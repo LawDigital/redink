@@ -57,12 +57,12 @@ J.	Security features	182
 K.	Information for Developers / Source Code	185
 V.	FAQS	188
 VI.	RELEASE NOTES	200
-VII.	ROADMAP	209
-ANNEX 1: IDEAS TO GET TO KNOW RED INK	210
-ANNEX 2: PROGRAMMING RESPONSE TEMPLATES	212
-ANNEX 3: WEB AGENT SCRIPTING	215
-ANNEX 4: AUTOMATIC INI UPDATE	236
-ANNEX 5: INSTALLATION WITH CENTRAL CONFIGURATION	248
+VII.	ROADMAP	210
+ANNEX 1: IDEAS TO GET TO KNOW RED INK	211
+ANNEX 2: PROGRAMMING RESPONSE TEMPLATES	213
+ANNEX 3: WEB AGENT SCRIPTING	216
+ANNEX 4: AUTOMATIC INI UPDATE	237
+ANNEX 5: INSTALLATION WITH CENTRAL CONFIGURATION	249
 
 I. OVERVIEW
 1 Red Ink is an AI tool developed for daily office use, which is integrated directly into Word, Excel and Outlook in the form of Microsoft Office add-ins, allowing various AI functions to be performed with your own texts, worksheets and emails. Prompts can be entered directly, but it is also possible to have the AI translate, revise, summarize, comment on, and search a selected text, cells in a worksheet, or email chains. Even a chatbot is available, the tool can transcribe, create audiobooks from texts, and can also be accessed from the browser. What is special about Red Ink, however, in contrast to most other AI tools, is that you can work with the AI directly in Word, Excel and Outlook; there is no need to switch back and forth to the browser.
@@ -219,7 +219,7 @@ The secondary and further models are accessed via Freestyle (2nd). Within Freest
 * "terms" outputs any preconfigured usage restrictions or permissions in the INI file. They are also displayed when you move the mouse over the Red Ink logo in the menu bar.
 * "version" provides information about the current version of the add-in; this information also appears when you move the mouse over the Red Ink logo in the menu bar. The "version" command also shows the expiry date of the current licence for Red Ink (this information can also be accessed via Settings and then "About Red Ink"). This menu item also provides further information, e.g. about the third-party libraries used.
 * "switch" can temporarily swap the primary and secondary AI models; this is also possible via Settings.
-* "clientname" shows the name of your own Windows client; this is needed for the "UpdateClients" parameter.
+* "clientname" shows the name of your own Windows client; this is needed for the "UpdateIniClients" parameter.
 * "clearlastprompt" clears the cache of the last executed freestyle prompt.
 * "cleanmenu" removes any existing Red Ink context menus and rebuilds them if they are enabled.
 * "reload" ensures that the add-in reloads the configuration file (e.g. because something has been manually adjusted in the meantime; this also happens automatically after saving the configuration in Settings.
@@ -1692,7 +1692,7 @@ UpdateIni
 =
 True
 Main switch for the INI update mechanism; true executes update checks and can apply changes; false terminates the check immediately without changes; for details see Annex 4
-UpdateClients
+UpdateIniClients
 =
 DSKTOP01
 Name of the clients (Windows Computer Name) that are allowed to use the INI update mechanism, separated by a comma; this can prevent multiple clients in a network from executing the mechanism in parallel; your own name can be queried in the command prompt with "hostname" or in Freestyle with the shortcut "clientname"
@@ -2872,7 +2872,7 @@ W=1.1.1.200
 O=1.1.1.200
 E=1.1.1.200
 Preview version:
-Extension of the update functions by "UpdateClients" and the model definitions by "ModelNote" and "Depreciated"; adjustment of the backup function for INI updates; introduction of "Location" parameter for location-aware prompts; parameter to block helper downloads; bug fixes (window display, swallowing of and <> by Markdown conversion)
+Extension of the update functions by "UpdateIniClients" and the model definitions by "ModelNote" and "Depreciated"; adjustment of the backup function for INI updates; introduction of "Location" parameter for location-aware prompts; parameter to block helper downloads; bug fixes (window display, swallowing of and <> by Markdown conversion)
 3.1.2026
 
 W=1.1.2.200
@@ -2885,6 +2885,12 @@ W=1.1.3.200
 O=1.1.3.200
 E=1.1.3.200
 Logging feature (LogPath)
+4.1.2026
+
+W=1.1.4.200
+O=1.1.4.200
+E=1.1.4.200
+Bug fix (hidden window), change of parameter (UpdateClients --> UpdateIniClients)
 Note: Version numbers with x.x.x.2nn are Preview-Releases.
 
 
@@ -3647,7 +3653,7 @@ Parameter
 Description
 UpdateIni
 Enables (true) or disables (false) the entire update mechanism
-UpdateClients
+UpdateIniClients
 Name of the clients (Windows Computer Name) that are allowed to use the INI update mechanism, separated by a comma; this can prevent multiple clients in a network from executing the mechanism in parallel; your own name can be queried in the command prompt with "hostname" or in Freestyle with the shortcut "clientname"
 UpdateSource
 Defines the update source for the main configuration in the format path; key; public key
@@ -3783,7 +3789,7 @@ P. Protected parameters
 Parameters whose name begins with Update are protected from automatic changes. This prevents the update mechanism from overwriting its own configuration.
 Protected parameters include:
 * UpdateIni
-* UpdateClients
+* UpdateIniClients
 * UpdateSource
 * UpdateIniSilentMode
 * UpdateIniAllowRemote
@@ -3942,7 +3948,7 @@ g) Secondary model, configuring alternate models: If necessary, configure the se
 h) Further configurations: Now make any further configurations. You can go through the sample file redink.ini and check the individual parameters, or you can rely on the default settings to start with. We recommend the latter, with the exception of these parameters:
 * LicensedTill: Here you specify the end date of the licence you have (various date formats are supported). In LicenseUsers (not licensedUsers) and LicenseStatus, you specify the number of users and the name of the licence. The content is not checked, but only displayed in the "About" window. You can also enter your contact details under LicenseContact. If a licence warning occurs (e.g. before the licence expires), users will know who to contact. More information about licence management is described in para. 415 et seq. The licence configuration in redink.ini overrides a local licence entry; the user is no longer prompted to enter a licence.
 * UpdateCheckInterval: Normally 3 or 7 days. If you want to disable automatic updates of the add-ins, set this value to 0.
-* UpdateIni: Normally True, i.e. if one of the configuration files contains the UpdateSource parameter and the address given provides for an update of the relevant file or section of a model or special service configuration, the user will be asked whether the update shall be made. If you do not want this, set UpdateIni to False. Alternatively, you can set the UpdateClients parameter to the Windows name of your own computer (e.g. "UpdateClients = ADMDSKTP01"), which means that any updates will only be made from this device, i.e. only the user on the relevant computer will receive update notifications. Several such clients can be entered, separated by commas. This update function and the numerous other parameters with which it can be controlled are described in more detail in para. 464 et seq. and Annex 4. However, updates are also offered by selected service providers.
+* UpdateIni: Normally True, i.e. if one of the configuration files contains the UpdateSource parameter and the address given provides for an update of the relevant file or section of a model or special service configuration, the user will be asked whether the update shall be made. If you do not want this, set UpdateIni to False. Alternatively, you can set the UpdateIniClients parameter to the Windows name of your own computer (e.g. "UpdateIniClients = ADMDSKTP01"), which means that any updates will only be made from this device, i.e. only the user on the relevant computer will receive update notifications. Several such clients can be entered, separated by commas. This update function and the numerous other parameters with which it can be controlled are described in more detail in para. 464 et seq. and Annex 4. However, updates are also offered by selected service providers.
 * Paths: We recommend specifying the various paths for additional resources (such as prompt libraries). The "Get Sample Files" function already does this. The concept is as follows: there is a central and shared version and a local version of each of these paths, with the exception of MyStylePath (library with personal writing styles), where there is only a local version, and Promptlib_Transcript (prompts for converting transcripts), where there is only a central, shared version. 
 Example: The Find Clause function allows the user to access multiple files with clause libraries. The clause libraries used and shared by all users are stored in a central network directory. This is parameterised in FindClausePath. Users can store personal clause libraries on their own computers. For example, the directory %APPDATA%\microsoft\word can be used for this purpose. This directory must then be configured using FindClausePathLocal. Since placeholders or environment variables such as %APPDATA% can be used, personalisation is very easy (but also necessary so that each user has their own directory). 
 Please note: There are paths that only specify the directory and others that also refer to a file. Details can be found in the manual. Where only directories are specified, Red Ink searches for files with a specific name structure. For Find Clause, for example, "redink-lib-*.txt" is used. We recommend storing all central and shared libraries in a central and shared library directory. All libraries can be easily edited with a text editor. They either have the extension .txt or are .json files. The same applies to the "local" files. In our experience, however, users rarely use local files. It is often better to make "good" prompts available to all users by customising the central prompt file for the respective function. Once a customisation has been made, it takes effect immediately.
