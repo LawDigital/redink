@@ -2344,7 +2344,8 @@ Namespace SharedLibrary
                 .FormBorderStyle = FormBorderStyle.Sizable,
                 .Font = New Font("Segoe UI", 9.0F),
                 .MinimumSize = New Size(550, 400),
-                .AutoScaleMode = AutoScaleMode.Dpi
+                .AutoScaleMode = AutoScaleMode.Dpi,
+                .TopMost = True
             }
 
 
@@ -2505,7 +2506,8 @@ Namespace SharedLibrary
                 .FormBorderStyle = FormBorderStyle.Sizable,
                 .Font = New Font("Segoe UI", 9.0F),
                 .MinimumSize = New Size(800, 450),
-                .AutoScaleMode = AutoScaleMode.Dpi
+                .AutoScaleMode = AutoScaleMode.Dpi,
+                .TopMost = True
             }
 
 
@@ -2729,7 +2731,8 @@ Namespace SharedLibrary
         .FormBorderStyle = FormBorderStyle.Sizable,
         .Font = New Font("Segoe UI", 9.0F),
         .MinimumSize = New Size(550, 350),
-        .AutoScaleMode = AutoScaleMode.Dpi
+        .AutoScaleMode = AutoScaleMode.Dpi,
+        .TopMost = True
             }
 
 
@@ -3037,7 +3040,7 @@ Namespace SharedLibrary
 #Region "Client Identification"
 
         ''' <summary>
-        ''' Returns the current client identifier used for UpdateClients matching.
+        ''' Returns the current client identifier used for UpdateIniClients matching.
         ''' This uses the Windows computer name (Environment.MachineName).
         ''' </summary>
         ''' <returns>The client identifier string (computer name).</returns>
@@ -3051,16 +3054,16 @@ Namespace SharedLibrary
 
         ''' <summary>
         ''' Determines whether the current client is allowed to perform INI updates
-        ''' based on the UpdateClients parameter.
+        ''' based on the UpdateIniClients parameter.
         ''' </summary>
         ''' <returns>True if this client can update; False otherwise.</returns>
         Private Shared Function IsClientAllowedToUpdate() As Boolean
             Try
-                ' Get the UpdateClients setting from context
-                Dim updateClients As String = _iniUpdateContext.INI_UpdateClients
+                ' Get the UpdateIniClients setting from context
+                Dim UpdateIniClients As String = _iniUpdateContext.INI_UpdateIniClients
 
                 ' If not configured, any client can update
-                If String.IsNullOrWhiteSpace(updateClients) Then
+                If String.IsNullOrWhiteSpace(UpdateIniClients) Then
                     Return True
                 End If
 
@@ -3071,7 +3074,7 @@ Namespace SharedLibrary
                 End If
 
                 ' Parse the comma-separated list of allowed clients
-                Dim allowedClients = updateClients.Split(","c).
+                Dim allowedClients = UpdateIniClients.Split(","c).
                     Select(Function(c) c.Trim()).
                     Where(Function(c) Not String.IsNullOrWhiteSpace(c)).
                     ToList()
@@ -3085,7 +3088,7 @@ Namespace SharedLibrary
 
                 If Not isAllowed Then
                     LogIniUpdateEvent("Client Check",
-                        $"Client '{currentClient}' is not in UpdateClients list: {updateClients} - skipping update")
+                        $"Client '{currentClient}' is not in UpdateIniClients list: {UpdateIniClients} - skipping update")
                 End If
 
                 Return isAllowed
@@ -3262,7 +3265,8 @@ Namespace SharedLibrary
                 .StartPosition = FormStartPosition.CenterParent,
                 .FormBorderStyle = FormBorderStyle.Sizable,
                 .Font = New Font("Segoe UI", 9.0F),
-                .MinimumSize = New Size(700, 350)
+                .MinimumSize = New Size(700, 350),
+                .TopMost = True
             }
 
 
@@ -3779,7 +3783,8 @@ Namespace SharedLibrary
                 .FormBorderStyle = FormBorderStyle.Sizable,
                 .Font = New Font("Segoe UI", 9.0F),
                 .MinimumSize = New Size(600, 400),
-                .AutoScaleMode = AutoScaleMode.Dpi
+                .AutoScaleMode = AutoScaleMode.Dpi,
+                .TopMost = True
                             }
 
 

@@ -1067,8 +1067,8 @@ Namespace SharedLibrary
                     Return context.INI_UpdateIniNoSignature.ToString()
                 Case "UpdateSource"
                     Return context.INI_UpdateSource
-                Case "UpdateClients"
-                    Return context.INI_UpdateClients
+                Case "UpdateIniClients"
+                    Return context.INI_UpdateIniClients
                 Case "UpdateIniIgnoreOverride"
                     Return context.INI_UpdateIniIgnoreOverride
                 Case "UpdateIniSilentMode"
@@ -1341,8 +1341,8 @@ Namespace SharedLibrary
                     context.INI_UpdateIniNoSignature = Boolean.Parse(value)
                 Case "UpdateSource"
                     context.INI_UpdateSource = value
-                Case "UpdateClients"
-                    context.INI_UpdateClients = value
+                Case "UpdateIniClients"
+                    context.INI_UpdateIniClients = value
                 Case "UpdateIniIgnoreOverride"
                     context.INI_UpdateIniIgnoreOverride = value
                 Case "UpdateIniSilentMode"
@@ -1715,7 +1715,7 @@ Namespace SharedLibrary
                     {"UpdateIniAllowRemote", context.INI_UpdateIniAllowRemote.ToString()},
                     {"UpdateIniNoSignature", context.INI_UpdateIniNoSignature.ToString()},
                     {"UpdateSource", context.INI_UpdateSource},
-                    {"UpdateClients", context.INI_UpdateClients},
+                    {"UpdateIniClients", context.INI_UpdateIniClients},
                     {"UpdateIniIgnoreOverride", context.INI_UpdateIniIgnoreOverride},
                     {"UpdateIniSilentMode", context.INI_UpdateIniSilentMode.ToString()},
                     {"UpdateIniSilentLog", context.INI_UpdateIniSilentLog.ToString()}
@@ -2159,7 +2159,7 @@ Namespace SharedLibrary
                     {"UpdateIniAllowRemote", context.INI_UpdateIniAllowRemote.ToString()},
                     {"UpdateIniNoSignature", context.INI_UpdateIniNoSignature.ToString()},
                     {"UpdateSource", context.INI_UpdateSource},
-                    {"UpdateClients", context.INI_UpdateClients},
+                    {"UpdateIniClients", context.INI_UpdateIniClients},
                     {"UpdateIniIgnoreOverride", context.INI_UpdateIniIgnoreOverride},
                     {"UpdateIniSilentMode", context.INI_UpdateIniSilentMode.ToString()},
                     {"UpdateIniSilentLog", context.INI_UpdateIniSilentLog.ToString()}
@@ -2801,7 +2801,7 @@ Namespace SharedLibrary
             variableValues.Add("UpdateIniAllowRemote", context.INI_UpdateIniAllowRemote)
             variableValues.Add("UpdateIniNoSignature", context.INI_UpdateIniNoSignature)
             variableValues.Add("UpdateSource", context.INI_UpdateSource)
-            variableValues.Add("UpdateClients", context.INI_UpdateClients)
+            variableValues.Add("UpdateIniClients", context.INI_UpdateIniClients)
             variableValues.Add("UpdateIniIgnoreOverride", context.INI_UpdateIniIgnoreOverride)
             variableValues.Add("UpdateIniSilentMode", context.INI_UpdateIniSilentMode)
             variableValues.Add("UpdateIniSilentLog", context.INI_UpdateIniSilentLog)
@@ -3014,7 +3014,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("UpdateIniAllowRemote") Then context.INI_UpdateIniAllowRemote = CBool(updatedValues("UpdateIniAllowRemote"))
                 If updatedValues.ContainsKey("UpdateIniNoSignature") Then context.INI_UpdateIniNoSignature = CBool(updatedValues("UpdateIniNoSignature"))
                 If updatedValues.ContainsKey("UpdateSource") Then context.INI_UpdateSource = CStr(updatedValues("UpdateSource"))
-                If updatedValues.ContainsKey("UpdateClients") Then context.INI_UpdateClients = CStr(updatedValues("UpdateClients"))
+                If updatedValues.ContainsKey("UpdateIniClients") Then context.INI_UpdateIniClients = CStr(updatedValues("UpdateIniClients"))
                 If updatedValues.ContainsKey("UpdateIniIgnoreOverride") Then context.INI_UpdateIniIgnoreOverride = CStr(updatedValues("UpdateIniIgnoreOverride"))
                 If updatedValues.ContainsKey("UpdateIniSilentMode") Then context.INI_UpdateIniSilentMode = CInt(updatedValues("UpdateIniSilentMode"))
                 If updatedValues.ContainsKey("UpdateIniSilentLog") Then context.INI_UpdateIniSilentLog = CBool(updatedValues("UpdateIniSilentLog"))

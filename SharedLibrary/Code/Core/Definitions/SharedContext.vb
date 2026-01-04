@@ -270,7 +270,7 @@ Namespace SharedLibrary
             ' Update source for redink.ini: "path; keylist; base64_public_key"
             Property INI_UpdateSource As String
             ' Override ignore settings with file-specific and segment-specific rules
-            Property INI_UpdateClients As String
+            Property INI_UpdateIniClients As String
             ' Allow HTTPS sources (vs local/network only)
             Property INI_UpdateIniIgnoreOverride As String
             ' Silent update mode: Controls whether updates are applied without user interaction
@@ -526,7 +526,7 @@ Namespace SharedLibrary
 
         Public Property INI_NoHelperDownload As Boolean Implements ISharedContext.INI_NoHelperDownload
         Public Property INI_UpdateIni As Boolean Implements ISharedContext.INI_UpdateIni
-        Public Property INI_UpdateClients As String Implements ISharedContext.INI_UpdateClients
+        Public Property INI_UpdateIniClients As String Implements ISharedContext.INI_UpdateIniClients
         Public Property INI_UpdateIniAllowRemote As Boolean Implements ISharedContext.INI_UpdateIniAllowRemote
         Public Property INI_UpdateIniNoSignature As Boolean Implements ISharedContext.INI_UpdateIniNoSignature
         Public Property INI_UpdateSource As String Implements ISharedContext.INI_UpdateSource
