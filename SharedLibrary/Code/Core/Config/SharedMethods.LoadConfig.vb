@@ -267,7 +267,11 @@ Namespace SharedLibrary
                 context.INI_UpdateIniAllowRemote = ParseBoolean(configDict, "UpdateIniAllowRemote", DEFAULT_BOOL_UPDATEINI_ALLOWREMOTE)
                 context.INI_UpdateIniNoSignature = ParseBoolean(configDict, "UpdateIniNoSignature", False)
                 context.INI_UpdateSource = If(configDict.ContainsKey("UpdateSource"), configDict("UpdateSource"), "")
-                context.INI_UpdateClients = If(configDict.ContainsKey("UpdateClients"), configDict("UpdateClients"), "")
+
+                ' First parameter Is legacy
+                ' context.INI_UpdateIniClients = If(configDict.ContainsKey("UpdateClients"), configDict("UpdateClients"), "")
+                context.INI_UpdateIniClients = If(configDict.ContainsKey("UpdateIniClients"), configDict("UpdateIniClients"), "")
+
                 context.INI_UpdateIniIgnoreOverride = If(configDict.ContainsKey("UpdateIniIgnoreOverride"), configDict("UpdateIniIgnoreOverride"), "")
                 context.INI_UpdateIniSilentMode = If(configDict.ContainsKey("UpdateIniSilentMode"), CInt(configDict("UpdateIniSilentMode")), DEFAULT_UPDATE_INI_SILENT_MODE)
                 context.INI_UpdateIniSilentLog = ParseBoolean(configDict, "UpdateIniSilentLog", DEFAULT_BOOL_UPDATEINISILENTLOG)

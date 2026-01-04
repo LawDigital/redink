@@ -1922,6 +1922,14 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_UpdateIniClients As String
+        Get
+            Return _context.INI_UpdateIniClients
+        End Get
+        Set(value As String)
+            _context.INI_UpdateIniClients = value
+        End Set
+    End Property
 
     Public Shared Property INI_UpdateIniSilentMode As Integer
         Get
