@@ -51,12 +51,12 @@ D.	Other alternative language models	169
 E.	Configuring Tooling	171
 F.	OAuth2.0 (e.g. Google Vertex API)	175
 G.	Configuration of Advanced API Calls	176
-H.	Automatic loading of configuration and template files	179
+H.	Automatic loading of configuration and template files	180
 I.	Automatic updating of INI files	181
 J.	Security features	182
-K.	Information for Developers / Source Code	184
-V.	FAQS	187
-VI.	RELEASE NOTES	199
+K.	Information for Developers / Source Code	185
+V.	FAQS	188
+VI.	RELEASE NOTES	200
 VII.	ROADMAP	209
 ANNEX 1: IDEAS TO GET TO KNOW RED INK	210
 ANNEX 2: PROGRAMMING RESPONSE TEMPLATES	212
@@ -230,6 +230,7 @@ The secondary and further models are accessed via Freestyle (2nd). Within Freest
 * "inipath" allows the directory for a central configuration file to be written in the registry (see para. 410 et seq. below).
 * "codebasis" allows you to write the keyword in the registry if it is not hard-coded in the programme code (see para. 469 et seq. below).
 * "domain" shows the current domain in which the add-in is running and whether and to which domains it is restricted, if this should be programmed in as a security function (see para. 469 et seq. below).
+* "logstat" evaluates any logs that have been collected (based on the "LogPath" parameter).
 * "setsources" allows adapting the list of sources (esp. Special Services) that are currently available to the models with tooling capabilities (see para. 89 et seq.).
 * "definemystyle" starts the process of analyzing the writing style and creating a MyStyle prompt.
 * "editmystyle" opens a text editor with the MyStyle prompt file.
@@ -1269,6 +1270,10 @@ APIDebug
 =
 False
 If set to True, the full text sent to the LLM and the full response of the LLM (or Special Service) will each be written into a JSON file on the user's desktop (it will always be overwritten with every call to the LLM); when using Tooling, a detailed log will be saved on the desktop, too; default is False
+LogPath
+=
+I:\RedInk\Logs
+Central directory where log files about the function calls are stored (without username, only with a unique hash per user and workstation); a separate file is kept for each user and application; "logstat" in Freestyle evaluates them; if the parameter is not set, no logging occurs
 ToolingLogWindow
 =
 True
@@ -2316,7 +2321,7 @@ This is because the language model used does not correctly execute the instructi
 25. I have installed the browser extension but the system is not responding when I select a command. 
 This can have several causes. First of all, Outlook with the Red Ink add-in must be loaded and active, as the browser extension depends on it (and on the add-in for Word if the "Send to Word" function is to be used). So, Outlook should be started first. In practice, it can also happen that the window for selecting the language, for example, opens but is hidden by other windows or ignored by the user. If larger amounts of text have been selected in the browser, the system needs a moment until everything has been transferred to Outlook. Finally, it is also possible that security settings prevent communication between the browser and Red Ink, or the browser extension is disabled (the ports 12333 and 12334 are used by 127.0.0.1 [localhost] using the http protocol).
 26. Can Red Ink record what users do with it?
-Red Ink itself does with one exception not have this function, i.e. it does not currently have a logging function or audit trail. It is conceivable that such a function could be integrated into the tool, especially for use in organisations, but this would require a central server in the network to which the inputs and outputs can be sent. We can implement such a function if it is desired. However, it should be noted that if more than just the commands are to be logged, a lot of text is generated. There are also labor and data protection law requirements. The one exception concerns the storage or logging of Freestyle prompts in Word. This is done automatically, but for the user, not the company. The last Freestyle prompts can be retrieved by entering "promptlog" in Freestyle and pressing OK. The most recently used prompts from Freestyle will appear. Furthermore, it is possible to configure Red Ink so that certain Freestyle prompts are stored locally for billing purposes along with the tokens used for "thinking".
+Yes, it contains a logging function. If enabled, it logs which command is called by which user, but not the content of the command (no prompts, no text). It only counts which function in which version of the add-in is called and when. It also does not contain a username, but an encoded value that is composed of several elements and therefore cannot be easily reverse-engineered. This function is used to measure the usage of Red Ink. A further logging concerns the storage or logging of Freestyle prompts in Word. This is done automatically, but for the user, not the company. The last Freestyle prompts can be retrieved by entering "promptlog" in Freestyle and pressing OK. The most recently used prompts from Freestyle will appear. Furthermore, it is possible to configure Red Ink so that certain Freestyle prompts are stored locally for billing purposes along with the tokens used for "thinking".
 27. Which prompts does Red Ink use and can I change them?
 Yes. Almost all the prompts used by Red Ink can be read and changed in the configuration file. To do this, open Settings in Red Ink and select "Expert Config". The prompts can then be copied. We have described which prompts are used for what in the advanced configuration (see para. 399 et seq. above). We reserve the right to revise and improve the prompts ourselves from time to time, which is why they are not written to the configuration file, provided they meet the standard. However, reformulated prompts are read from the configuration file. Therefore, anyone who has stored their own prompts there will not benefit from our improvements in these cases until their prompts have been deleted from the configuration file.
 28. Can the installation of the helpers for Word and Excel be automated?
@@ -2874,6 +2879,12 @@ W=1.1.2.200
 O=1.1.2.200
 Preview version:
 Extension of Freestyle and Chat for Word with tooling support (models can access Special Services themselves); improved display (for markup method 2); help command for shortcuts in Freestyle; added support for multiple Mime variants for APICall_Object parameter; various model and special service configurations (on redink.ai/get-more); updated installation wizard
+4.1.2026
+
+W=1.1.3.200
+O=1.1.3.200
+E=1.1.3.200
+Logging feature (LogPath)
 Note: Version numbers with x.x.x.2nn are Preview-Releases.
 
 
@@ -3958,10 +3969,10 @@ We provide various documents for end-users at https://redink.ai/downloads-site/m
 
 
 
-03 January 2026	1
+04 January 2026	1
 
 
-	03 January 2026 
+	04 January 2026 
 
 
 

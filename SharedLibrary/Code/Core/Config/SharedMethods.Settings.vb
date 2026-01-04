@@ -1017,6 +1017,10 @@ Namespace SharedLibrary
                     Return context.INI_APIEncrypted_2.ToString()
                 Case "UsageRestrictions"
                     Return context.INI_UsageRestrictions
+                Case "LogPath"
+                    Return context.INI_LogPath
+                Case "LogPath"
+                    Return context.INI_LogPath
                 Case "ContextMenu"
                     Return context.INI_ContextMenu.ToString()
                 Case "UpdateCheckInterval"
@@ -1529,6 +1533,7 @@ Namespace SharedLibrary
                     {"PostCorrection", context.INI_PostCorrection},
                     {"APIKeyPrefix", context.INI_APIKeyPrefix},
                     {"UsageRestrictions", context.INI_UsageRestrictions},
+                    {"LogPath", context.INI_LogPath},
                     {"Language1", context.INI_Language1},
                     {"Language2", context.INI_Language2},
                     {"DoubleS", context.INI_DoubleS.ToString()},
@@ -2653,6 +2658,7 @@ Namespace SharedLibrary
             variableValues.Add("OAuth2ATExpiry_2", context.INI_OAuth2ATExpiry_2)
             variableValues.Add("APIDebug", context.INI_APIDebug)
             variableValues.Add("UsageRestrictions", context.INI_UsageRestrictions)
+            variableValues.Add("LogPath", context.INI_LogPath)
             variableValues.Add("Language1", context.INI_Language1)
             variableValues.Add("Language2", context.INI_Language2)
             variableValues.Add("KeepFormat1", context.INI_KeepFormat1)
@@ -2865,6 +2871,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("OAuth2ATExpiry_2") Then context.INI_OAuth2ATExpiry_2 = CLng(updatedValues("OAuth2ATExpiry_2"))
                 If updatedValues.ContainsKey("APIDebug") Then context.INI_APIDebug = CBool(updatedValues("APIDebug"))
                 If updatedValues.ContainsKey("UsageRestrictions") Then context.INI_UsageRestrictions = CStr(updatedValues("UsageRestrictions"))
+                If updatedValues.ContainsKey("LogPath") Then context.INI_LogPath = CStr(updatedValues("LogPath"))
                 If updatedValues.ContainsKey("Language1") Then context.INI_Language1 = CStr(updatedValues("Language1"))
                 If updatedValues.ContainsKey("Language2") Then context.INI_Language2 = CStr(updatedValues("Language2"))
                 If updatedValues.ContainsKey("KeepFormat1") Then context.INI_KeepFormat1 = CBool(updatedValues("KeepFormat1"))
