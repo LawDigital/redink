@@ -70,6 +70,8 @@ Partial Class Ribbon1
         Me.RI_BalloonMergePartPrompt = Me.Factory.CreateRibbonButton
         Me.RI_BalloonMergeFullPrompt = Me.Factory.CreateRibbonButton
         Me.RI_Filibuster = Me.Factory.CreateRibbonButton
+        Me.RI_ApplyDocStyle = Me.Factory.CreateRibbonButton
+        Me.RI_LearnDocStyle = Me.Factory.CreateRibbonButton
         Me.RI_Shorten = Me.Factory.CreateRibbonButton
         Me.Menu5 = Me.Factory.CreateRibbonMenu
         Me.RI_Anonymize = Me.Factory.CreateRibbonButton
@@ -118,8 +120,6 @@ Partial Class Ribbon1
         Me.RI_PrimLang2 = Me.Factory.CreateRibbonButton
         Me.RI_Correct2 = Me.Factory.CreateRibbonButton
         Me.RI_Chat = Me.Factory.CreateRibbonButton
-        Me.RI_LearnDocStyle = Me.Factory.CreateRibbonButton
-        Me.RI_ApplyDocStyle = Me.Factory.CreateRibbonButton
         Me.Tab1.SuspendLayout()
         Me.Group1.SuspendLayout()
         Me.Group2.SuspendLayout()
@@ -308,6 +308,24 @@ Partial Class Ribbon1
         Me.RI_Filibuster.OfficeImageId = "AnimationTransitionSpeedGallery"
         Me.RI_Filibuster.ScreenTip = "Will expand your text to have at least the number of words you specify"
         Me.RI_Filibuster.ShowImage = True
+        '
+        'RI_ApplyDocStyle
+        '
+        Me.RI_ApplyDocStyle.Label = "Apply MyDocStyle"
+        Me.RI_ApplyDocStyle.Name = "RI_ApplyDocStyle"
+        Me.RI_ApplyDocStyle.OfficeImageId = "StyleGalleryClassic"
+        Me.RI_ApplyDocStyle.ScreenTip = "Apply a previously learned document formatting style to the current document or s" &
+    "election"
+        Me.RI_ApplyDocStyle.ShowImage = True
+        '
+        'RI_LearnDocStyle
+        '
+        Me.RI_LearnDocStyle.Label = "Learn MyDocStyle"
+        Me.RI_LearnDocStyle.Name = "RI_LearnDocStyle"
+        Me.RI_LearnDocStyle.OfficeImageId = "StylesPaneNewStyle"
+        Me.RI_LearnDocStyle.ScreenTip = "Creates a MyDocStyle template based on a specially drafted document that contains" &
+    " instructions when to apply which style to a paragraph"
+        Me.RI_LearnDocStyle.ShowImage = True
         '
         'RI_Shorten
         '
@@ -736,24 +754,6 @@ Partial Class Ribbon1
         Me.RI_Chat.OfficeImageId = "ContactUs"
         Me.RI_Chat.ScreenTip = "Will open a window where you can chat with the LLM"
         Me.RI_Chat.ShowImage = True
-        '
-        'RI_LearnDocStyle
-        '
-        Me.RI_LearnDocStyle.Label = "Learn MyDocStyle"
-        Me.RI_LearnDocStyle.Name = "RI_LearnDocStyle"
-        Me.RI_LearnDocStyle.OfficeImageId = "StylesPaneNewStyle"
-        Me.RI_LearnDocStyle.ScreenTip = "Creates a MyDocStyle template based on a specially drafted document that contains" &
-    " instructions when to apply which style to a paragraph"
-        Me.RI_LearnDocStyle.ShowImage = True
-        '
-        'RI_ApplyDocStyle
-        '
-        Me.RI_ApplyDocStyle.Label = "Apply MyDocStyle"
-        Me.RI_ApplyDocStyle.Name = "RI_ApplyDocStyle"
-        Me.RI_ApplyDocStyle.OfficeImageId = "StyleGalleryClassic"
-        Me.RI_ApplyDocStyle.ScreenTip = "Apply a previously learned document formatting style to the current document or s" &
-    "election"
-        Me.RI_ApplyDocStyle.ShowImage = True
         '
         'Ribbon1
         '

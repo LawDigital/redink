@@ -100,6 +100,7 @@ Namespace SharedLibrary
             Property INI_OAuth2ATExpiry_2 As Long
             Property INI_APIDebug As Boolean
             Property INI_UsageRestrictions As String
+            Property INI_LogPath As String
             Property INI_Language1 As String
             Property INI_Language2 As String
             Property INI_DefaultPrefix As String
@@ -357,6 +358,7 @@ Namespace SharedLibrary
         Public Property INI_OAuth2ATExpiry_2 As Long Implements ISharedContext.INI_OAuth2ATExpiry_2
         Public Property INI_APIDebug As Boolean Implements ISharedContext.INI_APIDebug
         Public Property INI_UsageRestrictions As String Implements ISharedContext.INI_UsageRestrictions
+        Public Property INI_LogPath As String Implements ISharedContext.INI_LogPath
         Public Property INI_Language1 As String Implements ISharedContext.INI_Language1
         Public Property INI_Language2 As String Implements ISharedContext.INI_Language2
         Public Property INI_MarkdownConvert As Boolean Implements ISharedContext.INI_MarkdownConvert

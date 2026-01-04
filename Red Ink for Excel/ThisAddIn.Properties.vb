@@ -31,7 +31,7 @@ Imports SharedLibrary.SharedLibrary.SharedContext
 Partial Public Class ThisAddIn
 
     ''' <summary>Backing store instance for all exposed Shared properties.</summary>
-    Private Shared _context As ISharedContext = New SharedContext()
+    Public Shared _context As ISharedContext = New SharedContext()
 
     ' Properties below: provide shared access to configuration and state held in the SharedLibrary implementation.
 

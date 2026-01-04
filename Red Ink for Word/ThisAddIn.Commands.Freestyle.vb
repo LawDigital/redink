@@ -425,6 +425,7 @@ Partial Public Class ThisAddIn
                 ' PROMPTS / LOGS
                 AddItem("clearlastprompt", "Clear the stored last Freestyle prompt and repeat state.")
                 AddItem("promptlog", "Show/edit the cached Freestyle prompt log.")
+                AddItem("logstat", $"Compile and show {AN} usage startistics based on collected logs.")
 
                 ' MYSTYLE
                 AddItem("definemystyle", "Create/update your MyStyle prompts.")
@@ -717,6 +718,12 @@ Partial Public Class ThisAddIn
                     AddContextMenu()
                     ShowCustomMessageBox($"Following the reset, the configuration file '{AN2}.ini' has been be reloaded.")
                 End If
+                Return
+            End If
+
+            ' Reset local configuration to defaults (with confirmation)
+            If String.Equals(OtherPrompt.Trim(), "logstat", StringComparison.OrdinalIgnoreCase) Then
+                SharedLogger.AnalyzeLogs(_context)
                 Return
             End If
 
