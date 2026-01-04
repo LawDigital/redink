@@ -361,6 +361,7 @@
     <Compile Include="Code\Core\UI\SharedMethods.SelectionFormSmall.vb" />
     <Compile Include="Code\Core\UI\SharedMethods.SplashScreen.vb" />
     <Compile Include="Code\Core\UI\ShowMethods.CustomForms.vb" />
+    <Compile Include="Code\Core\Various\SharedLogger.vb" />
     <Compile Include="Code\Core\Various\SharedMethods.FileImporter.vb" />
     <Compile Include="Code\Core\Various\SharedMethods.ProcessParameterPlaceholders.vb" />
     <Compile Include="Code\Core\Various\SharedMethods.VarHelpers.vb" />

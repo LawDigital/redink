@@ -61,7 +61,7 @@ Imports SharedLibrary.SharedLibrary.SharedContext
 
 Partial Public Class ThisAddIn
 
-    Private Shared _context As ISharedContext = New SharedContext()
+    Public Shared _context As ISharedContext = New SharedContext()
 
     Public Shared Property INI_APIKey As String
         Get
