@@ -50,6 +50,7 @@ Public Class DiscussInky
 #Region "Constants and Fields"
 
     Private Const AssistantName As String = Globals.ThisAddIn.AN6
+    Private Const PersistedKnowledgeFileName As String = "redink-discussknowledge.txt"
     Private _currentPersonaName As String = AssistantName
     Private _currentPersonaPrompt As String = ""
 
@@ -59,6 +60,13 @@ Public Class DiscussInky
     ' Runtime knowledge cache (persists while Word is running, not in My.Settings)
     Private Shared _cachedKnowledgeContent As String = Nothing
     Private Shared _cachedKnowledgeFilePath As String = Nothing
+
+    ' Supported file extensions for knowledge loading
+    Private Shared ReadOnly SupportedKnowledgeExtensions As String() = {
+        ".txt", ".rtf", ".doc", ".docx", ".pdf", ".pptx", ".ini", ".csv", ".log",
+        ".json", ".xml", ".html", ".htm", ".md", ".vb", ".cs", ".js", ".ts",
+        ".py", ".java", ".cpp", ".c", ".h", ".sql", ".yaml", ".yml"
+    }
 
     ' Random words for response variety
     Private Shared ReadOnly _randomModifiers As String() = {
@@ -81,14 +89,23 @@ Public Class DiscussInky
         .AcceptsReturn = True,
         .WordWrap = True
     }
+
+    Private ReadOnly _toolTip As ToolTip = New ToolTip() With {
+    .AutoPopDelay = 10000,
+    .InitialDelay = 500,
+    .ReshowDelay = 200
+}
+
     Private ReadOnly _btnClear As Button = New Button() With {.Text = "Clear", .AutoSize = True}
+    Private ReadOnly _btnSendToDoc As Button = New Button() With {.Text = "Send to Doc", .AutoSize = True}
     Private ReadOnly _btnClose As Button = New Button() With {.Text = "Close", .AutoSize = True}
     Private ReadOnly _btnSend As Button = New Button() With {.Text = $"Send", .AutoSize = True}
     Private ReadOnly _btnPersona As Button = New Button() With {.Text = "Persona", .AutoSize = True}
-    Private ReadOnly _btnEditPersona As Button = New Button() With {.Text = "Edit Local", .AutoSize = True}
-    Private ReadOnly _btnKnowledge As Button = New Button() With {.Text = "Knowledge", .AutoSize = True}
+    Private ReadOnly _btnEditPersona As Button = New Button() With {.Text = "Edit Local Persona Lib", .AutoSize = True}
+    Private ReadOnly _btnKnowledge As Button = New Button() With {.Text = "Load Knowledge", .AutoSize = True}
     Private ReadOnly _btnAlternateModel As Button = New Button() With {.Text = "Alternate Model", .AutoSize = True}
     Private ReadOnly _chkIncludeActiveDoc As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = "Include active document", .AutoSize = True}
+    Private ReadOnly _chkPersistKnowledge As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = "Persist knowledge temporarily", .AutoSize = True}
 
     ' State
     Private _htmlReady As Boolean = False
@@ -99,6 +116,7 @@ Public Class DiscussInky
     Private _knowledgeFilePath As String = Nothing
     Private _welcomeInProgress As Integer = 0
     Private _personaSelectedThisSession As Boolean = False
+    Private _isUpdatingPersistCheckbox As Boolean = False ' Prevents recursive event handling
 
     ' Alternate model support (new implementation matching Form1.vb pattern)
     Private _alternateModelSelected As Boolean = False
@@ -116,6 +134,24 @@ Public Class DiscussInky
         Public DisplayName As String
     End Structure
     Private _personas As New List(Of PersonaEntry)()
+
+    ''' <summary>
+    ''' Helper class to track file loading results for knowledge loading.
+    ''' </summary>
+    Private Class KnowledgeLoadingContext
+        Public Property GlobalDocumentCounter As Integer = 0
+        Public Property LoadedFiles As New List(Of Tuple(Of String, Integer))() ' (path, charCount)
+        Public Property FailedFiles As New List(Of String)()
+        Public Property IgnoredFilesPerDir As New Dictionary(Of String, Integer)(StringComparer.OrdinalIgnoreCase)
+        Public Property EnableOCR As Boolean = False
+        Public Property HasPdfFiles As Boolean = False
+
+        ''' <summary>Maximum files to load from a single directory.</summary>
+        Public Const MaxFilesPerDirectory As Integer = 50
+
+        ''' <summary>Ask user confirmation if directory has more than this many files.</summary>
+        Public Const ConfirmDirectoryFileCount As Integer = 10
+    End Class
 
 #End Region
 
@@ -175,8 +211,10 @@ Public Class DiscussInky
         End If
 
         pnlButtons.Controls.Add(_btnClear)
+        pnlButtons.Controls.Add(_btnSendToDoc)
         pnlButtons.Controls.Add(_btnClose)
         pnlButtons.Controls.Add(_chkIncludeActiveDoc)
+        pnlButtons.Controls.Add(_chkPersistKnowledge)
 
         table.Controls.Add(_chat, 0, 0)
         table.Controls.Add(_txtInput, 0, 1)
@@ -195,6 +233,7 @@ Public Class DiscussInky
         AddHandler Me.Activated, AddressOf OnActivated
         AddHandler _btnSend.Click, AddressOf OnSend
         AddHandler _btnClear.Click, AddressOf OnClear
+        AddHandler _btnSendToDoc.Click, AddressOf OnSendToDoc
         AddHandler _btnClose.Click, AddressOf OnClose
         AddHandler _btnPersona.Click, AddressOf OnSelectPersona
         AddHandler _btnEditPersona.Click, AddressOf OnEditLocalPersona
@@ -205,6 +244,8 @@ Public Class DiscussInky
         AddHandler _chat.Navigating, AddressOf Chat_Navigating
         AddHandler _chat.NewWindow, AddressOf Chat_NewWindow
         AddHandler _chkIncludeActiveDoc.CheckedChanged, AddressOf OnIncludeActiveDocChanged
+        AddHandler _chkPersistKnowledge.CheckedChanged, AddressOf OnPersistKnowledgeChanged
+
     End Sub
 
 #End Region
@@ -265,6 +306,28 @@ Public Class DiscussInky
         Return $"Today is {now:dd-MMM-yyyy}."
     End Function
 
+    ''' <summary>
+    ''' Gets the full path to the persisted knowledge file in the temp folder.
+    ''' </summary>
+    ''' <returns>Full path to the persisted knowledge file.</returns>
+    Private Function GetPersistedKnowledgeFilePath() As String
+        Return Path.Combine(Path.GetTempPath(), PersistedKnowledgeFileName)
+    End Function
+
+    ''' <summary>
+    ''' Checks if a trigger placeholder at a given index is wrapped in XML tags.
+    ''' </summary>
+    Private Function IsWrappedInXml(prompt As String, idx As Integer, trigger As String) As Boolean
+        Dim wrappedPattern As String = "<(?<name>[A-Za-z][\w\-]*)\b[^>]*>\s*" & Regex.Escape(trigger) & "\s*</\k<name>>"
+        Dim matches As MatchCollection = Regex.Matches(prompt, wrappedPattern, RegexOptions.IgnoreCase)
+        For Each m As Match In matches
+            If idx >= m.Index AndAlso idx < m.Index + m.Length Then
+                Return True
+            End If
+        Next
+        Return False
+    End Function
+
 #End Region
 
 #Region "Form Events"
@@ -286,8 +349,6 @@ Public Class DiscussInky
     ''' <summary>
     ''' Handles form activation; TopMost behavior is disabled.
     ''' </summary>
-    ''' <param name="sender">Event source.</param>
-    ''' <param name="e">Event arguments.</param>
     Private Sub OnActivated(sender As Object, e As EventArgs)
         ' No longer applying TopMost behavior
     End Sub
@@ -295,8 +356,6 @@ Public Class DiscussInky
     ''' <summary>
     ''' Persists the 'include active document' checkbox state when changed.
     ''' </summary>
-    ''' <param name="sender">Event source.</param>
-    ''' <param name="e">Event arguments.</param>
     Private Sub OnIncludeActiveDocChanged(sender As Object, e As EventArgs)
         Try
             My.Settings.DiscussIncludeActiveDoc = _chkIncludeActiveDoc.Checked
@@ -306,10 +365,84 @@ Public Class DiscussInky
     End Sub
 
     ''' <summary>
+    ''' Handles the 'Persist knowledge temporarily' checkbox state changes.
+    ''' When checked: persists current knowledge to temp file.
+    ''' When unchecked: prompts user and deletes temp file if confirmed.
+    ''' </summary>
+    Private Sub OnPersistKnowledgeChanged(sender As Object, e As EventArgs)
+        If _isUpdatingPersistCheckbox Then Return
+
+        Try
+            Dim persistPath = GetPersistedKnowledgeFilePath()
+
+            If _chkPersistKnowledge.Checked Then
+                ' User checked the box - persist current knowledge if available
+                If Not String.IsNullOrWhiteSpace(_cachedKnowledgeContent) Then
+                    Try
+                        File.WriteAllText(persistPath, _cachedKnowledgeContent, Encoding.UTF8)
+                        AppendSystemMessage($"Knowledge persisted to temporary storage ({_cachedKnowledgeContent.Length:N0} characters).")
+                    Catch ex As Exception
+                        AppendSystemMessage($"Failed to persist knowledge: {ex.Message}")
+                        ' Revert checkbox state
+                        _isUpdatingPersistCheckbox = True
+                        _chkPersistKnowledge.Checked = False
+                        _isUpdatingPersistCheckbox = False
+                        Return
+                    End Try
+                Else
+                    AppendSystemMessage("No knowledge loaded to persist. Load knowledge first, then check this box.")
+                End If
+            Else
+                ' User unchecked the box - ask before deleting
+                If File.Exists(persistPath) Then
+                    Dim answer = ShowCustomYesNoBox(
+                        "Do you want to delete the persisted knowledge file? This cannot be undone if you quit Word.",
+                        "Yes, delete", "No, keep it")
+
+                    If answer = 1 Then
+                        Try
+                            File.Delete(persistPath)
+                            AppendSystemMessage("Persisted knowledge file deleted.")
+                        Catch ex As Exception
+                            AppendSystemMessage($"Failed to delete persisted knowledge: {ex.Message}")
+                        End Try
+                    Else
+                        ' User chose not to delete - revert checkbox
+                        _isUpdatingPersistCheckbox = True
+                        _chkPersistKnowledge.Checked = True
+                        _isUpdatingPersistCheckbox = False
+                        Return
+                    End If
+                End If
+            End If
+
+            ' Save checkbox state
+            My.Settings.DiscussPersistKnowledge = _chkPersistKnowledge.Checked
+            My.Settings.Save()
+
+            ' Update tooltip
+            UpdatePersistKnowledgeTooltip()
+
+        Catch ex As Exception
+            AppendSystemMessage($"Error handling persist knowledge setting: {ex.Message}")
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Updates the tooltip for the persist knowledge checkbox based on its state.
+    ''' </summary>
+    Private Sub UpdatePersistKnowledgeTooltip()
+        If _chkPersistKnowledge.Checked Then
+            Dim persistPath = GetPersistedKnowledgeFilePath()
+            _toolTip.SetToolTip(_chkPersistKnowledge, $"Currently stored in: {persistPath}")
+        Else
+            _toolTip.SetToolTip(_chkPersistKnowledge, "")
+        End If
+    End Sub
+
+    ''' <summary>
     ''' Restores persisted settings, persona, knowledge cache, transcript, and optionally triggers a welcome.
     ''' </summary>
-    ''' <param name="sender">Event source.</param>
-    ''' <param name="e">Event arguments.</param>
     Private Async Sub OnLoadForm(sender As Object, e As EventArgs)
         ' Restore window position/size
         Try
@@ -328,6 +461,25 @@ Public Class DiscussInky
 
         ' Load persisted settings
         Try : _chkIncludeActiveDoc.Checked = My.Settings.DiscussIncludeActiveDoc : Catch : _chkIncludeActiveDoc.Checked = False : End Try
+
+        ' Load persist knowledge checkbox state (set flag to prevent event firing during initialization)
+        _isUpdatingPersistCheckbox = True
+        Try : _chkPersistKnowledge.Checked = My.Settings.DiscussPersistKnowledge : Catch : _chkPersistKnowledge.Checked = False : End Try
+        _isUpdatingPersistCheckbox = False
+
+        ' Update tooltip for persist checkbox
+        UpdatePersistKnowledgeTooltip()
+
+        ' Clean up persisted knowledge file if checkbox is not checked
+        If Not _chkPersistKnowledge.Checked Then
+            Try
+                Dim persistPath = GetPersistedKnowledgeFilePath()
+                If File.Exists(persistPath) Then
+                    File.Delete(persistPath)
+                End If
+            Catch
+            End Try
+        End If
 
         ' Load personas
         LoadPersonas()
@@ -390,25 +542,8 @@ Public Class DiscussInky
             AppendSystemMessage($"Session restored. Now using primary model ({_context.INI_Model}).")
         End If
 
-        ' Restore knowledge from runtime cache first, then from settings
-        If Not String.IsNullOrEmpty(_cachedKnowledgeContent) AndAlso Not String.IsNullOrEmpty(_cachedKnowledgeFilePath) Then
-            _knowledgeContent = _cachedKnowledgeContent
-            _knowledgeFilePath = _cachedKnowledgeFilePath
-            UpdateWindowTitle()
-        Else
-            Try
-                Dim savedPath = My.Settings.DiscussKnowledgePath
-                If Not String.IsNullOrEmpty(savedPath) AndAlso File.Exists(savedPath) Then
-                    _knowledgeFilePath = savedPath
-                    _knowledgeContent = Await LoadKnowledgeFileAsync(savedPath)
-                    ' Cache for runtime
-                    _cachedKnowledgeContent = _knowledgeContent
-                    _cachedKnowledgeFilePath = _knowledgeFilePath
-                    UpdateWindowTitle()
-                End If
-            Catch
-            End Try
-        End If
+        ' Restore knowledge using the new loading flow
+        Await RestoreKnowledgeAsync()
 
         ' Force persona selection on first run after Word starts (if not restored from settings)
         If Not personaRestoredFromSettings AndAlso _personas.Count > 0 AndAlso Not _personaSelectedThisSession Then
@@ -418,7 +553,7 @@ Public Class DiscussInky
 
         ' Prompt for knowledge if not available
         If String.IsNullOrEmpty(_knowledgeContent) AndAlso Not hasChat Then
-            Await PromptForKnowledgeFileAsync()
+            Await PromptForKnowledgeAsync()
         End If
 
         If Not hasChat Then
@@ -427,10 +562,85 @@ Public Class DiscussInky
     End Sub
 
     ''' <summary>
+    ''' Restores knowledge from various sources in priority order:
+    ''' 1. Runtime cache (if Word hasn't been restarted)
+    ''' 2. Persisted temp file (if checkbox is checked)
+    ''' 3. Previously saved file path from settings
+    ''' </summary>
+    Private Async Function RestoreKnowledgeAsync() As Task
+        ' 1. Check runtime cache first (survives form close but not Word restart)
+        If Not String.IsNullOrEmpty(_cachedKnowledgeContent) AndAlso Not String.IsNullOrEmpty(_cachedKnowledgeFilePath) Then
+            _knowledgeContent = _cachedKnowledgeContent
+            _knowledgeFilePath = _cachedKnowledgeFilePath
+            UpdateWindowTitle()
+            Return
+        End If
+
+        ' 2. If persist checkbox is checked, try to load from temp file
+        If _chkPersistKnowledge.Checked Then
+            Dim persistPath = GetPersistedKnowledgeFilePath()
+            If File.Exists(persistPath) Then
+                Try
+                    _knowledgeContent = File.ReadAllText(persistPath, Encoding.UTF8)
+                    _knowledgeFilePath = "(Persisted Knowledge)"
+
+                    ' Update runtime cache
+                    _cachedKnowledgeContent = _knowledgeContent
+                    _cachedKnowledgeFilePath = _knowledgeFilePath
+
+                    UpdateWindowTitle()
+                    AppendSystemMessage($"Knowledge restored from persisted storage ({_knowledgeContent.Length:N0} characters).")
+                    Return
+                Catch ex As Exception
+                    AppendSystemMessage($"Failed to restore persisted knowledge: {ex.Message}")
+                End Try
+            End If
+        End If
+
+        ' 3. Try to reload from saved file path in settings
+        Try
+            Dim savedPath = My.Settings.DiscussKnowledgePath
+            If Not String.IsNullOrEmpty(savedPath) AndAlso File.Exists(savedPath) Then
+                ShowAssistantThinking()
+                _knowledgeContent = Await LoadSingleKnowledgeFileAsync(savedPath, False, False)
+                RemoveAssistantThinking()
+
+                If Not String.IsNullOrWhiteSpace(_knowledgeContent) Then
+                    _knowledgeFilePath = savedPath
+
+                    ' Update runtime cache
+                    _cachedKnowledgeContent = _knowledgeContent
+                    _cachedKnowledgeFilePath = _knowledgeFilePath
+
+                    ' Persist if checkbox is checked
+                    If _chkPersistKnowledge.Checked Then
+                        PersistKnowledgeToTempFile()
+                    End If
+
+                    UpdateWindowTitle()
+                End If
+            End If
+        Catch
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Persists the current knowledge content to the temp file.
+    ''' </summary>
+    Private Sub PersistKnowledgeToTempFile()
+        If String.IsNullOrWhiteSpace(_cachedKnowledgeContent) Then Return
+
+        Try
+            Dim persistPath = GetPersistedKnowledgeFilePath()
+            File.WriteAllText(persistPath, _cachedKnowledgeContent, Encoding.UTF8)
+        Catch
+            ' Silently fail - not critical
+        End Try
+    End Sub
+
+    ''' <summary>
     ''' Persists geometry, transcript, persona, knowledge path, and checkbox state on close.
     ''' </summary>
-    ''' <param name="sender">Event source.</param>
-    ''' <param name="e">Event arguments containing form-closing details.</param>
     Private Sub OnFormClosing(sender As Object, e As FormClosingEventArgs)
         Try
             PersistTranscriptLimited()
@@ -443,6 +653,7 @@ Public Class DiscussInky
                 My.Settings.DiscussFormSize = Me.RestoreBounds.Size
             End If
             My.Settings.DiscussIncludeActiveDoc = _chkIncludeActiveDoc.Checked
+            My.Settings.DiscussPersistKnowledge = _chkPersistKnowledge.Checked
             My.Settings.DiscussSelectedPersona = _currentPersonaName
             My.Settings.DiscussKnowledgePath = If(_knowledgeFilePath, "")
             My.Settings.Save()
@@ -468,8 +679,6 @@ Public Class DiscussInky
     ''' <summary>
     ''' Handles alternate model toggling or selection, mirroring Form1 pattern.
     ''' </summary>
-    ''' <param name="sender">Event source.</param>
-    ''' <param name="e">Event arguments.</param>
     Private Sub OnAlternateModelClick(sender As Object, e As EventArgs)
         If Not String.IsNullOrWhiteSpace(_context.INI_AlternateModelPath) Then
             ' If an alternate is already active -> switch back to primary without dialog
@@ -552,9 +761,6 @@ Public Class DiscussInky
     ''' <summary>
     ''' Runs an LLM request while temporarily applying any selected alternate model, restoring afterward.
     ''' </summary>
-    ''' <param name="systemPrompt">System instruction for the LLM.</param>
-    ''' <param name="userPrompt">User message payload.</param>
-    ''' <returns>LLM-generated response text.</returns>
     Private Async Function CallLlmWithSelectedModelAsync(systemPrompt As String, userPrompt As String) As Task(Of String)
         Await _modelSemaphore.WaitAsync().ConfigureAwait(False)
         Dim backupConfig As ModelConfig = Nothing
@@ -634,9 +840,6 @@ Public Class DiscussInky
     ''' <summary>
     ''' Parses a persona file, appending entries and marking whether they are local.
     ''' </summary>
-    ''' <param name="filePath">Path to the persona file.</param>
-    ''' <param name="isLocal">Whether the file is local (vs. global).</param>
-    ''' <returns>True if any persona entries were loaded.</returns>
     Private Function LoadPersonasFromFile(filePath As String, isLocal As Boolean) As Boolean
         ' Must be a file, not a directory
         If String.IsNullOrWhiteSpace(filePath) Then
@@ -649,8 +852,6 @@ Public Class DiscussInky
         End If
 
         If Not File.Exists(filePath) Then
-            ' Only show error if this is likely intentional (path is configured but file missing)
-            ' Don't show error for empty/unconfigured paths
             Return False
         End If
 
@@ -696,9 +897,6 @@ Public Class DiscussInky
     ''' <summary>
     ''' Ensures persona display names are unique by appending numeric suffixes.
     ''' </summary>
-    ''' <param name="baseText">Initial display name.</param>
-    ''' <param name="existing">Collection of existing display names.</param>
-    ''' <returns>Unique display name.</returns>
     Private Function MakeUniqueDisplay(baseText As String, existing As ICollection(Of String)) As String
         If Not existing.Contains(baseText) Then Return baseText
         Dim n = 2
@@ -712,8 +910,6 @@ Public Class DiscussInky
     ''' <summary>
     ''' Shows persona picker and applies the chosen persona prompt.
     ''' </summary>
-    ''' <param name="sender">Event source.</param>
-    ''' <param name="e">Event arguments.</param>
     Private Sub OnSelectPersona(sender As Object, e As EventArgs)
         If _personas.Count = 0 Then
             ShowCustomMessageBox("No personas configured. Please configure INI_DiscussInkyPath or INI_DiscussInkyPathLocal in your settings.",
@@ -760,8 +956,6 @@ Public Class DiscussInky
     ''' <summary>
     ''' Ensures the local persona file exists and opens it in the shared text editor.
     ''' </summary>
-    ''' <param name="sender">Event source.</param>
-    ''' <param name="e">Event arguments.</param>
     Private Sub OnEditLocalPersona(sender As Object, e As EventArgs)
         Dim localPath = ExpandEnvironmentVariables(If(_context?.INI_DiscussInkyPathLocal, ""))
 
@@ -781,15 +975,30 @@ Public Class DiscussInky
             End Try
         End If
 
-        ' Create file with sample content if it doesn't exist
+
+        ' Create file with sample content if it doesn't exist or contains only whitespace
+        Dim needsSampleContent As Boolean = False
         If Not File.Exists(localPath) Then
+            needsSampleContent = True
+        Else
+            Try
+                Dim content As String = File.ReadAllText(localPath, System.Text.Encoding.UTF8)
+                needsSampleContent = String.IsNullOrWhiteSpace(content)
+            Catch
+                needsSampleContent = True
+            End Try
+        End If
+
+        If needsSampleContent Then
+
+
             Try
                 File.WriteAllText(localPath,
-                    "; DiscussInky Local Personas" & vbCrLf &
+                    "; Discuss This Local Personas" & vbCrLf &
                     "; Format: Name|System Prompt" & vbCrLf &
                     "; Lines starting with ; are comments" & vbCrLf &
                     vbCrLf &
-                    "Teacher|You are a teacher and will do an exam with the user based on the knowledge you will be provided. Check the responses and provide feedback." & vbCrLf &
+                    "Teacher|You are a teacher and will do an exam with the user based on the knowledge you will be provided. Check the responses and provide feedback." & vbCrLf & vbCrLf &
                     "Summarizer|Summarize the knowledge document for the user in a clear and concise way. Answer follow-up questions about the content." & vbCrLf,
                     Encoding.UTF8)
             Catch ex As Exception
@@ -806,72 +1015,241 @@ Public Class DiscussInky
 #Region "Knowledge File Management"
 
     ''' <summary>
-    ''' Button handler that launches the knowledge file picker.
+    ''' Button handler that launches the knowledge file/directory picker.
     ''' </summary>
-    ''' <param name="sender">Event source.</param>
-    ''' <param name="e">Event arguments.</param>
     Private Async Sub OnLoadKnowledge(sender As Object, e As EventArgs)
-        Await PromptForKnowledgeFileAsync()
+        Await PromptForKnowledgeAsync()
     End Sub
 
     ''' <summary>
-    ''' Prompts the user for a knowledge file, loads its text, caches it, and updates state.
+    ''' Prompts the user for a knowledge file or directory, loads content, caches it, and updates state.
+    ''' Supports loading multiple files from a directory with unified document numbering.
     ''' </summary>
-    Private Async Function PromptForKnowledgeFileAsync() As Task
+    Private Async Function PromptForKnowledgeAsync() As Task
         Try
-            Globals.ThisAddIn.DragDropFormLabel = "Drag & drop a knowledge file (PDF, Word, TXT, etc.) or click Browse"
-            Globals.ThisAddIn.DragDropFormFilter = "Supported Files|*.txt;*.rtf;*.doc;*.docx;*.pdf;*.md;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm|" &
-                                                   "Text Files (*.txt;*.md)|*.txt;*.md|" &
-                                                   "Word Documents (*.doc;*.docx)|*.doc;*.docx|" &
-                                                   "PDF Files (*.pdf)|*.pdf|" &
-                                                   "All Files (*.*)|*.*"
+            Globals.ThisAddIn.DragDropFormLabel = "Drag & drop a knowledge file or folder, or click Browse"
+            Globals.ThisAddIn.DragDropFormFilter = ""
 
-            Dim filePath = Globals.ThisAddIn.GetFileName()
+            Dim selectedPath As String = ""
+
+            Using frm As New DragDropForm(DragDropMode.FileOrDirectory)
+                If frm.ShowDialog() = DialogResult.OK Then
+                    selectedPath = frm.SelectedFilePath
+                End If
+            End Using
 
             Globals.ThisAddIn.DragDropFormLabel = ""
             Globals.ThisAddIn.DragDropFormFilter = ""
 
-            If String.IsNullOrWhiteSpace(filePath) Then
+            If String.IsNullOrWhiteSpace(selectedPath) Then
                 Return
             End If
 
+            ' Determine if it's a file or directory
+            Dim isDirectory = Directory.Exists(selectedPath)
+            Dim isFile = File.Exists(selectedPath)
+
+            If Not isFile AndAlso Not isDirectory Then
+                AppendSystemMessage("Selected path does not exist.")
+                Return
+            End If
+
+            ' Create loading context
+            Dim ctx As New KnowledgeLoadingContext()
+
+            ' Collect files to process
+            Dim filesToProcess As New List(Of String)()
+
+            If isFile Then
+                filesToProcess.Add(selectedPath)
+                ' Check if it's a PDF
+                If Path.GetExtension(selectedPath).Equals(".pdf", StringComparison.OrdinalIgnoreCase) Then
+                    ctx.HasPdfFiles = True
+                End If
+            Else
+                ' It's a directory - collect supported files
+                Dim allFiles = Directory.GetFiles(selectedPath, "*.*", SearchOption.TopDirectoryOnly)
+                Dim ignoredCount = 0
+
+                For Each f In allFiles
+                    Dim ext = Path.GetExtension(f).ToLowerInvariant()
+                    If SupportedKnowledgeExtensions.Contains(ext) Then
+                        filesToProcess.Add(f)
+                        If ext = ".pdf" Then
+                            ctx.HasPdfFiles = True
+                        End If
+                    Else
+                        ignoredCount += 1
+                    End If
+                Next
+
+                If ignoredCount > 0 Then
+                    ctx.IgnoredFilesPerDir(selectedPath) = ignoredCount
+                End If
+
+                ' Check file count limits
+                If filesToProcess.Count > KnowledgeLoadingContext.MaxFilesPerDirectory Then
+                    Dim truncateAnswer = ShowCustomYesNoBox(
+                        $"The directory contains {filesToProcess.Count} supported files, but the maximum is {KnowledgeLoadingContext.MaxFilesPerDirectory}." & vbCrLf & vbCrLf &
+                        $"Only the first {KnowledgeLoadingContext.MaxFilesPerDirectory} files will be loaded. Continue?",
+                        "Yes, continue", "No, abort")
+                    If truncateAnswer <> 1 Then
+                        Return
+                    End If
+                    filesToProcess = filesToProcess.Take(KnowledgeLoadingContext.MaxFilesPerDirectory).ToList()
+                ElseIf filesToProcess.Count > KnowledgeLoadingContext.ConfirmDirectoryFileCount Then
+                    Dim confirmAnswer = ShowCustomYesNoBox(
+                        $"The directory contains {filesToProcess.Count} files to load. Continue?",
+                        "Yes, continue", "No, abort")
+                    If confirmAnswer <> 1 Then
+                        Return
+                    End If
+                End If
+
+                If filesToProcess.Count = 0 Then
+                    AppendSystemMessage($"No supported files found in directory '{selectedPath}'.")
+                    Return
+                End If
+            End If
+
+            ' Ask about OCR if there are PDF files
+            If ctx.HasPdfFiles Then
+                Dim ocrAnswer = ShowCustomYesNoBox(
+                    "Some files may require OCR (optical character recognition) to extract text. Enable OCR for PDF processing?" & vbCrLf & vbCrLf &
+                    "Note: OCR may take longer but allows reading scanned documents and images.",
+                    "Yes, enable OCR", "No, skip OCR")
+                ctx.EnableOCR = (ocrAnswer = 1)
+            End If
+
+            ' Load all files
             ShowAssistantThinking()
-            _knowledgeContent = Await LoadKnowledgeFileAsync(filePath)
+
+            Dim resultBuilder As New StringBuilder()
+            Dim useDocumentTags = (filesToProcess.Count > 1)
+
+            For Each filePath In filesToProcess
+                Try
+                    Dim content = Await LoadSingleKnowledgeFileAsync(filePath, ctx.EnableOCR, True)
+
+                    If String.IsNullOrWhiteSpace(content) Then
+                        ctx.FailedFiles.Add(filePath)
+                        Continue For
+                    End If
+
+                    ctx.GlobalDocumentCounter += 1
+                    ctx.LoadedFiles.Add(Tuple.Create(filePath, content.Length))
+
+                    If useDocumentTags Then
+                        Dim docNum = ctx.GlobalDocumentCounter
+                        Dim fileName = Path.GetFileName(filePath)
+                        Dim openTag = $"<document{docNum} name=""{fileName}"">"
+                        Dim closeTag = $"</document{docNum}>"
+                        resultBuilder.Append(openTag).Append(content).Append(closeTag)
+                    Else
+                        resultBuilder.Append(content)
+                    End If
+
+                Catch ex As Exception
+                    ctx.FailedFiles.Add(filePath)
+                End Try
+            Next
+
             RemoveAssistantThinking()
 
-            If String.IsNullOrWhiteSpace(_knowledgeContent) Then
-                AppendSystemMessage("Failed to load knowledge file or file is empty.")
+            ' Show summary
+            Dim combinedContent = resultBuilder.ToString()
+
+            If ctx.LoadedFiles.Count > 0 OrElse ctx.FailedFiles.Count > 0 OrElse ctx.IgnoredFilesPerDir.Count > 0 Then
+                Dim summary As New StringBuilder()
+                summary.AppendLine("Knowledge loading summary:")
+                summary.AppendLine("")
+
+                If ctx.LoadedFiles.Count > 0 Then
+                    summary.AppendLine($"Successfully loaded ({ctx.LoadedFiles.Count} files):")
+                    Dim totalChars = 0
+                    For Each item In ctx.LoadedFiles
+                        summary.AppendLine($"  • {Path.GetFileName(item.Item1)} ({item.Item2:N0} chars)")
+                        totalChars += item.Item2
+                    Next
+                    summary.AppendLine($"  Total: {totalChars:N0} characters")
+                    summary.AppendLine("")
+                End If
+
+                If ctx.FailedFiles.Count > 0 Then
+                    summary.AppendLine($"Failed to load ({ctx.FailedFiles.Count} items):")
+                    For Each f In ctx.FailedFiles
+                        summary.AppendLine($"  • {Path.GetFileName(f)}")
+                    Next
+                    summary.AppendLine("")
+                End If
+
+                If ctx.IgnoredFilesPerDir.Count > 0 Then
+                    summary.AppendLine("Ignored unsupported files:")
+                    For Each kvp In ctx.IgnoredFilesPerDir
+                        summary.AppendLine($"  • {kvp.Key}: {kvp.Value} file(s)")
+                    Next
+                    summary.AppendLine("")
+                End If
+
+                Dim proceedAnswer = ShowCustomYesNoBox(
+                    summary.ToString().TrimEnd() & vbCrLf & vbCrLf & "Do you want to use this knowledge?",
+                    "Yes, proceed", "No, retry")
+
+                If proceedAnswer <> 1 Then
+                    ' User chose to retry
+                    Await PromptForKnowledgeAsync()
+                    Return
+                End If
+            End If
+
+            If String.IsNullOrWhiteSpace(combinedContent) Then
+                AppendSystemMessage("Failed to load knowledge or all files are empty.")
                 Return
             End If
 
-            _knowledgeFilePath = filePath
+            ' Update state
+            _knowledgeContent = combinedContent
+            _knowledgeFilePath = If(isFile, selectedPath, selectedPath & " (directory)")
 
             ' Update runtime cache
             _cachedKnowledgeContent = _knowledgeContent
             _cachedKnowledgeFilePath = _knowledgeFilePath
 
+            ' Persist if checkbox is checked
+            If _chkPersistKnowledge.Checked Then
+                Try
+                    Dim persistPath = GetPersistedKnowledgeFilePath()
+                    File.WriteAllText(persistPath, _knowledgeContent, Encoding.UTF8)
+                    AppendSystemMessage($"Knowledge loaded and persisted ({_knowledgeContent.Length:N0} characters from {ctx.LoadedFiles.Count} file(s)).")
+                Catch ex As Exception
+                    AppendSystemMessage($"Knowledge loaded ({_knowledgeContent.Length:N0} characters) but failed to persist: {ex.Message}")
+                End Try
+            Else
+                AppendSystemMessage($"Knowledge loaded: {ctx.LoadedFiles.Count} file(s), {_knowledgeContent.Length:N0} characters total.")
+            End If
+
             UpdateWindowTitle()
 
             Try
-                My.Settings.DiscussKnowledgePath = filePath
+                My.Settings.DiscussKnowledgePath = If(isFile, selectedPath, "")
                 My.Settings.Save()
             Catch
             End Try
 
-            AppendSystemMessage($"Knowledge loaded: {Path.GetFileName(filePath)} ({_knowledgeContent.Length:N0} characters)")
-
         Catch ex As Exception
             RemoveAssistantThinking()
-            AppendSystemMessage($"Error loading knowledge file: {ex.Message}")
+            AppendSystemMessage($"Error loading knowledge: {ex.Message}")
         End Try
     End Function
 
     ''' <summary>
-    ''' Reads supported file formats into plain text, delegating to specialized readers when needed.
+    ''' Loads a single knowledge file, optionally with OCR for PDFs.
     ''' </summary>
-    ''' <param name="filePath">Path to the knowledge file.</param>
-    ''' <returns>Plain text content of the file.</returns>
-    Private Async Function LoadKnowledgeFileAsync(filePath As String) As Task(Of String)
+    ''' <param name="filePath">Path to the file to load.</param>
+    ''' <param name="enableOCR">Whether to enable OCR for PDF files.</param>
+    ''' <param name="silent">Whether to suppress error messages.</param>
+    ''' <returns>File content as string, or empty string on failure.</returns>
+    Private Async Function LoadSingleKnowledgeFileAsync(filePath As String, enableOCR As Boolean, silent As Boolean) As Task(Of String)
         If String.IsNullOrWhiteSpace(filePath) OrElse Not File.Exists(filePath) Then
             Return ""
         End If
@@ -880,7 +1258,8 @@ Public Class DiscussInky
             Dim ext = Path.GetExtension(filePath).ToLowerInvariant()
 
             Select Case ext
-                Case ".txt", ".md", ".log", ".ini", ".csv", ".json", ".xml", ".html", ".htm"
+                Case ".txt", ".md", ".log", ".ini", ".csv", ".json", ".xml", ".html", ".htm",
+                     ".vb", ".cs", ".js", ".ts", ".py", ".java", ".cpp", ".c", ".h", ".sql", ".yaml", ".yml"
                     Return File.ReadAllText(filePath, Encoding.UTF8)
 
                 Case ".rtf"
@@ -890,13 +1269,21 @@ Public Class DiscussInky
                     Return ReadWordDocument(filePath)
 
                 Case ".pdf"
-                    Return Await ReadPdfAsText(filePath, True, False, False, _context)
+                    ' Use silent mode and respect OCR setting
+                    Return Await ReadPdfAsText(filePath, True, enableOCR, False, _context)
+
+                Case ".pptx"
+                    Return Globals.ThisAddIn.GetPresentationJson(filePath)
 
                 Case Else
+                    ' Try to read as text
                     Return File.ReadAllText(filePath, Encoding.UTF8)
             End Select
 
         Catch ex As Exception
+            If Not silent Then
+                AppendSystemMessage($"Error loading {Path.GetFileName(filePath)}: {ex.Message}")
+            End If
             Return ""
         End Try
     End Function
@@ -908,8 +1295,6 @@ Public Class DiscussInky
     ''' <summary>
     ''' Captures the user's message, adds it to history, and starts asynchronous LLM processing.
     ''' </summary>
-    ''' <param name="sender">Event source.</param>
-    ''' <param name="e">Event arguments.</param>
     Private Sub OnSend(sender As Object, e As EventArgs)
         Dim userText = _txtInput.Text.Trim()
         If userText.Length = 0 Then Return
@@ -924,8 +1309,6 @@ Public Class DiscussInky
     ''' <summary>
     ''' Clears transcript and history, then regenerates the welcome sequence.
     ''' </summary>
-    ''' <param name="sender">Event source.</param>
-    ''' <param name="e">Event arguments.</param>
     Private Async Sub OnClear(sender As Object, e As EventArgs)
         Try
             _history.Clear()
@@ -940,11 +1323,79 @@ Public Class DiscussInky
         End Try
     End Sub
 
+
+    ''' <summary>
+    ''' Creates a new Word document with the chat transcript, excluding system messages.
+    ''' Converts markdown to HTML for proper formatting.
+    ''' </summary>
+    Private Sub OnSendToDoc(sender As Object, e As EventArgs)
+        Try
+            If _history.Count = 0 Then
+                AppendSystemMessage("No conversation to export.")
+                Return
+            End If
+
+            Dim app = Globals.ThisAddIn.Application
+            If app Is Nothing Then
+                AppendSystemMessage("Word application is not available.")
+                Return
+            End If
+
+            ' Create new document first
+            Dim newDoc As Microsoft.Office.Interop.Word.Document = app.Documents.Add()
+            Dim sel As Microsoft.Office.Interop.Word.Selection = app.Selection
+
+            ' Build markdown content for the conversation
+            Dim mdBuilder As New StringBuilder()
+
+            ' Title
+            mdBuilder.AppendLine($"# Discussion with {_currentPersonaName}")
+            mdBuilder.AppendLine()
+
+            ' Metadata
+            mdBuilder.Append($"*Exported: {DateTime.Now:g}")
+            If Not String.IsNullOrEmpty(_knowledgeFilePath) Then
+                mdBuilder.Append($" | Knowledge: {Path.GetFileName(_knowledgeFilePath)}")
+            End If
+            mdBuilder.AppendLine("*")
+            mdBuilder.AppendLine()
+            mdBuilder.AppendLine("---")
+            mdBuilder.AppendLine()
+
+            ' Conversation
+            For Each msg In _history
+                If msg.Role = "user" Then
+                    mdBuilder.AppendLine("**You:**")
+                    mdBuilder.AppendLine()
+                    mdBuilder.AppendLine(msg.Content)
+                    mdBuilder.AppendLine()
+                Else
+                    mdBuilder.AppendLine($"**{_currentPersonaName}:**")
+                    mdBuilder.AppendLine()
+                    mdBuilder.AppendLine(msg.Content)
+                    mdBuilder.AppendLine()
+                End If
+            Next
+
+            ' Use the shared InsertTextWithMarkdown method which handles HTML/paste properly
+            sel.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseStart)
+            InsertTextWithMarkdown(sel, mdBuilder.ToString(), True)
+
+            ' Move cursor to start
+            newDoc.Content.Paragraphs(1).Range.Select()
+            app.Selection.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseStart)
+
+            AppendSystemMessage($"Chat exported to new document ({_history.Count} messages).")
+
+        Catch ex As Exception
+            AppendSystemMessage($"Error exporting to document: {ex.Message}")
+        End Try
+    End Sub
+
+
     ''' <summary>
     ''' Closes the DiscussInky form.
     ''' </summary>
-    ''' <param name="sender">Event source.</param>
-    ''' <param name="e">Event arguments.</param>
     Private Sub OnClose(sender As Object, e As EventArgs)
         Me.Close()
     End Sub
@@ -952,8 +1403,6 @@ Public Class DiscussInky
     ''' <summary>
     ''' Handles Enter/Escape shortcuts for sending and closing.
     ''' </summary>
-    ''' <param name="sender">Event source.</param>
-    ''' <param name="e">Key event arguments.</param>
     Private Sub OnInputKeyDown(sender As Object, e As KeyEventArgs)
         If e.KeyCode = Keys.Enter AndAlso Not e.Shift Then
             e.SuppressKeyPress = True
@@ -1049,7 +1498,9 @@ Public Class DiscussInky
         AppendAssistantMarkdown(answer)
         ' Include welcome in history - it's part of the conversation
         _history.Add(("assistant", answer))
+
         PersistChatHtml()
+        PersistTranscriptLimited()  ' Add this line
     End Function
 
 #End Region
@@ -1117,7 +1568,9 @@ Public Class DiscussInky
             RemoveAssistantThinking()
             AppendAssistantMarkdown(answer)
             _history.Add(("assistant", answer))
+
             PersistChatHtml()
+            PersistTranscriptLimited()  ' Add this line to save transcript immediately
 
         Catch ex As Exception
             RemoveAssistantThinking()
@@ -1401,7 +1854,6 @@ Public Class DiscussInky
     ''' <summary>
     ''' Rebuilds the history list from the plain-text transcript copy.
     ''' </summary>
-    ''' <param name="transcript">Plain text transcript to parse.</param>
     Private Sub RestoreHistoryFromTranscript(transcript As String)
         _history.Clear()
         If String.IsNullOrEmpty(transcript) Then Return
@@ -1411,31 +1863,38 @@ Public Class DiscussInky
         Dim content As New StringBuilder()
 
         Dim flush =
-            Sub()
-                If content.Length = 0 OrElse String.IsNullOrEmpty(currentRole) Then
-                    content.Clear() : currentRole = Nothing : Return
-                End If
-                _history.Add((currentRole, content.ToString().Trim()))
-                content.Clear()
-                currentRole = Nothing
-            End Sub
+        Sub()
+            If content.Length = 0 OrElse String.IsNullOrEmpty(currentRole) Then
+                content.Clear() : currentRole = Nothing : Return
+            End If
+            _history.Add((currentRole, content.ToString().Trim()))
+            content.Clear()
+            currentRole = Nothing
+        End Sub
 
         For Each ln In lines
-            If ln.StartsWith("You:", StringComparison.OrdinalIgnoreCase) Then
+            ' Check for user message marker
+            If ln.StartsWith("You: ", StringComparison.OrdinalIgnoreCase) Then
                 flush()
                 currentRole = "user"
-                content.Append(ln.Substring(4).TrimStart())
-            ElseIf ln.StartsWith(_currentPersonaName & ":", StringComparison.OrdinalIgnoreCase) Then
+                content.Append(ln.Substring(5).TrimStart())
+                ' Check for current persona name
+            ElseIf ln.StartsWith(_currentPersonaName & ": ", StringComparison.OrdinalIgnoreCase) Then
                 flush()
                 currentRole = "assistant"
-                content.Append(ln.Substring((_currentPersonaName & ":").Length).TrimStart())
-            ElseIf ln.StartsWith(AssistantName & ":", StringComparison.OrdinalIgnoreCase) Then
+                content.Append(ln.Substring((_currentPersonaName & ": ").Length).TrimStart())
+                ' Check for default assistant name (fallback)
+            ElseIf ln.StartsWith(AssistantName & ": ", StringComparison.OrdinalIgnoreCase) Then
                 flush()
                 currentRole = "assistant"
-                content.Append(ln.Substring((AssistantName & ":").Length).TrimStart())
+                content.Append(ln.Substring((AssistantName & ": ").Length).TrimStart())
             Else
-                If content.Length > 0 Then content.AppendLine()
-                content.Append(ln)
+                ' Continuation line - only append if we're already in a message
+                If currentRole IsNot Nothing Then
+                    If content.Length > 0 Then content.AppendLine()
+                    content.Append(ln)
+                End If
+                ' If currentRole Is Nothing, skip orphan lines (don't try to guess)
             End If
         Next
         flush()

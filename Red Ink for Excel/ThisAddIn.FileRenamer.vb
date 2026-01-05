@@ -153,6 +153,38 @@ Partial Public Class ThisAddIn
                 extraAction =
                         Sub()
                             Try
+                                ' Create file with sample content if it doesn't exist or contains only whitespace
+                                Dim needsSampleContent As Boolean = False
+                                If Not File.Exists(localPath) Then
+                                    needsSampleContent = True
+                                Else
+                                    Try
+                                        Dim content As String = File.ReadAllText(localPath, System.Text.Encoding.UTF8)
+                                        needsSampleContent = String.IsNullOrWhiteSpace(content)
+                                    Catch
+                                        needsSampleContent = True
+                                    End Try
+                                End If
+
+                                If needsSampleContent Then
+                                    Try
+                                        File.WriteAllText(localPath,
+                                        "; Red Ink File Renamer - Local Library" & vbCrLf &
+                                        "; Format: Title | Instruction" & vbCrLf &
+                                        "; Lines starting with ; are comments" & vbCrLf &
+                                        vbCrLf &
+                                        "Contract Naming|Rename to format: [Date YYYY-MM-DD] [PartyA] - [PartyB] - [Contract Type]. Extract the effective date, main contracting parties, and contract type (e.g., NDA, Service Agreement, License)." & vbCrLf & vbCrLf &
+                                        "Invoice Naming|Rename to format: [Date YYYY-MM-DD] [Vendor] - Invoice [Number] - [Amount]. Extract invoice date, vendor name, invoice number, and total amount." & vbCrLf & vbCrLf &
+                                        "Correspondence|Rename to format: [Date YYYY-MM-DD] [Sender] to [Recipient] - [Subject]. Extract the letter date, sender, recipient, and brief subject." & vbCrLf & vbCrLf &
+                                        "Legal Filing|Rename to format: [Case Number] - [Document Type] - [Filing Date YYYY-MM-DD]. Extract case reference, document type (Motion, Brief, Order), and filing date." & vbCrLf & vbCrLf &
+                                        "Meeting Minutes|Rename to format: [Date YYYY-MM-DD] [Meeting Type] Minutes - [Key Topic]. Extract meeting date, type (Board, Team, Client), and primary topic discussed." & vbCrLf & vbCrLf &
+                                        "Report Naming|Rename to format: [Date YYYY-MM-DD] [Report Type] - [Subject] - [Author]. Extract report date, type (Financial, Technical, Status), subject, and author if available." & vbCrLf,
+                                        System.Text.Encoding.UTF8)
+                                    Catch ex As Exception
+                                        SLib.ShowCustomMessageBox($"Cannot create file: {ex.Message}")
+                                        Return
+                                    End Try
+                                End If
                                 ' Open the local library in the editor
                                 SLib.ShowTextFileEditor(localPath, $"{AN} Local Library '{localPath}':", False, _context)
                             Catch ex As Exception
