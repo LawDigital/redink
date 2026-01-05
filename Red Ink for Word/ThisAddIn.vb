@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 4.1.2026
+' 5.1.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -47,7 +47,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.040126" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.050126" & SharedMethods.VersionQualifier
 
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
@@ -68,6 +68,7 @@ Partial Public Class ThisAddIn
     Private Const TPMarkupTriggerR As String = ")"
     Private Const TPMarkupTriggerInstruct As String = "(rev[:user])"
     Private Const ExtTrigger As String = "{doc}"
+    Private Const ExtDirTrigger As String = "{dir}"
     Private Const ExtTriggerFixed As String = "{[path]}"
     Private Const AddDocTrigger As String = "(adddoc)"
     Private Const MyStyleTrigger As String = "(mystyle)"
@@ -282,6 +283,7 @@ Partial Public Class ThisAddIn
     Public TargetAudience As String
     Public DialogueContext As String
     Public ExtraInstructions As String
+    Public DiscussKnowledgeCache As String = ""
 
 
 
