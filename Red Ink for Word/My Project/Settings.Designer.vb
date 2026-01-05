@@ -904,6 +904,18 @@ Namespace My
                 Me("ChatEnableTooling") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property DiscussPersistKnowledge() As Boolean
+            Get
+                Return CType(Me("DiscussPersistKnowledge"),Boolean)
+            End Get
+            Set
+                Me("DiscussPersistKnowledge") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

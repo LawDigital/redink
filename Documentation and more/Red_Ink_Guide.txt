@@ -15,54 +15,54 @@ I.	Database of Clauses	58
 J.	Creating Podcasts and Audiobooks	61
 K.	Integrated anonymization function	65
 L.	AI-based Redaction Function	70
-M.	Automatically apply Word styles	76
+M.	Automatically apply Word styles	75
 N.	Find hidden prompts	80
-O.	Discuss this	82
-P.	WebAgent	85
-Q.	Word helpers – practical everyday helpers (almost) without AI	87
-R.	Word-integrated chatbot "Inky"	91
+O.	Discuss this	81
+P.	WebAgent	84
+Q.	Word helpers – practical everyday helpers (almost) without AI	86
+R.	Word-integrated chatbot "Inky"	90
 S.	Interactive help function: Help me, Inky	94
 T.	Further tips for using Red Ink in Word	95
 U.	Red Ink functions in Excel	98
-V.	CSV Analyzer	104
-W.	Data Extractor	106
-X.	File Renamer	112
-Y.	Red Ink functions in Outlook	114
-Z.	Separate chatbot "Inky"	119
-AA.	Browser extension	120
-BB.	Using Red Ink in other programs	122
-III.	INSTALLATION	124
-A.	For those who can't wait: The one-click installation	124
-B.	The installation in more detail	126
-C.	Preparation: API access	129
-D.	Step 1: Download the installer/installations package	130
-E.	Step 2: Run the installer	132
-F.	Step 3: Initial configuration using the wizard	132
-G.	Step 4: Enter license	134
-H.	Step 5: Install helper (optional, can be done later)	135
-I.	Step 6: Using add-ins	136
-J.	Step 7: Making further adjustments as necessary	137
-K.	Installation of the browser extension	138
-IV.	CONFIGURATION (FOR ADVANCED USERS)	138
-A.	Configuration file "redink.ini"	138
-B.	License Management	166
-C.	Prompt library	168
-D.	Other alternative language models	169
-E.	Configuring Tooling	171
-F.	OAuth2.0 (e.g. Google Vertex API)	175
-G.	Configuration of Advanced API Calls	176
-H.	Automatic loading of configuration and template files	180
-I.	Automatic updating of INI files	181
-J.	Security features	182
-K.	Information for Developers / Source Code	185
-V.	FAQS	188
-VI.	RELEASE NOTES	200
-VII.	ROADMAP	210
-ANNEX 1: IDEAS TO GET TO KNOW RED INK	211
-ANNEX 2: PROGRAMMING RESPONSE TEMPLATES	213
-ANNEX 3: WEB AGENT SCRIPTING	216
-ANNEX 4: AUTOMATIC INI UPDATE	237
-ANNEX 5: INSTALLATION WITH CENTRAL CONFIGURATION	249
+V.	CSV Analyzer	103
+W.	Data Extractor	105
+X.	File Renamer	111
+Y.	Red Ink functions in Outlook	113
+Z.	Separate chatbot "Inky"	118
+AA.	Browser extension	119
+BB.	Using Red Ink in other programs	121
+III.	INSTALLATION	123
+A.	For those who can't wait: The one-click installation	123
+B.	The installation in more detail	125
+C.	Preparation: API access	128
+D.	Step 1: Download the installer/installations package	129
+E.	Step 2: Run the installer	131
+F.	Step 3: Initial configuration using the wizard	131
+G.	Step 4: Enter license	133
+H.	Step 5: Install helper (optional, can be done later)	134
+I.	Step 6: Using add-ins	135
+J.	Step 7: Making further adjustments as necessary	136
+K.	Installation of the browser extension	137
+IV.	CONFIGURATION (FOR ADVANCED USERS)	137
+A.	Configuration file "redink.ini"	137
+B.	License Management	165
+C.	Prompt library	167
+D.	Other alternative language models	168
+E.	Configuring Tooling	170
+F.	OAuth2.0 (e.g. Google Vertex API)	174
+G.	Configuration of Advanced API Calls	175
+H.	Automatic loading of configuration and template files	179
+I.	Automatic updating of INI files	180
+J.	Security features	181
+K.	Information for Developers / Source Code	184
+V.	FAQS	187
+VI.	RELEASE NOTES	199
+VII.	ROADMAP	209
+ANNEX 1: IDEAS TO GET TO KNOW RED INK	210
+ANNEX 2: PROGRAMMING RESPONSE TEMPLATES	212
+ANNEX 3: WEB AGENT SCRIPTING	215
+ANNEX 4: AUTOMATIC INI UPDATE	236
+ANNEX 5: INSTALLATION WITH CENTRAL CONFIGURATION	248
 
 I. OVERVIEW
 1 Red Ink is an AI tool developed for daily office use, which is integrated directly into Word, Excel and Outlook in the form of Microsoft Office add-ins, allowing various AI functions to be performed with your own texts, worksheets and emails. Prompts can be entered directly, but it is also possible to have the AI translate, revise, summarize, comment on, and search a selected text, cells in a worksheet, or email chains. Even a chatbot is available, the tool can transcribe, create audiobooks from texts, and can also be accessed from the browser. What is special about Red Ink, however, in contrast to most other AI tools, is that you can work with the AI directly in Word, Excel and Outlook; there is no need to switch back and forth to the browser.
@@ -197,6 +197,7 @@ The secondary and further models are accessed via Freestyle (2nd). Within Freest
 * If you include "{doc}" in the prompt, it is a good idea to use a so-called tag so that the language model can better distinguish it from the instruction, for example, with "Here is the external text: <TEXT>{doc}</TEXT>". If the user does not specify one, Red Ink automatically sets a tag around "{doc}" ("<DOCUMENT>{doc}</DOCUMENT>"). This label (e.g., "DOCUMENT" or "TEXT") can be referenced.
 * If "{doc}" is used multiple times in the same prompt, the add-in will also ask the user for a file multiple times. This allows multiple documents to be included in the same prompt. The use of enclosing tags is particularly important here, because the texts are inserted into the prompt at the point where the respective "{doc}" is located. In this case, the automatically set tags are also numbered ("<DOCUMENT1>{doc}</DOCUMENT1>" etc.). If only one "{doc}" is specified, the process will be aborted if this document cannot be read. If there are several "{doc}", the user can choose whether to proceed anyway. This makes it possible, especially with prompts stored in the prompt library, to provide for the inclusion of several documents, even if the user does not want to read that many documents as has been specified in the prompt in a specific case.
 * Instead of "{doc}", "{[Path]}" can also be used, where a full file path with a file name is specified instead of [Path]. In this case, the specified file is read directly. This makes it easier to implement the use of frequently used text templates (e.g., if a text for a matter recorded in Word is to be formulated based on am existing text template, the text template can be saved and a corresponding reference can be stored in a prompt in the prompt library; then only the prompt needs to be called up, and no document needs to be draged-and-dropped).
+* The same also works with "{dir}" for a whole directory of text documents (up to 50). It can be specified as a placeholder; then the user will be prompted to drag it into the drag & drop field, or the path can be specified as above for individual files.
 * The trigger "(file)" also allows external files to be read in, but in a different way. Here, the add-in is instructed to transmit the content of the file directly to the language model. However, this only works with file formats that the language model supports and if the language model has been configured accordingly ("APICall_Object"). Modern language models support the common formats of images, audio files and videos as well as PDF documents. If the trigger is set, a window opens into which the respective file can be dragged. An sample prompt for this trigger would be "What can be seen in this image? (file)" or – if the model also supports image generation and has been configured accordingly – "Color the object in this image blue and create a new image of it. (file)". Other applications are transcribing audio files and analyzing or converting content from PDF documents. However, the add-in does not check whether the file format is supported or whether the file is too large. The larger the file, the longer the response of the language model takes.
 * The same also works with the contents of the clipboard if, instead of "(file)", the trigger "(clip)" is inserted. This is particularly practical when, while working on a document, text from another document that cannot simply be copied needs to be inserted. It is only necessary to take a screenshot of the relevant passage (Shift-Windows-S), and then Freestyle can be instructed with a command such as "Exctract for me the text from the image (clip)" to extract the text and deliver it as a response. To make life easier for you, a corresponding command is already preprogrammed as a Word-Helper-Function ("Clipboard to text") and can also be used by entering the short command "insertclip" or "iclip" within Freestyle.
 * The trigger "(rev)" instructs the add-in to code all markups in the selected text as such before the text is passed to the language model. This makes it possible to ask the language model questions about the markups, e.g. "Summarise the changes made to the contract in terms of their meaning.". If you only want to have markups from a specific author coded, you can simply enter the name after a colon, exactly as it appears in the text (e.g. "(rev:VISCHER)"). You will have to tell the AI in sufficiently clear terms what to do with the markups (deletions or insertions/additions) because it will only see them, but not by default know what to do with them.
@@ -219,7 +220,7 @@ The secondary and further models are accessed via Freestyle (2nd). Within Freest
 * "terms" outputs any preconfigured usage restrictions or permissions in the INI file. They are also displayed when you move the mouse over the Red Ink logo in the menu bar.
 * "version" provides information about the current version of the add-in; this information also appears when you move the mouse over the Red Ink logo in the menu bar. The "version" command also shows the expiry date of the current licence for Red Ink (this information can also be accessed via Settings and then "About Red Ink"). This menu item also provides further information, e.g. about the third-party libraries used.
 * "switch" can temporarily swap the primary and secondary AI models; this is also possible via Settings.
-* "clientname" shows the name of your own Windows client; this is needed for the "UpdateIniClients" parameter.
+* "clientname" shows the name of your own Windows client; this is needed for the "UpdateClients" parameter.
 * "clearlastprompt" clears the cache of the last executed freestyle prompt.
 * "cleanmenu" removes any existing Red Ink context menus and rebuilds them if they are enabled.
 * "reload" ensures that the add-in reloads the configuration file (e.g. because something has been manually adjusted in the meantime; this also happens automatically after saving the configuration in Settings.
@@ -526,8 +527,6 @@ will result in "<redacted_0003_1>" for the first entity of the third rule. The g
 178 Once anonymization is complete (the entire text is processed), and if the show or askshow modes were selected, Red Ink then opens an editing window where the anonymized result can be manually checked and adjusted (placeholders and formatting should not be changed). As soon as the window is closed with the corresponding release button, the add-in continues with the final, anonymized text as usual. If canceled, nothing is passed on and it is aborted or the add-in behaves as if nothing had been returned by the language model.
 179 If the text "David Rosenthal is working for VISCHER in Zurich" and a redink-anon.txt file with the above content were used in Word, the following prompt window appears after the yes/no question of whether to anonymize:
          
-
-
 180 The result then looks like this:
          
 181 If the language model or the Special Service has returned a text, Red Ink automatically replaces the placeholders with the previous values. It must be manually checked whether the replaced terms are in the right place, because the language model did not see them in plain text. Here, as mentioned, descriptive placeholders can increase the answer quality.
@@ -570,13 +569,13 @@ M. Automatically apply Word styles
 198 A special function is Apply MyDocStyle: It allows you to have styles (and other formatting) applied to an existing Word document with AI support. In this way, a third-party document or a document created without styles can be converted with little effort into a document that corresponds to your own company-specific formatting. If desired, this also works even if the document to be formatted does not yet contain these custom styles.
 199 The process is as follows: First, a sample document is created based on a custom style template with instructions on how to apply the individual styles in natural language. From this, the Learn MyDocStyle function in the "Improve" menu generates a file that contains all the necessary information in coded form ("Style Template"). This is stored in a directory (must be configured). If a document is now to be adapted, the Apply MyDocStyle function in the "Improve" menu is called, the Style Template is selected and applied with the corresponding parameters. If desired, it transfers the necessary styles and then assigns them, with other formatting, to the respective paragraphs with the help of the AI.
 200 The function proceeds paragraph by paragraph, i.e. it always assumes that a style is applied to an entire paragraph at a time. There are also styles that are only applied to text sections within paragraphs. These can also be applied, but they are treated like paragraph styles.
-
-
 201 To generate a style template from a formatting template, the instructions must be written in such a way that the AI can understand when to apply which of the templates when it is later presented with a text. This then looks, for example, like this:
 202 Each of these paragraphs is assigned the respective style that is to be assigned in the relevant case. It is also possible to apply additional paragraph formatting, i.e., to also apply formatting that does not appear in the respective style. In the example above, the first and second paragraphs have the same style, but the numbering was manually deleted from the first paragraph. These properties are also saved in the style template. In principle, it is therefore possible to use the function entirely without styles, and in this way merely describe when which paragraph formatting should be used in a document.
 203 To "learn" the style template, you just need to open the relevant instruction document and select Learn MyDocStyle. The user will be asked what name to give the style template. This is the name by which the user will later select the style template. It should therefore be understandable to the user. The storage takes place in one of a maximum of two pre-configurable file paths. With the parameters "DocStylePath" and "DocStylePathLocal", a central and a personal directory can be configured in this way. If both are configured, the user must choose which one to use for saving. The storage is done in the standardized JSON file format, and always with a file name following the pattern "redink-ds-*.json". The user is offered the option to view and edit it. This is normally not necessary.
 204 Attention: This style template contains not only the rules for applying the styles, but also the styles themselves. However, only those styles for which a rule is also defined are saved, and consequently only these can be transferred to a target document. So, if you want to transfer all styles, you must define a rule for all of them.
 205 The application of a style template is done using the Apply MyDocStyle function. For this, the relevant text passage must be selected in the document in question or, if the entire document is to be adjusted, nothing should be selected. Then the function is to be called. The following parameters can be set:
+
+
 
 206 The parameters mean:
 * Style Template: Here you can choose which style template to use. It shows whether it comes from the central or the local (own) repository.
@@ -606,21 +605,22 @@ N. Find hidden prompts
 213 If the entire text is not selected by hand, but the check of the entire document is requested without prior selection, then the footnotes and endnotes are also checked (in a separate run).
 214 The "Explain" function also instructs the AI to pay attention to suspicious content. The same also applies to the chatbot in Word and the separate chatbot. Furthermore, it is possible to activate the use of the "Ignore" prompt in the settings ("Settings"). This instructs the AI in various functions (such as Freestyle, Summarize, Sum-up, Reply) to ignore instructions in the provided text passages, emails, etc.
 O. Discuss this
-215 Red Ink can be used to discuss a specific document using a special chatbot.
+215 Red Ink can be used to discuss a specific document or the text files of a directory using a special chatbot.
 216 This is also possible in principle with the chatbot in Word. It can "see" the active Word document and, if approved via a checkbox, all other open Word documents as well. However, this does not work with other documents. The chatbot also has a defined "personality". The local chatbot can see documents that are passed to it, too, but it only sees them for the immediately following question.
 217 This is where the "Discuss this" function fills the gap: It is a chatbot to which, firstly, a document can be passed that it constantly keeps in its memory ("Knowledge"), and secondly, a personality chosen by the user ("Persona") is assigned. This allows for a wide variety of applications:
-* The chatbot is used as a devil's advocate for a discussion of a case with all its details. The details of the case are combined in a PDF consisting of the various documents on the case and handed over in this way.
+* The chatbot is used as a devil's advocate or as a litigation specialist for a discussion of a case with all its details. The details of the case are combined in a PDF consisting of the various documents on the case and handed over in this way.
 * The chatbot is used to prepare for an interview or a questioning, and the chatbot is given collected statements of the person concerned and its persona is set up in such a way that it steers its statements in a certain direction.
+* The chatbot is used to ask the AI questions about a series of documents that are relevant for a business transaction and where, for example, differences need to be identified. The chatbot can, for instance, be asked to compare the documents with each other.
 * The chatbot is used as an examiner or teacher who quizzes a person on material or works through this material with them; the material is given to the chatbot in the form of one or more scripts, combined in a PDF.
-218 When "Discuss this" is started, the chatbot asks for the file with the knowledge, which can be provided via drag & drop or a selection window. Basically, documents of any size can be used, as long as the language model used supports this. However, the larger the files are, the longer the AI takes for each answer, as the entire text is provided to it for each answer. The chatbot remembers the file source of the text and accesses it again the next time if it is still available. A new file can be loaded at any time. Word, text files and PDFs (as long as they are searchable) are supported; graphics and images are not processed or are ignored.
+218 When "Discuss this" is started, the chatbot asks for the file or directory with the knowledge, which can be provided via drag & drop or through a selection window. Basically, documents of any size can be used, as long as the language model used supports this. However, the larger the files are, the longer the AI takes for each response, as the entire text is provided to it for each answer. A directory can also be "dragged in"; the chatbot will then take all text files within it (up to 50). OCR is also available if the model supports it. If there are multiple files, the name of the file is also given to the chatbot. The chatbot remembers the file source of the text and accesses it again the next time, if it is still available. With the "Persist knowledge temporarily" button, it can also remember the content of the file (it is then saved in a file in the temporary directory of the local computer). This means that the content of the document is available again the next time Word is started, without needing the source file. If the checkbox is unchecked, the temporary file is deleted again (until then, its storage space can be displayed by hovering the mouse over the checkbox). A new file or new files can be loaded at any time ("Load Knowledge"). Word, text files, and PDFs (as long as they are searchable) as well as PowerPoints are supported; graphics and images are not processed or are ignored.
+
+
 219 The persona can be selected from a choice, each of which is stored in the configured persona libraries. It is possible to work with a central and a local, personal library. They are configured via the configuration file ("DiscussInkyPath" and "DiscussInkyPathLocal"). These are simple text files (e.g. "personalib.txt"), which first contain the name of the persona on each line, then "|" and then on the rest of the line the prompt that represents the persona (here is an excerpt from the sample file):
-220 The persona can be changed at any time using the "Persona" button and takes effect from that moment on. The chatbot continues to see the previous chat history up to the configured maximum number of characters ("ChatCap"). The knowledge document is reloaded using the "Knowledge" button (the current document is displayed in the window title). If the chatbot is closed, the dialog is retained. It must be actively deleted with "Clear".
+220 The persona can be changed at any time using the "Persona" button and takes effect from that moment on. The chatbot continues to see the previous chat history up to the configured maximum number of characters ("ChatCap"). The knowledge document is reloaded using the "Load Knowledge" button (the current document is displayed in the window title). If the chatbot is closed, the dialog is retained. It must be actively deleted with "Clear".
 
 221 If "Include active document" is checked, the chatbot also sees the content of the current Word document and the selection. This makes it possible, for example, to discuss your own phrasing with the chatbot.
 222 The default primary model is used for the "Discuss this" chatbot. If a secondary model or even several alternative models are configured, you can switch by pressing a button ("Alternate Model", if such models are configured). Pressing the button again switches back. This is also indicated in the window. For security reasons, when the chatbot is closed and restarted, it always starts with the primary model. If you switch to an alternative model, it is the user's responsibility to ensure that it is approved for the information contained in the "knowledge" and the entire chat history (the entire previous chat history is sent to the model with every request).
-223 Anyone who wants to create their own personas can do so with the "Edit Local" button, provided that a corresponding storage path has been configured.
-
-
+223 Anyone who wants to create their own personas can do so with the "Edit Local Persona Lib" button, provided that a corresponding storage path has been configured.
 P. WebAgent
 224 The add-in in Word is able to perform tasks on the internet based on user-defined scripts, in which pages on the internet can be retrieved and their content processed, especially with the help of a large language model. This function can be used, for example, to retrieve decisions published by an authority from time to time on its website, summarize them, and present the result in a report. The user saves time because they do not have to retrieve all pages by hand and read everything in detail. The Web Agent handles the retrieval and the AI handles the summary..
 225 The function is called via the "Analyze" submenu and there as the "Run WebAgent" function. When it is called, the available scripts are displayed to the user. A path can be defined for local scripts and one for centrally managed scripts ("WebAgentPath", "WebAgentPathLocal", cf. para. 399 ff.). The files are named "redink-ag-xxx.json", where xxx stands for a selectable name that is permissible for file names. The ".json" extension indicates that it is a file in JSON format, a standard format for such purposes. There are many editors with which these files can be edited. However, editing is also possible in Red Ink itself.
@@ -665,7 +665,7 @@ R. Word-integrated chatbot "Inky"
 242 If "Include all other open Word docs" is selected, the chatbot will also see all other currently open Word documents with every question, even if "Include document" or "Include selection" is not checked. For security reasons, this is deactivated by default. However, the function can be very useful if questions are to be asked to the chatbot about the current document for which it should be able to refer to other documents (e.g., other contract appendices). In Freestyle, this can be controlled individually via "(adddoc)"; here, you simply have to pay attention to which documents are open. In the chatbot, they can be referred to by using their file name.
 
 243 If an alternate model is selected that supports so-called tooling (see para. 89 et seq.), then it can be granted access to the currently activated additional data sources via "Enable sources". These can be selected via the "Sources" button. The model will then query these sources if it considers this necessary to answer a question. The log window is not displayed in the chatbot itself, even when it is activated.
-244 In addition to this integrated chatbot Inky, there is also a separate chatbot that can be used with a normal browser (see para. 119 et seq.).
+244 In addition to this integrated chatbot Inky, there is also a separate chatbot that can be used with a normal browser (see para. 118 et seq.).
 S. Interactive help function: Help me, Inky
 245 To make it easier for the user to use Red Ink without having to read the entire manual, the chatbot "Help me, Inky" can be called up from the main menu (also in the add-in for Excel and Outlook). It knows this manual and can answer questions about the use of Red Ink based on it (e.g. "How do I insert additional documents in Freestyle?"). It is only intended for such questions. For other questions, the chatbot integrated in Word or the separate chatbot should be used. 
 
@@ -682,7 +682,7 @@ T. Further tips for using Red Ink in Word
 * In Freestyle, the suffix "(file)" can be appended to the prompt. If the configured model supports the processing of PDFs, the PDF is passed to the model as such (the user is prompted to drag it into a window that opens). The prompt can refer to the attached file.
 * In Freestyle, the suffix "{doc}" is added to the prompt (this can also be done multiple times). Here too, the user is prompted to drag the PDF into a window that opens. First, Red Ink tries to extract the text from the PDF "normally" (if the text is stored as such in the PDF). If that doesn't work and the model supports it, OCR is performed by it.
 * It is also possible to import the PDF into a Word file using the Word helper "Import Text File" and proceed with it. The Word helper basically does the same as "{doc}", but the user receives the imported PDF file as a Word file.
-251 When using Red Ink, tables can be created. This is sometimes advantageous because the evaluation of the results is clearer. In the command, the AI is to be instructed to present the result in the form of a table. This will only be created for text codes with a separator chosen by the AI. However, this text can easily be converted using the Word command "Convert Text to Table..." (simply select the table, open the command and enter the separator chosen by the AI):
+251 When using Red Ink, tables can be created. This is sometimes advantageous because the evaluation of the results is clearer. In the command, the AI is to be instructed to present the result in the form of a table. This will only be created for text codes with a separator chosen by the AI. However, this text can easily be converted using the Word command "Convert Text to Table..." (simply select the table, open the command and enter the separator chosen by the AI).
 252 Red Ink itself can handle tables in text. If it encounters one in the selected text, it asks whether it should go through the individual text blocks before and after it and the individual cells separately, so that the table is not destroyed (this, however, takes much more time and is only worthwhile if a table is also to be effectively revised by the AI). This then generates a corresponding number of queries. This can also be declined. If it is cancelled, nothing happens. If markup is activated, the diff method (not DiffW) is used because it is the most efficient for this purpose.     
 253 If you want Red Ink to revise tables (e.g., to have them automatically filled in or adjusted), you should not do this in Word, but rather copy the table into Excel and ask Red Ink there, via the Freestyle function, to revise the table. This works much better and faster than in Word.
 254 If you are in Word and want to enter a text in Red Ink that consists of several parts that are to be controlled individually (e.g. two text passages in the same document that are to be compared), it has proven useful to mark these with HTML-like "tags" to delimit the content. Example:
@@ -1692,7 +1692,7 @@ UpdateIni
 =
 True
 Main switch for the INI update mechanism; true executes update checks and can apply changes; false terminates the check immediately without changes; for details see Annex 4
-UpdateIniClients
+UpdateClients
 =
 DSKTOP01
 Name of the clients (Windows Computer Name) that are allowed to use the INI update mechanism, separated by a comma; this can prevent multiple clients in a network from executing the mechanism in parallel; your own name can be queried in the command prompt with "hostname" or in Freestyle with the shortcut "clientname"
@@ -2872,7 +2872,7 @@ W=1.1.1.200
 O=1.1.1.200
 E=1.1.1.200
 Preview version:
-Extension of the update functions by "UpdateIniClients" and the model definitions by "ModelNote" and "Depreciated"; adjustment of the backup function for INI updates; introduction of "Location" parameter for location-aware prompts; parameter to block helper downloads; bug fixes (window display, swallowing of and <> by Markdown conversion)
+Extension of the update functions by "UpdateClients" and the model definitions by "ModelNote" and "Depreciated"; adjustment of the backup function for INI updates; introduction of "Location" parameter for location-aware prompts; parameter to block helper downloads; bug fixes (window display, swallowing of and <> by Markdown conversion)
 3.1.2026
 
 W=1.1.2.200
@@ -2890,7 +2890,12 @@ Logging feature (LogPath)
 W=1.1.4.200
 O=1.1.4.200
 E=1.1.4.200
-Bug fix (hidden window), change of parameter (UpdateClients --> UpdateIniClients)
+Bug fix (hidden window), parameters adjusted (UpdateClients --> UpdateIniClients)
+5.1.2026
+
+W=1.1.5.200
+E=1.1.5.200
+Introduction of {dir} in Freestyle (Word, Excel) and predefined directories; Discuss this remembers documents on request, also processes directories and can export chats to Word
 Note: Version numbers with x.x.x.2nn are Preview-Releases.
 
 
@@ -3653,7 +3658,7 @@ Parameter
 Description
 UpdateIni
 Enables (true) or disables (false) the entire update mechanism
-UpdateIniClients
+UpdateClients
 Name of the clients (Windows Computer Name) that are allowed to use the INI update mechanism, separated by a comma; this can prevent multiple clients in a network from executing the mechanism in parallel; your own name can be queried in the command prompt with "hostname" or in Freestyle with the shortcut "clientname"
 UpdateSource
 Defines the update source for the main configuration in the format path; key; public key
@@ -3789,7 +3794,7 @@ P. Protected parameters
 Parameters whose name begins with Update are protected from automatic changes. This prevents the update mechanism from overwriting its own configuration.
 Protected parameters include:
 * UpdateIni
-* UpdateIniClients
+* UpdateClients
 * UpdateSource
 * UpdateIniSilentMode
 * UpdateIniAllowRemote
@@ -3948,7 +3953,7 @@ g) Secondary model, configuring alternate models: If necessary, configure the se
 h) Further configurations: Now make any further configurations. You can go through the sample file redink.ini and check the individual parameters, or you can rely on the default settings to start with. We recommend the latter, with the exception of these parameters:
 * LicensedTill: Here you specify the end date of the licence you have (various date formats are supported). In LicenseUsers (not licensedUsers) and LicenseStatus, you specify the number of users and the name of the licence. The content is not checked, but only displayed in the "About" window. You can also enter your contact details under LicenseContact. If a licence warning occurs (e.g. before the licence expires), users will know who to contact. More information about licence management is described in para. 415 et seq. The licence configuration in redink.ini overrides a local licence entry; the user is no longer prompted to enter a licence.
 * UpdateCheckInterval: Normally 3 or 7 days. If you want to disable automatic updates of the add-ins, set this value to 0.
-* UpdateIni: Normally True, i.e. if one of the configuration files contains the UpdateSource parameter and the address given provides for an update of the relevant file or section of a model or special service configuration, the user will be asked whether the update shall be made. If you do not want this, set UpdateIni to False. Alternatively, you can set the UpdateIniClients parameter to the Windows name of your own computer (e.g. "UpdateIniClients = ADMDSKTP01"), which means that any updates will only be made from this device, i.e. only the user on the relevant computer will receive update notifications. Several such clients can be entered, separated by commas. This update function and the numerous other parameters with which it can be controlled are described in more detail in para. 464 et seq. and Annex 4. However, updates are also offered by selected service providers.
+* UpdateIni: Normally True, i.e. if one of the configuration files contains the UpdateSource parameter and the address given provides for an update of the relevant file or section of a model or special service configuration, the user will be asked whether the update shall be made. If you do not want this, set UpdateIni to False. Alternatively, you can set the UpdateClients parameter to the Windows name of your own computer (e.g. "UpdateClients = ADMDSKTP01"), which means that any updates will only be made from this device, i.e. only the user on the relevant computer will receive update notifications. Several such clients can be entered, separated by commas. This update function and the numerous other parameters with which it can be controlled are described in more detail in para. 464 et seq. and Annex 4. However, updates are also offered by selected service providers.
 * Paths: We recommend specifying the various paths for additional resources (such as prompt libraries). The "Get Sample Files" function already does this. The concept is as follows: there is a central and shared version and a local version of each of these paths, with the exception of MyStylePath (library with personal writing styles), where there is only a local version, and Promptlib_Transcript (prompts for converting transcripts), where there is only a central, shared version. 
 Example: The Find Clause function allows the user to access multiple files with clause libraries. The clause libraries used and shared by all users are stored in a central network directory. This is parameterised in FindClausePath. Users can store personal clause libraries on their own computers. For example, the directory %APPDATA%\microsoft\word can be used for this purpose. This directory must then be configured using FindClausePathLocal. Since placeholders or environment variables such as %APPDATA% can be used, personalisation is very easy (but also necessary so that each user has their own directory). 
 Please note: There are paths that only specify the directory and others that also refer to a file. Details can be found in the manual. Where only directories are specified, Red Ink searches for files with a specific name structure. For Find Clause, for example, "redink-lib-*.txt" is used. We recommend storing all central and shared libraries in a central and shared library directory. All libraries can be easily edited with a text editor. They either have the extension .txt or are .json files. The same applies to the "local" files. In our experience, however, users rarely use local files. It is often better to make "good" prompts available to all users by customising the central prompt file for the respective function. Once a customisation has been made, it takes effect immediately.
@@ -3975,14 +3980,15 @@ We provide various documents for end-users at https://redink.ai/downloads-site/m
 
 
 
-04 January 2026	1
+05 January 2026	1
 
 
-	04 January 2026 
+	05 January 2026 
 
 
 
 Copyright © LawDigital Ltd., Switzerland. All rights reserved. Info: https://redink.ai
+
 
 
 

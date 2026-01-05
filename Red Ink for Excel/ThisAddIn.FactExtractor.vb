@@ -230,6 +230,41 @@ Partial Public Class ThisAddIn
                 extraAction =
                         Sub()
                             Try
+                                ' Create file with sample content if it doesn't exist or contains only whitespace
+                                Dim needsSampleContent As Boolean = False
+                                If Not File.Exists(localPath) Then
+                                    needsSampleContent = True
+                                Else
+                                    Try
+                                        Dim content As String = File.ReadAllText(localPath, System.Text.Encoding.UTF8)
+                                        needsSampleContent = String.IsNullOrWhiteSpace(content)
+                                    Catch
+                                        needsSampleContent = True
+                                    End Try
+                                End If
+
+                                If needsSampleContent Then
+                                    Try
+                                        File.WriteAllText(localPath,
+                                            "; Red Ink Fact Extractor - Local Library" & vbCrLf &
+                                            "; Format: Title | Instruction | SchemaSpec | MergeEnable | MergeDateCol | MergeInstruction" & vbCrLf &
+                                            "; " & vbCrLf &
+                                            "; SchemaSpec types: text, number, integer, decimal, date, datetime, other" & vbCrLf &
+                                            "; Use * after type to mark preferred sort column (e.g., date*)" & vbCrLf &
+                                            "; Lines starting with ; are comments" & vbCrLf &
+                                            vbCrLf &
+                                            "Contract Summary|Extract the key contract metadata including parties, dates, and financial terms.|Contract Title:text; Party A:text; Party B:text; Effective Date:date*; Expiration Date:date; Contract Value:decimal; Currency:text; Governing Law:text|False|0|" & vbCrLf & vbCrLf &
+                                            "Contract Obligations|Extract all contractual obligations, deadlines, and responsible parties.|Obligation:text; Responsible Party:text; Due Date:date*; Frequency:text; Penalty Clause:text|True|3|Merge obligations with the same due date and responsible party" & vbCrLf & vbCrLf &
+                                            "Payment Schedule|Extract payment milestones, amounts, and due dates from the contract.|Milestone:text; Payment Date:date*; Amount:decimal; Currency:text; Payment Terms:text; Status:text|True|2|Consolidate payments scheduled for the same date" & vbCrLf & vbCrLf &
+                                            "Termination Clauses|Identify all termination and exit provisions.|Clause Type:text; Trigger Condition:text; Notice Period:text; Effective Date:date*; Consequences:text|False|0|" & vbCrLf & vbCrLf &
+                                            "Renewal Terms|Extract automatic renewal and extension provisions.|Renewal Type:text; Renewal Date:date*; Duration:text; Notice Deadline:date; Conditions:text|False|0|" & vbCrLf,
+                                            System.Text.Encoding.UTF8)
+                                    Catch ex As Exception
+                                        ShowCustomMessageBox($"Tried to create a sample file but could not: {ex.Message}")
+                                        Return
+                                    End Try
+                                End If
+
                                 ' Open the local library in the editor
                                 SLib.ShowTextFileEditor(localPath, $"{AN} Local Library '{localPath}':", False, _context)
                             Catch ex As Exception
