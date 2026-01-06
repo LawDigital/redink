@@ -773,7 +773,8 @@ Public Class frmAIChat
             ' compatibility but second one is the active version.
 
             SystemPrompt = _context.SP_ChatWord().
-                        Replace("{UserLanguage}", UserLanguage) &
+                        Replace("{UserLanguage}", UserLanguage).
+                        Replace("{Location}", ThisAddIn.Location) &
                         $" Your name is '{AN5}'. The current date and time is: {DateTime.Now.ToString("MMMM dd, yyyy hh:mm tt")}." &
                         If(chkIncludeDocText.Checked, vbLf & "You have access to the user's active document." & vbLf, "") &
                         If(chkIncludeselection.Checked, vbLf & "You have access to a selection of the active document." & vbLf, "") &
@@ -1199,7 +1200,7 @@ Public Class frmAIChat
     Private Async Function WelcomeMessage() As Task(Of String)
         Try
             ' Build system prompt with assistant identity and current timestamp
-            SystemPrompt = _context.SP_ChatWord().Replace("{UserLanguage}", UserLanguage) &
+            SystemPrompt = _context.SP_ChatWord().Replace("{UserLanguage}", UserLanguage).Replace("{Location}", ThisAddIn.Location) &
                           $" Your name is '{AN5}'. The current date and time is: {DateTime.Now.ToString("F")}."
             txtUserInput.Text = ""
 

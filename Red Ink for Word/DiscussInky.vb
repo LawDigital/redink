@@ -4,26 +4,79 @@
 ' =============================================================================
 ' File: DiscussInky.vb
 ' Purpose: Hosts the "Discuss Inky" multi-persona chat surface inside Word,
-'          wiring persona selection, knowledge loading, transcript persistence,
-'          and LLM invocation with optional alternate models.
+'          wiring persona selection, mission selection, knowledge loading,
+'          transcript persistence, and LLM invocation with optional
+'          alternate/secondary models. Includes an autoresponder loop to
+'          simulate multi-party discussions.
 '
-' Architecture:
-'  - UI Composition: Builds a WinForms surface composed of WebBrowser transcript,
-'    multiline input box, and action buttons (Send, Persona, Knowledge, etc.).
-'  - Session State: Persists persona choice, chat transcript, window geometry,
-'    active-document flag, and knowledge file references via My.Settings plus
-'    process-level caches.
-'  - Personas & Knowledge: Loads persona prompts from local/global libraries,
-'    opens arbitrary knowledge files (TXT/RTF/DOC/PDF/…), and caches their text.
-'  - Missions: Optional mission statements that provide specific behavioral targets
-'    alongside personas, loaded from companion files (e.g., personas-missions.txt).
-'  - LLM Pipeline: Constructs prompts with persona instructions, mission targets,
-'    knowledge text, optional active-document excerpts, and prior conversation;
-'    routes calls through SharedLibrary LLM helpers with optional alternate/secondary models.
-'  - HTML Transcript: Renders chat history via Markdig HTML, keeps "thinking"
-'    placeholders, restores transcripts on startup, and persists DOM fragments.
-'  - External Dependencies: Relies on SharedLibrary.SharedMethods for model
-'    management, file dialogs, message boxes, PDF parsing, and selection UI.
+' Architecture / How it works:
+'  - UI Composition:
+'     * WinForms surface composed of:
+'         - WebBrowser transcript renderer (Markdown -> HTML via Markdig)
+'         - Multiline input box
+'         - Action buttons (Send, Persona, Mission, Load Knowledge, Send to Doc, Autorespond, etc.)
+'         - Checkboxes for including the active document and persisting knowledge temporarily.
+'
+'  - Session State & Persistence:
+'     * Persists window geometry, selected persona/mission, checkbox states, and transcript
+'       via `My.Settings`.
+'     * Persists transcript in two forms:
+'         - HTML fragment (`DiscussLastChatHtml`) to restore UI visuals quickly
+'         - Plain transcript (`DiscussLastChat`) to rebuild `_history` for LLM context
+'     * Maintains an in-process knowledge cache (`_cachedKnowledgeContent/_cachedKnowledgeFilePath`)
+'       that survives closing/reopening the form while Word remains running.
+'
+'  - Personas & Missions:
+'     * Personas are loaded from local/global persona libraries (Name|Prompt format).
+'     * Missions are loaded from a sibling file derived from the persona library path:
+'         [personaFileNameWithoutExtension]-missions.txt (Name|Prompt format).
+'     * Mission editing from the UI reloads missions immediately and refreshes the selection flow.
+'
+'  - Knowledge Loading (File/Directory):
+'     * Loads a single knowledge file or all supported files from a directory (top level).
+'     * When multiple files are loaded, wraps each file into numbered tags:
+'         <documentN name="file.ext"> ... </documentN>
+'     * Supports PDF extraction with optional OCR (if available) and warns when extraction may be incomplete.
+'     * Knowledge can be persisted temporarily to a temp file when the user enables the
+'       "Persist knowledge temporarily" checkbox.
+'
+'  - LLM Pipeline & Context Unification:
+'     * All LLM calls (manual chat and autorespond) are built from the same context pieces:
+'         - Persona system prompt (+ optional mission clause)
+'         - Loaded knowledge (if provided)
+'         - Active document excerpt (if enabled)
+'         - Conversation history (from `_history`)
+'     * Conversation history is produced by `BuildConversationForAutoResponder()` which includes:
+'         - `user` messages
+'         - `assistant` messages (main chatbot persona)
+'         - `autoresponder` messages (other persona; stored already prefixed with its display name)
+'       This ensures BOTH the main chatbot and the autoresponder always see the full conversation so far
+'       regardless of who spoke.
+'     * Prompt history is capped using `_context.INI_ChatCap` to avoid overly long prompts; if exceeded,
+'       older history is truncated by taking the most recent tail.
+'
+'  - Autorespond Feature (Multi-party Dialogue Simulation):
+'     * When started, alternates between:
+'         1) Autoresponder persona generates a message (recorded as role `autoresponder`)
+'         2) Main chatbot responds (recorded as role `assistant`)
+'     * Uses the same knowledge, active-document option, and unified history builder as manual chat.
+'     * Supports a configurable maximum number of rounds and a stop phrase (`<AUTORESPOND_STOP>`).
+'
+'  - Alternate / Secondary Model Support:
+'     * Supports selecting an alternate model config (via INI file) or toggling a configured second API.
+'     * `CallLlmWithSelectedModelAsync()` applies the selected alternate model only for the duration of the call
+'       and restores the original context configuration afterward (thread-safe via semaphore).
+'
+'  - Send to Doc:
+'     * Exports the transcript to a new Word document using Markdown insertion.
+'     * Handles roles explicitly (`user`, `assistant`, `autoresponder`) and formats each speaker properly.
+'
+' External Dependencies:
+'  - Uses `SharedLibrary.SharedMethods` for:
+'     * LLM calls and model configuration switching
+'     * OCR/PDF handling utilities
+'     * Shared dialogs (value selection, variable input form, message boxes, text editor)
+'  - Uses Markdig for Markdown-to-HTML conversion for transcript rendering.
 ' =============================================================================
 
 Option Strict On
@@ -81,6 +134,11 @@ Public Class DiscussInky
     }
     Private Shared ReadOnly _rng As New Random()
 
+    ' Autorespond constants
+    Private Const MaxAutoRespondRounds As Integer = 50
+    Private Const AutoRespondStopWord As String = "<AUTORESPOND_STOP>"
+    Private DefaultAutoRespondBreakOff As String = $"If this chat is going in circles, if you have come to an agreement or solution, or if this chat is drifting away to a point that is no longer productive, stop the responses by including the exact text '{AutoRespondStopWord}' at the end of your message and explain why (if because a solution is found, explain the solution, common grounds, etc.)."
+
     ' UI Controls
     Private ReadOnly _chat As WebBrowser = New WebBrowser() With {
         .Dock = DockStyle.Fill,
@@ -113,6 +171,7 @@ Public Class DiscussInky
     Private ReadOnly _btnAlternateModel As Button = New Button() With {.Text = "Alternate Model", .AutoSize = True}
     Private ReadOnly _chkIncludeActiveDoc As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = "Include active document", .AutoSize = True}
     Private ReadOnly _chkPersistKnowledge As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = "Persist knowledge temporarily", .AutoSize = True}
+    Private ReadOnly _btnAutoRespond As Button = New Button() With {.Text = "Autorespond", .AutoSize = True}
 
     ' State
     Private _htmlReady As Boolean = False
@@ -124,6 +183,16 @@ Public Class DiscussInky
     Private _welcomeInProgress As Integer = 0
     Private _personaSelectedThisSession As Boolean = False
     Private _isUpdatingPersistCheckbox As Boolean = False ' Prevents recursive event handling
+
+    ' Autorespond state
+    Private _autoRespondInProgress As Boolean = False
+    Private _autoRespondCancelled As Boolean = False
+    Private _autoRespondPersonaName As String = ""
+    Private _autoRespondPersonaPrompt As String = ""
+    Private _autoRespondMissionName As String = ""
+    Private _autoRespondMissionPrompt As String = ""
+    Private _autoRespondMaxRounds As Integer = 5
+    Private _autoRespondBreakOff As String = DefaultAutoRespondBreakOff
 
     ' Alternate model support (new implementation matching Form1.vb pattern)
     Private _alternateModelSelected As Boolean = False
@@ -234,6 +303,7 @@ Public Class DiscussInky
         pnlButtons.Controls.Add(_btnClear)
         pnlButtons.Controls.Add(_btnSendToDoc)
         pnlButtons.Controls.Add(_btnClose)
+        pnlButtons.Controls.Add(_btnAutoRespond)
         pnlButtons.Controls.Add(_chkIncludeActiveDoc)
         pnlButtons.Controls.Add(_chkPersistKnowledge)
 
@@ -267,6 +337,7 @@ Public Class DiscussInky
         AddHandler _chat.NewWindow, AddressOf Chat_NewWindow
         AddHandler _chkIncludeActiveDoc.CheckedChanged, AddressOf OnIncludeActiveDocChanged
         AddHandler _chkPersistKnowledge.CheckedChanged, AddressOf OnPersistKnowledgeChanged
+        AddHandler _btnAutoRespond.Click, AddressOf OnAutoRespondClick
 
     End Sub
 
@@ -1177,7 +1248,8 @@ Public Class DiscussInky
                     "Problem Solver|Help find a solution to the problem at hand. Ask probing questions to understand the full context. Encourage exploration of alternatives while remaining constructive and focused on actionable outcomes." & vbCrLf & vbCrLf &
                     "Witness Simulation|Defend the documented position as stated in the knowledge base. Respond as if being questioned, staying consistent with the documented facts. Do not volunteer information beyond what is documented." & vbCrLf & vbCrLf &
                     "Cross-Examination|Systematically question the documented statements to test their credibility and consistency. Look for gaps, contradictions, or areas requiring clarification. Press for specifics and challenge vague assertions." & vbCrLf & vbCrLf &
-                    "Only One Paragraph|Limit your response always to a maximum of one paragraph.",
+                    "Only One Paragraph|Limit your response always to a maximum of one paragraph." & vbCrLf & vbCrLf &
+                    "Only One Sentence|Limit your response always to a maximum of one sentence.",
                     Encoding.UTF8)
             Catch
                 ' Silently fail
@@ -1302,6 +1374,39 @@ Public Class DiscussInky
             Globals.ThisAddIn.DragDropFormFilter = ""
 
             If String.IsNullOrWhiteSpace(selectedPath) Then
+                ' No file selected - check if there's existing knowledge to delete
+                If Not String.IsNullOrWhiteSpace(_knowledgeContent) Then
+                    Dim answer = ShowCustomYesNoBox(
+                        "No file was selected. Do you want to delete the currently loaded knowledge?",
+                        "Yes, delete knowledge", "No, keep it")
+
+                    If answer = 1 Then
+                        ' Delete knowledge
+                        _knowledgeContent = Nothing
+                        _knowledgeFilePath = Nothing
+                        _cachedKnowledgeContent = Nothing
+                        _cachedKnowledgeFilePath = Nothing
+
+                        ' Delete persisted knowledge file if it exists
+                        Try
+                            Dim persistPath = GetPersistedKnowledgeFilePath()
+                            If File.Exists(persistPath) Then
+                                File.Delete(persistPath)
+                            End If
+                        Catch
+                        End Try
+
+                        ' Clear the saved path in settings
+                        Try
+                            My.Settings.DiscussKnowledgePath = ""
+                            My.Settings.Save()
+                        Catch
+                        End Try
+
+                        UpdateWindowTitle()
+                        AppendSystemMessage("Knowledge deleted.")
+                    End If
+                End If
                 Return
             End If
 
@@ -1604,6 +1709,8 @@ Public Class DiscussInky
         End Try
     End Sub
 
+    ' Replace the OnSendToDoc method to properly handle autoresponder messages:
+
     ''' <summary>
     ''' Creates a new Word document with the chat transcript, excluding system messages.
     ''' Converts markdown to HTML for proper formatting.
@@ -1647,17 +1754,42 @@ Public Class DiscussInky
 
             ' Conversation
             For Each msg In _history
-                If msg.Role = "user" Then
-                    mdBuilder.AppendLine("**You:**")
-                    mdBuilder.AppendLine()
-                    mdBuilder.AppendLine(msg.Content)
-                    mdBuilder.AppendLine()
-                Else
-                    mdBuilder.AppendLine($"**{_currentPersonaName}:**")
-                    mdBuilder.AppendLine()
-                    mdBuilder.AppendLine(msg.Content)
-                    mdBuilder.AppendLine()
-                End If
+                Select Case msg.Role
+                    Case "user"
+                        mdBuilder.AppendLine("**You:**")
+                        mdBuilder.AppendLine()
+                        mdBuilder.AppendLine(msg.Content)
+                        mdBuilder.AppendLine()
+
+                    Case "assistant"
+                        mdBuilder.AppendLine($"**{_currentPersonaName}:**")
+                        mdBuilder.AppendLine()
+                        mdBuilder.AppendLine(msg.Content)
+                        mdBuilder.AppendLine()
+
+                    Case "autoresponder"
+                        ' Autoresponder content is stored as "PersonaName: message"
+                        ' We need to extract the persona name and format it properly
+                        Dim content = msg.Content
+                        Dim colonIdx = content.IndexOf(": ", StringComparison.Ordinal)
+                        If colonIdx > 0 Then
+                            Dim responderName = content.Substring(0, colonIdx)
+                            Dim responderMessage = content.Substring(colonIdx + 2)
+                            mdBuilder.AppendLine($"**{responderName}:**")
+                            mdBuilder.AppendLine()
+                            mdBuilder.AppendLine(responderMessage)
+                            mdBuilder.AppendLine()
+                        Else
+                            ' Fallback: just output the content with a generic label
+                            mdBuilder.AppendLine("**Autoresponder:**")
+                            mdBuilder.AppendLine()
+                            mdBuilder.AppendLine(content)
+                            mdBuilder.AppendLine()
+                        End If
+
+                    Case Else
+                        ' Skip system messages or unknown roles
+                End Select
             Next
 
             ' Use the shared InsertTextWithMarkdown method which handles HTML/paste properly
@@ -1756,7 +1888,7 @@ Public Class DiscussInky
 
         If String.IsNullOrWhiteSpace(_knowledgeContent) Then
             systemPrompt = $"{dateContext} Generate a brief, friendly {langName} welcome that {randomWord} references it is {partOfDay} now. " &
-                           "Tell the user they should load a knowledge document using the 'Knowledge' button to start a discussion. " &
+                           "Tell the user they should load a knowledge document using the 'Load Knowledge' button (button name always in English) to start a discussion. " &
                            "You are ready to discuss any knowledge they provide. One short sentence, not talkative."
         Else
             ' Use persona prompt to shape the welcome message
@@ -1849,8 +1981,8 @@ Public Class DiscussInky
                 End If
             End If
 
-            ' Include conversation history (excluding welcome messages)
-            Dim convo = BuildConversationForLlm()
+            ' Include conversation history (supports user, assistant, and autoresponder roles)
+            Dim convo = BuildConversationForAutoResponder()
             If Not String.IsNullOrWhiteSpace(convo) Then
                 sb.AppendLine("Conversation so far:")
                 sb.AppendLine(convo)
@@ -1944,6 +2076,7 @@ Public Class DiscussInky
                _htmlReady = False
                Dim baseSize = If(Me.Font IsNot Nothing, Me.Font.SizeInPoints, 9.0F)
                Dim fontPt = Math.Max(CSng(baseSize + 1.0F), 10.0F)
+               ' Replace the entire CSS variable in InitializeChatHtml with this:
                Dim css =
                    $"html,body{{height:100%;margin:0;padding:0;background:#fff;color:#000;}}
                     body{{font-family:'Segoe UI',Tahoma,Arial,sans-serif;font-size:{fontPt}pt;line-height:1.45;}}
@@ -1954,6 +2087,8 @@ Public Class DiscussInky
                     .msg.user .who{{color:#0078d4;}}
                     .msg.assistant{{padding:8px 0;margin-left:0;}}
                     .msg.assistant .who{{color:#003366;}}
+                    .msg.autoresponder{{background:#f3e8ff;border-left:3px solid #8b5cf6;padding:8px 10px;border-radius:4px;margin-right:40px;}}
+                    .msg.autoresponder .who{{color:#6d28d9;}}
                     .msg.system{{color:#666;font-style:italic;background:#f9f9f9;padding:4px 8px;border-radius:4px;}}
                     .msg.thinking .content{{opacity:.75;font-style:italic;}}
                     a{{color:#0068c9;text-decoration:underline;cursor:pointer;}}
@@ -2251,15 +2386,453 @@ Public Class DiscussInky
         Return sb.ToString()
     End Function
 
+
+#End Region
+
+
+#Region "Autorespond Feature"
+
     ''' <summary>
-    ''' Builds a capped, reversed conversation snippet for prompt injection.
+    ''' Handles the Autorespond button click - shows configuration dialog and starts auto-response loop.
     ''' </summary>
-    Private Function BuildConversationForLlm() As String
+    Private Async Sub OnAutoRespondClick(sender As Object, e As EventArgs)
+        ' Only allow when input is enabled (not during processing)
+        If Not _txtInput.Enabled Then
+            AppendSystemMessage("Cannot start autorespond while a response is in progress.")
+            Return
+        End If
+
+        ' Show configuration dialog
+        If Not ShowAutoRespondConfigDialog() Then
+            Return ' User cancelled
+        End If
+
+        ' Start the autorespond loop
+        Await RunAutoRespondLoopAsync()
+    End Sub
+
+    ' Replace the ShowAutoRespondConfigDialog function with this version that handles mission editing properly:
+
+    ''' <summary>
+    ''' Shows the autorespond configuration dialog using ShowCustomVariableInputForm.
+    ''' </summary>
+    ''' <returns>True if user confirmed, False if cancelled.</returns>
+    Private Function ShowAutoRespondConfigDialog() As Boolean
+        ' Build persona options
+        Dim personaOptions As New List(Of String)()
+        For Each p In _personas
+            personaOptions.Add(p.DisplayName)
+        Next
+        If personaOptions.Count = 0 Then
+            ShowCustomMessageBox("No personas configured. Please configure personas first.")
+            Return False
+        End If
+
+        ' Build mission options (including "No mission")
+        Dim missionOptions As New List(Of String)()
+        missionOptions.Add("No mission")
+        For Each m In _missions
+            missionOptions.Add(m.DisplayName)
+        Next
+
+        ' Build round count options (1 to MaxAutoRespondRounds)
+        Dim roundOptions As New List(Of String)()
+        For i = 1 To MaxAutoRespondRounds
+            roundOptions.Add(i.ToString())
+        Next
+
+        ' Restore persisted values or use defaults
+        Dim savedPersona = ""
+        Dim savedMission = ""
+        Dim savedRounds = 5
+        Dim savedBreakOff = DefaultAutoRespondBreakOff
+        Try
+            savedPersona = My.Settings.AutoRespondPersona
+            savedMission = My.Settings.AutoRespondMission
+            savedRounds = My.Settings.AutoRespondMaxRounds
+            If savedRounds < 1 OrElse savedRounds > MaxAutoRespondRounds Then savedRounds = 5
+            savedBreakOff = My.Settings.AutoRespondBreakOff
+            If String.IsNullOrWhiteSpace(savedBreakOff) Then savedBreakOff = DefaultAutoRespondBreakOff
+        Catch
+        End Try
+
+        ' Find default values
+        Dim defaultPersonaDisplay = If(personaOptions.Count > 0, personaOptions(0), "")
+        For i = 0 To _personas.Count - 1
+            If _personas(i).DisplayName.Equals(savedPersona, StringComparison.OrdinalIgnoreCase) OrElse
+               _personas(i).Name.Equals(savedPersona, StringComparison.OrdinalIgnoreCase) Then
+                defaultPersonaDisplay = _personas(i).DisplayName
+                Exit For
+            End If
+        Next
+
+        Dim defaultMissionDisplay = "No mission"
+        If Not String.IsNullOrEmpty(savedMission) Then
+            For i = 0 To _missions.Count - 1
+                If _missions(i).DisplayName.Equals(savedMission, StringComparison.OrdinalIgnoreCase) OrElse
+                   _missions(i).Name.Equals(savedMission, StringComparison.OrdinalIgnoreCase) Then
+                    defaultMissionDisplay = _missions(i).DisplayName
+                    Exit For
+                End If
+            Next
+        End If
+
+        ' Build InputParameter array
+        Dim p0 As New SharedMethods.InputParameter("Responder Persona", defaultPersonaDisplay, personaOptions)
+        Dim p1 As New SharedMethods.InputParameter("Responder Mission", defaultMissionDisplay, missionOptions)
+        Dim p2 As New SharedMethods.InputParameter("Maximum Rounds", savedRounds.ToString(), roundOptions)
+        Dim p3 As New SharedMethods.InputParameter("Break-off Instruction", savedBreakOff)
+
+        Dim params() As SharedMethods.InputParameter = {p0, p1, p2, p3}
+
+        ' Prepare extra button for editing mission file
+        Dim missionPath = GetMissionFilePath()
+        Dim extraButtonText = If(Not String.IsNullOrWhiteSpace(missionPath), "Edit Missions...", Nothing)
+        Dim extraButtonAction As System.Action = Nothing
+        Dim shouldReopenDialog As Boolean = False
+
+        If Not String.IsNullOrWhiteSpace(missionPath) Then
+            extraButtonAction = Sub()
+                                    EnsureMissionFileExists(missionPath)
+                                    ShowTextFileEditor(missionPath, $"{AN} - Edit Missions:", False, _context)
+                                    ' Reload missions after editing
+                                    LoadMissions()
+                                    ' Flag to reopen the dialog
+                                    shouldReopenDialog = True
+                                End Sub
+        End If
+
+        ' Show the dialog - CloseAfterExtra = True to close after Edit Missions button
+        Dim result = ShowCustomVariableInputForm(
+            "Configure the AI responder that will continue the conversation:",
+            $"{AN} - Configure Autorespond",
+            params,
+            extraButtonText,
+            extraButtonAction,
+            CloseAfterExtra:=True)
+
+        ' If user clicked Edit Missions, reopen the dialog with updated missions
+        If shouldReopenDialog Then
+            Return ShowAutoRespondConfigDialog()
+        End If
+
+        If Not result Then
+            Return False ' User cancelled
+        End If
+
+        ' Parse results
+        Dim selectedPersonaDisplay = CStr(params(0).Value)
+        Dim selectedMissionDisplay = CStr(params(1).Value)
+        Dim selectedRounds = 5
+        Integer.TryParse(CStr(params(2).Value), selectedRounds)
+        Dim breakOffText = CStr(params(3).Value)
+
+        ' Find the selected persona
+        Dim foundPersona = _personas.FirstOrDefault(Function(p) p.DisplayName.Equals(selectedPersonaDisplay, StringComparison.OrdinalIgnoreCase))
+        If String.IsNullOrEmpty(foundPersona.Name) Then
+            ' Fallback to first persona
+            foundPersona = _personas(0)
+        End If
+        _autoRespondPersonaName = foundPersona.Name
+        _autoRespondPersonaPrompt = foundPersona.Prompt
+
+        ' Find the selected mission
+        If selectedMissionDisplay.Equals("No mission", StringComparison.OrdinalIgnoreCase) Then
+            _autoRespondMissionName = ""
+            _autoRespondMissionPrompt = ""
+        Else
+            Dim foundMission = _missions.FirstOrDefault(Function(m) m.DisplayName.Equals(selectedMissionDisplay, StringComparison.OrdinalIgnoreCase))
+            If Not String.IsNullOrEmpty(foundMission.Name) Then
+                _autoRespondMissionName = foundMission.Name
+                _autoRespondMissionPrompt = foundMission.Prompt
+            Else
+                _autoRespondMissionName = ""
+                _autoRespondMissionPrompt = ""
+            End If
+        End If
+
+        _autoRespondMaxRounds = If(selectedRounds >= 1 AndAlso selectedRounds <= MaxAutoRespondRounds, selectedRounds, 5)
+        _autoRespondBreakOff = If(String.IsNullOrWhiteSpace(breakOffText), DefaultAutoRespondBreakOff, breakOffText)
+
+        ' Persist settings
+        Try
+            My.Settings.AutoRespondPersona = _autoRespondPersonaName
+            My.Settings.AutoRespondMission = _autoRespondMissionName
+            My.Settings.AutoRespondMaxRounds = _autoRespondMaxRounds
+            My.Settings.AutoRespondBreakOff = _autoRespondBreakOff
+            My.Settings.Save()
+        Catch
+        End Try
+
+        Return True
+    End Function
+
+
+    ''' <summary>
+    ''' Runs the autorespond loop, alternating between the responder and the chatbot.
+    ''' </summary>
+    Private Async Function RunAutoRespondLoopAsync() As Task
+        _autoRespondInProgress = True
+        _autoRespondCancelled = False
+
+        ' Disable input during autorespond
+        Ui(Sub()
+               _txtInput.Enabled = False
+               _btnSend.Enabled = False
+               _btnAutoRespond.Enabled = False
+           End Sub)
+
+        ' Determine display name for responder (add "(2nd)" if same as chatbot persona)
+        Dim responderDisplayName = _autoRespondPersonaName
+        If _autoRespondPersonaName.Equals(_currentPersonaName, StringComparison.OrdinalIgnoreCase) Then
+            responderDisplayName = _autoRespondPersonaName & " (2nd)"
+        End If
+
+        ' Show progress bar if more than 1 round
+        Dim useProgressBar = (_autoRespondMaxRounds > 1)
+        If useProgressBar Then
+            ShowProgressBarInSeparateThread($"{AN} Autorespond", $"{responderDisplayName} responding...")
+            ProgressBarModule.CancelOperation = False
+            ProgressBarModule.GlobalProgressMax = _autoRespondMaxRounds
+            ProgressBarModule.GlobalProgressValue = 0
+            ProgressBarModule.GlobalProgressLabel = "Starting..."
+        End If
+
+        ' Notify start
+        AppendSystemMessage($"Autorespond started: {responderDisplayName}" &
+                           If(Not String.IsNullOrEmpty(_autoRespondMissionName), $" [{_autoRespondMissionName}]", "") &
+                           $" for up to {_autoRespondMaxRounds} round(s).")
+
+        Try
+            Dim roundCount = 0
+            Dim stopRequested = False
+
+            While roundCount < _autoRespondMaxRounds AndAlso Not _autoRespondCancelled AndAlso Not stopRequested
+                roundCount += 1
+
+                If useProgressBar Then
+                    ProgressBarModule.GlobalProgressValue = roundCount
+                    ProgressBarModule.GlobalProgressLabel = $"Round {roundCount} of {_autoRespondMaxRounds}..."
+                    If ProgressBarModule.CancelOperation Then
+                        _autoRespondCancelled = True
+                        Exit While
+                    End If
+                End If
+
+                ' Step 1: Get response from the autoresponder (simulating user input)
+                ShowAutoResponderThinking(responderDisplayName)
+                Dim responderMessage = Await GenerateAutoResponderMessageAsync(responderDisplayName)
+                RemoveAssistantThinking()
+
+                ' Check for stop word
+                If responderMessage.Contains(AutoRespondStopWord) Then
+                    stopRequested = True
+                    responderMessage = responderMessage.Replace(AutoRespondStopWord, "").Trim()
+                End If
+
+                ' Display and record the responder's message
+                If Not String.IsNullOrWhiteSpace(responderMessage) Then
+                    AppendAutoResponderHtml(responderDisplayName, responderMessage)
+                    _history.Add(("autoresponder", $"{responderDisplayName}: {responderMessage}"))
+                End If
+
+                If stopRequested OrElse _autoRespondCancelled Then
+                    Exit While
+                End If
+
+                ' Step 2: Get response from the chatbot
+                ShowAssistantThinking()
+                Dim chatbotResponse = Await GenerateChatbotResponseToAutoResponderAsync(responderDisplayName)
+                RemoveAssistantThinking()
+
+                ' Check if chatbot also wants to stop (unlikely but possible)
+                If chatbotResponse.Contains(AutoRespondStopWord) Then
+                    stopRequested = True
+                    chatbotResponse = chatbotResponse.Replace(AutoRespondStopWord, "").Trim()
+                End If
+
+                ' Display and record the chatbot's response
+                If Not String.IsNullOrWhiteSpace(chatbotResponse) Then
+                    AppendAssistantMarkdown(chatbotResponse)
+                    _history.Add(("assistant", chatbotResponse))
+                End If
+
+                PersistChatHtml()
+                PersistTranscriptLimited()
+
+                ' Small delay to prevent rate limiting and allow UI updates
+                Await Task.Delay(500)
+            End While
+
+            ' Summary message
+            If _autoRespondCancelled Then
+                AppendSystemMessage($"Autorespond cancelled after {roundCount} round(s).")
+            ElseIf stopRequested Then
+                AppendSystemMessage($"Autorespond completed after {roundCount} round(s) - responder indicated conversation should stop.")
+            Else
+                AppendSystemMessage($"Autorespond completed - maximum of {roundCount} round(s) reached.")
+            End If
+
+        Catch ex As Exception
+            AppendSystemMessage($"Autorespond error: {ex.Message}")
+        Finally
+            If useProgressBar Then
+                ProgressBarModule.CancelOperation = True
+            End If
+
+            _autoRespondInProgress = False
+            _autoRespondCancelled = False
+
+            ' Re-enable input
+            Ui(Sub()
+                   _txtInput.Enabled = True
+                   _btnSend.Enabled = True
+                   _btnAutoRespond.Enabled = True
+                   _txtInput.Focus()
+               End Sub)
+
+            PersistChatHtml()
+            PersistTranscriptLimited()
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Generates a message from the autoresponder persona.
+    ''' </summary>
+    Private Async Function GenerateAutoResponderMessageAsync(responderDisplayName As String) As Task(Of String)
+        Dim dateContext = GetDateContext()
+        Dim randomWord = GetRandomModifier()
+
+        ' Build system prompt for the responder
+        Dim basePrompt = If(Not String.IsNullOrEmpty(_autoRespondPersonaPrompt),
+                            _autoRespondPersonaPrompt,
+                            $"You are {_autoRespondPersonaName}, participating in a discussion.")
+
+        Dim missionClause = ""
+        If Not String.IsNullOrEmpty(_autoRespondMissionPrompt) Then
+            missionClause = $" Your mission: {_autoRespondMissionPrompt}"
+        End If
+
+        Dim systemPrompt = $"{basePrompt}{missionClause}. In your response, be {randomWord}. Do not start with a greeting or salutation. " &
+                           $"You are responding to {_currentPersonaName} in an ongoing discussion. " &
+                           $"{_autoRespondBreakOff} {dateContext}"
+
+        ' Build the conversation context
+        Dim sb As New StringBuilder()
+        sb.AppendLine($"You are {responderDisplayName}, responding to {_currentPersonaName}.")
+        sb.AppendLine()
+
+        ' Include knowledge if available
+        If Not String.IsNullOrWhiteSpace(_knowledgeContent) Then
+            sb.AppendLine("<Knowledge Base>")
+            sb.AppendLine(_knowledgeContent)
+            sb.AppendLine("</Knowledge Base>")
+            sb.AppendLine()
+        End If
+
+        ' Include active document if checkbox checked (same as main chatbot)
+        If _chkIncludeActiveDoc.Checked Then
+            Dim activeDocContent = GetActiveDocumentContent()
+            If Not String.IsNullOrWhiteSpace(activeDocContent) Then
+                sb.AppendLine("<User's Active Document>")
+                sb.AppendLine(TruncateForPrompt(activeDocContent, _context.INI_ChatCap))
+                sb.AppendLine("</User's Active Document>")
+                sb.AppendLine()
+            End If
+        End If
+
+        ' Include conversation history with clear role identification
+        sb.AppendLine("Conversation so far:")
+        Dim convo = BuildConversationForAutoResponder()
+        sb.AppendLine(convo)
+        sb.AppendLine()
+        sb.AppendLine($"Now respond as {responderDisplayName}:")
+
+        Dim answer = Await CallLlmWithSelectedModelAsync(systemPrompt, sb.ToString())
+        Return If(answer, "").Trim()
+    End Function
+
+    ''' <summary>
+    ''' Generates the chatbot's response to the autoresponder's message.
+    ''' </summary>
+    Private Async Function GenerateChatbotResponseToAutoResponderAsync(responderDisplayName As String) As Task(Of String)
+        Dim dateContext = GetDateContext()
+        Dim randomWord = GetRandomModifier()
+
+        ' Use the main chatbot's persona and mission
+        Dim basePrompt = If(Not String.IsNullOrEmpty(_currentPersonaPrompt),
+                            _currentPersonaPrompt,
+                            $"You are {_currentPersonaName}, a helpful assistant.")
+
+        Dim missionClause = ""
+        If Not String.IsNullOrEmpty(_currentMissionPrompt) Then
+            missionClause = $" Your mission: {_currentMissionPrompt}"
+        End If
+
+        Dim systemPrompt = $"{basePrompt}{missionClause}. In your response, be {randomWord}. Do not start with a greeting or salutation. " &
+                           $"You are discussing with {responderDisplayName}. The knowledge provided may consist of multiple documents or sections. " &
+                           $"{dateContext}"
+
+        ' Build the conversation context
+        Dim sb As New StringBuilder()
+        sb.AppendLine($"You are {_currentPersonaName}, discussing with {responderDisplayName}.")
+        sb.AppendLine()
+
+        ' Include knowledge if available
+        If Not String.IsNullOrWhiteSpace(_knowledgeContent) Then
+            sb.AppendLine("<Knowledge Base>")
+            sb.AppendLine(_knowledgeContent)
+            sb.AppendLine("</Knowledge Base>")
+            sb.AppendLine()
+        End If
+
+        ' Include active document if checkbox checked
+        If _chkIncludeActiveDoc.Checked Then
+            Dim activeDocContent = GetActiveDocumentContent()
+            If Not String.IsNullOrWhiteSpace(activeDocContent) Then
+                sb.AppendLine("<User's Active Document>")
+                sb.AppendLine(TruncateForPrompt(activeDocContent, _context.INI_ChatCap))
+                sb.AppendLine("</User's Active Document>")
+                sb.AppendLine()
+            End If
+        End If
+
+        ' Include conversation history
+        sb.AppendLine("Conversation so far:")
+        Dim convo = BuildConversationForAutoResponder()
+        sb.AppendLine(convo)
+        sb.AppendLine()
+        sb.AppendLine($"Now respond as {_currentPersonaName}:")
+
+        Dim answer = Await CallLlmWithSelectedModelAsync(systemPrompt, sb.ToString())
+        Return If(answer, "").Trim()
+    End Function
+
+    ''' <summary>
+    ''' Builds conversation history with proper role identification for autorespond context.
+    ''' </summary>
+    Private Function BuildConversationForAutoResponder() As String
         Dim sb As New StringBuilder()
         Dim cap = Math.Max(5000, If(_context IsNot Nothing, _context.INI_ChatCap, 0))
         Dim acc = 0
+
         For i = _history.Count - 1 To 0 Step -1
-            Dim line = If(_history(i).Role = "user", "User: ", _currentPersonaName & ": ") & _history(i).Content & Environment.NewLine
+            Dim role = _history(i).Role
+            Dim content = _history(i).Content
+            Dim line As String
+
+            Select Case role
+                Case "user"
+                    line = "User: " & content & Environment.NewLine
+                Case "assistant"
+                    line = _currentPersonaName & ": " & content & Environment.NewLine
+                Case "autoresponder"
+                    ' Content already includes the persona name prefix
+                    line = content & Environment.NewLine
+                Case Else
+                    line = content & Environment.NewLine
+            End Select
+
             If acc + line.Length > cap Then
                 Dim remain = cap - acc
                 If remain > 0 Then sb.Insert(0, line.Substring(line.Length - remain))
@@ -2269,8 +2842,51 @@ Public Class DiscussInky
                 acc += line.Length
             End If
         Next
+
         Return sb.ToString()
     End Function
+
+    ''' <summary>
+    ''' Shows a thinking placeholder for the autoresponder.
+    ''' </summary>
+    Private Sub ShowAutoResponderThinking(responderName As String)
+        _lastThinkingId = "thinking-" & Guid.NewGuid().ToString("N")
+        AppendHtml($"<div id=""{_lastThinkingId}"" class='msg autoresponder thinking'><span class='who'>{WebUtility.HtmlEncode(responderName)}:</span><span class='content'>Thinking...</span></div>")
+    End Sub
+
+    ''' <summary>
+    ''' Appends an autoresponder message with distinct styling.
+    ''' </summary>
+    Private Sub AppendAutoResponderHtml(responderName As String, text As String)
+        Dim body = Markdig.Markdown.ToHtml(text, _mdPipeline)
+        Dim t = body.Trim()
+        Dim whoHtml = WebUtility.HtmlEncode(responderName)
+
+        Dim isSingle = Regex.IsMatch(t, "^\s*<p>[\s\S]*?</p>\s*$", RegexOptions.IgnoreCase) AndAlso
+                       Not Regex.IsMatch(t, "<(ul|ol|pre|table|h[1-6]|blockquote|hr|div)\b", RegexOptions.IgnoreCase)
+
+        If isSingle Then
+            Dim inlineHtml = Regex.Replace(t, "^\s*<p>|</p>\s*$", "", RegexOptions.IgnoreCase)
+            AppendHtml($"<div class='msg autoresponder'><span class='who'>{whoHtml}:</span><span class='content'>{inlineHtml}</span></div>")
+        Else
+            Dim m = Regex.Match(t, "^\s*<p>([\s\S]*?)</p>\s*", RegexOptions.IgnoreCase)
+            If m.Success Then
+                Dim firstInline = m.Groups(1).Value
+                Dim rest = t.Substring(m.Index + m.Length).Trim()
+                Dim htmlSb As New StringBuilder()
+                htmlSb.Append("<div class='msg autoresponder'>")
+                htmlSb.Append("<span class='who'>").Append(whoHtml).Append(":</span>")
+                htmlSb.Append("<span class='content'>").Append(firstInline).Append("</span>")
+                If rest.Length > 0 Then
+                    htmlSb.Append("<div class='content'>").Append(rest).Append("</div>")
+                End If
+                htmlSb.Append("</div>")
+                AppendHtml(htmlSb.ToString())
+            Else
+                AppendHtml($"<div class='msg autoresponder'><span class='who'>{whoHtml}:</span><div class='content'>{t}</div></div>")
+            End If
+        End If
+    End Sub
 
 #End Region
 
