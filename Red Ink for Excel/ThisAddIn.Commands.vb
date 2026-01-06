@@ -40,6 +40,7 @@ Option Explicit On
 
 Imports System.Diagnostics
 Imports System.Drawing
+Imports System.IO
 Imports System.Text.RegularExpressions
 Imports System.Threading.Tasks
 Imports System.Windows.Forms
@@ -69,6 +70,9 @@ Partial Public Class ThisAddIn
 
         ''' <summary>Total number of files expected to be loaded (for determining if filename should be included).</summary>
         Public Property ExpectedFileCount As Integer = 0
+
+        ''' <summary>PDFs that heuristics suggest may contain images/scanned content but OCR was not performed.</summary>
+        Public Property PdfsWithPossibleImages As New List(Of String)()
 
         ''' <summary>Maximum files to load from a single directory.</summary>
         Public Const MaxFilesPerDirectory As Integer = 50
@@ -104,92 +108,84 @@ Partial Public Class ThisAddIn
         Return False
     End Function
 
-    ''' <summary>
-    ''' Loads a single file and returns its content wrapped in document tags.
-    ''' For individual files or single PDFs, OCR is enabled with AskUser=True.
-    ''' When multiple files are loaded, includes filename (and directory path for directory files) in the tags.
-    ''' </summary>
-    ''' <param name="filePath">The path to the file to load.</param>
-    ''' <param name="isWrapped">If True, returns raw content without document tags.</param>
-    ''' <param name="ctx">The file loading context for tracking state.</param>
-    ''' <param name="isFromDirectory">If True, file is being loaded as part of a directory batch.</param>
-    ''' <returns>The file content, optionally wrapped in document tags.</returns>
     Private Async Function LoadSingleFileAsync(filePath As String, isWrapped As Boolean, ctx As FileLoadingContext, Optional isFromDirectory As Boolean = False) As Task(Of String)
         Try
-            Dim doOCR As Boolean = True
-            Dim askUser As Boolean = True
+            Dim doOCR As Boolean = False
+            Dim askUser As Boolean = False
 
-            ' Determine OCR behavior based on context
-            If isFromDirectory Then
-                ' File is part of a directory batch - use the directory OCR mode
-                If ctx.DirectoryOCRMode = 1 Then
-                    ' Enable OCR for all without asking
-                    doOCR = True
-                    askUser = False
-                ElseIf ctx.DirectoryOCRMode = 2 Then
-                    ' Ask individually for each file
-                    doOCR = True
-                    askUser = True
+            ' Check if OCR is available at all
+            Dim ocrAvailable As Boolean = SharedMethods.IsOcrAvailable(_context)
+
+            ' Determine OCR behavior based on context and availability
+            If ocrAvailable Then
+                If isFromDirectory Then
+                    If ctx.DirectoryOCRMode = 1 Then
+                        doOCR = True
+                        askUser = False
+                    ElseIf ctx.DirectoryOCRMode = 2 Then
+                        doOCR = True
+                        askUser = True
+                    Else
+                        doOCR = True
+                        askUser = True
+                    End If
                 Else
-                    ' OCR mode not set (shouldn't happen for directories with multiple PDFs)
                     doOCR = True
                     askUser = True
                 End If
             Else
-                ' Individual file or single PDF - always enable OCR with AskUser=True
-                doOCR = True
-                askUser = True
+                doOCR = False
+                askUser = False
             End If
 
             ' Load file content with determined OCR settings
-            Dim content As String = Await GetFileContent(
+            Dim fileResult = Await GetFileContentEx(
                 optionalFilePath:=filePath,
                 Silent:=True,
                 DoOCR:=doOCR,
                 AskUser:=askUser
             )
 
-            If String.IsNullOrWhiteSpace(content) Then
+            ' Track PDFs that may have incomplete content
+            If fileResult.PdfMayBeIncomplete Then
+                ctx.PdfsWithPossibleImages.Add(filePath)
+            End If
+
+            If String.IsNullOrWhiteSpace(fileResult.Content) Then
                 ctx.FailedFiles.Add(filePath)
                 Return ""
             End If
 
             ctx.GlobalDocumentCounter += 1
             Dim docNum As Integer = ctx.GlobalDocumentCounter
-            ctx.LoadedFiles.Add(Tuple.Create(filePath, content.Length))
+            ctx.LoadedFiles.Add(Tuple.Create(filePath, fileResult.Content.Length))
 
             If isWrapped Then
-                Return content
+                Return fileResult.Content
             Else
-                ' Determine if we should include filename/path info
-                ' Include if: multiple files expected, or loading from directory
                 Dim includeFileInfo As Boolean = (ctx.ExpectedFileCount > 1) OrElse isFromDirectory
 
                 Dim openTag As String
                 Dim closeTag As String = "</document" & docNum.ToString() & ">"
 
                 If includeFileInfo Then
-                    Dim fileName As String = IO.Path.GetFileName(filePath)
+                    Dim fileName As String = Path.GetFileName(filePath)
                     If isFromDirectory AndAlso Not String.IsNullOrEmpty(ctx.CurrentDirectoryPath) Then
-                        ' Include both directory path and filename for directory files
                         openTag = "<document" & docNum.ToString() & " directory=""" & ctx.CurrentDirectoryPath & """ filename=""" & fileName & """>"
                     Else
-                        ' Include just the filename for multiple individual files
                         openTag = "<document" & docNum.ToString() & " filename=""" & fileName & """>"
                     End If
                 Else
-                    ' Single file - no need to include filename
                     openTag = "<document" & docNum.ToString() & ">"
                 End If
 
-                Return openTag & content & closeTag
+                Return openTag & fileResult.Content & closeTag
             End If
         Catch ex As Exception
             ctx.FailedFiles.Add(filePath)
             Return ""
         End Try
     End Function
-
     ''' <summary>
     ''' Loads all supported files from a directory and returns their combined content.
     ''' Prompts for OCR only when there are multiple PDF files in the directory.
@@ -256,8 +252,8 @@ Partial Public Class ThisAddIn
             ' Reset directory OCR mode for this directory
             ctx.DirectoryOCRMode = 0
 
-            ' Only ask about OCR if there are multiple PDF files in the directory
-            If pdfCount > 1 Then
+            ' Only ask about OCR if there are multiple PDF files in the directory AND OCR is available
+            If pdfCount > 1 AndAlso SharedMethods.IsOcrAvailable(_context) Then
                 Dim ocrChoice As Integer = ShowCustomYesNoBox(
                     $"The directory '{dirPath}' contains {pdfCount} PDF files." & vbCrLf & vbCrLf &
                     "Some PDFs may require OCR (optical character recognition) to extract text from scanned documents or images." & vbCrLf & vbCrLf &
@@ -277,7 +273,7 @@ Partial Public Class ThisAddIn
                     ctx.DirectoryOCRMode = 2
                 End If
             End If
-            ' If pdfCount <= 1, we don't set DirectoryOCRMode, and individual files will use AskUser=True
+            ' If pdfCount <= 1 or OCR not available, we don't set DirectoryOCRMode
 
             ' Set the current directory path for inclusion in document tags
             ctx.CurrentDirectoryPath = dirPath
@@ -510,7 +506,7 @@ Partial Public Class ThisAddIn
         End While
 
         ' === Show summary and confirm before proceeding ===
-        If ctx.LoadedFiles.Count > 0 OrElse ctx.FailedFiles.Count > 0 OrElse ctx.IgnoredFilesPerDir.Count > 0 Then
+        If ctx.LoadedFiles.Count > 0 OrElse ctx.FailedFiles.Count > 0 OrElse ctx.IgnoredFilesPerDir.Count > 0 OrElse ctx.PdfsWithPossibleImages.Count > 0 Then
             Dim summary As New System.Text.StringBuilder()
             summary.AppendLine("File inclusion summary:")
             summary.AppendLine("")
@@ -526,6 +522,15 @@ Partial Public Class ThisAddIn
                 summary.AppendLine("")
             End If
 
+            If ctx.PdfsWithPossibleImages.Count > 0 Then
+                summary.AppendLine($"⚠ PDFs that may contain images/scans ({ctx.PdfsWithPossibleImages.Count} file(s)):")
+                For Each f In ctx.PdfsWithPossibleImages
+                    summary.AppendLine($"  • {Path.GetFileName(f)}")
+                Next
+                summary.AppendLine("  (Text extraction may be incomplete - OCR was not available or not performed)")
+                summary.AppendLine("")
+            End If
+
             If ctx.FailedFiles.Count > 0 Then
                 summary.AppendLine($"Failed to load ({ctx.FailedFiles.Count} items):")
                 For Each f In ctx.FailedFiles
@@ -533,6 +538,8 @@ Partial Public Class ThisAddIn
                 Next
                 summary.AppendLine("")
             End If
+
+            ' ... rest of summary ...
 
             If ctx.IgnoredFilesPerDir.Count > 0 Then
                 summary.AppendLine("Ignored unsupported files:")

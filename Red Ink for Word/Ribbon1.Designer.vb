@@ -108,6 +108,7 @@ Partial Class Ribbon1
         Me.RI_TimeSpan = Me.Factory.CreateRibbonButton
         Me.RI_Regex = Me.Factory.CreateRibbonButton
         Me.RI_Import = Me.Factory.CreateRibbonButton
+        Me.RI_ConvertDocToTxt = Me.Factory.CreateRibbonButton
         Me.RI_Markdown = Me.Factory.CreateRibbonButton
         Me.RI_ContentControls = Me.Factory.CreateRibbonButton
         Me.RI_InsertClipboard = Me.Factory.CreateRibbonButton
@@ -593,6 +594,7 @@ Partial Class Ribbon1
         Me.Menu2.Items.Add(Me.RI_TimeSpan)
         Me.Menu2.Items.Add(Me.RI_Regex)
         Me.Menu2.Items.Add(Me.RI_Import)
+        Me.Menu2.Items.Add(Me.RI_ConvertDocToTxt)
         Me.Menu2.Items.Add(Me.RI_Markdown)
         Me.Menu2.Items.Add(Me.RI_ContentControls)
         Me.Menu2.Items.Add(Me.RI_InsertClipboard)
@@ -650,6 +652,15 @@ Partial Class Ribbon1
         Me.RI_Import.ScreenTip = "Will insert at the current position the text of a PDF, Word document or text file" &
     ""
         Me.RI_Import.ShowImage = True
+        '
+        'RI_ConvertDocToTxt
+        '
+        Me.RI_ConvertDocToTxt.Label = "Convert PDF To Txt"
+        Me.RI_ConvertDocToTxt.Name = "RI_ConvertDocToTxt"
+        Me.RI_ConvertDocToTxt.OfficeImageId = "ConvertInkMenu"
+        Me.RI_ConvertDocToTxt.ScreenTip = "Will convert PDF and other documents in a directory (and subdirectories) to TXT f" &
+    "iles for easier analysis by AI (will do OCR, if available)"
+        Me.RI_ConvertDocToTxt.ShowImage = True
         '
         'RI_Markdown
         '
@@ -1024,6 +1035,7 @@ Partial Class Ribbon1
     Friend WithEvents RI_DiscussInky As RibbonButton
     Friend WithEvents RI_ApplyDocStyle As RibbonButton
     Friend WithEvents RI_LearnDocStyle As RibbonButton
+    Friend WithEvents RI_ConvertDocToTxt As RibbonButton
 End Class
 
 Partial Class ThisRibbonCollection

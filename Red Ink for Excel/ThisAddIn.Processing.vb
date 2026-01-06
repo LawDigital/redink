@@ -347,8 +347,11 @@ Partial Public Class ThisAddIn
                     End Try
 
                     If HasPDF Then
-                        If Not String.IsNullOrWhiteSpace(INI_APICall_Object) Then
-                            Dim answer As Integer = ShowCustomYesNoBox("The selected directory contains PDF files. Do you want to use your main model's OCR capabilities (if any) to extract text from PDFs that do not appear to contain searchable text?", "Yes, use OCR as needed", "No, do it without OCR")
+                        If SharedMethods.IsOcrAvailable(_context) Then
+                            Dim answer As Integer = ShowCustomYesNoBox(
+                                "The selected directory contains PDF files. Do you want to use your model's OCR capabilities to extract text from PDFs that do not appear to contain searchable text?",
+                                "Yes, use OCR as needed",
+                                "No, do it without OCR")
                             If answer = 1 Then
                                 DoOCR = True
                             ElseIf answer <> 2 Then

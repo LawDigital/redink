@@ -1321,7 +1321,7 @@ Partial Public Class ThisAddIn
                         ' Persist state with user turn BEFORE returning (important)
                         SaveInkyState(st)
                         ' ------------------ (D) Prepare system prompt (same logic) ------------------
-                        Dim sysPromptBase As String = _context.SP_Chat
+                        Dim sysPromptBase As String = _context.SP_Chat.Replace("{Location}", Location)
                         Dim nowLocal As String = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss zzz", Globalization.CultureInfo.InvariantCulture)
                         sysPromptBase &= Environment.NewLine & "Current local date/time: " & nowLocal
                         sysPromptBase &= Environment.NewLine & $"Your name is '{AN6}'. "

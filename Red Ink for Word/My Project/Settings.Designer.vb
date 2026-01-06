@@ -916,6 +916,66 @@ Namespace My
                 Me("DiscussPersistKnowledge") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property DiscussSelectedMission() As String
+            Get
+                Return CType(Me("DiscussSelectedMission"),String)
+            End Get
+            Set
+                Me("DiscussSelectedMission") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property AutoRespondBreakOff() As String
+            Get
+                Return CType(Me("AutoRespondBreakOff"),String)
+            End Get
+            Set
+                Me("AutoRespondBreakOff") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("5")>  _
+        Public Property AutoRespondMaxRounds() As Integer
+            Get
+                Return CType(Me("AutoRespondMaxRounds"),Integer)
+            End Get
+            Set
+                Me("AutoRespondMaxRounds") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property AutoRespondMission() As String
+            Get
+                Return CType(Me("AutoRespondMission"),String)
+            End Get
+            Set
+                Me("AutoRespondMission") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property AutoRespondPersona() As String
+            Get
+                Return CType(Me("AutoRespondPersona"),String)
+            End Get
+            Set
+                Me("AutoRespondPersona") = value
+            End Set
+        End Property
     End Class
 End Namespace
 
