@@ -42,6 +42,44 @@ Namespace SharedLibrary
     Partial Public Class SharedMethods
 
         ''' <summary>
+        ''' Result from reading a file, including content and metadata about potential incompleteness.
+        ''' </summary>
+        Public Class FileReadResult
+            ''' <summary>The extracted text content from the file.</summary>
+            Public Property Content As String = ""
+
+            ''' <summary>True if the file was a PDF and heuristics suggested it may contain images but OCR was not performed.</summary>
+            Public Property PdfMayBeIncomplete As Boolean = False
+
+            Public Sub New()
+            End Sub
+
+            Public Sub New(content As String, pdfMayBeIncomplete As Boolean)
+                Me.Content = content
+                Me.PdfMayBeIncomplete = pdfMayBeIncomplete
+            End Sub
+        End Class
+
+        ''' <summary>
+        ''' Result from reading a PDF file, including content and metadata about OCR status.
+        ''' </summary>
+        Public Class PdfReadResult
+            ''' <summary>The extracted text content from the PDF.</summary>
+            Public Property Content As String = ""
+
+            ''' <summary>True if heuristics suggested OCR but it was not performed (OCR unavailable or user declined).</summary>
+            Public Property OcrWasSkippedDueToHeuristics As Boolean = False
+
+            Public Sub New()
+            End Sub
+
+            Public Sub New(content As String, ocrSkipped As Boolean)
+                Me.Content = content
+                Me.OcrWasSkippedDueToHeuristics = ocrSkipped
+            End Sub
+        End Class
+
+        ''' <summary>
         ''' Reads a text file as UTF-8 (with BOM detection) and returns its contents.
         ''' </summary>
         ''' <param name="filePath">Path to the file to read.</param>
@@ -152,189 +190,92 @@ Namespace SharedLibrary
         ''' <param name="DoOCR">If <c>True</c>, enables OCR heuristics and (if confirmed) OCR execution.</param>
         ''' <param name="AskUser">If <c>True</c>, prompts the user before performing OCR.</param>
         ''' <param name="context">Shared context used for OCR-capable model configuration and LLM invocation.</param>
-        ''' <returns>The extracted text (or OCR output if performed), or an error string / empty string depending on <paramref name="ReturnErrorInsteadOfEmpty"/>.</returns>
-        Public Shared Async Function ReadPdfAsText(ByVal pdfPath As String,
+        ''' <returns>A PdfReadResult containing the extracted text and whether OCR was skipped despite being suggested.</returns>
+        Public Shared Async Function ReadPdfAsTextEx(ByVal pdfPath As String,
                                             Optional ByVal ReturnErrorInsteadOfEmpty As Boolean = True,
                                             Optional ByVal DoOCR As Boolean = False,
                                             Optional ByVal AskUser As Boolean = True,
-                                            Optional ByVal context As ISharedContext = Nothing) As Task(Of String)
-            Try
-                Dim sb As New System.Text.StringBuilder()
+                                            Optional ByVal context As ISharedContext = Nothing) As Task(Of PdfReadResult)
 
-                If Not System.IO.File.Exists(pdfPath) Then
-                    Throw New System.IO.FileNotFoundException("PDF not found.", pdfPath)
+            Dim result As New PdfReadResult()
+
+            Try
+                If String.IsNullOrWhiteSpace(pdfPath) OrElse Not IO.File.Exists(pdfPath) Then
+                    result.Content = If(ReturnErrorInsteadOfEmpty, "Error: File not found or path is empty.", "")
+                    Return result
                 End If
 
+                Dim sb As New System.Text.StringBuilder()
                 Dim pageCount As Integer = 0
-                Dim totalLetters As Integer = 0
+                Dim totalChars As Integer = 0
+                Dim hasLowQualityText As Boolean = False
+                Dim reasons As New List(Of String)()
 
-                ' Per-page diagnostics (evaluated only if DoOCR=True)
-                Dim pagesImageOnly As New System.Collections.Generic.List(Of Integer)()
-                Dim pagesLowLetters As New System.Collections.Generic.List(Of Integer)()
-                Dim minLettersThreshold As Integer = 15 ' per-page "few letters" threshold
+                Using document As UglyToad.PdfPig.PdfDocument = UglyToad.PdfPig.PdfDocument.Open(pdfPath)
+                    pageCount = document.NumberOfPages
 
-                ' Open the PDF document
-                Dim parseOptions As New UglyToad.PdfPig.ParsingOptions() With {
-                        .UseLenientParsing = True
-                    }
+                    For Each page As UglyToad.PdfPig.Content.Page In document.GetPages()
+                        Dim pageText As String = page.Text
+                        sb.AppendLine(pageText)
+                        totalChars += If(pageText IsNot Nothing, pageText.Length, 0)
 
-                Using document As UglyToad.PdfPig.PdfDocument = UglyToad.PdfPig.PdfDocument.Open(pdfPath, parseOptions)
-                    Dim pageTotal As Integer = document.NumberOfPages
-                    pageCount = pageTotal
-
-                    Debug.WriteLine("PDF has " & pageTotal & " pages.")
-
-                    For pageNumber As Integer = 1 To pageTotal
-                        Dim page As UglyToad.PdfPig.Content.Page = Nothing
-
-                        Try
-                            page = document.GetPage(pageNumber)
-                        Catch ex As Exception
-                            Debug.WriteLine($"PDF page {pageNumber} failed To load: {ex.Message}")
-                            Continue For
-                        End Try
-
-                        Dim pageText As String = Nothing
-
-                        ' Extract text from the page safely. If this fails, try a very simple fallback.
-                        Try
-                            pageText = ExtractPageTextFromPdf(page)
-                            If Not String.IsNullOrWhiteSpace(pageText) Then
-                                sb.AppendLine(pageText)
-                            End If
-                            Debug.WriteLine("Page " & pageNumber & " extracted text length: " & If(pageText IsNot Nothing, pageText.Length, 0))
-                        Catch ex As Exception
-                            ' Last-resort fallback: concatenate raw letters so we don't lose the page entirely.
-                            Try
-                                Dim letters = page.Letters
-                                If letters IsNot Nothing AndAlso letters.Count > 0 Then
-                                    Dim raw As New System.Text.StringBuilder(letters.Count)
-                                    For Each l In letters
-                                        raw.Append(l.Value)
-                                    Next
-                                    sb.AppendLine(raw.ToString())
-                                End If
-                            Catch
-                                ' Give up on this page; continue with the rest.
-                            End Try
-                        End Try
-
-                        ' Count letters and detect image-only/few-letters pages for OCR heuristic (only if DoOCR=True)
-                        If DoOCR Then
-                            Dim lettersThis As Integer = 0
-                            Try
-                                lettersThis = page.Letters.Count()
-                                totalLetters += lettersThis
-                            Catch
-                                ' ignore
-                            End Try
-
-                            ' Page-level triggers
-                            If String.IsNullOrWhiteSpace(pageText) AndAlso lettersThis = 0 Then
-                                pagesImageOnly.Add(pageNumber)
-                            ElseIf lettersThis < minLettersThreshold Then
-                                pagesLowLetters.Add(pageNumber)
+                        ' Check for low-quality text indicators
+                        If pageText IsNot Nothing Then
+                            Dim words = pageText.Split({" "c, vbCr(0), vbLf(0)}, StringSplitOptions.RemoveEmptyEntries)
+                            Dim avgWordLen = If(words.Length > 0, words.Average(Function(w) w.Length), 0)
+                            If avgWordLen < 2 AndAlso words.Length > 10 Then
+                                hasLowQualityText = True
                             End If
                         End If
                     Next
                 End Using
 
-                Dim extractedText As String = sb.ToString()
+                Dim extractedText As String = sb.ToString().Trim()
+
+                ' Heuristics to determine if OCR might be needed
+                Dim shouldSuggestOcr As Boolean = False
+                Dim avgCharsPerPage As Double = If(pageCount > 0, totalChars / pageCount, 0)
+
+                If pageCount > 0 AndAlso avgCharsPerPage < 100 Then
+                    shouldSuggestOcr = True
+                    reasons.Add($"Very little text extracted ({avgCharsPerPage:F0} chars/page average)")
+                End If
+
+                If hasLowQualityText Then
+                    shouldSuggestOcr = True
+                    reasons.Add("Text appears to be low quality (possibly garbled OCR or image-based)")
+                End If
+
+                If String.IsNullOrWhiteSpace(extractedText) AndAlso pageCount > 0 Then
+                    shouldSuggestOcr = True
+                    reasons.Add("No text could be extracted from any page")
+                End If
 
                 ' Disable OCR if no OCR-capable call is configured or context missing
-                If DoOCR AndAlso (context Is Nothing OrElse System.String.IsNullOrWhiteSpace(context.INI_APICall_Object)) Then
+                If DoOCR AndAlso (context Is Nothing OrElse Not IsOcrAvailable(context)) Then
                     DoOCR = False
                 End If
 
                 ' If DoOCR is disabled → just return whatever text we found (or empty string)
                 If Not DoOCR Then
-                    Return extractedText
-                End If
-
-                ' --- Heuristics only evaluated when DoOCR=True ---
-                Dim shouldSuggestOcr As Boolean = False
-                Dim reasons As New System.Collections.Generic.List(Of String)()
-
-                ' Gather metrics for heuristic evaluation
-                Dim fileLen As Long = New System.IO.FileInfo(pdfPath).Length
-                Dim bytesPerPage As Double = If(pageCount > 0, CDbl(fileLen) / CDbl(pageCount), CDbl(fileLen))
-
-                Dim textLen As Integer = If(extractedText IsNot Nothing, extractedText.Length, 0)
-
-                ' Analyze text quality (document-level)
-                Dim alphaNumCount As Integer = 0
-                Dim whiteCount As Integer = 0
-                Dim controlLikeCount As Integer = 0
-
-                For Each ch As Char In extractedText
-                    If System.Char.IsWhiteSpace(ch) Then
-                        whiteCount += 1
+                    ' If we would have suggested OCR but it's not available, flag it
+                    If shouldSuggestOcr Then
+                        result.OcrWasSkippedDueToHeuristics = True
                     End If
-                    If System.Char.IsLetterOrDigit(ch) Then
-                        alphaNumCount += 1
-                    End If
-                    If System.Char.IsControl(ch) AndAlso ch <> Microsoft.VisualBasic.ChrW(10) AndAlso ch <> Microsoft.VisualBasic.ChrW(13) AndAlso ch <> Microsoft.VisualBasic.ChrW(9) Then
-                        controlLikeCount += 1
-                    End If
-                Next
-
-                Dim alphaRatio As Double = If(textLen > 0, CDbl(alphaNumCount) / CDbl(textLen), 0.0)
-                Dim whiteRatio As Double = If(textLen > 0, CDbl(whiteCount) / CDbl(textLen), 1.0)
-                Dim controlRatio As Double = If(textLen > 0, CDbl(controlLikeCount) / CDbl(textLen), 0.0)
-
-                Dim lettersPerPage As Double = If(pageCount > 0, CDbl(totalLetters) / CDbl(pageCount), 0.0)
-
-                ' Threshold constants (document-level)
-                Const MIN_TEXT_LEN_FOR_CONFIDENCE As Integer = 200
-                Const MIN_LETTERS_PER_PAGE As Double = 15.0
-                Const HIGH_BYTES_PER_PAGE As Double = 90_000
-                Const LOW_ALPHA_RATIO As Double = 0.2
-                Const HIGH_WHITE_RATIO As Double = 0.55
-                Const HIGH_CONTROL_RATIO As Double = 0.02
-                Const MANY_PAGES_FEW_LETTERS_PAGE_THRESHOLD As Integer = 5
-
-                ' Page-level rules (strong signals)
-                If pagesImageOnly.Count > 0 Then
-                    shouldSuggestOcr = True
-                    reasons.Add($"Found {pagesImageOnly.Count} image-only page(s) (0 text, 0 letters), e.g., page {pagesImageOnly(0)}.")
-                ElseIf pagesLowLetters.Count > 0 Then
-                    shouldSuggestOcr = True
-                    reasons.Add($"Found {pagesLowLetters.Count} page(s) with very few letters (e.g., page {pagesLowLetters(0)}).")
-                End If
-
-                ' Document-level rules
-                ' Rule A: Empty/near-empty text and large images per page
-                If Not shouldSuggestOcr AndAlso textLen < MIN_TEXT_LEN_FOR_CONFIDENCE AndAlso bytesPerPage >= HIGH_BYTES_PER_PAGE Then
-                    shouldSuggestOcr = True
-                    reasons.Add($"Low extracted text ({textLen} chars) but large size per page (~{CInt(bytesPerPage)} bytes/page).")
-                End If
-
-                ' Rule B: very few letters per page on average
-                If Not shouldSuggestOcr AndAlso lettersPerPage < MIN_LETTERS_PER_PAGE Then
-                    shouldSuggestOcr = True
-                    reasons.Add($"Very few letters detected by text layer on average (≈{lettersPerPage:N1} letters/page).")
-                End If
-
-                ' Rule C: Extracted text looks like junk (mostly whitespace/control or very low alpha)
-                If Not shouldSuggestOcr AndAlso textLen > 0 AndAlso (alphaRatio < LOW_ALPHA_RATIO OrElse whiteRatio > HIGH_WHITE_RATIO OrElse controlRatio > HIGH_CONTROL_RATIO) Then
-                    shouldSuggestOcr = True
-                    reasons.Add($"Extracted text looks low-quality (alphaRatio={alphaRatio:P0}, whitespaceRatio={whiteRatio:P0}, controlRatio={controlRatio:P1}).")
-                End If
-
-                ' Rule D: Many pages but few letters overall
-                If Not shouldSuggestOcr AndAlso pageCount >= MANY_PAGES_FEW_LETTERS_PAGE_THRESHOLD AndAlso lettersPerPage < MIN_LETTERS_PER_PAGE Then
-                    shouldSuggestOcr = True
-                    reasons.Add($"Many pages ({pageCount}) with very low letters/page (≈{lettersPerPage:N1}).")
-                End If
-
-                Debug.WriteLine($"PDF '{pdfPath}': pages={pageCount}, bytesPerPage≈{CInt(bytesPerPage)}, textLen={textLen}, lettersPerPage≈{lettersPerPage:N1}, alphaRatio={alphaRatio:P0}, whitespaceRatio={whiteRatio:P0}, controlRatio={controlRatio:P1}.")
-                If shouldSuggestOcr Then
-                    Debug.WriteLine("Heuristics suggest OCR. Reasons: " & String.Join(" | ", reasons.ToArray()))
-                Else
-                    Debug.WriteLine("Heuristics do not suggest OCR.")
+                    result.Content = extractedText
+                    Return result
                 End If
 
                 If shouldSuggestOcr Then
+                    ' Check if OCR is actually available
+                    If Not IsOcrAvailable(context) Then
+                        ' OCR would be suggested but is not available - silently continue with extracted text
+                        Debug.WriteLine("OCR suggested by heuristics but not available - skipping OCR prompt.")
+                        result.OcrWasSkippedDueToHeuristics = True
+                        result.Content = extractedText
+                        Return result
+                    End If
+
                     If AskUser Then
                         Dim formattedReasons As String = String.Join(Environment.NewLine, reasons.ConvertAll(Function(r) "- " & r))
                         Dim msg As String = $"The PDF appears to contain little or no extractable text:" & Environment.NewLine & Environment.NewLine &
@@ -343,23 +284,42 @@ Namespace SharedLibrary
                                             "Would you like AI to perform OCR to extract text (if supported by your configured model)?"
                         Dim userChoice As Integer = ShowCustomYesNoBox(msg, "Yes, try OCR", "No, use what you have")
                         If userChoice <> 1 Then
-                            Return extractedText
+                            result.OcrWasSkippedDueToHeuristics = True
+                            result.Content = extractedText
+                            Return result
                         End If
                     End If
 
                     Dim ocrText As String = Await PerformOCR(pdfPath, context)
                     If Not String.IsNullOrWhiteSpace(ocrText) Then
-                        Return ocrText
+                        result.Content = ocrText
+                        Return result
+                    Else
+                        ' OCR was attempted but returned empty - content may be incomplete
+                        result.OcrWasSkippedDueToHeuristics = True
                     End If
                 End If
 
-                Return extractedText
+                result.Content = extractedText
+                Return result
 
             Catch ex As System.Exception
-                Return If(ReturnErrorInsteadOfEmpty, $"Error reading PDF: {ex.Message}", "")
+                result.Content = If(ReturnErrorInsteadOfEmpty, $"Error reading PDF: {ex.Message}", "")
+                Return result
             End Try
         End Function
 
+        ''' <summary>
+        ''' Reads a PDF using PdfPig and returns extracted text (backward compatible wrapper).
+        ''' </summary>
+        Public Shared Async Function ReadPdfAsText(ByVal pdfPath As String,
+                                            Optional ByVal ReturnErrorInsteadOfEmpty As Boolean = True,
+                                            Optional ByVal DoOCR As Boolean = False,
+                                            Optional ByVal AskUser As Boolean = True,
+                                            Optional ByVal context As ISharedContext = Nothing) As Task(Of String)
+            Dim result = Await ReadPdfAsTextEx(pdfPath, ReturnErrorInsteadOfEmpty, DoOCR, AskUser, context)
+            Return result.Content
+        End Function
 
         ''' <summary>
         ''' Extracts plain text content from a single PDF page using multiple strategies:
@@ -455,8 +415,9 @@ Namespace SharedLibrary
         ''' <returns>OCR result text, or an empty string if OCR is not available or fails.</returns>
         Private Shared Async Function PerformOCR(ByVal pdfPath As String, context As ISharedContext) As Task(Of String)
 
-            If System.String.IsNullOrWhiteSpace(context.INI_APICall_Object) Then
-                ShowCustomMessageBox($"Your model ({context.INI_Model}) is not configured to process binary objects - aborting OCR.")
+            ' Use the comprehensive OCR availability check
+            If Not IsOcrAvailable(context) Then
+                ShowCustomMessageBox($"OCR is not available with your current model configuration.")
                 Return ""
             End If
 
@@ -483,6 +444,103 @@ Namespace SharedLibrary
 
             Return result
 
+        End Function
+
+        ''' <summary>
+        ''' Determines whether OCR is available based on the configured model capabilities.
+        ''' </summary>
+        ''' <param name="context">Shared context containing model and API configuration.</param>
+        ''' <returns>True if OCR is available, False otherwise.</returns>
+        Public Shared Function IsOcrAvailable(context As ISharedContext) As Boolean
+            If context Is Nothing Then Return False
+
+            ' First check: If alternate model path is configured, check for OCR-capable secondary model
+            If Not String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then
+                ' Save original config before GetSpecialTaskModel potentially changes it
+                Dim savedConfig As ModelConfig = GetCurrentConfig(context)
+                Dim savedConfigLoaded As Boolean = originalConfigLoaded
+
+                Try
+                    If GetSpecialTaskModel(context, context.INI_AlternateModelPath, "OCR") Then
+                        ' OCR model found - restore config and return True
+                        RestoreDefaults(context, savedConfig)
+                        originalConfigLoaded = savedConfigLoaded
+                        Return True
+                    End If
+                Catch
+                    ' If GetSpecialTaskModel fails, continue to check primary API
+                Finally
+                    ' Ensure config is restored even if exception occurred
+                    RestoreDefaults(context, savedConfig)
+                    originalConfigLoaded = savedConfigLoaded
+                End Try
+            End If
+
+            ' Second check: Evaluate the INI_APICall_Object configuration
+            Return IsApiCallObjectOcrCapable(context.INI_APICall_Object)
+        End Function
+
+        ''' <summary>
+        ''' Checks if the given APICall_Object configuration string supports PDF/OCR.
+        ''' </summary>
+        ''' <param name="apiCallObject">The INI_APICall_Object or INI_APICall_Object_2 string.</param>
+        ''' <returns>True if OCR/PDF is supported, False otherwise.</returns>
+        Private Shared Function IsApiCallObjectOcrCapable(apiCallObject As String) As Boolean
+            ' If null or empty, OCR is not available
+            If String.IsNullOrWhiteSpace(apiCallObject) Then
+                Return False
+            End If
+
+            ' Check if the string contains segment separators (¦)
+            Dim segments As String() = apiCallObject.Split(New Char() {"¦"c}, StringSplitOptions.RemoveEmptyEntries)
+
+            ' Track if we found any segment without a filter (means all types supported)
+            ' or any segment with a filter that includes PDF
+            Dim hasUnfilteredSegment As Boolean = False
+            Dim hasPdfFilter As Boolean = False
+            Dim allSegmentsHaveFilters As Boolean = True
+
+            For Each segment As String In segments
+                Dim trimmedSegment As String = segment.Trim()
+
+                ' Check if this segment has a filter (starts with [...])
+                If trimmedSegment.StartsWith("[") Then
+                    ' Extract the filter content between [ and ]
+                    Dim closeBracketIdx As Integer = trimmedSegment.IndexOf("]"c)
+                    If closeBracketIdx > 1 Then
+                        Dim filterContent As String = trimmedSegment.Substring(1, closeBracketIdx - 1)
+
+                        ' Check if the filter contains application/pdf or pdf
+                        If filterContent.IndexOf("application/pdf", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+                           filterContent.IndexOf("pdf", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                            hasPdfFilter = True
+                        End If
+                    End If
+                Else
+                    ' No filter on this segment - means it accepts all types
+                    hasUnfilteredSegment = True
+                    allSegmentsHaveFilters = False
+                End If
+            Next
+
+            ' OCR is available if:
+            ' 1. There's at least one segment without a filter (accepts all), OR
+            ' 2. There's a segment with a filter that includes PDF
+            If hasUnfilteredSegment Then
+                Return True
+            End If
+
+            If hasPdfFilter Then
+                Return True
+            End If
+
+            ' If all segments have filters and none include PDF, OCR is not available
+            If allSegmentsHaveFilters Then
+                Return False
+            End If
+
+            ' Default: if we have content but couldn't parse filters, assume capable
+            Return True
         End Function
 
 

@@ -15,9 +15,11 @@
 '    process-level caches.
 '  - Personas & Knowledge: Loads persona prompts from local/global libraries,
 '    opens arbitrary knowledge files (TXT/RTF/DOC/PDF/…), and caches their text.
-'  - LLM Pipeline: Constructs prompts with persona instructions, knowledge text,
-'    optional active-document excerpts, and prior conversation; routes calls
-'    through SharedLibrary LLM helpers with optional alternate/secondary models.
+'  - Missions: Optional mission statements that provide specific behavioral targets
+'    alongside personas, loaded from companion files (e.g., personas-missions.txt).
+'  - LLM Pipeline: Constructs prompts with persona instructions, mission targets,
+'    knowledge text, optional active-document excerpts, and prior conversation;
+'    routes calls through SharedLibrary LLM helpers with optional alternate/secondary models.
 '  - HTML Transcript: Renders chat history via Markdig HTML, keeps "thinking"
 '    placeholders, restores transcripts on startup, and persists DOM fragments.
 '  - External Dependencies: Relies on SharedLibrary.SharedMethods for model
@@ -53,6 +55,10 @@ Public Class DiscussInky
     Private Const PersistedKnowledgeFileName As String = "redink-discussknowledge.txt"
     Private _currentPersonaName As String = AssistantName
     Private _currentPersonaPrompt As String = ""
+
+    ' Mission state
+    Private _currentMissionName As String = ""
+    Private _currentMissionPrompt As String = ""
 
     Private ReadOnly _context As ISharedContext
     Private ReadOnly _mdPipeline As Markdig.MarkdownPipeline
@@ -101,6 +107,7 @@ Public Class DiscussInky
     Private ReadOnly _btnClose As Button = New Button() With {.Text = "Close", .AutoSize = True}
     Private ReadOnly _btnSend As Button = New Button() With {.Text = $"Send", .AutoSize = True}
     Private ReadOnly _btnPersona As Button = New Button() With {.Text = "Persona", .AutoSize = True}
+    Private ReadOnly _btnMission As Button = New Button() With {.Text = "Mission", .AutoSize = True}
     Private ReadOnly _btnEditPersona As Button = New Button() With {.Text = "Edit Local Persona Lib", .AutoSize = True}
     Private ReadOnly _btnKnowledge As Button = New Button() With {.Text = "Load Knowledge", .AutoSize = True}
     Private ReadOnly _btnAlternateModel As Button = New Button() With {.Text = "Alternate Model", .AutoSize = True}
@@ -136,6 +143,16 @@ Public Class DiscussInky
     Private _personas As New List(Of PersonaEntry)()
 
     ''' <summary>
+    ''' Holds a mission definition loaded from a file.
+    ''' </summary>
+    Private Structure MissionEntry
+        Public Name As String
+        Public Prompt As String
+        Public DisplayName As String
+    End Structure
+    Private _missions As New List(Of MissionEntry)()
+
+    ''' <summary>
     ''' Helper class to track file loading results for knowledge loading.
     ''' </summary>
     Private Class KnowledgeLoadingContext
@@ -145,6 +162,9 @@ Public Class DiscussInky
         Public Property IgnoredFilesPerDir As New Dictionary(Of String, Integer)(StringComparer.OrdinalIgnoreCase)
         Public Property EnableOCR As Boolean = False
         Public Property HasPdfFiles As Boolean = False
+
+        ''' <summary>PDFs that heuristics suggest may contain images/scanned content but OCR was not performed.</summary>
+        Public Property PdfsWithPossibleImages As New List(Of String)()
 
         ''' <summary>Maximum files to load from a single directory.</summary>
         Public Const MaxFilesPerDirectory As Integer = 50
@@ -201,6 +221,7 @@ Public Class DiscussInky
         }
         pnlButtons.Controls.Add(_btnSend)
         pnlButtons.Controls.Add(_btnPersona)
+        pnlButtons.Controls.Add(_btnMission)
         pnlButtons.Controls.Add(_btnEditPersona)
         pnlButtons.Controls.Add(_btnKnowledge)
 
@@ -236,6 +257,7 @@ Public Class DiscussInky
         AddHandler _btnSendToDoc.Click, AddressOf OnSendToDoc
         AddHandler _btnClose.Click, AddressOf OnClose
         AddHandler _btnPersona.Click, AddressOf OnSelectPersona
+        AddHandler _btnMission.Click, AddressOf OnSelectMission
         AddHandler _btnEditPersona.Click, AddressOf OnEditLocalPersona
         AddHandler _btnKnowledge.Click, AddressOf OnLoadKnowledge
         AddHandler _btnAlternateModel.Click, AddressOf OnAlternateModelClick
@@ -266,10 +288,16 @@ Public Class DiscussInky
     End Sub
 
     ''' <summary>
-    ''' Builds the window caption to reflect persona, knowledge file, and model state.
+    ''' Builds the window caption to reflect persona, mission, knowledge file, and model state.
     ''' </summary>
     Private Sub UpdateWindowTitle()
         Dim title = $"Discuss this, {_currentPersonaName}"
+
+        ' Add mission to title if active
+        If Not String.IsNullOrEmpty(_currentMissionName) Then
+            title &= $" [{_currentMissionName}]"
+        End If
+
         If Not String.IsNullOrEmpty(_knowledgeFilePath) Then
             title &= $" - {Path.GetFileName(_knowledgeFilePath)}"
         End If
@@ -441,7 +469,7 @@ Public Class DiscussInky
     End Sub
 
     ''' <summary>
-    ''' Restores persisted settings, persona, knowledge cache, transcript, and optionally triggers a welcome.
+    ''' Restores persisted settings, persona, mission, knowledge cache, transcript, and optionally triggers a welcome.
     ''' </summary>
     Private Async Sub OnLoadForm(sender As Object, e As EventArgs)
         ' Restore window position/size
@@ -484,6 +512,9 @@ Public Class DiscussInky
         ' Load personas
         LoadPersonas()
 
+        ' Load missions
+        LoadMissions()
+
         ' Check if persona was previously saved - if not, force selection
         Dim savedPersona = ""
         Try
@@ -500,6 +531,19 @@ Public Class DiscussInky
                 personaRestoredFromSettings = True
             End If
         End If
+
+        ' Restore mission if previously saved
+        Try
+            Dim savedMission = My.Settings.DiscussSelectedMission
+            If Not String.IsNullOrEmpty(savedMission) Then
+                Dim found = _missions.FirstOrDefault(Function(m) m.Name.Equals(savedMission, StringComparison.OrdinalIgnoreCase))
+                If Not String.IsNullOrEmpty(found.Name) Then
+                    _currentMissionName = found.Name
+                    _currentMissionPrompt = found.Prompt
+                End If
+            End If
+        Catch
+        End Try
 
         UpdateWindowTitle()
         UpdateSendButtonText()
@@ -602,7 +646,8 @@ Public Class DiscussInky
             Dim savedPath = My.Settings.DiscussKnowledgePath
             If Not String.IsNullOrEmpty(savedPath) AndAlso File.Exists(savedPath) Then
                 ShowAssistantThinking()
-                _knowledgeContent = Await LoadSingleKnowledgeFileAsync(savedPath, False, False)
+                Dim result = Await LoadSingleKnowledgeFileAsync(savedPath, False, False)
+                _knowledgeContent = result.Content
                 RemoveAssistantThinking()
 
                 If Not String.IsNullOrWhiteSpace(_knowledgeContent) Then
@@ -639,7 +684,7 @@ Public Class DiscussInky
     End Sub
 
     ''' <summary>
-    ''' Persists geometry, transcript, persona, knowledge path, and checkbox state on close.
+    ''' Persists geometry, transcript, persona, mission, knowledge path, and checkbox state on close.
     ''' </summary>
     Private Sub OnFormClosing(sender As Object, e As FormClosingEventArgs)
         Try
@@ -655,6 +700,7 @@ Public Class DiscussInky
             My.Settings.DiscussIncludeActiveDoc = _chkIncludeActiveDoc.Checked
             My.Settings.DiscussPersistKnowledge = _chkPersistKnowledge.Checked
             My.Settings.DiscussSelectedPersona = _currentPersonaName
+            My.Settings.DiscussSelectedMission = _currentMissionName
             My.Settings.DiscussKnowledgePath = If(_knowledgeFilePath, "")
             My.Settings.Save()
         Catch
@@ -1012,6 +1058,220 @@ Public Class DiscussInky
 
 #End Region
 
+#Region "Mission Management"
+
+    ''' <summary>
+    ''' Derives the mission file path from the persona lib path.
+    ''' Format: [personafilename]-missions.txt
+    ''' Prefers local path, falls back to global.
+    ''' </summary>
+    ''' <returns>Full path to the mission file, or empty string if no persona path is configured.</returns>
+    Private Function GetMissionFilePath() As String
+        ' Prefer local path
+        Dim personaPath = ExpandEnvironmentVariables(If(_context?.INI_DiscussInkyPathLocal, ""))
+
+        ' Fall back to global path
+        If String.IsNullOrWhiteSpace(personaPath) Then
+            personaPath = ExpandEnvironmentVariables(If(_context?.INI_DiscussInkyPath, ""))
+        End If
+
+        If String.IsNullOrWhiteSpace(personaPath) Then
+            Return ""
+        End If
+
+        ' Build mission file path: [name]-missions.txt
+        Dim dir = Path.GetDirectoryName(personaPath)
+        Dim nameWithoutExt = Path.GetFileNameWithoutExtension(personaPath)
+        Dim missionFileName = nameWithoutExt & "-missions.txt"
+
+        Return Path.Combine(If(dir, ""), missionFileName)
+    End Function
+
+    ''' <summary>
+    ''' Loads mission definitions from the mission file into memory.
+    ''' </summary>
+    Private Sub LoadMissions()
+        _missions.Clear()
+
+        Dim missionPath = GetMissionFilePath()
+        If String.IsNullOrWhiteSpace(missionPath) Then
+            Return
+        End If
+
+        If Not File.Exists(missionPath) Then
+            ' File doesn't exist yet - that's okay, user can create it via Edit
+            Return
+        End If
+
+        Try
+            For Each rawLine In File.ReadAllLines(missionPath, Encoding.UTF8)
+                Dim line = If(rawLine, "").Trim()
+
+                ' Skip empty lines and comments
+                If line.Length = 0 OrElse line.StartsWith(";", StringComparison.Ordinal) Then
+                    Continue For
+                End If
+
+                ' Parse Name|Prompt format
+                Dim pipeIdx = line.IndexOf("|"c)
+                If pipeIdx < 1 Then Continue For
+
+                Dim name = line.Substring(0, pipeIdx).Trim()
+                Dim prompt = line.Substring(pipeIdx + 1).Trim()
+
+                If name.Length = 0 OrElse prompt.Length = 0 Then Continue For
+
+                ' Create unique display name
+                Dim displayName = MakeUniqueDisplay(name, _missions.Select(Function(m) m.DisplayName).ToList())
+
+                _missions.Add(New MissionEntry With {
+                    .Name = name,
+                    .Prompt = prompt,
+                    .DisplayName = displayName
+                })
+            Next
+        Catch ex As Exception
+            AppendSystemMessage($"Error loading mission file: {ex.Message}")
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Creates a sample mission file if it doesn't exist or is empty.
+    ''' </summary>
+    ''' <param name="missionPath">Path to the mission file.</param>
+    Private Sub EnsureMissionFileExists(missionPath As String)
+        If String.IsNullOrWhiteSpace(missionPath) Then Return
+
+        ' Create directory if needed
+        Dim dir = Path.GetDirectoryName(missionPath)
+        If Not String.IsNullOrWhiteSpace(dir) AndAlso Not Directory.Exists(dir) Then
+            Try
+                Directory.CreateDirectory(dir)
+            Catch
+                Return
+            End Try
+        End If
+
+        ' Check if file needs sample content
+        Dim needsSampleContent = False
+        If Not File.Exists(missionPath) Then
+            needsSampleContent = True
+        Else
+            Try
+                Dim content = File.ReadAllText(missionPath, Encoding.UTF8)
+                needsSampleContent = String.IsNullOrWhiteSpace(content)
+            Catch
+                needsSampleContent = True
+            End Try
+        End If
+
+        If needsSampleContent Then
+            Try
+                File.WriteAllText(missionPath,
+                    "; Discuss This Missions" & vbCrLf &
+                    "; Format: Name|Mission Prompt" & vbCrLf &
+                    "; Lines starting with ; are comments" & vbCrLf &
+                    "; Missions provide specific behavioral targets for the conversation." & vbCrLf &
+                    vbCrLf &
+                    "Devil's Advocate|Challenge every argument presented. Find weaknesses, inconsistencies, and counter-arguments. Push back firmly but constructively, forcing a thorough defense of each position." & vbCrLf & vbCrLf &
+                    "Problem Solver|Help find a solution to the problem at hand. Ask probing questions to understand the full context. Encourage exploration of alternatives while remaining constructive and focused on actionable outcomes." & vbCrLf & vbCrLf &
+                    "Witness Simulation|Defend the documented position as stated in the knowledge base. Respond as if being questioned, staying consistent with the documented facts. Do not volunteer information beyond what is documented." & vbCrLf & vbCrLf &
+                    "Cross-Examination|Systematically question the documented statements to test their credibility and consistency. Look for gaps, contradictions, or areas requiring clarification. Press for specifics and challenge vague assertions." & vbCrLf & vbCrLf &
+                    "Only One Paragraph|Limit your response always to a maximum of one paragraph.",
+                    Encoding.UTF8)
+            Catch
+                ' Silently fail
+            End Try
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' Shows mission picker with "No mission" as first option and "Edit mission library" as last.
+    ''' </summary>
+    Private Sub OnSelectMission(sender As Object, e As EventArgs)
+        Dim missionPath = GetMissionFilePath()
+
+        If String.IsNullOrWhiteSpace(missionPath) Then
+            ShowCustomMessageBox("No persona library is configured. Missions require a persona library path (INI_DiscussInkyPathLocal or INI_DiscussInkyPath).")
+            Return
+        End If
+
+        ' Ensure mission file exists with samples if needed
+        EnsureMissionFileExists(missionPath)
+
+        ' Reload missions to pick up any changes
+        LoadMissions()
+
+        ' Build selection items
+        Dim items As New List(Of SelectionItem)()
+
+        ' First item: "No mission"
+        Const NoMissionValue As Integer = -1
+        items.Add(New SelectionItem("No mission", NoMissionValue))
+
+        ' Mission items
+        For i = 0 To _missions.Count - 1
+            items.Add(New SelectionItem(_missions(i).DisplayName, i + 1))
+        Next
+
+        ' Last item: "Edit mission library"
+        Const EditMissionValue As Integer = -2
+        items.Add(New SelectionItem("Edit mission library...", EditMissionValue))
+
+        ' Find current selection
+        Dim defaultVal = NoMissionValue
+        If Not String.IsNullOrEmpty(_currentMissionName) Then
+            For i = 0 To _missions.Count - 1
+                If _missions(i).Name.Equals(_currentMissionName, StringComparison.OrdinalIgnoreCase) Then
+                    defaultVal = i + 1
+                    Exit For
+                End If
+            Next
+        End If
+
+        Dim result = SelectValue(items, defaultVal, "Select a mission (optional behavioral target):", AN & " - Select Mission")
+
+        If result = NoMissionValue Then
+            ' User selected "No mission"
+            If Not String.IsNullOrEmpty(_currentMissionName) Then
+                _currentMissionName = ""
+                _currentMissionPrompt = ""
+                UpdateWindowTitle()
+
+                Try
+                    My.Settings.DiscussSelectedMission = ""
+                    My.Settings.Save()
+                Catch
+                End Try
+
+                AppendSystemMessage("Mission cleared.")
+            End If
+        ElseIf result = EditMissionValue Then
+            ' User selected "Edit mission library"
+            ShowTextFileEditor(missionPath, $"{AN} - Edit Missions (changes active after reload):", False, _context)
+
+            ' Reload and show selection again
+            OnSelectMission(sender, e)
+        ElseIf result > 0 AndAlso result <= _missions.Count Then
+            ' User selected a mission
+            Dim selected = _missions(result - 1)
+            _currentMissionName = selected.Name
+            _currentMissionPrompt = selected.Prompt
+            UpdateWindowTitle()
+
+            Try
+                My.Settings.DiscussSelectedMission = _currentMissionName
+                My.Settings.Save()
+            Catch
+            End Try
+
+            AppendSystemMessage($"Mission set to: {_currentMissionName}")
+        End If
+        ' If result = 0 (cancelled), do nothing - keep current mission
+    End Sub
+
+#End Region
+
 #Region "Knowledge File Management"
 
     ''' <summary>
@@ -1027,7 +1287,7 @@ Public Class DiscussInky
     ''' </summary>
     Private Async Function PromptForKnowledgeAsync() As Task
         Try
-            Globals.ThisAddIn.DragDropFormLabel = "Drag & drop a knowledge file or folder, or click Browse"
+            Globals.ThisAddIn.DragDropFormLabel = "... a document you want to use as a knowledge file or folder to use all documents contained therein, or click Browse"
             Globals.ThisAddIn.DragDropFormFilter = ""
 
             Dim selectedPath As String = ""
@@ -1112,13 +1372,18 @@ Public Class DiscussInky
                 End If
             End If
 
-            ' Ask about OCR if there are PDF files
+            ' Ask about OCR if there are PDF files AND OCR is available
             If ctx.HasPdfFiles Then
-                Dim ocrAnswer = ShowCustomYesNoBox(
-                    "Some files may require OCR (optical character recognition) to extract text. Enable OCR for PDF processing?" & vbCrLf & vbCrLf &
-                    "Note: OCR may take longer but allows reading scanned documents and images.",
-                    "Yes, enable OCR", "No, skip OCR")
-                ctx.EnableOCR = (ocrAnswer = 1)
+                If SharedMethods.IsOcrAvailable(_context) Then
+                    Dim ocrAnswer = ShowCustomYesNoBox(
+                        "Some files may require OCR (optical character recognition) to extract text. Enable OCR for PDF processing?" & vbCrLf & vbCrLf &
+                        "Note: OCR may take longer but allows reading scanned documents and images.",
+                        "Yes, enable OCR", "No, skip OCR")
+                    ctx.EnableOCR = (ocrAnswer = 1)
+                Else
+                    ' OCR not available - will extract what text is possible
+                    ctx.EnableOCR = False
+                End If
             End If
 
             ' Load all files
@@ -1129,7 +1394,13 @@ Public Class DiscussInky
 
             For Each filePath In filesToProcess
                 Try
-                    Dim content = Await LoadSingleKnowledgeFileAsync(filePath, ctx.EnableOCR, True)
+                    Dim result = Await LoadSingleKnowledgeFileAsync(filePath, ctx.EnableOCR, True)
+                    Dim content = result.Content
+
+                    ' Track PDFs that may have incomplete content
+                    If result.PdfMayBeIncomplete Then
+                        ctx.PdfsWithPossibleImages.Add(filePath)
+                    End If
 
                     If String.IsNullOrWhiteSpace(content) Then
                         ctx.FailedFiles.Add(filePath)
@@ -1159,7 +1430,7 @@ Public Class DiscussInky
             ' Show summary
             Dim combinedContent = resultBuilder.ToString()
 
-            If ctx.LoadedFiles.Count > 0 OrElse ctx.FailedFiles.Count > 0 OrElse ctx.IgnoredFilesPerDir.Count > 0 Then
+            If ctx.LoadedFiles.Count > 0 OrElse ctx.FailedFiles.Count > 0 OrElse ctx.IgnoredFilesPerDir.Count > 0 OrElse ctx.PdfsWithPossibleImages.Count > 0 Then
                 Dim summary As New StringBuilder()
                 summary.AppendLine("Knowledge loading summary:")
                 summary.AppendLine("")
@@ -1180,6 +1451,15 @@ Public Class DiscussInky
                     For Each f In ctx.FailedFiles
                         summary.AppendLine($"  • {Path.GetFileName(f)}")
                     Next
+                    summary.AppendLine("")
+                End If
+
+                If ctx.PdfsWithPossibleImages.Count > 0 Then
+                    summary.AppendLine($"⚠ PDFs that may contain images/scans ({ctx.PdfsWithPossibleImages.Count} file(s)):")
+                    For Each f In ctx.PdfsWithPossibleImages
+                        summary.AppendLine($"  • {Path.GetFileName(f)}")
+                    Next
+                    summary.AppendLine("  (Text extraction may be incomplete - OCR was not available or not performed)")
                     summary.AppendLine("")
                 End If
 
@@ -1248,10 +1528,10 @@ Public Class DiscussInky
     ''' <param name="filePath">Path to the file to load.</param>
     ''' <param name="enableOCR">Whether to enable OCR for PDF files.</param>
     ''' <param name="silent">Whether to suppress error messages.</param>
-    ''' <returns>File content as string, or empty string on failure.</returns>
-    Private Async Function LoadSingleKnowledgeFileAsync(filePath As String, enableOCR As Boolean, silent As Boolean) As Task(Of String)
+    ''' <returns>Tuple of (content, pdfMayBeIncomplete) where pdfMayBeIncomplete is True if PDF heuristics suggest images but OCR was not performed.</returns>
+    Private Async Function LoadSingleKnowledgeFileAsync(filePath As String, enableOCR As Boolean, silent As Boolean) As Task(Of (Content As String, PdfMayBeIncomplete As Boolean))
         If String.IsNullOrWhiteSpace(filePath) OrElse Not File.Exists(filePath) Then
-            Return ""
+            Return ("", False)
         End If
 
         Try
@@ -1260,31 +1540,32 @@ Public Class DiscussInky
             Select Case ext
                 Case ".txt", ".md", ".log", ".ini", ".csv", ".json", ".xml", ".html", ".htm",
                      ".vb", ".cs", ".js", ".ts", ".py", ".java", ".cpp", ".c", ".h", ".sql", ".yaml", ".yml"
-                    Return File.ReadAllText(filePath, Encoding.UTF8)
+                    Return (File.ReadAllText(filePath, Encoding.UTF8), False)
 
                 Case ".rtf"
-                    Return ReadRtfAsText(filePath)
+                    Return (ReadRtfAsText(filePath), False)
 
                 Case ".doc", ".docx"
-                    Return ReadWordDocument(filePath)
+                    Return (ReadWordDocument(filePath), False)
 
                 Case ".pdf"
-                    ' Use silent mode and respect OCR setting
-                    Return Await ReadPdfAsText(filePath, True, enableOCR, False, _context)
+                    ' Use the extended version that reports if OCR was skipped
+                    Dim pdfResult = Await ReadPdfAsTextEx(filePath, True, enableOCR, False, _context)
+                    Return (pdfResult.Content, pdfResult.OcrWasSkippedDueToHeuristics)
 
                 Case ".pptx"
-                    Return Globals.ThisAddIn.GetPresentationJson(filePath)
+                    Return (Globals.ThisAddIn.GetPresentationJson(filePath), False)
 
                 Case Else
                     ' Try to read as text
-                    Return File.ReadAllText(filePath, Encoding.UTF8)
+                    Return (File.ReadAllText(filePath, Encoding.UTF8), False)
             End Select
 
         Catch ex As Exception
             If Not silent Then
                 AppendSystemMessage($"Error loading {Path.GetFileName(filePath)}: {ex.Message}")
             End If
-            Return ""
+            Return ("", False)
         End Try
     End Function
 
@@ -1323,7 +1604,6 @@ Public Class DiscussInky
         End Try
     End Sub
 
-
     ''' <summary>
     ''' Creates a new Word document with the chat transcript, excluding system messages.
     ''' Converts markdown to HTML for proper formatting.
@@ -1354,6 +1634,9 @@ Public Class DiscussInky
 
             ' Metadata
             mdBuilder.Append($"*Exported: {DateTime.Now:g}")
+            If Not String.IsNullOrEmpty(_currentMissionName) Then
+                mdBuilder.Append($" | Mission: {_currentMissionName}")
+            End If
             If Not String.IsNullOrEmpty(_knowledgeFilePath) Then
                 mdBuilder.Append($" | Knowledge: {Path.GetFileName(_knowledgeFilePath)}")
             End If
@@ -1391,7 +1674,6 @@ Public Class DiscussInky
             AppendSystemMessage($"Error exporting to document: {ex.Message}")
         End Try
     End Sub
-
 
     ''' <summary>
     ''' Closes the DiscussInky form.
@@ -1436,14 +1718,20 @@ Public Class DiscussInky
     End Function
 
     ''' <summary>
-    ''' Posts a system message summarizing the active persona and knowledge file.
+    ''' Posts a system message summarizing the active persona, mission, and knowledge file.
     ''' </summary>
     Private Sub ShowSessionInfo()
         Dim sb As New StringBuilder()
 
         ' Persona info
         sb.Append($"Persona: {_currentPersonaName}")
-        sb.Append(" (change with 'Persona' button)")
+
+        ' Mission info
+        If Not String.IsNullOrEmpty(_currentMissionName) Then
+            sb.Append($" | Mission: {_currentMissionName}")
+        Else
+            sb.Append(" | Mission: None")
+        End If
 
         ' Knowledge document info
         If Not String.IsNullOrEmpty(_knowledgeFilePath) Then
@@ -1451,7 +1739,6 @@ Public Class DiscussInky
         Else
             sb.Append(" | Knowledge: None loaded")
         End If
-        sb.Append(" (change with 'Knowledge' button)")
 
         AppendSystemMessage(sb.ToString())
     End Sub
@@ -1475,14 +1762,18 @@ Public Class DiscussInky
             ' Use persona prompt to shape the welcome message
             Dim personaContext = ""
             If Not String.IsNullOrEmpty(_currentPersonaPrompt) Then
-                personaContext = $" Your persona and role is defined as: '{_currentPersonaPrompt}'. " &
-                                 "Generate a welcome that fits this persona - for example, a Teacher might greet students and mention they're ready to teach, " &
-                                 "an Examiner might announce they're ready to test knowledge, a Summarizer might offer to explain the content."
+                personaContext = $" Your persona and role is defined as: '{_currentPersonaPrompt}'."
+            End If
+
+            ' Include mission context if active
+            Dim missionContext = ""
+            If Not String.IsNullOrEmpty(_currentMissionPrompt) Then
+                missionContext = $" Your current mission is: '{_currentMissionPrompt}'."
             End If
 
             systemPrompt = $"{dateContext} Generate a brief, friendly {langName} welcome that {randomWord} references it is {partOfDay} now. " &
-                           $"A knowledge base has been loaded (it may contain multiple documents or sections).{personaContext} " &
-                           "Ask what the user would like to discuss about the knowledge. One or two short sentences, stay in character."
+                           $"A knowledge base has been loaded (it may contain multiple documents or sections).{personaContext}{missionContext} " &
+                           "Generate a welcome that fits this persona and mission. One or two short sentences, stay in character."
         End If
 
         Dim answer = ""
@@ -1500,7 +1791,7 @@ Public Class DiscussInky
         _history.Add(("assistant", answer))
 
         PersistChatHtml()
-        PersistTranscriptLimited()  ' Add this line
+        PersistTranscriptLimited()
     End Function
 
 #End Region
@@ -1508,7 +1799,7 @@ Public Class DiscussInky
 #Region "Send Message"
 
     ''' <summary>
-    ''' Builds the full prompt (persona, knowledge, history, document) and sends it to the LLM.
+    ''' Builds the full prompt (persona, mission, knowledge, history, document) and sends it to the LLM.
     ''' </summary>
     ''' <param name="userText">User's message text.</param>
     Private Async Function SendAsync(userText As String) As Task
@@ -1521,7 +1812,13 @@ Public Class DiscussInky
                                 _currentPersonaPrompt,
                                 $"You are {_currentPersonaName}, a helpful assistant. Discuss the provided knowledge with the user.")
 
-            Dim systemPrompt = $"{basePrompt}. In your response, be {randomWord}. Do not start with a greeting or salutation. " &
+            ' Append mission if active
+            Dim missionClause = ""
+            If Not String.IsNullOrEmpty(_currentMissionPrompt) Then
+                missionClause = $" Your mission: {_currentMissionPrompt}"
+            End If
+
+            Dim systemPrompt = $"{basePrompt}{missionClause}. In your response, be {randomWord}. Do not start with a greeting or salutation. " &
                                "The knowledge provided may consist of multiple documents or sections combined into one. " &
                                $"Refer to it as 'the knowledge' or 'the materials' rather than 'the document' when appropriate. {dateContext}"
 
@@ -1570,7 +1867,7 @@ Public Class DiscussInky
             _history.Add(("assistant", answer))
 
             PersistChatHtml()
-            PersistTranscriptLimited()  ' Add this line to save transcript immediately
+            PersistTranscriptLimited()
 
         Catch ex As Exception
             RemoveAssistantThinking()
@@ -1690,8 +1987,6 @@ Public Class DiscussInky
     ''' <summary>
     ''' Flushes queued HTML fragments once the browser document is ready.
     ''' </summary>
-    ''' <param name="sender">Event source.</param>
-    ''' <param name="e">Event arguments.</param>
     Private Sub Chat_DocumentCompleted(sender As Object, e As WebBrowserDocumentCompletedEventArgs)
         _htmlReady = True
         If _htmlQueue.Count > 0 Then
@@ -1709,8 +2004,6 @@ Public Class DiscussInky
     ''' <summary>
     ''' Intercepts navigation to open http/https/mailto links externally.
     ''' </summary>
-    ''' <param name="sender">Event source.</param>
-    ''' <param name="e">Navigation event arguments.</param>
     Private Sub Chat_Navigating(sender As Object, e As WebBrowserNavigatingEventArgs)
         Try
             Dim scheme = e.Url?.Scheme?.ToLowerInvariant()
@@ -1725,8 +2018,6 @@ Public Class DiscussInky
     ''' <summary>
     ''' Prevents the WebBrowser control from spawning new windows.
     ''' </summary>
-    ''' <param name="sender">Event source.</param>
-    ''' <param name="e">Cancel event arguments.</param>
     Private Sub Chat_NewWindow(sender As Object, e As CancelEventArgs)
         e.Cancel = True
     End Sub
@@ -1734,7 +2025,6 @@ Public Class DiscussInky
     ''' <summary>
     ''' Appends HTML to the chat DOM, queuing if the document is not ready.
     ''' </summary>
-    ''' <param name="fragment">HTML fragment to append.</param>
     Private Sub AppendHtml(fragment As String)
         If String.IsNullOrEmpty(fragment) Then Return
         Ui(Sub()
@@ -1753,7 +2043,6 @@ Public Class DiscussInky
     ''' <summary>
     ''' Adds a user message block to the transcript and persists HTML.
     ''' </summary>
-    ''' <param name="text">User message text.</param>
     Private Sub AppendUserHtml(text As String)
         Dim encoded = WebUtility.HtmlEncode(text).Replace(vbCrLf, "<br>").Replace(vbLf, "<br>").Replace(vbCr, "<br>")
         AppendHtml($"<div class='msg user'><span class='who'>You:</span><span class='content'>{encoded}</span></div>")
@@ -1763,7 +2052,6 @@ Public Class DiscussInky
     ''' <summary>
     ''' Adds a system message block and persists HTML.
     ''' </summary>
-    ''' <param name="text">System message text.</param>
     Private Sub AppendSystemMessage(text As String)
         Dim encoded = WebUtility.HtmlEncode(text)
         AppendHtml($"<div class='msg system'>{encoded}</div>")
@@ -1798,7 +2086,6 @@ Public Class DiscussInky
     ''' <summary>
     ''' Converts assistant markdown to HTML and appends it to the transcript.
     ''' </summary>
-    ''' <param name="md">Markdown text from assistant.</param>
     Private Sub AppendAssistantMarkdown(md As String)
         md = If(md, "")
         Dim body = Markdig.Markdown.ToHtml(md, _mdPipeline)
@@ -1878,12 +2165,10 @@ Public Class DiscussInky
                 flush()
                 currentRole = "user"
                 content.Append(ln.Substring(5).TrimStart())
-                ' Check for current persona name
             ElseIf ln.StartsWith(_currentPersonaName & ": ", StringComparison.OrdinalIgnoreCase) Then
                 flush()
                 currentRole = "assistant"
                 content.Append(ln.Substring((_currentPersonaName & ": ").Length).TrimStart())
-                ' Check for default assistant name (fallback)
             ElseIf ln.StartsWith(AssistantName & ": ", StringComparison.OrdinalIgnoreCase) Then
                 flush()
                 currentRole = "assistant"
@@ -1894,7 +2179,6 @@ Public Class DiscussInky
                     If content.Length > 0 Then content.AppendLine()
                     content.Append(ln)
                 End If
-                ' If currentRole Is Nothing, skip orphan lines (don't try to guess)
             End If
         Next
         flush()
@@ -1903,7 +2187,6 @@ Public Class DiscussInky
     ''' <summary>
     ''' Recreates chat HTML from the stored transcript text.
     ''' </summary>
-    ''' <param name="transcript">Plain text transcript to convert to HTML.</param>
     Private Sub AppendTranscriptToHtml(transcript As String)
         If String.IsNullOrEmpty(transcript) Then Return
         Dim lines = transcript.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf).Split({vbLf}, StringSplitOptions.None)
@@ -1956,7 +2239,6 @@ Public Class DiscussInky
     ''' <summary>
     ''' Returns the current chat history in 'You:/Persona:' text format.
     ''' </summary>
-    ''' <returns>Plain text transcript of all messages.</returns>
     Private Function BuildTranscriptPlain() As String
         Dim sb As New StringBuilder()
         For Each m In _history
@@ -1972,7 +2254,6 @@ Public Class DiscussInky
     ''' <summary>
     ''' Builds a capped, reversed conversation snippet for prompt injection.
     ''' </summary>
-    ''' <returns>Truncated conversation history for LLM context.</returns>
     Private Function BuildConversationForLlm() As String
         Dim sb As New StringBuilder()
         Dim cap = Math.Max(5000, If(_context IsNot Nothing, _context.INI_ChatCap, 0))
@@ -1998,7 +2279,6 @@ Public Class DiscussInky
     ''' <summary>
     ''' Determines 'Morning/Afternoon/Evening' from the current hour.
     ''' </summary>
-    ''' <returns>Part of day string.</returns>
     Private Shared Function GetPartOfDay() As String
         Dim h = DateTime.Now.Hour
         If h < 12 Then Return "Morning"
@@ -2009,24 +2289,18 @@ Public Class DiscussInky
     ''' <summary>
     ''' Detects whether the restored HTML ended on an alternate-model state by checking for model switch messages.
     ''' </summary>
-    ''' <param name="html">Saved HTML content from chat transcript.</param>
-    ''' <returns>True if an alternate model was active when the chat was saved.</returns>
     Private Function ChatHtmlIndicatesAlternateModel(html As String) As Boolean
         If String.IsNullOrEmpty(html) Then Return False
 
         Try
-            ' Look for the last occurrence of model switch messages
             Dim switchedToAlternateIdx = html.LastIndexOf("Switched to alternate model", StringComparison.OrdinalIgnoreCase)
             Dim switchedToSecondaryIdx = html.LastIndexOf("Switched to secondary model", StringComparison.OrdinalIgnoreCase)
             Dim switchedBackIdx = html.LastIndexOf("Switched back to primary model", StringComparison.OrdinalIgnoreCase)
 
-            ' Find the latest "switched to" message
             Dim lastSwitchToIdx = Math.Max(switchedToAlternateIdx, switchedToSecondaryIdx)
 
-            ' If there's no switch-to message, no alternate was active
             If lastSwitchToIdx < 0 Then Return False
 
-            ' If there's no switch-back, or the switch-back is before the last switch-to, alternate was active
             If switchedBackIdx < 0 OrElse switchedBackIdx < lastSwitchToIdx Then
                 Return True
             End If
