@@ -385,4 +385,8 @@ Public Class Ribbon1
         Globals.ThisAddIn.ApplyStyleTemplate()
     End Sub
 
+    Private Sub RI_ConvertDocToTxt_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_ConvertDocToTxt.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_ConvertDocToTxt_Click invoked")
+        Globals.ThisAddIn.ExportFileContentToText()
+    End Sub
 End Class

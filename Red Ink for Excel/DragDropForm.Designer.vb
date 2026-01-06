@@ -58,7 +58,7 @@ Partial Class DragDropForm
         Me.Label1.Name = "Label1"
         Me.Label1.Size = New System.Drawing.Size(198, 20)
         Me.Label1.TabIndex = 1
-        Me.Label1.Text = "Drag and drop your file here"
+        Me.Label1.Text = "Drag and drop here ..."
         '
         'Label2
         '

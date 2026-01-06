@@ -127,7 +127,11 @@ Partial Public Class ThisAddIn
                                                New SLib.InputParameter("Manual instruction (required if no library)", manualInstruction),
                                                New SLib.InputParameter("Manual instruction (overrides)", manualInstruction))
             Dim pRef As New SLib.InputParameter("Also use reference document", useReferenceDoc)
-            Dim pOcr As New SLib.InputParameter("Do OCR if needed (PDFs)", doOcr)
+
+            ' OCR checkbox: pass Nothing if OCR is unavailable to show disabled checkbox
+            Dim ocrAvailable As Boolean = SharedMethods.IsOcrAvailable(_context)
+            Dim pOcr As New SLib.InputParameter("Do OCR if needed (PDFs)", If(ocrAvailable, CObj(doOcr), Nothing))
+
             Dim pLang As New SLib.InputParameter("Output language", UserOutputLanguage)
             Dim pAlt As SLib.InputParameter = Nothing
             If hasSecondary Then
@@ -263,7 +267,8 @@ Partial Public Class ThisAddIn
                 Try
                     DragDropFormLabel = ""
                     DragDropFormFilter = ""
-                    referenceContent = Await GetFileContent(Nothing, False, Not String.IsNullOrWhiteSpace(INI_APICall_Object), True)
+                    ' Use IsOcrAvailable for proper OCR capability check
+                    referenceContent = Await GetFileContent(Nothing, False, ocrAvailable, True)
                     If String.IsNullOrWhiteSpace(referenceContent) Then
                         ShowCustomMessageBox("The file you have selected is empty or not supported - exiting.")
                         Return

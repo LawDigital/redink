@@ -198,7 +198,9 @@ Partial Public Class ThisAddIn
             Dim p4 As New SLib.InputParameter("Sort direction", displaySortDirection)
             p4.Options = New System.Collections.Generic.List(Of String) From {"Ascending", "Descending"}
             Dim p5 As New SLib.InputParameter("Multiple files", multipleFiles)
-            Dim p6 As New SLib.InputParameter("Do OCR if needed (PDFs)", doOcr)
+            ' OCR checkbox: pass Nothing if OCR is unavailable to show disabled checkbox
+            Dim ocrAvailable As Boolean = SharedMethods.IsOcrAvailable(_context)
+            Dim p6 As New SLib.InputParameter("Do OCR if needed (PDFs)", If(ocrAvailable, CObj(doOcr), Nothing))
             Dim p9 As New SLib.InputParameter("Output language", UserOutputLanguage)
             Dim p10 As New SLib.InputParameter("Date format (e.g., yyyy-MM-dd; empty=default)", dateOutputFormat)
             Dim pMergeEnable As New SLib.InputParameter("Permit row merging (if requested)", mergeRowsViaLlm)
