@@ -976,6 +976,66 @@ Namespace My
                 Me("AutoRespondPersona") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property SortOutMainMission() As String
+            Get
+                Return CType(Me("SortOutMainMission"),String)
+            End Get
+            Set
+                Me("SortOutMainMission") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property SortOutResponderMission() As String
+            Get
+                Return CType(Me("SortOutResponderMission"),String)
+            End Get
+            Set
+                Me("SortOutResponderMission") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property SortOutMaxRounds() As Integer
+            Get
+                Return CType(Me("SortOutMaxRounds"),Integer)
+            End Get
+            Set
+                Me("SortOutMaxRounds") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property SortOutMainMissionManual() As String
+            Get
+                Return CType(Me("SortOutMainMissionManual"),String)
+            End Get
+            Set
+                Me("SortOutMainMissionManual") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property SortOutResponderMissionManual() As String
+            Get
+                Return CType(Me("SortOutResponderMissionManual"),String)
+            End Get
+            Set
+                Me("SortOutResponderMissionManual") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

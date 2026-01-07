@@ -135,9 +135,18 @@ Public Class DiscussInky
     Private Shared ReadOnly _rng As New Random()
 
     ' Autorespond constants
-    Private Const MaxAutoRespondRounds As Integer = 50
+    Private Const MaxAutoRespondRounds As Integer = 100
+    Private Const DefaultRespondRounds As Integer = 5
     Private Const AutoRespondStopWord As String = "<AUTORESPOND_STOP>"
+    Private Const ShowGeneratedMissionsConfirmation As Boolean = False
     Private DefaultAutoRespondBreakOff As String = $"If this chat is going in circles, if you have come to an agreement or solution, or if this chat is drifting away to a point that is no longer productive, stop the responses by including the exact text '{AutoRespondStopWord}' at the end of your message and explain why (if because a solution is found, explain the solution, common grounds, etc.)."
+
+    ' Sort Out feature state
+    Private _sortOutInProgress As Boolean = False
+    Private _sortOutMainMissionPrompt As String = ""
+    Private _sortOutResponderMissionPrompt As String = ""
+    Private _sortOutOriginalMissionName As String = ""
+    Private _sortOutOriginalMissionPrompt As String = ""
 
     ' UI Controls
     Private ReadOnly _chat As WebBrowser = New WebBrowser() With {
@@ -172,6 +181,7 @@ Public Class DiscussInky
     Private ReadOnly _chkIncludeActiveDoc As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = "Include active document", .AutoSize = True}
     Private ReadOnly _chkPersistKnowledge As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = "Persist knowledge temporarily", .AutoSize = True}
     Private ReadOnly _btnAutoRespond As Button = New Button() With {.Text = "Autorespond", .AutoSize = True}
+    Private ReadOnly _btnSortOut As Button = New Button() With {.Text = "Sort out", .AutoSize = True}
 
     ' State
     Private _htmlReady As Boolean = False
@@ -304,6 +314,7 @@ Public Class DiscussInky
         pnlButtons.Controls.Add(_btnSendToDoc)
         pnlButtons.Controls.Add(_btnClose)
         pnlButtons.Controls.Add(_btnAutoRespond)
+        pnlButtons.Controls.Add(_btnSortOut)
         pnlButtons.Controls.Add(_chkIncludeActiveDoc)
         pnlButtons.Controls.Add(_chkPersistKnowledge)
 
@@ -338,12 +349,33 @@ Public Class DiscussInky
         AddHandler _chkIncludeActiveDoc.CheckedChanged, AddressOf OnIncludeActiveDocChanged
         AddHandler _chkPersistKnowledge.CheckedChanged, AddressOf OnPersistKnowledgeChanged
         AddHandler _btnAutoRespond.Click, AddressOf OnAutoRespondClick
+        AddHandler _btnSortOut.Click, AddressOf OnSortOutClick
 
     End Sub
 
 #End Region
 
 #Region "Utility Methods"
+
+    ''' <summary>
+    ''' Gets the location context string for inclusion in prompts.
+    ''' </summary>
+    ''' <returns>Location context string.</returns>
+    Private Function GetLocationContext() As String
+        Dim location = If(_context?.INI_Location, "")
+        If String.IsNullOrWhiteSpace(location) Then
+            Return ""
+        End If
+        Return $"Location of user: {location}."
+    End Function
+
+    ''' <summary>
+    ''' Gets the language instruction for LLM responses.
+    ''' </summary>
+    ''' <returns>Language instruction string.</returns>
+    Private Function GetLanguageInstruction() As String
+        Return "Always respond in the same language the user uses in their messages, regardless of the language of these instructions or the knowledge base."
+    End Function
 
     ''' <summary>
     ''' Executes an action on the UI thread, marshaling via BeginInvoke when required.
@@ -1762,9 +1794,24 @@ Public Class DiscussInky
                         mdBuilder.AppendLine()
 
                     Case "assistant"
-                        mdBuilder.AppendLine($"**{_currentPersonaName}:**")
+                        ' Check if content has an embedded display name (from Sort Out mode)
+                        Dim content = msg.Content
+                        Dim colonIdx = content.IndexOf(": ", StringComparison.Ordinal)
+                        Dim displayName = _currentPersonaName
+                        Dim messageText = content
+
+                        ' Check for Sort Out style naming (e.g., "PersonaName (Advocate): message")
+                        If colonIdx > 0 Then
+                            Dim potentialName = content.Substring(0, colonIdx)
+                            If potentialName.Contains("(Advocate)") OrElse potentialName.Contains("(Challenger)") OrElse potentialName.Contains("(2nd)") Then
+                                displayName = potentialName
+                                messageText = content.Substring(colonIdx + 2)
+                            End If
+                        End If
+
+                        mdBuilder.AppendLine($"**{displayName}:**")
                         mdBuilder.AppendLine()
-                        mdBuilder.AppendLine(msg.Content)
+                        mdBuilder.AppendLine(messageText)
                         mdBuilder.AppendLine()
 
                     Case "autoresponder"
@@ -1883,13 +1930,15 @@ Public Class DiscussInky
         Dim partOfDay = GetPartOfDay()
         Dim dateContext = GetDateContext()
         Dim randomWord = GetRandomModifier()
+        Dim locationContext = GetLocationContext()
+        Dim languageInstruction = GetLanguageInstruction()
 
         Dim systemPrompt As String
 
         If String.IsNullOrWhiteSpace(_knowledgeContent) Then
             systemPrompt = $"{dateContext} Generate a brief, friendly {langName} welcome that {randomWord} references it is {partOfDay} now. " &
                            "Tell the user they should load a knowledge document using the 'Load Knowledge' button (button name always in English) to start a discussion. " &
-                           "You are ready to discuss any knowledge they provide. One short sentence, not talkative."
+                           $"You are ready to discuss any knowledge they provide. One short sentence, not talkative. {languageInstruction}"
         Else
             ' Use persona prompt to shape the welcome message
             Dim personaContext = ""
@@ -1903,9 +1952,9 @@ Public Class DiscussInky
                 missionContext = $" Your current mission is: '{_currentMissionPrompt}'."
             End If
 
-            systemPrompt = $"{dateContext} Generate a brief, friendly {langName} welcome that {randomWord} references it is {partOfDay} now. " &
+            systemPrompt = $"{dateContext} {locationContext} Generate a brief, friendly {langName} welcome that {randomWord} references it is {partOfDay} now. " &
                            $"A knowledge base has been loaded (it may contain multiple documents or sections).{personaContext}{missionContext} " &
-                           "Generate a welcome that fits this persona and mission. One or two short sentences, stay in character."
+                           $"Generate a welcome that fits this persona and mission. One or two short sentences, stay in character. {languageInstruction}"
         End If
 
         Dim answer = ""
@@ -1919,7 +1968,6 @@ Public Class DiscussInky
 
         answer = If(answer, "").Trim()
         AppendAssistantMarkdown(answer)
-        ' Include welcome in history - it's part of the conversation
         _history.Add(("assistant", answer))
 
         PersistChatHtml()
@@ -1939,6 +1987,8 @@ Public Class DiscussInky
             ' Build system prompt from persona or default
             Dim dateContext = GetDateContext()
             Dim randomWord = GetRandomModifier()
+            Dim locationContext = GetLocationContext()
+            Dim languageInstruction = GetLanguageInstruction()
 
             Dim basePrompt = If(Not String.IsNullOrEmpty(_currentPersonaPrompt),
                                 _currentPersonaPrompt,
@@ -1952,7 +2002,8 @@ Public Class DiscussInky
 
             Dim systemPrompt = $"{basePrompt}{missionClause}. In your response, be {randomWord}. Do not start with a greeting or salutation. " &
                                "The knowledge provided may consist of multiple documents or sections combined into one. " &
-                               $"Refer to it as 'the knowledge' or 'the materials' rather than 'the document' when appropriate. {dateContext}"
+                               $"Refer to it as 'the knowledge' or 'the materials' rather than 'the document' when appropriate. {dateContext} {locationContext} {languageInstruction}"
+
 
             ' Build user prompt with knowledge and context
             Dim sb As New StringBuilder()
@@ -2222,13 +2273,21 @@ Public Class DiscussInky
     ''' Converts assistant markdown to HTML and appends it to the transcript.
     ''' </summary>
     Private Sub AppendAssistantMarkdown(md As String)
+        AppendAssistantMarkdownWithName(md, _currentPersonaName)
+    End Sub
+
+
+    ''' <summary>
+    ''' Converts assistant markdown to HTML and appends it to the transcript with a custom display name.
+    ''' </summary>
+    Private Sub AppendAssistantMarkdownWithName(md As String, displayName As String)
         md = If(md, "")
         Dim body = Markdig.Markdown.ToHtml(md, _mdPipeline)
         Dim t = body.Trim()
         Dim isSingle = Regex.IsMatch(t, "^\s*<p>[\s\S]*?</p>\s*$", RegexOptions.IgnoreCase) AndAlso
                    Not Regex.IsMatch(t, "<(ul|ol|pre|table|h[1-6]|blockquote|hr|div)\b", RegexOptions.IgnoreCase)
 
-        Dim whoHtml = WebUtility.HtmlEncode(_currentPersonaName)
+        Dim whoHtml = WebUtility.HtmlEncode(displayName)
 
         If isSingle Then
             Dim inlineHtml = Regex.Replace(t, "^\s*<p>|</p>\s*$", "", RegexOptions.IgnoreCase)
@@ -2396,6 +2455,11 @@ Public Class DiscussInky
     ''' Handles the Autorespond button click - shows configuration dialog and starts auto-response loop.
     ''' </summary>
     Private Async Sub OnAutoRespondClick(sender As Object, e As EventArgs)
+        ' Prevent running if sort out is in progress
+        If _sortOutInProgress Then
+            AppendSystemMessage("Cannot start Autorespond while Sort Out is in progress.")
+            Return
+        End If
         ' Only allow when input is enabled (not during processing)
         If Not _txtInput.Enabled Then
             AppendSystemMessage("Cannot start autorespond while a response is in progress.")
@@ -2444,7 +2508,7 @@ Public Class DiscussInky
         ' Restore persisted values or use defaults
         Dim savedPersona = ""
         Dim savedMission = ""
-        Dim savedRounds = 5
+        Dim savedRounds = DefaultRespondRounds
         Dim savedBreakOff = DefaultAutoRespondBreakOff
         Try
             savedPersona = My.Settings.AutoRespondPersona
@@ -2551,7 +2615,7 @@ Public Class DiscussInky
             End If
         End If
 
-        _autoRespondMaxRounds = If(selectedRounds >= 1 AndAlso selectedRounds <= MaxAutoRespondRounds, selectedRounds, 5)
+        _autoRespondMaxRounds = If(selectedRounds >= 1 AndAlso selectedRounds <= MaxAutoRespondRounds, selectedRounds, DefaultRespondRounds)
         _autoRespondBreakOff = If(String.IsNullOrWhiteSpace(breakOffText), DefaultAutoRespondBreakOff, breakOffText)
 
         ' Persist settings
@@ -2702,6 +2766,8 @@ Public Class DiscussInky
     Private Async Function GenerateAutoResponderMessageAsync(responderDisplayName As String) As Task(Of String)
         Dim dateContext = GetDateContext()
         Dim randomWord = GetRandomModifier()
+        Dim locationContext = GetLocationContext()
+        Dim languageInstruction = GetLanguageInstruction()
 
         ' Build system prompt for the responder
         Dim basePrompt = If(Not String.IsNullOrEmpty(_autoRespondPersonaPrompt),
@@ -2715,7 +2781,8 @@ Public Class DiscussInky
 
         Dim systemPrompt = $"{basePrompt}{missionClause}. In your response, be {randomWord}. Do not start with a greeting or salutation. " &
                            $"You are responding to {_currentPersonaName} in an ongoing discussion. " &
-                           $"{_autoRespondBreakOff} {dateContext}"
+                           $"{_autoRespondBreakOff} {dateContext} {locationContext} {languageInstruction}"
+
 
         ' Build the conversation context
         Dim sb As New StringBuilder()
@@ -2758,6 +2825,8 @@ Public Class DiscussInky
     Private Async Function GenerateChatbotResponseToAutoResponderAsync(responderDisplayName As String) As Task(Of String)
         Dim dateContext = GetDateContext()
         Dim randomWord = GetRandomModifier()
+        Dim locationContext = GetLocationContext()
+        Dim languageInstruction = GetLanguageInstruction()
 
         ' Use the main chatbot's persona and mission
         Dim basePrompt = If(Not String.IsNullOrEmpty(_currentPersonaPrompt),
@@ -2771,7 +2840,8 @@ Public Class DiscussInky
 
         Dim systemPrompt = $"{basePrompt}{missionClause}. In your response, be {randomWord}. Do not start with a greeting or salutation. " &
                            $"You are discussing with {responderDisplayName}. The knowledge provided may consist of multiple documents or sections. " &
-                           $"{dateContext}"
+                           $"{dateContext} {locationContext} {languageInstruction}"
+
 
         ' Build the conversation context
         Dim sb As New StringBuilder()
@@ -2825,7 +2895,13 @@ Public Class DiscussInky
                 Case "user"
                     line = "User: " & content & Environment.NewLine
                 Case "assistant"
-                    line = _currentPersonaName & ": " & content & Environment.NewLine
+                    ' Check if content already has an embedded display name (from Sort Out mode)
+                    If content.Contains("(Advocate):") OrElse content.Contains("(Challenger):") OrElse content.Contains("(2nd):") Then
+                        ' Content already includes the persona name prefix
+                        line = content & Environment.NewLine
+                    Else
+                        line = _currentPersonaName & ": " & content & Environment.NewLine
+                    End If
                 Case "autoresponder"
                     ' Content already includes the persona name prefix
                     line = content & Environment.NewLine
@@ -2887,6 +2963,668 @@ Public Class DiscussInky
             End If
         End If
     End Sub
+
+#End Region
+
+#Region "Sort Out Feature"
+
+    ''' <summary>
+    ''' Handles the Sort Out button click - prompts for instruction and starts a structured discussion.
+    ''' </summary>
+    Private Async Sub OnSortOutClick(sender As Object, e As EventArgs)
+        ' Prevent running if autorespond or sort out is already in progress
+        If _autoRespondInProgress Then
+            AppendSystemMessage("Cannot start Sort Out while Autorespond is in progress.")
+            Return
+        End If
+        If _sortOutInProgress Then
+            AppendSystemMessage("Sort Out is already in progress.")
+            Return
+        End If
+        If Not _txtInput.Enabled Then
+            AppendSystemMessage("Cannot start Sort Out while a response is in progress.")
+            Return
+        End If
+
+        ' Run the Sort Out flow
+        Await RunSortOutFlowAsync()
+    End Sub
+
+    ''' <summary>
+    ''' Main flow for the Sort Out feature.
+    ''' </summary>
+    Private Async Function RunSortOutFlowAsync() As Task
+        ' Step 1: Get user instruction
+        Dim userInstruction = ShowCustomInputBox(
+            "Enter your instruction for the discussion. The two bots will sort out this issue based on the conversation so far and the loaded knowledge." & vbCrLf & vbCrLf &
+            "Example: ""In the discussion so far, I received the advice to cancel the contract. Now, please discuss whether this really makes sense.""" & vbCrLf,
+            $"{AN} - Sort Out Discussion", False)
+
+        If String.IsNullOrWhiteSpace(userInstruction) Then
+            Return ' User cancelled
+        End If
+
+        userInstruction = userInstruction.Trim()
+
+        ' Step 2: Get maximum rounds
+        Dim maxRounds = ShowSortOutRoundsDialog()
+        If maxRounds < 1 Then
+            Return ' User cancelled
+        End If
+
+        ' Variables to hold the mission prompts
+        Dim mainMission As String = ""
+        Dim responderMission As String = ""
+        Dim missionsGenerated As Boolean = False
+
+        ' Check if we have stored missions from a previous Sort Out
+        Dim hasStoredMissions = False
+        Try
+            Dim storedMain = My.Settings.SortOutMainMission
+            Dim storedResponder = My.Settings.SortOutResponderMission
+            hasStoredMissions = Not String.IsNullOrWhiteSpace(storedMain) AndAlso Not String.IsNullOrWhiteSpace(storedResponder)
+        Catch
+        End Try
+
+        Dim UserSelectMission As Boolean = False
+
+        If hasStoredMissions Then
+            ' Ask user if they want to reuse stored missions
+            Dim reuseAnswer = ShowCustomYesNoBox(
+                "Previously generated mission statements are available. Do you want to reuse them?" & vbCrLf & vbCrLf &
+                "Click 'Yes' to reuse the previous missions, or 'No' to generate new ones.",
+                "Yes, reuse", "No, generate new")
+
+            If reuseAnswer = 1 Then
+                Try
+                    mainMission = My.Settings.SortOutMainMission
+                    responderMission = My.Settings.SortOutResponderMission
+                    missionsGenerated = True
+                    AppendSystemMessage("Reusing previously generated mission statements.")
+                Catch
+                End Try
+            End If
+            If reuseAnswer = 0 Then
+                Dim abort = ShowCustomYesNoBox(
+                    "Do you really want to abort, or do you want to select the missions manually?",
+                    "Yes, abort", "No, select manually")
+                If abort <> 2 Then Return
+                UserSelectMission = True
+            End If
+        End If
+
+        ' Step 3: Generate or select missions
+        If Not missionsGenerated AndAlso Not String.IsNullOrWhiteSpace(userInstruction) AndAlso Not UserSelectMission Then
+            ' Try to generate missions using LLM
+            Dim generatedMissions = Await GenerateSortOutMissionsAsync(userInstruction, maxRounds)
+
+            If generatedMissions.Success Then
+                ' Always persist the generated missions
+                mainMission = generatedMissions.MainMission
+                responderMission = generatedMissions.ResponderMission
+
+                Try
+                    My.Settings.SortOutMainMission = mainMission
+                    My.Settings.SortOutResponderMission = responderMission
+                    My.Settings.Save()
+                Catch
+                End Try
+
+                If ShowGeneratedMissionsConfirmation Then
+                    ' Show the generated missions and ask for confirmation
+                    Dim confirmMsg = $"Generated mission statements:" & vbCrLf & vbCrLf &
+                                     $"**Advocate (Main Bot):**" & vbCrLf &
+                                     $"{generatedMissions.MainMission}" & vbCrLf & vbCrLf &
+                                     $"**Challenger (Responder Bot):**" & vbCrLf &
+                                     $"{generatedMissions.ResponderMission}" & vbCrLf & vbCrLf &
+                                     "Proceed with these missions?"
+
+                    Dim confirmAnswer = ShowCustomYesNoBox(confirmMsg, "Yes, proceed", "No, select manually")
+
+                    If confirmAnswer = 1 Then
+                        missionsGenerated = True
+                    End If
+                Else
+                    ' Skip confirmation, use generated missions directly
+                    missionsGenerated = True
+                    AppendSystemMessage("Mission statements generated for Advocate and Challenger.")
+                End If
+            Else
+                ' LLM failed - notify user
+                ShowCustomMessageBox("Could not automatically generate mission statements. Please select missions manually.")
+            End If
+        End If
+
+        ' Step 4: If missions not generated, let user select manually
+        If Not missionsGenerated Then
+            ' Select mission for main bot
+            mainMission = ShowSortOutMissionSelector("Select mission for the Main Bot (Advocate):", "SortOutMainMissionManual")
+            If mainMission Is Nothing Then
+                Return ' User cancelled
+            End If
+
+            ' Select mission for responder bot
+            responderMission = ShowSortOutMissionSelector("Select mission for the Responder Bot (Challenger):", "SortOutResponderMissionManual")
+            If responderMission Is Nothing Then
+                Return ' User cancelled
+            End If
+        End If
+
+        ' Step 5: Store original mission and set up temporary missions
+        _sortOutOriginalMissionName = _currentMissionName
+        _sortOutOriginalMissionPrompt = _currentMissionPrompt
+
+        ' Temporarily set the main bot's mission
+        _currentMissionPrompt = mainMission
+
+        ' Set up autoresponder with same persona but different mission
+        _autoRespondPersonaName = _currentPersonaName
+        _autoRespondPersonaPrompt = _currentPersonaPrompt
+        _autoRespondMissionPrompt = responderMission
+        _autoRespondMaxRounds = maxRounds
+        _autoRespondBreakOff = DefaultAutoRespondBreakOff
+
+        ' Store the sort out mission prompts for reference
+        _sortOutMainMissionPrompt = mainMission
+        _sortOutResponderMissionPrompt = responderMission
+
+        ' Step 6: Inject user instruction as a user message if provided
+        If Not String.IsNullOrWhiteSpace(userInstruction) Then
+            AppendUserHtml(userInstruction)
+            _history.Add(("user", userInstruction))
+        End If
+
+        ' Step 7: Run the discussion loop (reusing autorespond infrastructure)
+        Await RunSortOutLoopAsync(maxRounds)
+
+        ' Step 8: Restore original mission
+        _currentMissionName = _sortOutOriginalMissionName
+        _currentMissionPrompt = _sortOutOriginalMissionPrompt
+        UpdateWindowTitle()
+    End Function
+
+    ''' <summary>
+    ''' Shows a dialog to select the number of rounds for Sort Out.
+    ''' </summary>
+    ''' <returns>Selected number of rounds, or 0 if cancelled.</returns>
+    Private Function ShowSortOutRoundsDialog() As Integer
+        ' Build round count options
+        Dim roundOptions As New List(Of String)()
+        For i = 1 To MaxAutoRespondRounds
+            roundOptions.Add(i.ToString())
+        Next
+
+        ' Restore persisted value or use default
+        Dim savedRounds = DefaultRespondRounds
+        Try
+            Dim stored = My.Settings.SortOutMaxRounds
+            If stored >= 1 AndAlso stored <= MaxAutoRespondRounds Then
+                savedRounds = stored
+            End If
+        Catch
+        End Try
+
+        Dim p0 As New SharedMethods.InputParameter("Maximum Rounds", savedRounds.ToString(), roundOptions)
+        Dim params() As SharedMethods.InputParameter = {p0}
+
+        Dim result = ShowCustomVariableInputForm(
+            "How many rounds (back-and-forth exchanges) should the discussion have at most?",
+            $"{AN} - Sort Out Rounds",
+            params)
+
+        If Not result Then
+            Return 0 ' Cancelled
+        End If
+
+        Dim selectedRounds = DefaultRespondRounds
+        Integer.TryParse(CStr(params(0).Value), selectedRounds)
+
+        If selectedRounds < 1 OrElse selectedRounds > MaxAutoRespondRounds Then
+            selectedRounds = DefaultRespondRounds
+        End If
+
+        ' Persist
+        Try
+            My.Settings.SortOutMaxRounds = selectedRounds
+            My.Settings.Save()
+        Catch
+        End Try
+
+        Return selectedRounds
+    End Function
+
+    ''' <summary>
+    ''' Generates mission statements for Sort Out using LLM.
+    ''' </summary>
+    Private Async Function GenerateSortOutMissionsAsync(userInstruction As String, maxRounds As Integer) As Task(Of (Success As Boolean, MainMission As String, ResponderMission As String))
+        Try
+            ShowAssistantThinking()
+
+            ' Build the discussion context
+            Dim discussionContext = BuildConversationForAutoResponder()
+            If String.IsNullOrWhiteSpace(discussionContext) Then
+                discussionContext = "(No discussion yet)"
+            End If
+
+            ' Build the knowledge context
+            Dim knowledgeContext As New StringBuilder()
+            If Not String.IsNullOrWhiteSpace(_knowledgeContent) Then
+                knowledgeContext.AppendLine(_knowledgeContent)
+            End If
+
+            ' Include active document if checkbox checked
+            If _chkIncludeActiveDoc.Checked Then
+                Dim activeDocContent = GetActiveDocumentContent()
+                If Not String.IsNullOrWhiteSpace(activeDocContent) Then
+                    If knowledgeContext.Length > 0 Then
+                        knowledgeContext.AppendLine()
+                        knowledgeContext.AppendLine("--- User's Active Document ---")
+                    End If
+                    knowledgeContext.AppendLine(activeDocContent)
+                End If
+            End If
+
+            Dim knowledgeText = knowledgeContext.ToString()
+            If String.IsNullOrWhiteSpace(knowledgeText) Then
+                knowledgeText = "(No knowledge loaded)"
+            End If
+
+            ' Build the prompt with placeholders replaced
+            Dim prompt = ThisAddIn.SP_DiscussThis_SortOut
+            prompt = prompt.Replace("{MaxRounds}", maxRounds.ToString())
+            prompt = prompt.Replace("{Persona}", If(_currentPersonaPrompt, _currentPersonaName))
+            prompt = prompt.Replace("{Location}", If(_context?.INI_Location, "Unknown"))
+            prompt = prompt.Replace("{OtherPrompt}", userInstruction)
+            prompt = prompt.Replace("{dateContext}", GetDateContext())
+            prompt = prompt.Replace("{Discussion}", discussionContext)
+            prompt = prompt.Replace("{Knowledge}", knowledgeText)
+
+            ' Call LLM (not using alternate model for mission generation)
+            Dim response = Await LLM(_context, prompt, "", "", "", 0, False, True)
+
+            RemoveAssistantThinking()
+
+            If String.IsNullOrWhiteSpace(response) Then
+                Return (False, "", "")
+            End If
+
+            ' Parse the response - expecting two prompts separated by |||
+            Dim parts = response.Split(New String() {"|||"}, StringSplitOptions.None)
+            If parts.Length >= 2 Then
+                Dim mainMission = parts(0).Trim()
+                Dim responderMission = parts(1).Trim()
+
+                If Not String.IsNullOrWhiteSpace(mainMission) AndAlso Not String.IsNullOrWhiteSpace(responderMission) Then
+                    Return (True, mainMission, responderMission)
+                End If
+            End If
+
+            Return (False, "", "")
+
+        Catch ex As Exception
+            RemoveAssistantThinking()
+            AppendSystemMessage($"Error generating missions: {ex.Message}")
+            Return (False, "", "")
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Shows a mission selector for Sort Out manual selection.
+    ''' </summary>
+    ''' <param name="prompt">The prompt to show.</param>
+    ''' <param name="settingsKey">The settings key for persisting selection.</param>
+    ''' <returns>The selected mission prompt, or Nothing if cancelled.</returns>
+    Private Function ShowSortOutMissionSelector(prompt As String, settingsKey As String) As String
+        Dim missionPath = GetMissionFilePath()
+
+        ' Ensure mission file exists
+        If Not String.IsNullOrWhiteSpace(missionPath) Then
+            EnsureMissionFileExists(missionPath)
+        End If
+
+        ' Reload missions
+        LoadMissions()
+
+        ' Build selection items
+        Dim items As New List(Of SelectionItem)()
+
+        ' First item: "No mission"
+        Const NoMissionValue As Integer = -1
+        items.Add(New SelectionItem("No mission", NoMissionValue))
+
+        ' Mission items
+        For i = 0 To _missions.Count - 1
+            items.Add(New SelectionItem(_missions(i).DisplayName, i + 1))
+        Next
+
+        ' Last item: "Edit mission library"
+        Const EditMissionValue As Integer = -2
+        items.Add(New SelectionItem("Edit mission library...", EditMissionValue))
+
+        ' Try to restore saved selection
+        Dim defaultVal = NoMissionValue
+        Try
+            Dim saved = ""
+            Select Case settingsKey
+                Case "SortOutMainMissionManual"
+                    saved = My.Settings.SortOutMainMissionManual
+                Case "SortOutResponderMissionManual"
+                    saved = My.Settings.SortOutResponderMissionManual
+            End Select
+            If Not String.IsNullOrEmpty(saved) Then
+                For i = 0 To _missions.Count - 1
+                    If _missions(i).Name.Equals(saved, StringComparison.OrdinalIgnoreCase) Then
+                        defaultVal = i + 1
+                        Exit For
+                    End If
+                Next
+            End If
+        Catch
+        End Try
+
+        While True
+            Dim result = SelectValue(items, defaultVal, prompt, $"{AN} - Select Mission")
+
+            If result = 0 Then
+                Return Nothing ' Cancelled
+            ElseIf result = NoMissionValue Then
+                ' No mission selected
+                Return ""
+            ElseIf result = EditMissionValue Then
+                ' Edit mission library
+                If Not String.IsNullOrWhiteSpace(missionPath) Then
+                    ShowTextFileEditor(missionPath, $"{AN} - Edit Missions:", False, _context)
+                    LoadMissions()
+
+                    ' Rebuild items
+                    items.Clear()
+                    items.Add(New SelectionItem("No mission", NoMissionValue))
+                    For i = 0 To _missions.Count - 1
+                        items.Add(New SelectionItem(_missions(i).DisplayName, i + 1))
+                    Next
+                    items.Add(New SelectionItem("Edit mission library...", EditMissionValue))
+                End If
+                ' Loop back to show selector again
+            ElseIf result > 0 AndAlso result <= _missions.Count Then
+                ' Mission selected
+                Dim selected = _missions(result - 1)
+
+                ' Persist selection
+                Try
+                    Select Case settingsKey
+                        Case "SortOutMainMissionManual"
+                            My.Settings.SortOutMainMissionManual = selected.Name
+                        Case "SortOutResponderMissionManual"
+                            My.Settings.SortOutResponderMissionManual = selected.Name
+                    End Select
+                    My.Settings.Save()
+                Catch
+                End Try
+
+                Return selected.Prompt
+            End If
+        End While
+
+        Return Nothing
+    End Function
+
+    ''' <summary>
+    ''' Runs the Sort Out discussion loop, reusing autorespond infrastructure.
+    ''' </summary>
+    Private Async Function RunSortOutLoopAsync(maxRounds As Integer) As Task
+        _sortOutInProgress = True
+        _autoRespondInProgress = True  ' Block autorespond while sort out is running
+        _autoRespondCancelled = False
+
+        ' Disable input during sort out
+        Ui(Sub()
+               _txtInput.Enabled = False
+               _btnSend.Enabled = False
+               _btnAutoRespond.Enabled = False
+               _btnSortOut.Enabled = False
+           End Sub)
+
+        ' Determine display names
+        Dim mainDisplayName = _currentPersonaName & " (Advocate)"
+        Dim responderDisplayName = _currentPersonaName & " (Challenger)"
+
+        ' Show progress bar
+        Dim useProgressBar = (maxRounds > 1)
+        If useProgressBar Then
+            ShowProgressBarInSeparateThread($"{AN} Sort Out", "Discussion in progress...")
+            ProgressBarModule.CancelOperation = False
+            ProgressBarModule.GlobalProgressMax = maxRounds
+            ProgressBarModule.GlobalProgressValue = 0
+            ProgressBarModule.GlobalProgressLabel = "Starting discussion..."
+        End If
+
+        ' Notify start
+        AppendSystemMessage($"Sort Out discussion started between {mainDisplayName} and {responderDisplayName} for up to {maxRounds} round(s).")
+
+        Try
+            Dim roundCount = 0
+            Dim stopRequested = False
+
+            ' First, get the main bot's initial response to the user's instruction
+            ShowAssistantThinking()
+            Dim mainResponse = Await GenerateSortOutMainBotResponseAsync(mainDisplayName, responderDisplayName)
+            RemoveAssistantThinking()
+
+            ' Check for stop word
+            If mainResponse.Contains(AutoRespondStopWord) Then
+                stopRequested = True
+                mainResponse = mainResponse.Replace(AutoRespondStopWord, "").Trim()
+            End If
+
+            If Not String.IsNullOrWhiteSpace(mainResponse) Then
+                AppendAssistantMarkdownWithName(mainResponse, mainDisplayName)
+                ' Store with display name prefix for Sort Out mode (like autoresponder)
+                _history.Add(("assistant", $"{mainDisplayName}: {mainResponse}"))
+            End If
+
+            PersistChatHtml()
+            PersistTranscriptLimited()
+
+            ' Now alternate between responder and main bot
+            While roundCount < maxRounds AndAlso Not _autoRespondCancelled AndAlso Not stopRequested
+                roundCount += 1
+
+                If useProgressBar Then
+                    ProgressBarModule.GlobalProgressValue = roundCount
+                    ProgressBarModule.GlobalProgressLabel = $"Round {roundCount} of {maxRounds}..."
+                    If ProgressBarModule.CancelOperation Then
+                        _autoRespondCancelled = True
+                        Exit While
+                    End If
+                End If
+
+                ' Responder (Challenger) responds
+                ShowAutoResponderThinking(responderDisplayName)
+                Dim responderMessage = Await GenerateSortOutResponderMessageAsync(mainDisplayName, responderDisplayName)
+                RemoveAssistantThinking()
+
+                ' Check for stop word
+                If responderMessage.Contains(AutoRespondStopWord) Then
+                    stopRequested = True
+                    responderMessage = responderMessage.Replace(AutoRespondStopWord, "").Trim()
+                End If
+
+                If Not String.IsNullOrWhiteSpace(responderMessage) Then
+                    AppendAutoResponderHtml(responderDisplayName, responderMessage)
+                    _history.Add(("autoresponder", $"{responderDisplayName}: {responderMessage}"))
+                End If
+
+                If stopRequested OrElse _autoRespondCancelled Then
+                    Exit While
+                End If
+
+                ' Main bot (Advocate) responds
+                ShowAssistantThinking()
+                Dim mainBotResponse = Await GenerateSortOutMainBotResponseAsync(mainDisplayName, responderDisplayName)
+                RemoveAssistantThinking()
+
+                ' Check for stop word
+                If mainBotResponse.Contains(AutoRespondStopWord) Then
+                    stopRequested = True
+                    mainBotResponse = mainBotResponse.Replace(AutoRespondStopWord, "").Trim()
+                End If
+
+                If Not String.IsNullOrWhiteSpace(mainBotResponse) Then
+                    AppendAssistantMarkdownWithName(mainBotResponse, mainDisplayName)
+                    ' Store with display name prefix for Sort Out mode (like autoresponder)
+                    _history.Add(("assistant", $"{mainDisplayName}: {mainBotResponse}"))
+                End If
+
+                PersistChatHtml()
+                PersistTranscriptLimited()
+
+                ' Small delay
+                Await Task.Delay(500)
+            End While
+
+            ' Summary message
+            If _autoRespondCancelled Then
+                AppendSystemMessage($"Sort Out discussion cancelled after {roundCount} round(s).")
+            ElseIf stopRequested Then
+                AppendSystemMessage($"Sort Out discussion completed after {roundCount} round(s) - participants came to an end.")
+            Else
+                AppendSystemMessage($"Sort Out discussion completed - maximum of {roundCount} round(s) reached.")
+            End If
+
+        Catch ex As Exception
+            AppendSystemMessage($"Sort Out error: {ex.Message}")
+        Finally
+            If useProgressBar Then
+                ProgressBarModule.CancelOperation = True
+            End If
+
+            _sortOutInProgress = False
+            _autoRespondInProgress = False
+            _autoRespondCancelled = False
+
+            ' Re-enable input
+            Ui(Sub()
+                   _txtInput.Enabled = True
+                   _btnSend.Enabled = True
+                   _btnAutoRespond.Enabled = True
+                   _btnSortOut.Enabled = True
+                   _txtInput.Focus()
+               End Sub)
+
+            PersistChatHtml()
+            PersistTranscriptLimited()
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Generates the main bot's response in Sort Out mode.
+    ''' </summary>
+    Private Async Function GenerateSortOutMainBotResponseAsync(mainDisplayName As String, responderDisplayName As String) As Task(Of String)
+        Dim dateContext = GetDateContext()
+        Dim randomWord = GetRandomModifier()
+        Dim locationContext = GetLocationContext()
+        Dim languageInstruction = GetLanguageInstruction()
+
+        ' Use the main bot's persona with the Sort Out mission
+        Dim basePrompt = If(Not String.IsNullOrEmpty(_currentPersonaPrompt),
+                            _currentPersonaPrompt,
+                            $"You are {_currentPersonaName}, participating in a structured discussion.")
+
+        Dim missionClause = ""
+        If Not String.IsNullOrEmpty(_sortOutMainMissionPrompt) Then
+            missionClause = $" Your mission: {_sortOutMainMissionPrompt}"
+        End If
+
+        Dim systemPrompt = $"{basePrompt}{missionClause}. In your response, be {randomWord}. Do not start with a greeting or salutation. " &
+                           $"You are {mainDisplayName}, discussing with {responderDisplayName}. " &
+                           $"{DefaultAutoRespondBreakOff} {dateContext} {locationContext} {languageInstruction}"
+
+        ' Build context
+        Dim sb As New StringBuilder()
+        sb.AppendLine($"You are {mainDisplayName}, in a structured discussion with {responderDisplayName}.")
+        sb.AppendLine()
+
+        If Not String.IsNullOrWhiteSpace(_knowledgeContent) Then
+            sb.AppendLine("<Knowledge Base>")
+            sb.AppendLine(_knowledgeContent)
+            sb.AppendLine("</Knowledge Base>")
+            sb.AppendLine()
+        End If
+
+        If _chkIncludeActiveDoc.Checked Then
+            Dim activeDocContent = GetActiveDocumentContent()
+            If Not String.IsNullOrWhiteSpace(activeDocContent) Then
+                sb.AppendLine("<User's Active Document>")
+                sb.AppendLine(TruncateForPrompt(activeDocContent, _context.INI_ChatCap))
+                sb.AppendLine("</User's Active Document>")
+                sb.AppendLine()
+            End If
+        End If
+
+        sb.AppendLine("Conversation so far:")
+        Dim convo = BuildConversationForAutoResponder()
+        sb.AppendLine(convo)
+        sb.AppendLine()
+        sb.AppendLine($"Now respond as {mainDisplayName}:")
+
+        Dim answer = Await CallLlmWithSelectedModelAsync(systemPrompt, sb.ToString())
+        Return If(answer, "").Trim()
+    End Function
+
+    ''' <summary>
+    ''' Generates the responder's message in Sort Out mode.
+    ''' </summary>
+    Private Async Function GenerateSortOutResponderMessageAsync(mainDisplayName As String, responderDisplayName As String) As Task(Of String)
+        Dim dateContext = GetDateContext()
+        Dim randomWord = GetRandomModifier()
+        Dim locationContext = GetLocationContext()
+        Dim languageInstruction = GetLanguageInstruction()
+
+        ' Use same persona but responder mission
+        Dim basePrompt = If(Not String.IsNullOrEmpty(_autoRespondPersonaPrompt),
+                            _autoRespondPersonaPrompt,
+                            $"You are {_autoRespondPersonaName}, participating in a structured discussion.")
+
+        Dim missionClause = ""
+        If Not String.IsNullOrEmpty(_sortOutResponderMissionPrompt) Then
+            missionClause = $" Your mission: {_sortOutResponderMissionPrompt}"
+        End If
+
+        Dim systemPrompt = $"{basePrompt}{missionClause}. In your response, be {randomWord}. Do not start with a greeting or salutation. " &
+                           $"You are {responderDisplayName}, responding to {mainDisplayName}. " &
+                           $"{DefaultAutoRespondBreakOff} {dateContext} {locationContext} {languageInstruction}"
+
+        ' Build context
+        Dim sb As New StringBuilder()
+        sb.AppendLine($"You are {responderDisplayName}, responding to {mainDisplayName} in a structured discussion.")
+        sb.AppendLine()
+
+        If Not String.IsNullOrWhiteSpace(_knowledgeContent) Then
+            sb.AppendLine("<Knowledge Base>")
+            sb.AppendLine(_knowledgeContent)
+            sb.AppendLine("</Knowledge Base>")
+            sb.AppendLine()
+        End If
+
+        If _chkIncludeActiveDoc.Checked Then
+            Dim activeDocContent = GetActiveDocumentContent()
+            If Not String.IsNullOrWhiteSpace(activeDocContent) Then
+                sb.AppendLine("<User's Active Document>")
+                sb.AppendLine(TruncateForPrompt(activeDocContent, _context.INI_ChatCap))
+                sb.AppendLine("</User's Active Document>")
+                sb.AppendLine()
+            End If
+        End If
+
+        sb.AppendLine("Conversation so far:")
+        Dim convo = BuildConversationForAutoResponder()
+        sb.AppendLine(convo)
+        sb.AppendLine()
+        sb.AppendLine($"Now respond as {responderDisplayName}:")
+
+        Dim answer = Await CallLlmWithSelectedModelAsync(systemPrompt, sb.ToString())
+        Return If(answer, "").Trim()
+    End Function
 
 #End Region
 
