@@ -1698,6 +1698,7 @@ Namespace SharedLibrary
                     {"SP_MarkupRegex", context.SP_MarkupRegex},
                     {"SP_ChatWord", context.SP_ChatWord},
                     {"SP_HelpMe", context.SP_HelpMe},
+                    {"SP_DiscussThis_SortOut", context.SP_DiscussThis_SortOut},
                     {"SP_Chat", context.SP_Chat},
                     {"SP_Add_ChatWord_Commands", context.SP_Add_ChatWord_Commands},
                     {"SP_Add_Chat_NoCommands", context.SP_Add_Chat_NoCommands},
@@ -1785,6 +1786,7 @@ Namespace SharedLibrary
                     {"SP_MarkupRegex", Default_SP_MarkupRegex},
                     {"SP_ChatWord", Default_SP_ChatWord},
                     {"SP_HelpMe", Default_SP_HelpMe},
+                    {"SP_DiscussThis_SortOut", Default_SP_DiscussThis_SortOut},
                     {"SP_Chat", Default_SP_Chat},
                     {"SP_Add_ChatWord_Commands", Default_SP_Add_ChatWord_Commands},
                     {"SP_Add_Chat_NoCommands", Default_SP_Add_Chat_NoCommands},
@@ -2784,6 +2786,7 @@ Namespace SharedLibrary
             variableValues.Add("SP_MarkupRegex", context.SP_MarkupRegex)
             variableValues.Add("SP_ChatWord", context.SP_ChatWord)
             variableValues.Add("SP_HelpMe", context.SP_HelpMe)
+            variableValues.Add("SP_DiscussThis_SortOut", context.SP_DiscussThis_SortOut)
             variableValues.Add("SP_Chat", context.SP_Chat)
             variableValues.Add("SP_Add_ChatWord_Commands", context.SP_Add_ChatWord_Commands)
             variableValues.Add("SP_Add_Chat_NoCommands", context.SP_Add_Chat_NoCommands)
@@ -2944,6 +2947,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_MarkupRegex") Then context.SP_MarkupRegex = CStr(updatedValues("SP_MarkupRegex"))
                 If updatedValues.ContainsKey("SP_ChatWord") Then context.SP_ChatWord = CStr(updatedValues("SP_ChatWord"))
                 If updatedValues.ContainsKey("SP_HelpMe") Then context.SP_HelpMe = CStr(updatedValues("SP_HelpMe"))
+                If updatedValues.ContainsKey("SP_DiscussThis_SortOut") Then context.SP_DiscussThis_SortOut = CStr(updatedValues("SP_DiscussThis_SortOut"))
                 If updatedValues.ContainsKey("SP_Chat") Then context.SP_Chat = CStr(updatedValues("SP_Chat"))
                 If updatedValues.ContainsKey("SP_Add_ChatWord_Commands") Then context.SP_Add_ChatWord_Commands = CStr(updatedValues("SP_Add_ChatWord_Commands"))
                 If updatedValues.ContainsKey("SP_Add_Chat_NoCommands") Then context.SP_Add_Chat_NoCommands = CStr(updatedValues("SP_Add_Chat_NoCommands"))

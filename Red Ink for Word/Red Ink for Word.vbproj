@@ -55,7 +55,7 @@
     <FriendlyName>Red Ink for Word %28Develop%29</FriendlyName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Preview'">
-    <ApplicationVersion>1.1.6.200</ApplicationVersion>
+    <ApplicationVersion>1.1.7.200</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\preview\word\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/preview/word/</InstallUrl>
     <ProductName>Red Ink for Word %28Preview%29</ProductName>

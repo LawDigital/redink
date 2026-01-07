@@ -1234,6 +1234,15 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_DiscussThis_SortOut As String
+        Get
+            Return _context.SP_DiscussThis_SortOut
+        End Get
+        Set(value As String)
+            _context.SP_DiscussThis_SortOut = value
+        End Set
+    End Property
+
 
     Public Shared Property SP_Add_ChatWord_Commands As String
         Get
