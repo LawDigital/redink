@@ -252,6 +252,7 @@ Namespace SharedLibrary
                 context.INI_APIEncrypted = ParseBoolean(configDict, "APIKeyEncrypted")
                 context.INI_ShortcutsWordExcel = If(configDict.ContainsKey("ShortcutsWordExcel"), configDict("ShortcutsWordExcel"), "")
                 context.INI_ContextMenu = ParseBoolean(configDict, "ContextMenu", DEFAULT_BOOL_CONTEXTMENU)
+                context.INI_NoLocalConfig = ParseBoolean(configDict, "NoLocalConfig")
 
                 ' Tooling settings
 
@@ -269,8 +270,6 @@ Namespace SharedLibrary
                 context.INI_UpdateIniNoSignature = ParseBoolean(configDict, "UpdateIniNoSignature", False)
                 context.INI_UpdateSource = If(configDict.ContainsKey("UpdateSource"), configDict("UpdateSource"), "")
 
-                ' First parameter Is legacy
-                ' context.INI_UpdateIniClients = If(configDict.ContainsKey("UpdateClients"), configDict("UpdateClients"), "")
                 context.INI_UpdateIniClients = If(configDict.ContainsKey("UpdateIniClients"), configDict("UpdateIniClients"), "")
 
                 context.INI_UpdateIniIgnoreOverride = If(configDict.ContainsKey("UpdateIniIgnoreOverride"), configDict("UpdateIniIgnoreOverride"), "")
@@ -307,6 +306,17 @@ Namespace SharedLibrary
                 context.INI_DocStylePath = If(configDict.ContainsKey("DocStylePath"), configDict("DocStylePath"), "")
                 context.INI_DocStylePathLocal = If(configDict.ContainsKey("DocStylePathLocal"), configDict("DocStylePathLocal"), "")
                 context.INI_PromptLibPath_Transcript = If(configDict.ContainsKey("PromptLib_Transcript"), configDict("PromptLib_Transcript"), "")
+
+                ' Logo paths
+                context.INI_LogoPath = If(configDict.ContainsKey("LogoPath"), configDict("LogoPath"), "")
+                context.INI_LogoPathMedium = If(configDict.ContainsKey("LogoPathMedium"), configDict("LogoPathMedium"), "")
+                context.INI_LogoPathLarge = If(configDict.ContainsKey("LogoPathLarge"), configDict("LogoPathLarge"), "")
+                context.INI_BrandingName = If(configDict.ContainsKey("BrandingName"), configDict("BrandingName"), "")
+
+                ' Cache logo paths for use without context
+                SharedMethods.INI_LogoPath_Cached = context.INI_LogoPath
+                SharedMethods.INI_LogoPathMedium_Cached = context.INI_LogoPathMedium
+                SharedMethods.INI_LogoPathLarge_Cached = context.INI_LogoPathLarge
 
                 ' Process Internet search if enabled.
                 context.INI_ISearch = ParseBoolean(configDict, "ISearch", DEFAULT_BOOL_ISEARCH_ENABLED)
@@ -584,7 +594,7 @@ Namespace SharedLibrary
             settingsForm.TopMost = True
 
             ' Set the icon.
-            Dim bmp As New System.Drawing.Bitmap(My.Resources.Red_Ink_Logo)
+            Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
             settingsForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
 
             ' Set a predefined font for consistent layout.

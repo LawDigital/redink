@@ -56,7 +56,7 @@ Namespace SharedLibrary
                 Dim standardFont As New System.Drawing.Font("Segoe UI", 10.0F, FontStyle.Regular, GraphicsUnit.Point)
 
                 ' Create the PictureBox
-                Dim bmp As New Bitmap(My.Resources.Red_Ink_Logo)
+                Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
                 Dim pictureBox As New PictureBox()
                 pictureBox.Image = bmp
                 pictureBox.SizeMode = PictureBoxSizeMode.Zoom

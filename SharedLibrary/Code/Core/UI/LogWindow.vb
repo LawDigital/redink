@@ -251,7 +251,7 @@ Namespace SharedLibrary
 
                 ' (1) Use logo as icon (if available).
                 Try
-                    Using bmpIcon As New Bitmap(My.Resources.Red_Ink_Logo)
+                    Using bmpIcon As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
                         Dim hIcon As IntPtr = bmpIcon.GetHicon()
                         Try
                             Using ico As Icon = Icon.FromHandle(hIcon)

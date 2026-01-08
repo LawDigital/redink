@@ -240,7 +240,7 @@ Namespace SharedLibrary
         ''' </summary>
         Private Sub InitializeComponent(Optional title As System.String = Nothing, Optional resetChecked As System.Boolean = True, Optional instruction As System.String = "Select one or more alternate models:")
             Me.Text = If(String.IsNullOrWhiteSpace(title), SharedMethods.AN & " - Select Alternate Models", title)
-            Me.Icon = Icon.FromHandle((New System.Drawing.Bitmap(My.Resources.Red_Ink_Logo)).GetHicon())
+            Me.Icon = Icon.FromHandle((New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))).GetHicon())
             Me.StartPosition = System.Windows.Forms.FormStartPosition.CenterParent
             Me.MinimizeBox = True
             Me.MaximizeBox = True

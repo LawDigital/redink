@@ -303,9 +303,6 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Code\CommonFeatures\FactExtractionService.vb" />
-    <Compile Include="Code\CommonFeatures\DiscussInky.vb">
-      <SubType>Form</SubType>
-    </Compile>
     <Compile Include="Code\CommonFeatures\SharedMethods.MyStyleHelpers.vb" />
     <Compile Include="Code\CommonFeatures\SharedMethods.PromptLibrary.vb" />
     <Compile Include="Code\CommonFeatures\SharedMethods.TextFileEditor.vb" />

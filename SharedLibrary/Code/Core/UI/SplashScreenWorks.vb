@@ -92,7 +92,7 @@ Namespace SharedLibrary
 
             ' ─── Logo ─────────────────────────────────────────────────
             picLogo = New System.Windows.Forms.PictureBox() With {
-        .Image = New System.Drawing.Bitmap(My.Resources.Red_Ink_Logo),
+        .Image = New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)),
         .SizeMode = System.Windows.Forms.PictureBoxSizeMode.Zoom
     }
             Me.Controls.Add(picLogo)

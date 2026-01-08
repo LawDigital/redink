@@ -125,6 +125,7 @@ Namespace SharedLibrary
             Property RDV As String
             Property InitialConfigFailed As Boolean
             Property INI_ContextMenu As Boolean
+            Property INI_NoLocalConfig As Boolean
             Property INI_UpdateCheckInterval As Integer
             Property INI_UpdatePath As String
             Property INI_HelpMeInkyPath As String
@@ -201,6 +202,7 @@ Namespace SharedLibrary
             Property SP_Chat As String
             Property SP_HelpMe As String
             Property SP_DiscussThis_SortOut As String
+            Property SP_DiscussThis_SumUp As String
             Property SP_Add_ChatWord_Commands As String
             Property SP_Add_Chat_NoCommands As String
             Property SP_ChatExcel As String
@@ -292,6 +294,11 @@ Namespace SharedLibrary
             Property INI_APICall_ToolCallPart_Template_2 As String
             Property INI_ToolCallDetectionPattern_2 As String
             Property INI_ToolCallExtractionMap_2 As String
+
+            Property INI_LogoPathLarge As String
+            Property INI_LogoPathMedium As String
+            Property INI_LogoPath As String
+            Property INI_BrandingName As String
 
 
         End Interface
@@ -385,6 +392,7 @@ Namespace SharedLibrary
         Public Property RDV As String Implements ISharedContext.RDV
         Public Property InitialConfigFailed As Boolean Implements ISharedContext.InitialConfigFailed
         Public Property INI_ContextMenu As Boolean Implements ISharedContext.INI_ContextMenu
+        Public Property INI_NoLocalConfig As Boolean Implements ISharedContext.INI_NoLocalConfig
         Public Property INI_UpdateCheckInterval As Integer Implements ISharedContext.INI_UpdateCheckInterval
         Public Property INI_UpdatePath As String Implements ISharedContext.INI_UpdatePath
         Public Property INI_HelpMeInkyPath As String Implements ISharedContext.INI_HelpMeInkyPath
@@ -467,6 +475,7 @@ Namespace SharedLibrary
         Public Property SP_Chat As String Implements ISharedContext.SP_Chat
         Public Property SP_HelpMe As String Implements ISharedContext.SP_HelpMe
         Public Property SP_DiscussThis_SortOut As String Implements ISharedContext.SP_DiscussThis_SortOut
+        Public Property SP_DiscussThis_SumUp As String Implements ISharedContext.SP_DiscussThis_SumUp
         Public Property SP_Add_ChatWord_Commands As String Implements ISharedContext.SP_Add_ChatWord_Commands
         Public Property SP_Add_Chat_NoCommands As String Implements ISharedContext.SP_Add_Chat_NoCommands
         Public Property SP_ChatExcel As String Implements ISharedContext.SP_ChatExcel
@@ -550,6 +559,11 @@ Namespace SharedLibrary
         Public Property INI_APICall_ToolCallPart_Template_2 As String Implements ISharedContext.INI_APICall_ToolCallPart_Template_2
         Public Property INI_ToolCallDetectionPattern_2 As String Implements ISharedContext.INI_ToolCallDetectionPattern_2
         Public Property INI_ToolCallExtractionMap_2 As String Implements ISharedContext.INI_ToolCallExtractionMap_2
+
+        Public Property INI_LogoPathLarge As String Implements ISharedContext.INI_LogoPathLarge
+        Public Property INI_LogoPathMedium As String Implements ISharedContext.INI_LogoPathMedium
+        Public Property INI_LogoPath As String Implements ISharedContext.INI_LogoPath
+        Public Property INI_BrandingName As String Implements ISharedContext.INI_BrandingName
 
 
     End Class

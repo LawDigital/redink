@@ -123,7 +123,7 @@ Namespace SharedLibrary
             inputForm.Font = New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
 
             ' Use logo as icon.
-            Dim bmp As New System.Drawing.Bitmap(My.Resources.Red_Ink_Logo)
+            Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
             inputForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
 
             ' Main layout: prompt, ListBox, buttons.
@@ -299,7 +299,7 @@ Namespace SharedLibrary
             }
 
             ' Set the icon.
-            Dim bmp As New Bitmap(My.Resources.Red_Ink_Logo)
+            Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
             inputForm.Icon = Icon.FromHandle(bmp.GetHicon())
 
             ' Standard font.
@@ -616,7 +616,7 @@ Namespace SharedLibrary
             }
 
             ' Icon.
-            Dim bmpIcon As New Bitmap(My.Resources.Red_Ink_Logo)
+            Dim bmpIcon As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
             messageForm.Icon = Icon.FromHandle(bmpIcon.GetHicon())
 
             ' Font.
@@ -890,7 +890,7 @@ Namespace SharedLibrary
         .AutoSize = False
     }
 
-            Dim bmpIcon As New System.Drawing.Bitmap(My.Resources.Red_Ink_Logo)
+            Dim bmpIcon As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
             messageForm.Icon = System.Drawing.Icon.FromHandle(bmpIcon.GetHicon())
 
             Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
@@ -1133,7 +1133,7 @@ Namespace SharedLibrary
             RTFMessageForm.MinimumSize = New System.Drawing.Size(650, 335)
 
             ' Icon.
-            Dim bmp As New System.Drawing.Bitmap(My.Resources.Red_Ink_Logo)
+            Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
             RTFMessageForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
 
             ' Standard font.
@@ -1311,7 +1311,7 @@ Namespace SharedLibrary
                                     End If
 
                                     ' Set the icon.
-                                    Dim bmp As New System.Drawing.Bitmap(My.Resources.Red_Ink_Logo)
+                                    Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
                                     HTMLMessageForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
 
                                     ' Standard font.
@@ -1454,7 +1454,7 @@ Namespace SharedLibrary
                                     End If
 
                                     ' Set the icon.
-                                    Dim bmp As New System.Drawing.Bitmap(My.Resources.Red_Ink_Logo)
+                                    Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
                                     HTMLMessageForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
 
                                     ' Standard font.
@@ -1578,7 +1578,7 @@ Namespace SharedLibrary
             }
 
             ' Set icon.
-            Dim bmpIcon As New Bitmap(My.Resources.Red_Ink_Logo)
+            Dim bmpIcon As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
             inputForm.Icon = Icon.FromHandle(bmpIcon.GetHicon())
 
             ' Layout.
@@ -1913,7 +1913,7 @@ Namespace SharedLibrary
             styledForm.MinimumSize = New System.Drawing.Size(minFormWStatic, minFormHStatic)
 
             ' Icon.
-            Dim bmp As New System.Drawing.Bitmap(My.Resources.Red_Ink_Logo)
+            Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
             styledForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
 
             ' Standard font.

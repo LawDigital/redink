@@ -264,7 +264,7 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Function GetLogoPngBytes() As System.Byte()
         Try
-            Using src As System.Drawing.Bitmap = CType(My.Resources.Red_Ink_Logo.Clone(), System.Drawing.Bitmap)
+            Using src As System.Drawing.Bitmap = CType(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard).Clone(), System.Drawing.Bitmap)
                 Using ms As New System.IO.MemoryStream()
                     src.Save(ms, System.Drawing.Imaging.ImageFormat.Png)
                     Return ms.ToArray()
@@ -534,7 +534,7 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Function GetLogoDataUrl() As System.String
         Try
-            Using src As System.Drawing.Bitmap = CType(My.Resources.Red_Ink_Logo.Clone(), System.Drawing.Bitmap)
+            Using src As System.Drawing.Bitmap = CType(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard).Clone(), System.Drawing.Bitmap)
                 Using ms As New System.IO.MemoryStream()
                     src.Save(ms, System.Drawing.Imaging.ImageFormat.Png)
                     Dim b64 As System.String = System.Convert.ToBase64String(ms.ToArray())

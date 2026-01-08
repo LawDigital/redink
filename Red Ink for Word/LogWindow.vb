@@ -11,6 +11,7 @@ Option Strict On
 
 Imports System.Drawing
 Imports System.Windows.Forms
+Imports SharedLibrary.SharedLibrary
 
 ''' <summary>
 ''' A modeless log window that displays tooling operations and allows cancellation.
@@ -52,7 +53,7 @@ Public Class LogWindow
         Me.AutoScaleMode = AutoScaleMode.Font
 
         Try
-            Me.Icon = Icon.FromHandle((New Bitmap(My.Resources.Red_Ink_Logo)).GetHicon())
+            Me.Icon = Icon.FromHandle((New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))).GetHicon())
         Catch
         End Try
 

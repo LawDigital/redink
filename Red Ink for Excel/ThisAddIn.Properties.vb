@@ -1209,6 +1209,15 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_DiscussThis_SumUp As String
+        Get
+            Return _context.SP_DiscussThis_SumUp
+        End Get
+        Set(value As String)
+            _context.SP_DiscussThis_SumUp = value
+        End Set
+    End Property
+
 
     Public Shared Property SP_Add_ChatWord_Commands As String
         Get
@@ -1543,6 +1552,15 @@ Partial Public Class ThisAddIn
         End Get
         Set(value As Boolean)
             _context.INI_ContextMenu = value
+        End Set
+    End Property
+
+    Public Shared Property INI_NoLocalConfig As Boolean
+        Get
+            Return _context.INI_NoLocalConfig
+        End Get
+        Set(value As Boolean)
+            _context.INI_NoLocalConfig = value
         End Set
     End Property
 
@@ -2093,6 +2111,43 @@ Partial Public Class ThisAddIn
         End Get
         Set(value As String)
             _context.INI_ToolCallExtractionMap_2 = value
+        End Set
+    End Property
+
+    Public Shared Property INI_BrandingName As String
+        Get
+            Return _context.INI_BrandingName
+        End Get
+        Set(value As String)
+            _context.INI_BrandingName = value
+        End Set
+    End Property
+
+    Public Shared Property INI_LogoPath As String
+        Get
+            Return _context.INI_LogoPath
+        End Get
+        Set(value As String)
+            _context.INI_LogoPath = value
+        End Set
+    End Property
+
+
+    Public Shared Property INI_LogoPathMedium As String
+        Get
+            Return _context.INI_LogoPathMedium
+        End Get
+        Set(value As String)
+            _context.INI_LogoPathMedium = value
+        End Set
+    End Property
+
+    Public Shared Property INI_LogoPathLarge As String
+        Get
+            Return _context.INI_LogoPathLarge
+        End Get
+        Set(value As String)
+            _context.INI_LogoPathLarge = value
         End Set
     End Property
 
