@@ -330,6 +330,374 @@ Partial Public Class ThisAddIn
     End Sub
 
 
+
+    ''' <summary>
+    ''' Prompts the user for a file or directory, flattens PDF files into image-only PDFs,
+    ''' preserving visual appearance but removing all text layers (useful for security/distribution).
+    ''' Shows a progress bar and allows cancellation.
+    ''' </summary>
+    Public Async Sub FlattenPdfToImages()
+        Dim selectedPath As String = ""
+
+        ' Show DragDropForm for file or directory selection
+        Globals.ThisAddIn.DragDropFormLabel = "Select a PDF file or folder containing PDFs to flatten"
+
+        Try
+            Using frm As New DragDropForm(DragDropMode.FileOrDirectory)
+                If frm.ShowDialog() = DialogResult.OK Then
+                    selectedPath = frm.SelectedFilePath
+                End If
+            End Using
+        Finally
+            Globals.ThisAddIn.DragDropFormLabel = ""
+        End Try
+
+        If String.IsNullOrWhiteSpace(selectedPath) Then
+            Return
+        End If
+
+        ' Determine if it's a file or directory
+        Dim isDirectory As Boolean = IO.Directory.Exists(selectedPath)
+        Dim isFile As Boolean = IO.File.Exists(selectedPath)
+
+        If Not isFile AndAlso Not isDirectory Then
+            ShowCustomMessageBox("The selected path does not exist.")
+            Return
+        End If
+
+        ' Collect PDF files to process
+        Dim filesToProcess As New List(Of String)()
+
+        If isFile Then
+            Dim ext As String = IO.Path.GetExtension(selectedPath).ToLowerInvariant()
+            If ext = ".pdf" Then
+                filesToProcess.Add(selectedPath)
+            Else
+                ShowCustomMessageBox($"File type '{ext}' is not supported. Only PDF files can be flattened.")
+                Return
+            End If
+        Else
+            ' Directory - ask user about recursion
+            Dim recurseChoice As Integer = ShowCustomYesNoBox(
+            "Do you want to include PDF files from subdirectories?",
+            "Yes, include subdirectories",
+            "No, top directory only")
+
+            If recurseChoice = 0 Then
+                Return ' User aborted
+            End If
+
+            Dim searchOption As IO.SearchOption = If(recurseChoice = 1, IO.SearchOption.AllDirectories, IO.SearchOption.TopDirectoryOnly)
+
+            ' Collect all PDF files
+            Dim allFiles As String() = IO.Directory.GetFiles(selectedPath, "*.pdf", searchOption)
+            filesToProcess.AddRange(allFiles)
+
+            If filesToProcess.Count = 0 Then
+                ShowCustomMessageBox("No PDF files found in the selected directory.")
+                Return
+            End If
+
+            ' Confirm if many files
+            If filesToProcess.Count > 10 Then
+                Dim confirmAnswer As Integer = ShowCustomYesNoBox(
+                $"The directory contains {filesToProcess.Count} PDF files to process. Continue?",
+                "Yes, continue", "No, abort")
+                If confirmAnswer <> 1 Then
+                    Return
+                End If
+            End If
+        End If
+
+        ' Ask user about output location
+        Dim useSubdirectory As Boolean = False
+        Dim outputSubdirName As String = "flattened"
+
+        If filesToProcess.Count > 1 Then
+            Dim outputChoice As Integer = ShowCustomYesNoBox(
+            "Where should the flattened PDF files be saved?",
+            $"In a subdirectory '{outputSubdirName}'",
+            "Same location as original files (with '_flat' suffix)")
+
+            If outputChoice = 0 Then
+                Return ' User aborted
+            End If
+            useSubdirectory = (outputChoice = 1)
+        End If
+
+        ' Ask for DPI setting
+        ' 200 DPI is recommended for OCR compatibility while keeping file size small
+        ' 300 DPI is standard for high-quality OCR
+        ' 150 DPI is minimum for readable text
+        Dim dpiInput As String = ShowCustomInputBox(
+        "Enter the output DPI (dots per inch):" & vbCrLf & vbCrLf &
+        "• 150 DPI = Smaller files, lower quality (not recommended for OCR)" & vbCrLf &
+        "• 200 DPI = Balanced size/quality (minimum for reliable OCR)" & vbCrLf &
+        "• 300 DPI = High quality, larger files (recommended for OCR)",
+        AN & " Flatten PDF to Images",
+        True,
+        "200")
+
+        If dpiInput Is Nothing Then
+            Return ' User cancelled
+        End If
+
+        Dim dpi As Integer = 200
+        If Not Integer.TryParse(dpiInput.Trim(), dpi) OrElse dpi < 72 OrElse dpi > 600 Then
+            ShowCustomMessageBox("Invalid DPI value. Please enter a number between 72 and 600.")
+            Return
+        End If
+
+        ' Create output subdirectory if needed
+        Dim outputBaseDir As String = ""
+        If useSubdirectory Then
+            If isDirectory Then
+                outputBaseDir = IO.Path.Combine(selectedPath, outputSubdirName)
+            Else
+                outputBaseDir = IO.Path.Combine(IO.Path.GetDirectoryName(selectedPath), outputSubdirName)
+            End If
+
+            Try
+                If Not IO.Directory.Exists(outputBaseDir) Then
+                    IO.Directory.CreateDirectory(outputBaseDir)
+                End If
+            Catch ex As Exception
+                ShowCustomMessageBox($"Failed to create output directory: {ex.Message}")
+                Return
+            End Try
+        End If
+
+        ' Show progress bar
+        ProgressBarModule.GlobalProgressValue = 0
+        ProgressBarModule.GlobalProgressMax = filesToProcess.Count
+        ProgressBarModule.GlobalProgressLabel = "Initializing..."
+        ProgressBarModule.CancelOperation = False
+        ProgressBarModule.ShowProgressBarInSeparateThread(AN & " Flatten PDF to Images", "Starting PDF flattening...")
+
+        ' Process files
+        Dim successCount As Integer = 0
+        Dim failedFiles As New List(Of String)()
+
+        Try
+            For i As Integer = 0 To filesToProcess.Count - 1
+                ' Check for cancellation
+                If ProgressBarModule.CancelOperation Then
+                    Exit For
+                End If
+
+                Dim filePath As String = filesToProcess(i)
+                Dim fileName As String = IO.Path.GetFileName(filePath)
+
+                ' Update progress
+                ProgressBarModule.GlobalProgressValue = i
+                ProgressBarModule.GlobalProgressLabel = $"Processing file {i + 1} of {filesToProcess.Count}: {fileName}"
+
+                Try
+                    ' Determine output path
+                    Dim outputPath As String
+                    Dim nameWithoutExt As String = IO.Path.GetFileNameWithoutExtension(filePath)
+
+                    If useSubdirectory Then
+                        ' Preserve relative directory structure if processing subdirectories
+                        If isDirectory Then
+                            Dim relativePath As String = filePath.Substring(selectedPath.Length).TrimStart(IO.Path.DirectorySeparatorChar)
+                            Dim relativeDir As String = IO.Path.GetDirectoryName(relativePath)
+                            If Not String.IsNullOrEmpty(relativeDir) Then
+                                Dim targetDir As String = IO.Path.Combine(outputBaseDir, relativeDir)
+                                If Not IO.Directory.Exists(targetDir) Then
+                                    IO.Directory.CreateDirectory(targetDir)
+                                End If
+                            End If
+                            outputPath = IO.Path.Combine(outputBaseDir, IO.Path.ChangeExtension(relativePath, ".pdf"))
+                        Else
+                            outputPath = IO.Path.Combine(outputBaseDir, fileName)
+                        End If
+                    Else
+                        ' Same location with suffix
+                        Dim dir As String = IO.Path.GetDirectoryName(filePath)
+                        outputPath = IO.Path.Combine(dir, nameWithoutExt & "_flat.pdf")
+                    End If
+
+                    ' Flatten the PDF
+                    Await System.Threading.Tasks.Task.Run(Sub() FlattenPdfToImageOnly(filePath, outputPath, dpi))
+                    successCount += 1
+
+                Catch ex As Exception
+                    failedFiles.Add($"{fileName}: {ex.Message}")
+                End Try
+            Next
+
+        Finally
+            ' Close progress bar
+            ProgressBarModule.CancelOperation = True
+        End Try
+
+        ' Build summary
+        Dim wasCancelled As Boolean = (successCount + failedFiles.Count) < filesToProcess.Count
+
+        Dim summary As New System.Text.StringBuilder()
+
+        If wasCancelled Then
+            summary.AppendLine("Operation was cancelled by user.")
+            summary.AppendLine()
+        End If
+
+        summary.AppendLine($"Successfully flattened: {successCount} file(s)")
+        summary.AppendLine($"Output DPI: {dpi}")
+
+        If useSubdirectory Then
+            summary.AppendLine($"Output directory: {outputBaseDir}")
+        End If
+
+        If failedFiles.Count > 0 Then
+            summary.AppendLine()
+            summary.AppendLine($"Failed: {failedFiles.Count} file(s)")
+            For Each f In failedFiles.Take(10)
+                summary.AppendLine($"  • {f}")
+            Next
+            If failedFiles.Count > 10 Then
+                summary.AppendLine($"  ... and {failedFiles.Count - 10} more")
+            End If
+
+            ' Copy detailed log to clipboard
+            Dim clipboardLog As New System.Text.StringBuilder()
+            clipboardLog.AppendLine("=== FAILED FILES ===")
+            For Each f In failedFiles
+                clipboardLog.AppendLine(f)
+            Next
+            SharedMethods.PutInClipboard(clipboardLog.ToString().TrimEnd())
+            summary.AppendLine()
+            summary.AppendLine("(Detailed log copied to clipboard)")
+        End If
+
+        ShowCustomMessageBox(summary.ToString().TrimEnd(), AN & " Flatten PDF to Images")
+    End Sub
+
+    ''' <summary>
+    ''' Converts a PDF to an image-only PDF by rasterizing each page.
+    ''' Unlike BurnInPdfToImageOnly, this method does not process annotations and simply
+    ''' renders each page as-is to a rasterized image, removing all text layers.
+    ''' </summary>
+    ''' <param name="inputPath">Input PDF file path</param>
+    ''' <param name="outputPath">Output PDF file path</param>
+    ''' <param name="dpi">Rasterization DPI (default 200 for balance of size/quality)</param>
+    Private Shared Sub FlattenPdfToImageOnly(inputPath As String, outputPath As String, Optional dpi As Integer = 200)
+
+        ' Ensure pdfium.dll is loaded (reuse existing helper from PdfRedactionService)
+        PdfRedactionService.EnsurePdfiumLoadedPublic()
+
+        Using pdf As PdfiumViewer.PdfDocument = PdfiumViewer.PdfDocument.Load(inputPath)
+            Dim outDoc As New PdfSharp.Pdf.PdfDocument()
+
+            ' Preserve metadata from source PDF
+            Try
+                Using srcDoc As PdfSharp.Pdf.PdfDocument = PdfSharp.Pdf.IO.PdfReader.Open(inputPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.InformationOnly)
+                    CopyPdfMetadata(srcDoc, outDoc)
+                End Using
+            Catch
+                ' Ignore metadata copy failures
+            End Try
+
+            For pageIndex As Integer = 0 To pdf.PageCount - 1
+                Dim sizePt As System.Drawing.SizeF = pdf.PageSizes(pageIndex)
+                Dim widthPx As Integer = CInt(System.Math.Round(sizePt.Width / 72.0 * dpi))
+                Dim heightPx As Integer = CInt(System.Math.Round(sizePt.Height / 72.0 * dpi))
+
+                ' Render with annotations visible, LCD text smoothing, and print quality
+                Dim renderFlags As PdfiumViewer.PdfRenderFlags =
+                PdfiumViewer.PdfRenderFlags.Annotations Or
+                PdfiumViewer.PdfRenderFlags.LcdText Or
+                PdfiumViewer.PdfRenderFlags.ForPrinting
+
+                Using rendered As System.Drawing.Image = pdf.Render(pageIndex, widthPx, heightPx, dpi, dpi, renderFlags)
+                    Dim outPage As PdfSharp.Pdf.PdfPage = outDoc.AddPage()
+                    outPage.Width = PdfSharp.Drawing.XUnit.FromPoint(sizePt.Width)
+                    outPage.Height = PdfSharp.Drawing.XUnit.FromPoint(sizePt.Height)
+
+                    ' Save as JPEG for smaller file size (quality 85 is a good balance)
+                    Using ms As New System.IO.MemoryStream()
+                        Dim jpegEncoder As System.Drawing.Imaging.ImageCodecInfo = GetJpegEncoder()
+                        If jpegEncoder IsNot Nothing Then
+                            Dim encoderParams As New System.Drawing.Imaging.EncoderParameters(1)
+                            encoderParams.Param(0) = New System.Drawing.Imaging.EncoderParameter(
+                            System.Drawing.Imaging.Encoder.Quality, 85L)
+                            rendered.Save(ms, jpegEncoder, encoderParams)
+                        Else
+                            ' Fallback to PNG if JPEG encoder not available
+                            rendered.Save(ms, System.Drawing.Imaging.ImageFormat.Png)
+                        End If
+
+                        ms.Position = 0
+                        Using xgfx As PdfSharp.Drawing.XGraphics = PdfSharp.Drawing.XGraphics.FromPdfPage(outPage)
+                            Using ximg As PdfSharp.Drawing.XImage = PdfSharp.Drawing.XImage.FromStream(ms)
+                                xgfx.DrawImage(ximg, 0, 0, outPage.Width.Point, outPage.Height.Point)
+                            End Using
+                        End Using
+                    End Using
+                End Using
+            Next
+
+            outDoc.Save(outputPath)
+            outDoc.Close()
+        End Using
+    End Sub
+
+    ''' <summary>
+    ''' Gets the JPEG image encoder for file size optimization.
+    ''' </summary>
+    Private Shared Function GetJpegEncoder() As System.Drawing.Imaging.ImageCodecInfo
+        Dim codecs As System.Drawing.Imaging.ImageCodecInfo() = System.Drawing.Imaging.ImageCodecInfo.GetImageEncoders()
+        For Each codec In codecs
+            If codec.MimeType = "image/jpeg" Then
+                Return codec
+            End If
+        Next
+        Return Nothing
+    End Function
+
+    ''' <summary>
+    ''' Copies PDF metadata from source to destination document.
+    ''' </summary>
+    ''' <summary>
+    ''' Copies PDF metadata from source to destination document.
+    ''' Handles DateTimeKind conversion to avoid DateTimeInvalidLocalFormat exceptions.
+    ''' </summary>
+    Private Shared Sub CopyPdfMetadata(src As PdfSharp.Pdf.PdfDocument, dest As PdfSharp.Pdf.PdfDocument)
+        If src Is Nothing OrElse dest Is Nothing Then Return
+
+        Try
+            dest.Info.Title = src.Info.Title
+            dest.Info.Author = src.Info.Author
+            dest.Info.Subject = src.Info.Subject
+            dest.Info.Keywords = src.Info.Keywords
+            dest.Info.Creator = src.Info.Creator
+
+            ' Handle CreationDate - convert UTC to Local to avoid DateTimeInvalidLocalFormat MDA
+            If src.Info.CreationDate <> Date.MinValue Then
+                Dim creationDate As DateTime = src.Info.CreationDate
+                If creationDate.Kind = DateTimeKind.Utc Then
+                    creationDate = DateTime.SpecifyKind(creationDate.ToLocalTime(), DateTimeKind.Local)
+                ElseIf creationDate.Kind = DateTimeKind.Unspecified Then
+                    creationDate = DateTime.SpecifyKind(creationDate, DateTimeKind.Local)
+                End If
+                dest.Info.CreationDate = creationDate
+            End If
+
+            ' Handle ModificationDate - convert UTC to Local to avoid DateTimeInvalidLocalFormat MDA
+            If src.Info.ModificationDate <> Date.MinValue Then
+                Dim modificationDate As DateTime = src.Info.ModificationDate
+                If modificationDate.Kind = DateTimeKind.Utc Then
+                    modificationDate = DateTime.SpecifyKind(modificationDate.ToLocalTime(), DateTimeKind.Local)
+                ElseIf modificationDate.Kind = DateTimeKind.Unspecified Then
+                    modificationDate = DateTime.SpecifyKind(modificationDate, DateTimeKind.Local)
+                End If
+                dest.Info.ModificationDate = modificationDate
+            End If
+        Catch
+            ' Ignore metadata copy errors
+        End Try
+    End Sub
+
     ''' <summary>
     ''' Prompts the user for a file or directory, reads content using GetFileContent(),
     ''' and saves the extracted text as a .txt file at the same location (or optionally in a subdirectory).

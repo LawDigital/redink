@@ -736,7 +736,7 @@ Namespace SharedLibrary
 
 
             Try
-                Dim bmp As New Bitmap(My.Resources.Red_Ink_Logo)
+                Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
                 form.Icon = Icon.FromHandle(bmp.GetHicon())
             Catch
             End Try
@@ -1157,7 +1157,7 @@ Namespace SharedLibrary
 
 
             Try
-                Dim bmp As New Bitmap(My.Resources.Red_Ink_Logo)
+                Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
                 form.Icon = Icon.FromHandle(bmp.GetHicon())
             Catch
             End Try
@@ -2351,7 +2351,7 @@ Namespace SharedLibrary
 
 
             Try
-                Dim bmp As New Bitmap(My.Resources.Red_Ink_Logo)
+                Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
                 form.Icon = Icon.FromHandle(bmp.GetHicon())
             Catch
             End Try
@@ -2514,7 +2514,7 @@ Namespace SharedLibrary
 
 
             Try
-                Dim bmp As New Bitmap(My.Resources.Red_Ink_Logo)
+                Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
                 form.Icon = Icon.FromHandle(bmp.GetHicon())
             Catch
             End Try
@@ -2737,7 +2737,7 @@ Namespace SharedLibrary
 
 
             Try
-                Dim bmp As New Bitmap(My.Resources.Red_Ink_Logo)
+                Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
                 form.Icon = Icon.FromHandle(bmp.GetHicon())
             Catch
             End Try
@@ -3272,7 +3272,7 @@ Namespace SharedLibrary
 
 
             Try
-                Dim bmp As New Bitmap(My.Resources.Red_Ink_Logo)
+                Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
                 form.Icon = Icon.FromHandle(bmp.GetHicon())
             Catch
             End Try
@@ -3790,7 +3790,7 @@ Namespace SharedLibrary
 
 
             Try
-                Dim bmp As New Bitmap(My.Resources.Red_Ink_Logo)
+                Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
                 form.Icon = Icon.FromHandle(bmp.GetHicon())
             Catch
             End Try

@@ -98,7 +98,7 @@ Namespace SharedLibrary
             Me.Font = New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
 
             Me.StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen
-            Me.Icon = Icon.FromHandle((New System.Drawing.Bitmap(My.Resources.Red_Ink_Logo)).GetHicon())
+            Me.Icon = Icon.FromHandle((New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))).GetHicon())
             Me.Text = Title
 
             ' Main TableLayoutPanel (4 rows)

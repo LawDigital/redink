@@ -4,6 +4,7 @@
 Imports Microsoft.Office.Tools.Ribbon
 Imports Microsoft.Win32
 Imports SharedLibrary
+Imports SharedLibrary.SharedLibrary
 
 Public Class Ribbon1
 
@@ -18,13 +19,13 @@ Public Class Ribbon1
             Dim theme = DetectOfficeTheme()
             Select Case theme
                 Case OfficeTheme.Light
-                    Menu1.Image = My.Resources.Red_Ink_Logo_Medium
+                    Menu1.Image = SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Medium)
                 Case Else
-                    Menu1.Image = My.Resources.Red_Ink_Logo
+                    Menu1.Image = SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)
             End Select
             Menu1.ShowImage = True
         Catch
-            Menu1.Image = My.Resources.Red_Ink_Logo
+            Menu1.Image = SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)
             Menu1.ShowImage = True
         End Try
     End Sub
@@ -388,5 +389,10 @@ Public Class Ribbon1
     Private Sub RI_ConvertDocToTxt_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_ConvertDocToTxt.Click
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_ConvertDocToTxt_Click invoked")
         Globals.ThisAddIn.ExportFileContentToText()
+    End Sub
+
+    Private Sub RI_FlattenPDF_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_FlattenPDF.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_FlattenPDF_Click invoked")
+        Globals.ThisAddIn.FlattenPdfToImages()
     End Sub
 End Class

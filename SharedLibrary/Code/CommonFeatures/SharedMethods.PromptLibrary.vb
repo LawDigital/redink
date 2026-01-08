@@ -122,7 +122,7 @@ Namespace SharedLibrary
                 }
             settingsForm.MinimumSize = New System.Drawing.Size(900, 650)
 
-            Dim bmp As New System.Drawing.Bitmap(My.Resources.Red_Ink_Logo)
+            Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
             settingsForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
 
             Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
@@ -457,7 +457,7 @@ Namespace SharedLibrary
                 }
             settingsForm.MinimumSize = New System.Drawing.Size(900, 650)
 
-            Dim bmp As New System.Drawing.Bitmap(My.Resources.Red_Ink_Logo)
+            Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
             settingsForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
 
             Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)

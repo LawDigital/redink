@@ -101,7 +101,7 @@ Namespace SharedLibrary
             settingsForm.ShowInTaskbar = False
             settingsForm.TopMost = True
 
-            Dim bmp As New System.Drawing.Bitmap(My.Resources.Red_Ink_Logo)
+            Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
             settingsForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
 
             Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
@@ -784,7 +784,7 @@ Namespace SharedLibrary
             Dim booleanSettings As New List(Of String) From {
         "DoubleS", "NoEmDash", "Clean", "MarkdownBubbles", "KeepFormat1", "MarkdownConvert", "ReplaceText1",
         "KeepFormat2", "KeepParaFormatInline", "ReplaceText2", "DoMarkupOutlook", "DoMarkupWord",
-        "APIDebug", "ISearch_Approve", "ISearch", "Lib", "ContextMenu", "SecondAPI", "APIEncrypted", "APIEncrypted_2",
+        "APIDebug", "ISearch_Approve", "ISearch", "Lib", "ContextMenu", "NoLocalConfig", "SecondAPI", "APIEncrypted", "APIEncrypted_2",
         "OAuth2", "OAuth2_2", "PromptLib", "Ignore", "ToolingLogWindow", "ToolingDryRun",
         "UpdateIni", "UpdateIniAllowRemote", "UpdateIniNoSignature", "UpdateIniSilentLog", "NoHelperDownload"
             }
@@ -967,6 +967,14 @@ Namespace SharedLibrary
                     Return context.INI_SpeechModelPath
                 Case "LocalModelPath"
                     Return context.INI_LocalModelPath
+                Case "BrandingName"
+                    Return context.INI_BrandingName
+                Case "LogoPath"
+                    Return context.INI_LogoPath
+                Case "LogoPathMedium"
+                    Return context.INI_LogoPathMedium
+                Case "LotoPathLarge"
+                    Return context.INI_LogoPathLarge
                 Case "APIDebug"
                     Return context.INI_APIDebug.ToString()
                 Case "ISearch"
@@ -1023,6 +1031,8 @@ Namespace SharedLibrary
                     Return context.INI_LogPath
                 Case "ContextMenu"
                     Return context.INI_ContextMenu.ToString()
+                Case "NoLocalConfig"
+                    Return context.INI_NoLocalConfig.ToString()
                 Case "UpdateCheckInterval"
                     Return context.INI_UpdateCheckInterval.ToString()
                 Case "UpdatePath"
@@ -1253,6 +1263,14 @@ Namespace SharedLibrary
                     context.INI_SpeechModelPath = value
                 Case "LocalModelPath"
                     context.INI_LocalModelPath = value
+                Case "BrandingName"
+                    context.INI_BrandingName = value
+                Case "LogoPath"
+                    context.INI_LogoPath = value
+                Case "LogoPathMedium"
+                    context.INI_LogoPathMedium = value
+                Case "LotoPathLarge"
+                    context.INI_LogoPathLarge = value
                 Case "APIDebug"
                     context.INI_APIDebug = Boolean.Parse(value)
                 Case "ISearch"
@@ -1303,6 +1321,8 @@ Namespace SharedLibrary
                     context.INI_MaxOutputToken_2 = Integer.Parse(value)
                 Case "ContextMenu"
                     context.INI_ContextMenu = Boolean.Parse(value)
+                Case "NoLocalConfig"
+                    context.INI_NoLocalConfig = Boolean.Parse(value)
                 Case "UpdateCheckInterval"
                     context.INI_UpdateCheckInterval = Integer.Parse(value)
                 Case "UpdatePath"
@@ -1610,6 +1630,7 @@ Namespace SharedLibrary
                     {"MarkupMethodOutlookOverride", context.INI_MarkupMethodOutlookOverride},
                     {"ShortcutsWordExcel", context.INI_ShortcutsWordExcel},
                     {"ContextMenu", context.INI_ContextMenu.ToString()},
+                    {"NoLocalConfig", context.INI_NoLocalConfig.ToString()},
                     {"UpdateCheckInterval", context.INI_UpdateCheckInterval.ToString()},
                     {"UpdatePath", context.INI_UpdatePath},
                     {"HelpMeInkyPath", context.INI_HelpMeInkyPath},
@@ -1626,6 +1647,7 @@ Namespace SharedLibrary
                     {"TTSEndpoint", context.INI_TTSEndpoint},
                     {"PromptLib", context.INI_PromptLibPath},
                     {"PromptLibLocal", context.INI_PromptLibPathLocal},
+                    {"PromptLib_Transcript", context.INI_PromptLibPath_Transcript},
                     {"MyStylePath", context.INI_MyStylePath},
                     {"AlternateModelPath", context.INI_AlternateModelPath},
                     {"SpecialServicePath", context.INI_SpecialServicePath},
@@ -1637,7 +1659,10 @@ Namespace SharedLibrary
                     {"DocCheckPathLocal", context.INI_DocCheckPathLocal},
                     {"DocStylePath", context.INI_DocStylePath},
                     {"DocStylePathLocal", context.INI_DocStylePathLocal},
-                    {"PromptLib_Transcript", context.INI_PromptLibPath_Transcript},
+                    {"BrandingName", context.INI_BrandingName},
+                    {"LogoPath", context.INI_LogoPath},
+                    {"LogoPathMedium", context.INI_LogoPathMedium},
+                    {"LotoPathLarge", context.INI_LogoPathLarge},
                     {"SP_Translate", context.SP_Translate},
                     {"SP_Correct", context.SP_Correct},
                     {"SP_Improve", context.SP_Improve},
@@ -1699,6 +1724,7 @@ Namespace SharedLibrary
                     {"SP_ChatWord", context.SP_ChatWord},
                     {"SP_HelpMe", context.SP_HelpMe},
                     {"SP_DiscussThis_SortOut", context.SP_DiscussThis_SortOut},
+                    {"SP_DiscussThis_SumUp", context.SP_DiscussThis_SumUp},
                     {"SP_Chat", context.SP_Chat},
                     {"SP_Add_ChatWord_Commands", context.SP_Add_ChatWord_Commands},
                     {"SP_Add_Chat_NoCommands", context.SP_Add_Chat_NoCommands},
@@ -1787,6 +1813,7 @@ Namespace SharedLibrary
                     {"SP_ChatWord", Default_SP_ChatWord},
                     {"SP_HelpMe", Default_SP_HelpMe},
                     {"SP_DiscussThis_SortOut", Default_SP_DiscussThis_SortOut},
+                    {"SP_DiscussThis_SumUp", Default_SP_DiscussThis_Sumup},
                     {"SP_Chat", Default_SP_Chat},
                     {"SP_Add_ChatWord_Commands", Default_SP_Add_ChatWord_Commands},
                     {"SP_Add_Chat_NoCommands", Default_SP_Add_Chat_NoCommands},
@@ -2153,6 +2180,10 @@ Namespace SharedLibrary
                     {"DiscussInkyPathLocal", context.INI_DiscussInkyPathLocal},
                     {"UpdateCheckInterval", context.INI_UpdateCheckInterval.ToString()},
                     {"UpdatePath", context.INI_UpdatePath},
+                    {"BrandingName", context.INI_BrandingName},
+                    {"LogoPath", context.INI_LogoPath},
+                    {"LogoPathMedium", context.INI_LogoPathMedium},
+                    {"LogoPathLarge", context.INI_LogoPathLarge},
                     {"NoHelperDownload", context.INI_NoHelperDownload.ToString()},
                     {"ToolingLogWindow", context.INI_ToolingLogWindow.ToString()},
                     {"ToolingDryRun", context.INI_ToolingDryRun.ToString()},
@@ -2287,7 +2318,7 @@ Namespace SharedLibrary
 
             ' Icon / logo
             Try
-                Dim bmp As New System.Drawing.Bitmap(My.Resources.Red_Ink_Logo)
+                Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
                 form.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
             Catch
             End Try
@@ -2697,6 +2728,7 @@ Namespace SharedLibrary
             variableValues.Add("MarkupMethodWordOverride", context.INI_MarkupMethodWordOverride)
             variableValues.Add("MarkupMethodOutlookOverride", context.INI_MarkupMethodOutlookOverride)
             variableValues.Add("ContextMenu", context.INI_ContextMenu)
+            variableValues.Add("NoLocalConfig", context.INI_NoLocalConfig)
             variableValues.Add("UpdateCheckInterval", context.INI_UpdateCheckInterval)
             variableValues.Add("UpdatePath", context.INI_UpdatePath)
             variableValues.Add("HelpMeInkyPath", context.INI_HelpMeInkyPath)
@@ -2711,6 +2743,10 @@ Namespace SharedLibrary
             variableValues.Add("SpeechModelPath", context.INI_SpeechModelPath)
             variableValues.Add("LocalModelPath", context.INI_LocalModelPath)
             variableValues.Add("TTSEndpoint", context.INI_TTSEndpoint)
+            variableValues.Add("BrandingName", context.INI_BrandingName)
+            variableValues.Add("LogoPath", context.INI_LogoPath)
+            variableValues.Add("LogoPathMedium", context.INI_LogoPathMedium)
+            variableValues.Add("LogoPathLarge", context.INI_LogoPathLarge)
             variableValues.Add("ShortcutsWordExcel", context.INI_ShortcutsWordExcel)
             variableValues.Add("PromptLib", context.INI_PromptLibPath)
             variableValues.Add("PromptLibLocal", context.INI_PromptLibPathLocal)
@@ -2787,6 +2823,7 @@ Namespace SharedLibrary
             variableValues.Add("SP_ChatWord", context.SP_ChatWord)
             variableValues.Add("SP_HelpMe", context.SP_HelpMe)
             variableValues.Add("SP_DiscussThis_SortOut", context.SP_DiscussThis_SortOut)
+            variableValues.Add("SP_DiscussThis_SumUp", context.SP_DiscussThis_SumUp)
             variableValues.Add("SP_Chat", context.SP_Chat)
             variableValues.Add("SP_Add_ChatWord_Commands", context.SP_Add_ChatWord_Commands)
             variableValues.Add("SP_Add_Chat_NoCommands", context.SP_Add_Chat_NoCommands)
@@ -2948,6 +2985,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_ChatWord") Then context.SP_ChatWord = CStr(updatedValues("SP_ChatWord"))
                 If updatedValues.ContainsKey("SP_HelpMe") Then context.SP_HelpMe = CStr(updatedValues("SP_HelpMe"))
                 If updatedValues.ContainsKey("SP_DiscussThis_SortOut") Then context.SP_DiscussThis_SortOut = CStr(updatedValues("SP_DiscussThis_SortOut"))
+                If updatedValues.ContainsKey("SP_DiscussThis_SumUp") Then context.SP_DiscussThis_SumUp = CStr(updatedValues("SP_DiscussThis_SumUp"))
                 If updatedValues.ContainsKey("SP_Chat") Then context.SP_Chat = CStr(updatedValues("SP_Chat"))
                 If updatedValues.ContainsKey("SP_Add_ChatWord_Commands") Then context.SP_Add_ChatWord_Commands = CStr(updatedValues("SP_Add_ChatWord_Commands"))
                 If updatedValues.ContainsKey("SP_Add_Chat_NoCommands") Then context.SP_Add_Chat_NoCommands = CStr(updatedValues("SP_Add_Chat_NoCommands"))
@@ -2982,6 +3020,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("MarkupMethodOutlookOverride") Then context.INI_MarkupMethodOutlookOverride = CStr(updatedValues("MarkupMethodOutlookOverride"))
                 If updatedValues.ContainsKey("ShortcutsWordExcel") Then context.INI_ShortcutsWordExcel = CStr(updatedValues("ShortcutsWordExcel"))
                 If updatedValues.ContainsKey("ContextMenu") Then context.INI_ContextMenu = CBool(updatedValues("ContextMenu"))
+                If updatedValues.ContainsKey("NoLocalConfig") Then context.INI_NoLocalConfig = CBool(updatedValues("NoLocalConfig"))
                 If updatedValues.ContainsKey("UpdateCheckInterval") Then context.INI_UpdateCheckInterval = CInt(updatedValues("UpdateCheckInterval"))
                 If updatedValues.ContainsKey("UpdatePath") Then context.INI_UpdatePath = CStr(updatedValues("UpdatePath"))
                 If updatedValues.ContainsKey("HelpMeInkyPath") Then context.INI_HelpMeInkyPath = CStr(updatedValues("HelpMeInkyPath"))
@@ -3010,6 +3049,10 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("DocStylePath") Then context.INI_DocStylePath = CStr(updatedValues("DocStylePath"))
                 If updatedValues.ContainsKey("DocStylePathLocal") Then context.INI_DocStylePathLocal = CStr(updatedValues("DocStylePathLocal"))
                 If updatedValues.ContainsKey("PromptLib_Transcript") Then context.INI_PromptLibPath_Transcript = CStr(updatedValues("PromptLib_Transcript"))
+                If updatedValues.ContainsKey("BrandingName") Then context.INI_BrandingName = CStr(updatedValues("BrandingName"))
+                If updatedValues.ContainsKey("LogoPath") Then context.INI_LogoPath = CStr(updatedValues("LogoPath"))
+                If updatedValues.ContainsKey("LogoPathMedium") Then context.INI_LogoPathMedium = CStr(updatedValues("LogoPathMedium"))
+                If updatedValues.ContainsKey("LogoPathLarge") Then context.INI_LogoPathLarge = CStr(updatedValues("LogoPathLarge"))
                 If updatedValues.ContainsKey("NoHelperDownload") Then context.INI_NoHelperDownload = CBool(updatedValues("NoHelperDownload"))
                 If updatedValues.ContainsKey("ToolingLogWindow") Then context.INI_ToolingLogWindow = CBool(updatedValues("ToolingLogWindow"))
                 If updatedValues.ContainsKey("ToolingDryRun") Then context.INI_ToolingDryRun = CBool(updatedValues("ToolingDryRun"))
@@ -3043,11 +3086,13 @@ Namespace SharedLibrary
             Dim baseWidth As Integer = 450
             Dim formWidth As Integer = CInt(baseWidth * 1.3)
 
+            Dim BrandedVersion As String = If(String.IsNullOrWhiteSpace(INI_LogoPath_Cached & INI_LogoPathMedium_Cached & INI_LogoPathLarge_Cached), "", If(String.IsNullOrWhiteSpace(context.INI_BrandingName), "Branded version", $"Branded version for {context.INI_BrandingName}"))
+
             ' Calculate height based on text content
             Dim ExpireText As String = $"{vbCrLf}{vbCrLf}(your {If(String.IsNullOrEmpty(LicenseStatus), "(undefined license type)", LicenseStatus)} for {LicenseUsers} user(s) expires on {LicensedTill.ToString("dd-MMM-yyyy")})"
             Dim testRichTextBox As New System.Windows.Forms.RichTextBox() With {
                             .Font = standardFont,
-                            .Text = $"{AN}{vbCrLf}{context.RDV}{ExpireText}{vbCrLf}{vbCrLf}By David Rosenthal & Team{vbCrLf}{vbCrLf}{CopyrightNotice}{vbCrLf}{vbCrLf}All rights reserved.{vbCrLf}{vbCrLf}{AN4}{vbCrLf}{vbCrLf}Local Chat: {AN7}"
+                            .Text = $"{AN}{vbCrLf}{context.RDV}{ExpireText}{vbCrLf}{If(BrandedVersion = "", "", $"{vbCrLf}{BrandedVersion}{vbCrLf}")}{vbCrLf}By David Rosenthal & Team{vbCrLf}{vbCrLf}{CopyrightNotice}{vbCrLf}{vbCrLf}All rights reserved.{vbCrLf}{vbCrLf}{AN4}{vbCrLf}{vbCrLf}Local Chat: {AN7}"
                         }
             Dim graphics As System.Drawing.Graphics = testRichTextBox.CreateGraphics()
             Dim textSize As System.Drawing.SizeF = graphics.MeasureString(testRichTextBox.Text, standardFont, formWidth - 40)
@@ -3082,7 +3127,7 @@ Namespace SharedLibrary
 
             ' Add a logo
             Dim logo As New System.Windows.Forms.PictureBox() With {
-                        .Image = My.Resources.Red_Ink_Logo_Large,
+                        .Image = SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Large, True),
                         .SizeMode = System.Windows.Forms.PictureBoxSizeMode.Zoom,
                         .Size = New System.Drawing.Size(logoSize, logoSize),
                         .Location = New System.Drawing.Point((formWidth - logoSize) \ 2, 20)
@@ -3107,7 +3152,7 @@ Namespace SharedLibrary
             aboutForm.Controls.Add(aboutTextBox)
 
             Dim aboutContent As String =
-        $"{AN}<P>{context.RDV}{ExpireText}<P><P>By David Rosenthal & Team<P><P>{CopyrightNotice}<P><P>All rights reserved.<P><P>{AN4}<P><P>Local Chat: {AN7}"
+        $"{AN}<P>{context.RDV}{ExpireText}<P>{If(BrandedVersion = "", "", $"<P>{BrandedVersion}<P>")}<P>By David Rosenthal & Team<P><P>{CopyrightNotice}<P><P>All rights reserved.<P><P>{AN4}<P><P>Local Chat: {AN7}"
 
             ' Replace <P> with vbCrLf
             Dim plainText As New System.Text.StringBuilder()

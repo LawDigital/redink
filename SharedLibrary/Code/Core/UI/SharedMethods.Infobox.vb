@@ -58,7 +58,7 @@ Namespace SharedLibrary
                 Me.TopMost = True
 
                 ' Create and add the App logo PictureBox
-                Dim bmp As New Bitmap(My.Resources.Red_Ink_Logo)
+                Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
                 Dim iconPictureBox As New PictureBox()
                 iconPictureBox.Image = bmp
                 iconPictureBox.SizeMode = PictureBoxSizeMode.Zoom
