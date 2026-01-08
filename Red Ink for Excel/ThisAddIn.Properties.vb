@@ -1209,6 +1209,15 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_DiscussThis_SumUp As String
+        Get
+            Return _context.SP_DiscussThis_SumUp
+        End Get
+        Set(value As String)
+            _context.SP_DiscussThis_SumUp = value
+        End Set
+    End Property
+
 
     Public Shared Property SP_Add_ChatWord_Commands As String
         Get

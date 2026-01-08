@@ -390,4 +390,9 @@ Public Class Ribbon1
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_ConvertDocToTxt_Click invoked")
         Globals.ThisAddIn.ExportFileContentToText()
     End Sub
+
+    Private Sub RI_FlattenPDF_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_FlattenPDF.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_FlattenPDF_Click invoked")
+        Globals.ThisAddIn.FlattenPdfToImages()
+    End Sub
 End Class

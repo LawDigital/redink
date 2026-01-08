@@ -134,6 +134,9 @@ Public Class DiscussInky
     }
     Private Shared ReadOnly _rng As New Random()
 
+    ' Tooling support
+    Private _selectedToolsForChat As List(Of ModelConfig) = Nothing
+
     ' Autorespond constants
     Private Const MaxAutoRespondRounds As Integer = 100
     Private Const DefaultRespondRounds As Integer = 5
@@ -147,6 +150,8 @@ Public Class DiscussInky
     Private _sortOutResponderMissionPrompt As String = ""
     Private _sortOutOriginalMissionName As String = ""
     Private _sortOutOriginalMissionPrompt As String = ""
+
+    Private Const MinRoundsForAutoSummary As Integer = 2
 
     ' UI Controls
     Private ReadOnly _chat As WebBrowser = New WebBrowser() With {
@@ -182,6 +187,9 @@ Public Class DiscussInky
     Private ReadOnly _chkPersistKnowledge As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = "Persist knowledge temporarily", .AutoSize = True}
     Private ReadOnly _btnAutoRespond As Button = New Button() With {.Text = "Autorespond", .AutoSize = True}
     Private ReadOnly _btnSortOut As Button = New Button() With {.Text = "Sort It Out", .AutoSize = True}
+    Private ReadOnly _btnTools As Button = New Button() With {.Text = Globals.ThisAddIn.ToolFriendlyName, .AutoSize = True}
+    Private ReadOnly _chkEnableTooling As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = $"Enable {Globals.ThisAddIn.ToolFriendlyName.ToLower}", .AutoSize = True}
+    Private ReadOnly _chkShowToolingLog As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = "Tooling log", .AutoSize = True}
 
     ' State
     Private _htmlReady As Boolean = False
@@ -315,8 +323,12 @@ Public Class DiscussInky
         pnlButtons.Controls.Add(_btnClose)
         pnlButtons.Controls.Add(_btnAutoRespond)
         pnlButtons.Controls.Add(_btnSortOut)
+        pnlButtons.Controls.Add(_btnTools)
+        pnlButtons.Controls.Add(_chkEnableTooling)
         pnlButtons.Controls.Add(_chkIncludeActiveDoc)
         pnlButtons.Controls.Add(_chkPersistKnowledge)
+        pnlButtons.Controls.Add(_chkShowToolingLog)
+
 
         table.Controls.Add(_chat, 0, 0)
         table.Controls.Add(_txtInput, 0, 1)
@@ -350,6 +362,9 @@ Public Class DiscussInky
         AddHandler _chkPersistKnowledge.CheckedChanged, AddressOf OnPersistKnowledgeChanged
         AddHandler _btnAutoRespond.Click, AddressOf OnAutoRespondClick
         AddHandler _btnSortOut.Click, AddressOf OnSortOutClick
+        AddHandler _btnTools.Click, AddressOf OnToolsClick
+        AddHandler _chkEnableTooling.CheckedChanged, AddressOf OnEnableToolingChanged
+        AddHandler _chkShowToolingLog.CheckedChanged, AddressOf OnShowToolingLogChanged
 
     End Sub
 
@@ -612,11 +627,17 @@ Public Class DiscussInky
             End Try
         End If
 
+        ' Restore tooling checkbox state
+        Try : _chkEnableTooling.Checked = My.Settings.DiscussEnableTooling : Catch : _chkEnableTooling.Checked = False : End Try
+
         ' Load personas
         LoadPersonas()
 
         ' Load missions
         LoadMissions()
+
+        ' Update tooling controls based on current model
+        UpdateToolingControlsState()
 
         ' Check if persona was previously saved - if not, force selection
         Dim savedPersona = ""
@@ -805,6 +826,7 @@ Public Class DiscussInky
             My.Settings.DiscussSelectedPersona = _currentPersonaName
             My.Settings.DiscussSelectedMission = _currentMissionName
             My.Settings.DiscussKnowledgePath = If(_knowledgeFilePath, "")
+            My.Settings.DiscussEnableTooling = _chkEnableTooling.Checked
             My.Settings.Save()
         Catch
         End Try
@@ -887,6 +909,8 @@ Public Class DiscussInky
 
             UpdateAlternateModelButtonText()
             UpdateWindowTitle()
+            UpdateToolingControlsState()
+
         Else
             ' Legacy behavior: simple toggle to secondary model (if configured)
             If _context.INI_SecondAPI Then
@@ -903,12 +927,18 @@ Public Class DiscussInky
                 End If
                 UpdateAlternateModelButtonText()
                 UpdateWindowTitle()
+                UpdateToolingControlsState()
+
             End If
         End If
     End Sub
 
     ''' <summary>
     ''' Runs an LLM request while temporarily applying any selected alternate model, restoring afterward.
+    ''' </summary>
+    ''' <summary>
+    ''' Runs an LLM request while temporarily applying any selected alternate model, restoring afterward.
+    ''' Supports tooling when enabled and model supports it.
     ''' </summary>
     Private Async Function CallLlmWithSelectedModelAsync(systemPrompt As String, userPrompt As String) As Task(Of String)
         Await _modelSemaphore.WaitAsync().ConfigureAwait(False)
@@ -933,15 +963,28 @@ Public Class DiscussInky
                 useSecondApi = True
             End If
 
-            ' Execute the LLM call
-            Return Await LLM(_context,
-                             systemPrompt,
-                             userPrompt,
-                             "",
-                             "",
-                             0,
-                             useSecondApi,
-                             True).ConfigureAwait(False)
+            ' Check if tooling should be used
+            If ShouldUseTooling() AndAlso EnsureToolsSelected() Then
+                ' Execute via tooling loop
+                Return Await Globals.ThisAddIn.ExecuteToolingLoop(
+                    systemPrompt,
+                    "",
+                    _selectedToolsForChat,
+                    useSecondApi,
+                    fullPromptOverride:=userPrompt,
+                    hideSplash:=True,
+                    hideLogWindow:=Not _chkShowToolingLog.Checked).ConfigureAwait(False)
+            Else
+                ' Standard LLM call
+                Return Await LLM(_context,
+                                 systemPrompt,
+                                 userPrompt,
+                                 "",
+                                 "",
+                                 0,
+                                 useSecondApi,
+                                 True).ConfigureAwait(False)
+            End If
 
         Finally
             ' Always restore the original config after the call so the rest of the add-in sees the original state.
@@ -950,6 +993,93 @@ Public Class DiscussInky
             End If
             _modelSemaphore.Release()
         End Try
+    End Function
+
+#End Region
+
+
+#Region "Tooling Support"
+
+    ''' <summary>
+    ''' Updates enabled state of tooling controls based on current model's tooling support.
+    ''' </summary>
+    Private Sub UpdateToolingControlsState()
+        Dim currentConfig As ModelConfig = Nothing
+
+        If _alternateModelSelected AndAlso _alternateModelConfig IsNot Nothing Then
+            currentConfig = _alternateModelConfig
+        Else
+            currentConfig = SharedMethods.GetCurrentConfig(_context)
+        End If
+
+        Dim supportsTooling As Boolean = SharedMethods.ModelSupportsTooling(currentConfig)
+
+        _chkEnableTooling.Enabled = supportsTooling
+        _btnTools.Enabled = supportsTooling
+        _chkShowToolingLog.Enabled = supportsTooling AndAlso _chkEnableTooling.Checked
+
+        If Not supportsTooling Then
+            _chkEnableTooling.Checked = False
+            _chkShowToolingLog.Checked = False
+            _selectedToolsForChat = Nothing
+        End If
+    End Sub
+
+    Private Sub OnShowToolingLogChanged(sender As Object, e As EventArgs)
+        ' No special handling needed - just uses the Checked state when calling ExecuteToolingLoop
+    End Sub
+
+    ''' <summary>
+    ''' Handles the Tools button click - opens tool selection dialog.
+    ''' </summary>
+    Private Sub OnToolsClick(sender As Object, e As EventArgs)
+        Try
+            Dim selectedTools = Globals.ThisAddIn.SelectToolsForSession(forceDialog:=True, Globals.ThisAddIn.ToolFriendlyName)
+            If selectedTools IsNot Nothing Then
+                _selectedToolsForChat = selectedTools
+            End If
+        Catch ex As Exception
+            AppendSystemMessage($"Error selecting tools: {ex.Message}")
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Handles the Enable Tooling checkbox change.
+    ''' </summary>
+    Private Sub OnEnableToolingChanged(sender As Object, e As EventArgs)
+        If Not _chkEnableTooling.Checked Then
+            _selectedToolsForChat = Nothing
+        End If
+        ' Update log checkbox enabled state
+        _chkShowToolingLog.Enabled = _chkEnableTooling.Checked AndAlso _chkEnableTooling.Enabled
+    End Sub
+
+    ''' <summary>
+    ''' Determines if tooling should be used for the current call.
+    ''' </summary>
+    Private Function ShouldUseTooling() As Boolean
+        If Not _chkEnableTooling.Checked Then Return False
+
+        Dim currentConfig As ModelConfig = Nothing
+        If _alternateModelSelected AndAlso _alternateModelConfig IsNot Nothing Then
+            currentConfig = _alternateModelConfig
+        Else
+            currentConfig = SharedMethods.GetCurrentConfig(_context)
+        End If
+
+        Return SharedMethods.ModelSupportsTooling(currentConfig)
+    End Function
+
+    ''' <summary>
+    ''' Ensures tools are selected for the session if tooling is enabled.
+    ''' </summary>
+    Private Function EnsureToolsSelected() As Boolean
+        If _selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0 Then
+            Return True
+        End If
+
+        _selectedToolsForChat = Globals.ThisAddIn.SelectToolsForSession(forceDialog:=False)
+        Return _selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0
     End Function
 
 #End Region
@@ -2737,6 +2867,9 @@ Public Class DiscussInky
                 AppendSystemMessage($"Autorespond completed - maximum of {roundCount} round(s) reached.")
             End If
 
+            ' Offer summary if enough rounds completed
+            Await ShowDiscussionSummaryAsync(roundCount)
+
         Catch ex As Exception
             AppendSystemMessage($"Autorespond error: {ex.Message}")
         Finally
@@ -3000,7 +3133,7 @@ Public Class DiscussInky
             "Example: ""In the discussion so far, I received the advice to cancel the contract. Now, please discuss whether this really makes sense.""" & vbCrLf,
             $"{AN} - Sort It Out Discussion", False)
 
-        If String.IsNullOrWhiteSpace(userInstruction) Then
+        If String.IsNullOrWhiteSpace(userInstruction) Or userInstruction = "ESC" Then
             Return ' User cancelled
         End If
 
@@ -3491,6 +3624,9 @@ Public Class DiscussInky
                 AppendSystemMessage($"Sort It Out discussion completed - maximum of {roundCount} round(s) reached.")
             End If
 
+            ' Offer summary if enough rounds completed
+            Await ShowDiscussionSummaryAsync(roundCount)
+
         Catch ex As Exception
             AppendSystemMessage($"Sort It Out error: {ex.Message}")
         Finally
@@ -3625,6 +3761,85 @@ Public Class DiscussInky
         Dim answer = Await CallLlmWithSelectedModelAsync(systemPrompt, sb.ToString())
         Return If(answer, "").Trim()
     End Function
+
+#End Region
+
+#Region "Discussion Summary"
+
+    ''' <summary>
+    ''' Generates and displays a summary of the discussion after autorespond or sort out completes.
+    ''' </summary>
+    ''' <param name="roundCount">Number of rounds completed.</param>
+    Private Async Function ShowDiscussionSummaryAsync(roundCount As Integer) As Task
+        If roundCount < MinRoundsForAutoSummary Then Return
+
+        ' Ensure progress bar is closed before showing summary dialog
+        ProgressBarModule.CancelOperation = True
+
+        Try
+            ' Build the discussion transcript
+            Dim discussionText = BuildConversationForAutoResponder()
+            If String.IsNullOrWhiteSpace(discussionText) Then Return
+
+            ' Ask user if they want a summary
+            Dim answer = ShowCustomYesNoBox(
+                $"The discussion completed {roundCount} rounds. Would you like to generate a summary of the key points?",
+                "Yes, summarize", "No, skip")
+
+            If answer <> 1 Then Return
+
+            ShowAssistantThinking()
+
+            ' Call LLM with the summary prompt
+            Dim summaryResult = Await CallLlmWithSelectedModelAsync(
+                _context.SP_DiscussThis_SumUp,
+                "<TEXTTOPROCESS>" & discussionText & "</TEXTTOPROCESS>")
+
+            RemoveAssistantThinking()
+
+            If String.IsNullOrWhiteSpace(summaryResult) Then
+                AppendSystemMessage("Could not generate summary.")
+                Return
+            End If
+
+            ' Convert Markdown to HTML and display
+            ShowDiscussionSummaryHtml(summaryResult)
+
+        Catch ex As Exception
+            RemoveAssistantThinking()
+            AppendSystemMessage($"Error generating summary: {ex.Message}")
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Displays the discussion summary in an HTML window.
+    ''' </summary>
+    Private Sub ShowDiscussionSummaryHtml(summaryMarkdown As String)
+        Try
+            Dim htmlText As String = Markdig.Markdown.ToHtml(summaryMarkdown, _mdPipeline)
+
+            Dim fullHtml As String =
+                "<!DOCTYPE html>" &
+                "<html><head>" &
+                "  <meta charset=""utf-8"" />" &
+                "  <style>" &
+                "    body { font-family: 'Segoe UI', Tahoma, Arial, sans-serif; font-size: 10pt; line-height: 1.5; padding: 10px; }" &
+                "    h1, h2, h3 { color: #003366; margin-top: 0.8em; margin-bottom: 0.4em; }" &
+                "    ul, ol { margin-left: 1.5em; padding-left: 0.5em; }" &
+                "    li { margin-bottom: 0.3em; }" &
+                "    p { margin: 0.5em 0; }" &
+                "  </style>" &
+                "</head><body>" &
+                htmlText &
+                "</body></html>"
+
+            ShowHTMLCustomMessageBox(fullHtml, $"{SharedMethods.AN} Discussion Summary")
+
+        Catch ex As Exception
+            ' Fallback to plain text
+            ShowCustomMessageBox(summaryMarkdown, $"{SharedMethods.AN} Discussion Summary")
+        End Try
+    End Sub
 
 #End Region
 

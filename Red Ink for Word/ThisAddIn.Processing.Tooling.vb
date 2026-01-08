@@ -83,7 +83,7 @@ Partial Public Class ThisAddIn
         Private Shared ReadOnly _lock As New Object()
 
         ''' <summary>Stable log filename used for the tooling session log (overwritten each run).</summary>
-        Private Shared ReadOnly StableLogFileName As String = $"{AN5}_Tooling.txt"
+        Private Shared ReadOnly StableLogFileName As String = $"{AN5}_Tooling_Log.txt"
 
         ''' <summary>
         ''' Starts a tooling log session and writes the log header.

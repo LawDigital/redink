@@ -109,6 +109,7 @@ Partial Class Ribbon1
         Me.RI_TimeSpan = Me.Factory.CreateRibbonButton
         Me.RI_Regex = Me.Factory.CreateRibbonButton
         Me.RI_Import = Me.Factory.CreateRibbonButton
+        Me.RI_FlattenPDF = Me.Factory.CreateRibbonButton
         Me.RI_ConvertDocToTxt = Me.Factory.CreateRibbonButton
         Me.RI_Markdown = Me.Factory.CreateRibbonButton
         Me.RI_ContentControls = Me.Factory.CreateRibbonButton
@@ -147,7 +148,6 @@ Partial Class Ribbon1
         'Menu1
         '
         Me.Menu1.ControlSize = Microsoft.Office.Core.RibbonControlSize.RibbonControlSizeLarge
-        Me.Menu1.Image = SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)
         Me.Menu1.Items.Add(Me.RI_Primlang)
         Me.Menu1.Items.Add(Me.RI_SecLang)
         Me.Menu1.Items.Add(Me.RI_Translate)
@@ -595,6 +595,7 @@ Partial Class Ribbon1
         Me.Menu2.Items.Add(Me.RI_TimeSpan)
         Me.Menu2.Items.Add(Me.RI_Regex)
         Me.Menu2.Items.Add(Me.RI_Import)
+        Me.Menu2.Items.Add(Me.RI_FlattenPDF)
         Me.Menu2.Items.Add(Me.RI_ConvertDocToTxt)
         Me.Menu2.Items.Add(Me.RI_Markdown)
         Me.Menu2.Items.Add(Me.RI_ContentControls)
@@ -653,6 +654,14 @@ Partial Class Ribbon1
         Me.RI_Import.ScreenTip = "Will insert at the current position the text of a PDF, Word document or text file" &
     ""
         Me.RI_Import.ShowImage = True
+        '
+        'RI_FlattenPDF
+        '
+        Me.RI_FlattenPDF.Label = "Flatten PDFs to Images"
+        Me.RI_FlattenPDF.Name = "RI_FlattenPDF"
+        Me.RI_FlattenPDF.OfficeImageId = "StylesManageStyles"
+        Me.RI_FlattenPDF.ScreenTip = "Will flatten PDFs to pure image PDFs to improve text extraction via OCR"
+        Me.RI_FlattenPDF.ShowImage = True
         '
         'RI_ConvertDocToTxt
         '
@@ -1042,6 +1051,7 @@ Partial Class Ribbon1
     Friend WithEvents RI_ApplyDocStyle As RibbonButton
     Friend WithEvents RI_LearnDocStyle As RibbonButton
     Friend WithEvents RI_ConvertDocToTxt As RibbonButton
+    Friend WithEvents RI_FlattenPDF As RibbonButton
 End Class
 
 Partial Class ThisRibbonCollection
