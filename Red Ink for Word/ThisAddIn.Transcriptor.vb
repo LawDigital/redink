@@ -57,6 +57,7 @@ Imports SharedLibrary.SharedLibrary.SharedMethods
 Imports Vosk
 Imports Whisper.net
 Imports SLib = SharedLibrary.SharedLibrary.SharedMethods
+Imports SharedLibrary.SharedLibrary
 
 
 Partial Public Class ThisAddIn
@@ -893,7 +894,7 @@ deviceNames)
             AddHandler Me.Shown, Sub() Me.MinimumSize = Me.Size
 
             ' Set icon
-            Dim bmp As New Bitmap(My.Resources.Red_Ink_Logo)
+            Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
             Me.Icon = Icon.FromHandle(bmp.GetHicon())
         End Sub
 

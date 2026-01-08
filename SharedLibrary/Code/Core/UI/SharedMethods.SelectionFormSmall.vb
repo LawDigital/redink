@@ -102,7 +102,7 @@ Namespace SharedLibrary
                 If String.IsNullOrWhiteSpace(headerText) Then headerText = AN
                 Me.Text = headerText
 
-                Dim bmp As New System.Drawing.Bitmap(My.Resources.Red_Ink_Logo)
+                Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
                 Me.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
 
                 ' Important: don't reference baseWidth (it no longer exists).

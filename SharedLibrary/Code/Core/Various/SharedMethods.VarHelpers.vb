@@ -40,11 +40,121 @@ Imports System.Management
 Imports System.Text.RegularExpressions
 Imports System.Windows.Forms
 Imports Microsoft.Win32
+Imports SharedLibrary.SharedLibrary.SharedContext
 
 
 Namespace SharedLibrary
     Partial Public Class SharedMethods
 
+
+        ' Standard (dark theme):
+        'Me.Icon = Icon.FromHandle(SharedMethods.GetLogoBitmap(_context, SharedMethods.LogoType.Standard).GetHicon())
+
+        ' Medium (light theme):
+        'Menu1.Image = SharedMethods.GetLogoBitmap(ThisAddIn._context, SharedMethods.LogoType.Medium)
+
+        ' Large:
+        'picLogo.Image = SharedMethods.GetLogoBitmap(_context, SharedMethods.LogoType.Large)
+
+        ' SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)
+
+
+        ''' <summary>
+        ''' Logo types that can be requested.
+        ''' </summary>
+        Public Enum LogoType
+            Standard    ' Red_Ink_Logo (dark theme / default)
+            Medium      ' Red_Ink_Logo_Medium (light theme)
+            Large       ' Red_Ink_Logo_Large
+        End Enum
+
+        ''' <summary>
+        ''' Cached logo path for Standard variant. Set during LoadConfig.
+        ''' Supports file path, UNC path, or URL.
+        ''' </summary>
+        Public Shared INI_LogoPath_Cached As String = ""
+
+        ''' <summary>
+        ''' Cached logo path for Medium variant (light theme). Set during LoadConfig.
+        ''' Supports file path, UNC path, or URL.
+        ''' </summary>
+        Public Shared INI_LogoPathMedium_Cached As String = ""
+
+        ''' <summary>
+        ''' Cached logo path for Large variant. Set during LoadConfig.
+        ''' Supports file path, UNC path, or URL.
+        ''' </summary>
+        Public Shared INI_LogoPathLarge_Cached As String = ""
+
+        ''' <summary>
+        ''' Gets a logo bitmap from an external path (file, UNC, or URL) if configured and valid,
+        ''' otherwise returns the appropriate embedded resource from SharedLibrary.
+        ''' Uses the globally cached logo path values.
+        ''' </summary>
+        ''' <param name="logoType">Which logo type to retrieve.</param>
+        ''' <returns>Valid Bitmap from external source or the embedded resource fallback.</returns>
+        Public Shared Function GetLogoBitmap(logoType As LogoType, Optional RedInkLogo As Boolean = False) As System.Drawing.Bitmap
+
+            If Not RedInkLogo Then
+                Try
+
+                    Debug.WriteLine("INI_LogoPath_Cached: " & INI_LogoPath_Cached)
+                    Dim logoPath As String = Nothing
+                    Select Case logoType
+                        Case LogoType.Standard
+                            logoPath = ExpandEnvironmentVariables(If(INI_LogoPath_Cached, ""))
+                        Case LogoType.Medium
+                            logoPath = ExpandEnvironmentVariables(If(INI_LogoPathMedium_Cached, ""))
+                        Case LogoType.Large
+                            logoPath = ExpandEnvironmentVariables(If(INI_LogoPathLarge_Cached, ""))
+                    End Select
+
+                    If Not String.IsNullOrWhiteSpace(logoPath) Then
+                        Dim bmp = LoadBitmapFromPath(logoPath)
+                        If bmp IsNot Nothing AndAlso bmp.Width > 0 AndAlso bmp.Height > 0 Then
+                            Return bmp
+                        End If
+                        bmp?.Dispose()
+                    End If
+                Catch
+                End Try
+            End If
+
+            ' Fallback to embedded SharedLibrary resources
+            Select Case logoType
+                Case LogoType.Medium
+                    Return My.Resources.Red_Ink_Logo_Medium
+                Case LogoType.Large
+                    Return My.Resources.Red_Ink_Logo_Large
+                Case Else
+                    Return My.Resources.Red_Ink_Logo
+            End Select
+        End Function
+
+        Private Shared Function LoadBitmapFromPath(path As String) As System.Drawing.Bitmap
+            Try
+                ' URL (http/https)
+                If path.StartsWith("http://", StringComparison.OrdinalIgnoreCase) OrElse
+           path.StartsWith("https://", StringComparison.OrdinalIgnoreCase) Then
+                    Using client As New System.Net.WebClient()
+                        Dim bytes = client.DownloadData(path)
+                        Using ms As New System.IO.MemoryStream(bytes)
+                            Return New System.Drawing.Bitmap(ms)
+                        End Using
+                    End Using
+                End If
+
+                ' UNC or local file
+                If path.StartsWith("\\", StringComparison.Ordinal) OrElse System.IO.File.Exists(path) Then
+                    Dim bytes = System.IO.File.ReadAllBytes(path)
+                    Using ms As New System.IO.MemoryStream(bytes)
+                        Return New System.Drawing.Bitmap(ms)
+                    End Using
+                End If
+            Catch
+            End Try
+            Return Nothing
+        End Function
 
         ''' <summary>
         ''' Returns the default INI path for a given key by selecting the first matching entry from <c>DefaultINIPaths</c>

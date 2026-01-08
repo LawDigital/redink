@@ -185,7 +185,7 @@ Namespace SharedLibrary
             Me.Font = standardFont
 
             ' PictureBox (Logo)
-            Dim bmp As New Bitmap(My.Resources.Red_Ink_Logo_Large)
+            Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Large))
             Dim pictureBox As New PictureBox() With {
             .Image = bmp,
             .SizeMode = PictureBoxSizeMode.Zoom

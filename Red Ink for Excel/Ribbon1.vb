@@ -4,6 +4,7 @@
 Imports Microsoft.Office.Tools.Ribbon
 Imports Microsoft.Win32
 Imports SharedLibrary
+Imports SharedLibrary.SharedLibrary
 
 Public Class Ribbon1
 
@@ -18,13 +19,13 @@ Public Class Ribbon1
             Dim theme = DetectOfficeTheme()
             Select Case theme
                 Case OfficeTheme.Light
-                    Menu1.Image = My.Resources.Red_Ink_Logo_Medium
+                    Menu1.Image = SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Medium)
                 Case Else
-                    Menu1.Image = My.Resources.Red_Ink_Logo
+                    Menu1.Image = SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)
             End Select
             Menu1.ShowImage = True
         Catch
-            Menu1.Image = My.Resources.Red_Ink_Logo
+            Menu1.Image = SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)
             Menu1.ShowImage = True
         End Try
     End Sub

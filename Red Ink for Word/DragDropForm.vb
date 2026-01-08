@@ -39,6 +39,7 @@
 Imports System.Windows.Forms
 Imports System.Drawing
 Imports System.IO
+Imports SharedLibrary.SharedLibrary
 
 ''' <summary>
 ''' Specifies what type of path the DragDropForm should accept.
@@ -122,7 +123,7 @@ Public Class DragDropForm
     ''' Sets the form icon from application resources on load.
     ''' </summary>
     Private Sub DragDropForm_Load(sender As Object, e As EventArgs) Handles MyBase.Load
-        Dim bmp As New Bitmap(My.Resources.Red_Ink_Logo)
+        Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
         Dim icon As Icon = Icon.FromHandle(bmp.GetHicon())
         Me.Icon = icon
         ' Dispose bitmap to release GDI resources

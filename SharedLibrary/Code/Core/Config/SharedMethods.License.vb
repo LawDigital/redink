@@ -672,7 +672,7 @@ Namespace SharedLibrary
 
                     ' Set icon.
                     Try
-                        Dim bmp As New System.Drawing.Bitmap(My.Resources.Red_Ink_Logo)
+                        Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
                         form.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
                     Catch
                     End Try

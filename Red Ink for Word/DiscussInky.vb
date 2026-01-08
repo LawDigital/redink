@@ -141,7 +141,7 @@ Public Class DiscussInky
     Private Const ShowGeneratedMissionsConfirmation As Boolean = False
     Private DefaultAutoRespondBreakOff As String = $"If this chat is going in circles, if you have come to an agreement or solution, or if this chat is drifting away to a point that is no longer productive, stop the responses by including the exact text '{AutoRespondStopWord}' at the end of your message and explain why (if because a solution is found, explain the solution, common grounds, etc.)."
 
-    ' Sort Out feature state
+    ' Sort It Out feature state
     Private _sortOutInProgress As Boolean = False
     Private _sortOutMainMissionPrompt As String = ""
     Private _sortOutResponderMissionPrompt As String = ""
@@ -176,12 +176,12 @@ Public Class DiscussInky
     Private ReadOnly _btnPersona As Button = New Button() With {.Text = "Persona", .AutoSize = True}
     Private ReadOnly _btnMission As Button = New Button() With {.Text = "Mission", .AutoSize = True}
     Private ReadOnly _btnEditPersona As Button = New Button() With {.Text = "Edit Local Persona Lib", .AutoSize = True}
-    Private ReadOnly _btnKnowledge As Button = New Button() With {.Text = "Load Knowledge", .AutoSize = True}
+    Private ReadOnly _btnKnowledge As Button = New Button() With {.Text = "Load Knowledge (Docs)", .AutoSize = True}
     Private ReadOnly _btnAlternateModel As Button = New Button() With {.Text = "Alternate Model", .AutoSize = True}
     Private ReadOnly _chkIncludeActiveDoc As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = "Include active document", .AutoSize = True}
     Private ReadOnly _chkPersistKnowledge As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = "Persist knowledge temporarily", .AutoSize = True}
     Private ReadOnly _btnAutoRespond As Button = New Button() With {.Text = "Autorespond", .AutoSize = True}
-    Private ReadOnly _btnSortOut As Button = New Button() With {.Text = "Sort out", .AutoSize = True}
+    Private ReadOnly _btnSortOut As Button = New Button() With {.Text = "Sort It Out", .AutoSize = True}
 
     ' State
     Private _htmlReady As Boolean = False
@@ -270,7 +270,7 @@ Public Class DiscussInky
         Me.MinimumSize = New System.Drawing.Size(780, 480)
         Me.Font = New System.Drawing.Font("Segoe UI", 9.0F)
         Try
-            Me.Icon = Icon.FromHandle(New Bitmap(My.Resources.Red_Ink_Logo).GetHicon())
+            Me.Icon = Icon.FromHandle(New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)).GetHicon())
         Catch
         End Try
 
@@ -1794,13 +1794,13 @@ Public Class DiscussInky
                         mdBuilder.AppendLine()
 
                     Case "assistant"
-                        ' Check if content has an embedded display name (from Sort Out mode)
+                        ' Check if content has an embedded display name (from Sort it Out mode)
                         Dim content = msg.Content
                         Dim colonIdx = content.IndexOf(": ", StringComparison.Ordinal)
                         Dim displayName = _currentPersonaName
                         Dim messageText = content
 
-                        ' Check for Sort Out style naming (e.g., "PersonaName (Advocate): message")
+                        ' Check for Sort It Out style naming (e.g., "PersonaName (Advocate): message")
                         If colonIdx > 0 Then
                             Dim potentialName = content.Substring(0, colonIdx)
                             If potentialName.Contains("(Advocate)") OrElse potentialName.Contains("(Challenger)") OrElse potentialName.Contains("(2nd)") Then
@@ -2455,9 +2455,9 @@ Public Class DiscussInky
     ''' Handles the Autorespond button click - shows configuration dialog and starts auto-response loop.
     ''' </summary>
     Private Async Sub OnAutoRespondClick(sender As Object, e As EventArgs)
-        ' Prevent running if sort out is in progress
+        ' Prevent running if Sort It Out is in progress
         If _sortOutInProgress Then
-            AppendSystemMessage("Cannot start Autorespond while Sort Out is in progress.")
+            AppendSystemMessage("Cannot start Autorespond while Sort It Out is in progress.")
             Return
         End If
         ' Only allow when input is enabled (not during processing)
@@ -2895,7 +2895,7 @@ Public Class DiscussInky
                 Case "user"
                     line = "User: " & content & Environment.NewLine
                 Case "assistant"
-                    ' Check if content already has an embedded display name (from Sort Out mode)
+                    ' Check if content already has an embedded display name (from Sort It Out mode)
                     If content.Contains("(Advocate):") OrElse content.Contains("(Challenger):") OrElse content.Contains("(2nd):") Then
                         ' Content already includes the persona name prefix
                         line = content & Environment.NewLine
@@ -2966,39 +2966,39 @@ Public Class DiscussInky
 
 #End Region
 
-#Region "Sort Out Feature"
+#Region "Sort It Out Feature"
 
     ''' <summary>
-    ''' Handles the Sort Out button click - prompts for instruction and starts a structured discussion.
+    ''' Handles the Sort It Out button click - prompts for instruction and starts a structured discussion.
     ''' </summary>
     Private Async Sub OnSortOutClick(sender As Object, e As EventArgs)
-        ' Prevent running if autorespond or sort out is already in progress
+        ' Prevent running if autorespond or Sort It Out is already in progress
         If _autoRespondInProgress Then
-            AppendSystemMessage("Cannot start Sort Out while Autorespond is in progress.")
+            AppendSystemMessage("Cannot start Sort It Out while Autorespond is in progress.")
             Return
         End If
         If _sortOutInProgress Then
-            AppendSystemMessage("Sort Out is already in progress.")
+            AppendSystemMessage("Sort It Out is already in progress.")
             Return
         End If
         If Not _txtInput.Enabled Then
-            AppendSystemMessage("Cannot start Sort Out while a response is in progress.")
+            AppendSystemMessage("Cannot start Sort It Out while a response is in progress.")
             Return
         End If
 
-        ' Run the Sort Out flow
+        ' Run the Sort It Out flow
         Await RunSortOutFlowAsync()
     End Sub
 
     ''' <summary>
-    ''' Main flow for the Sort Out feature.
+    ''' Main flow for the Sort It Out feature.
     ''' </summary>
     Private Async Function RunSortOutFlowAsync() As Task
         ' Step 1: Get user instruction
         Dim userInstruction = ShowCustomInputBox(
             "Enter your instruction for the discussion. The two bots will sort out this issue based on the conversation so far and the loaded knowledge." & vbCrLf & vbCrLf &
             "Example: ""In the discussion so far, I received the advice to cancel the contract. Now, please discuss whether this really makes sense.""" & vbCrLf,
-            $"{AN} - Sort Out Discussion", False)
+            $"{AN} - Sort It Out Discussion", False)
 
         If String.IsNullOrWhiteSpace(userInstruction) Then
             Return ' User cancelled
@@ -3169,7 +3169,7 @@ Public Class DiscussInky
 
         Dim result = ShowCustomVariableInputForm(
             "How many rounds (back-and-forth exchanges) should the discussion have at most?",
-            $"{AN} - Sort Out Rounds",
+            $"{AN} - Sort It Out Rounds",
             params)
 
         If Not result Then
@@ -3194,7 +3194,7 @@ Public Class DiscussInky
     End Function
 
     ''' <summary>
-    ''' Generates mission statements for Sort Out using LLM.
+    ''' Generates mission statements for Sort It Out using LLM.
     ''' </summary>
     Private Async Function GenerateSortOutMissionsAsync(userInstruction As String, maxRounds As Integer) As Task(Of (Success As Boolean, MainMission As String, ResponderMission As String))
         Try
@@ -3269,7 +3269,7 @@ Public Class DiscussInky
     End Function
 
     ''' <summary>
-    ''' Shows a mission selector for Sort Out manual selection.
+    ''' Shows a mission selector for Sort It Out manual selection.
     ''' </summary>
     ''' <param name="prompt">The prompt to show.</param>
     ''' <param name="settingsKey">The settings key for persisting selection.</param>
@@ -3369,14 +3369,14 @@ Public Class DiscussInky
     End Function
 
     ''' <summary>
-    ''' Runs the Sort Out discussion loop, reusing autorespond infrastructure.
+    ''' Runs the Sort It Out discussion loop, reusing autorespond infrastructure.
     ''' </summary>
     Private Async Function RunSortOutLoopAsync(maxRounds As Integer) As Task
         _sortOutInProgress = True
-        _autoRespondInProgress = True  ' Block autorespond while sort out is running
+        _autoRespondInProgress = True  ' Block autorespond while Sort It Out is running
         _autoRespondCancelled = False
 
-        ' Disable input during sort out
+        ' Disable input during Sort It Out
         Ui(Sub()
                _txtInput.Enabled = False
                _btnSend.Enabled = False
@@ -3391,7 +3391,7 @@ Public Class DiscussInky
         ' Show progress bar
         Dim useProgressBar = (maxRounds > 1)
         If useProgressBar Then
-            ShowProgressBarInSeparateThread($"{AN} Sort Out", "Discussion in progress...")
+            ShowProgressBarInSeparateThread($"{AN} Sort It Out", "Discussion in progress...")
             ProgressBarModule.CancelOperation = False
             ProgressBarModule.GlobalProgressMax = maxRounds
             ProgressBarModule.GlobalProgressValue = 0
@@ -3399,7 +3399,7 @@ Public Class DiscussInky
         End If
 
         ' Notify start
-        AppendSystemMessage($"Sort Out discussion started between {mainDisplayName} and {responderDisplayName} for up to {maxRounds} round(s).")
+        AppendSystemMessage($"Sort It Out discussion started between {mainDisplayName} and {responderDisplayName} for up to {maxRounds} round(s).")
 
         Try
             Dim roundCount = 0
@@ -3418,7 +3418,7 @@ Public Class DiscussInky
 
             If Not String.IsNullOrWhiteSpace(mainResponse) Then
                 AppendAssistantMarkdownWithName(mainResponse, mainDisplayName)
-                ' Store with display name prefix for Sort Out mode (like autoresponder)
+                ' Store with display name prefix for Sort It Out mode (like autoresponder)
                 _history.Add(("assistant", $"{mainDisplayName}: {mainResponse}"))
             End If
 
@@ -3471,7 +3471,7 @@ Public Class DiscussInky
 
                 If Not String.IsNullOrWhiteSpace(mainBotResponse) Then
                     AppendAssistantMarkdownWithName(mainBotResponse, mainDisplayName)
-                    ' Store with display name prefix for Sort Out mode (like autoresponder)
+                    ' Store with display name prefix for Sort It Out mode (like autoresponder)
                     _history.Add(("assistant", $"{mainDisplayName}: {mainBotResponse}"))
                 End If
 
@@ -3484,15 +3484,15 @@ Public Class DiscussInky
 
             ' Summary message
             If _autoRespondCancelled Then
-                AppendSystemMessage($"Sort Out discussion cancelled after {roundCount} round(s).")
+                AppendSystemMessage($"Sort It Out discussion cancelled after {roundCount} round(s).")
             ElseIf stopRequested Then
-                AppendSystemMessage($"Sort Out discussion completed after {roundCount} round(s) - participants came to an end.")
+                AppendSystemMessage($"Sort It Out discussion completed after {roundCount} round(s) - participants came to an end.")
             Else
-                AppendSystemMessage($"Sort Out discussion completed - maximum of {roundCount} round(s) reached.")
+                AppendSystemMessage($"Sort It Out discussion completed - maximum of {roundCount} round(s) reached.")
             End If
 
         Catch ex As Exception
-            AppendSystemMessage($"Sort Out error: {ex.Message}")
+            AppendSystemMessage($"Sort It Out error: {ex.Message}")
         Finally
             If useProgressBar Then
                 ProgressBarModule.CancelOperation = True
@@ -3517,7 +3517,7 @@ Public Class DiscussInky
     End Function
 
     ''' <summary>
-    ''' Generates the main bot's response in Sort Out mode.
+    ''' Generates the main bot's response in Sort It Out mode.
     ''' </summary>
     Private Async Function GenerateSortOutMainBotResponseAsync(mainDisplayName As String, responderDisplayName As String) As Task(Of String)
         Dim dateContext = GetDateContext()
@@ -3525,7 +3525,7 @@ Public Class DiscussInky
         Dim locationContext = GetLocationContext()
         Dim languageInstruction = GetLanguageInstruction()
 
-        ' Use the main bot's persona with the Sort Out mission
+        ' Use the main bot's persona with the Sort It Out mission
         Dim basePrompt = If(Not String.IsNullOrEmpty(_currentPersonaPrompt),
                             _currentPersonaPrompt,
                             $"You are {_currentPersonaName}, participating in a structured discussion.")
@@ -3572,7 +3572,7 @@ Public Class DiscussInky
     End Function
 
     ''' <summary>
-    ''' Generates the responder's message in Sort Out mode.
+    ''' Generates the responder's message in Sort It Out mode.
     ''' </summary>
     Private Async Function GenerateSortOutResponderMessageAsync(mainDisplayName As String, responderDisplayName As String) As Task(Of String)
         Dim dateContext = GetDateContext()
