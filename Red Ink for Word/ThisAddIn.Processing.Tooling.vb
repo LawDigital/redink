@@ -60,6 +60,8 @@ Imports SharedLibrary.SharedLibrary.SharedMethods
 ''' </summary>
 Partial Public Class ThisAddIn
 
+    Const UseWebView2 = True
+
 #Region "Tooling File Logger (Reduced, Single File)"
 
     ''' <summary>
@@ -1407,20 +1409,19 @@ Partial Public Class ThisAddIn
             context.Log($"Retrieving content from {urls.Count} URL(s)...")
 
             Dim results As New StringBuilder()
-            Using httpClient As New HttpClient()
-                httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                httpClient.Timeout = TimeSpan.FromSeconds(30)
 
+            If UseWebView2 Then
                 For i = 0 To urls.Count - 1
                     Dim url = urls(i)
                     Try
                         context.Log($"  Fetching: {url}")
-                        Dim content = Await RetrieveWebsiteContent(url, 1, httpClient)
+                        ' RetrieveWebsiteContent_WebView2 handles its own threading (runs on STA thread internally)
+                        Dim content = Await RetrieveWebsiteContent_WebView2(url, 0)
 
                         If Not String.IsNullOrWhiteSpace(content) Then
                             results.AppendLine($"<URL_{i + 1}>{url}</URL_{i + 1}>")
                             results.AppendLine($"<CONTENT_{i + 1}>")
-                            results.AppendLine(Left(content, ISearch_MaxChars))
+                            results.AppendLine(content)
                             results.AppendLine($"</CONTENT_{i + 1}>")
                             results.AppendLine()
                         Else
@@ -1436,7 +1437,38 @@ Partial Public Class ThisAddIn
                         ToolingFileLogger.LogError("Internal web tool fetch error.", details:=$"url={url}", ex:=ex)
                     End Try
                 Next
-            End Using
+            Else
+                Using httpClient As New HttpClient()
+                    httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                    httpClient.Timeout = TimeSpan.FromSeconds(30)
+
+                    For i = 0 To urls.Count - 1
+                        Dim url = urls(i)
+                        Try
+                            context.Log($"  Fetching: {url}")
+                            Dim content = Await RetrieveWebsiteContent(url, INI_ISearch_MaxDepth, httpClient)
+
+                            If Not String.IsNullOrWhiteSpace(content) Then
+                                results.AppendLine($"<URL_{i + 1}>{url}</URL_{i + 1}>")
+                                results.AppendLine($"<CONTENT_{i + 1}>")
+                                results.AppendLine(content)
+                                results.AppendLine($"</CONTENT_{i + 1}>")
+                                results.AppendLine()
+                            Else
+                                results.AppendLine($"<URL_{i + 1}>{url}</URL_{i + 1}>")
+                                results.AppendLine($"<CONTENT_{i + 1}>No content retrieved</CONTENT_{i + 1}>")
+                                results.AppendLine()
+                                ToolingFileLogger.LogWarn("Internal web tool: No content retrieved.", details:=$"url={url}")
+                            End If
+                        Catch ex As Exception
+                            results.AppendLine($"<URL_{i + 1}>{url}</URL_{i + 1}>")
+                            results.AppendLine($"<ERROR_{i + 1}>{ex.Message}</ERROR_{i + 1}>")
+                            results.AppendLine()
+                            ToolingFileLogger.LogError("Internal web tool fetch error.", details:=$"url={url}", ex:=ex)
+                        End Try
+                    Next
+                End Using
+            End If
 
             response.Response = results.ToString()
             response.Success = True

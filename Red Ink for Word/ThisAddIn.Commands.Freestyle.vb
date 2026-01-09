@@ -51,6 +51,7 @@ Imports DocumentFormat.OpenXml
 Imports DocumentFormat.OpenXml.Office2010.CustomUI
 Imports DocumentFormat.OpenXml.Presentation
 Imports DocumentFormat.OpenXml.Wordprocessing
+Imports Google.Rpc.Context.AttributeContext.Types
 Imports Microsoft.Office.Interop.PowerPoint
 Imports Microsoft.Office.Interop.Word
 Imports NetOffice.PowerPointApi
@@ -962,6 +963,7 @@ Partial Public Class ThisAddIn
 
                 ' TOOLS / SOURCES
                 AddItem("setsources", "Select sources/tools available for tooling-capable models (session scope).")
+                AddItem("loadurl", "Retrieve the text of a particular URL given.")
 
                 ' PRIVACY / TRANSFORMS
                 AddItem("anonymize", "Anonymize/redact the current selection (no LLM call).")
@@ -1085,6 +1087,44 @@ Partial Public Class ThisAddIn
             ' Find hidden prompts in document
             If String.Equals(OtherPrompt.Trim(), "findhiddenprompts", StringComparison.OrdinalIgnoreCase) Then
                 FindHiddenPrompts()
+                Return
+            End If
+
+            ' Load the content of an URL                                 
+            If String.Equals(OtherPrompt.Trim(), "loadurl", StringComparison.OrdinalIgnoreCase) Then
+                Dim url As String = SLib.ShowCustomInputBox("Please enter the URL to retrieve the content from:", $"{AN} - Load URL Content", True, "https://")
+                If String.IsNullOrWhiteSpace(url) OrElse url.ToLower() = "esc" Then Return
+
+                InfoBox.ShowInfoBox($"Retrieving content from {url.Trim()} ...")
+
+                ' Run WebView2 on background and wait synchronously to stay on UI thread
+                Dim content As String = ""
+                Dim webViewTask As Task(Of String) = RetrieveWebsiteContent_WebView2(url.Trim(), 0)
+
+                ' Wait for completion while pumping messages to keep UI responsive
+                While Not webViewTask.IsCompleted
+                    System.Windows.Forms.Application.DoEvents()
+                    System.Threading.Thread.Sleep(50)
+                End While
+
+                ' Get the result (we're still on the original UI thread)
+                If webViewTask.Status = TaskStatus.RanToCompletion Then
+                    content = webViewTask.Result
+                End If
+
+                InfoBox.ShowInfoBox("")
+
+                If String.IsNullOrWhiteSpace(content) Then
+                    ShowCustomMessageBox("Could not retrieve content from the specified URL.")
+                    Return
+                End If
+
+                Debug.WriteLine($"[loadurl] Inserting {content.Length} characters into document")
+
+                ' We're on the UI thread - safe to access Word objects
+                selection.Range.Collapse(Direction:=Word.WdCollapseDirection.wdCollapseEnd)
+                selection.InsertAfter(vbCrLf & vbCrLf & content)
+
                 Return
             End If
 

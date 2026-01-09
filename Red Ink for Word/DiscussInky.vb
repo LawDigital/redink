@@ -3,83 +3,95 @@
 
 ' =============================================================================
 ' File: DiscussInky.vb
-' Purpose: Hosts the "Discuss Inky" multi-persona chat surface inside Word,
-'          wiring persona selection, mission selection, knowledge loading,
-'          transcript persistence, and LLM invocation with optional
-'          alternate/secondary models. Includes an autoresponder loop to
-'          simulate multi-party discussions.
+' Purpose:
+'   WinForms surface that hosts the "Discuss this" multi-persona chat inside Word.
+'   Provides persona + mission selection, knowledge loading (file or directory),
+'   optional inclusion of the active Word document, transcript rendering/persistence,
+'   and LLM invocation with optional alternate-model / second-API support.
+'   Includes two automation modes:
+'     - Autorespond: simulates a second participant for multi-party dialogue
+'     - Sort It Out: structured Advocate vs Challenger discussion using the same engine
 '
 ' Architecture / How it works:
 '  - UI Composition:
-'     * WinForms surface composed of:
-'         - WebBrowser transcript renderer (Markdown -> HTML via Markdig)
-'         - Multiline input box
-'         - Action buttons (Send, Persona, Mission, Load Knowledge, Send to Doc, Autorespond, etc.)
-'         - Checkboxes for including the active document and persisting knowledge temporarily.
+'     * WebBrowser transcript renderer (Markdown -> HTML via Markdig, custom CSS; external links open in browser)
+'     * Multiline TextBox input with Enter-to-send (Shift+Enter for newline) and Esc-to-close
+'     * Buttons: Send, Persona, Mission, Edit Local Persona Lib, Load Knowledge, Alternate Model,
+'       Clear, Send to Doc, Close, Autorespond, Sort It Out, Tools
+'     * Checkboxes: Include active document, Persist knowledge temporarily, Enable tooling, Tooling log
 '
-'  - Session State & Persistence:
-'     * Persists window geometry, selected persona/mission, checkbox states, and transcript
-'       via `My.Settings`.
+'  - Session State & Persistence (`My.Settings`):
+'     * Persists window geometry, selected persona/mission, checkbox states, knowledge path, tooling settings
 '     * Persists transcript in two forms:
-'         - HTML fragment (`DiscussLastChatHtml`) to restore UI visuals quickly
+'         - HTML fragment (`DiscussLastChatHtml`) for fast UI restoration
 '         - Plain transcript (`DiscussLastChat`) to rebuild `_history` for LLM context
-'     * Maintains an in-process knowledge cache (`_cachedKnowledgeContent/_cachedKnowledgeFilePath`)
-'       that survives closing/reopening the form while Word remains running.
+'     * Maintains an in-process runtime knowledge cache (`_cachedKnowledgeContent/_cachedKnowledgeFilePath`)
+'       (survives closing/reopening the form while Word remains running)
+'     * Optional temp-file persistence of knowledge when "Persist knowledge temporarily" is enabled
+'       (`%TEMP%\redink-discussknowledge.txt`)
 '
 '  - Personas & Missions:
-'     * Personas are loaded from local/global persona libraries (Name|Prompt format).
-'     * Missions are loaded from a sibling file derived from the persona library path:
-'         [personaFileNameWithoutExtension]-missions.txt (Name|Prompt format).
-'     * Mission editing from the UI reloads missions immediately and refreshes the selection flow.
+'     * Personas loaded from local and/or global persona libraries (Name|Prompt, `;` comments supported)
+'       - Local personas are labeled "(local)" and display names are de-duplicated
+'     * Missions loaded from a sibling file derived from the persona library filename:
+'         [personaFileNameWithoutExtension]-missions.txt (Name|Prompt, `;` comments supported)
+'     * Mission/Persona editing is available via the shared text editor; missions reload immediately
 '
 '  - Knowledge Loading (File/Directory):
-'     * Loads a single knowledge file or all supported files from a directory (top level).
-'     * When multiple files are loaded, wraps each file into numbered tags:
+'     * Loads a single file or all supported files from a directory (top-level only; capped to prevent overload)
+'     * Supported formats include text/code/markup, RTF, DOC/DOCX, PPTX, PDF (optional OCR when available)
+'     * When multiple files are loaded, wraps each into numbered tags:
 '         <documentN name="file.ext"> ... </documentN>
-'     * Supports PDF extraction with optional OCR (if available) and warns when extraction may be incomplete.
-'     * Knowledge can be persisted temporarily to a temp file when the user enables the
-'       "Persist knowledge temporarily" checkbox.
+'     * Produces a user-confirmed load summary (loaded/failed/ignored, PDF extraction warnings)
 '
 '  - LLM Pipeline & Context Unification:
-'     * All LLM calls (manual chat and autorespond) are built from the same context pieces:
+'     * Builds prompts from shared context pieces:
 '         - Persona system prompt (+ optional mission clause)
-'         - Loaded knowledge (if provided)
-'         - Active document excerpt (if enabled)
-'         - Conversation history (from `_history`)
-'     * Conversation history is produced by `BuildConversationForAutoResponder()` which includes:
-'         - `user` messages
-'         - `assistant` messages (main chatbot persona)
-'         - `autoresponder` messages (other persona; stored already prefixed with its display name)
-'       This ensures BOTH the main chatbot and the autoresponder always see the full conversation so far
-'       regardless of who spoke.
-'     * Prompt history is capped using `_context.INI_ChatCap` to avoid overly long prompts; if exceeded,
-'       older history is truncated by taking the most recent tail.
+'         - Knowledge base (if loaded)
+'         - Active Word document excerpt
+'         - Conversation history (`_history`), capped/tail-truncated using `_context.INI_ChatCap`
+'     * History roles:
+'         - `user`
+'         - `assistant` (main persona; Sort It Out stores prefixed display names like "X (Advocate): ...")
+'         - `autoresponder` (second participant; stored already prefixed with its display name)
+'       `BuildConversationForAutoResponder()` normalizes roles into a single transcript so both parties see the
+'       full conversation regardless of who spoke.
+'     * Generates a brief welcome message (persona/mission aware) and displays session info on startup when needed
 '
-'  - Autorespond Feature (Multi-party Dialogue Simulation):
-'     * When started, alternates between:
-'         1) Autoresponder persona generates a message (recorded as role `autoresponder`)
-'         2) Main chatbot responds (recorded as role `assistant`)
-'     * Uses the same knowledge, active-document option, and unified history builder as manual chat.
-'     * Supports a configurable maximum number of rounds and a stop phrase (`<AUTORESPOND_STOP>`).
+'  - Automation Modes:
+'     * Autorespond:
+'         - Alternates between responder persona and main persona for up to N rounds
+'         - Supports a stop phrase (`<AUTORESPOND_STOP>`) and optional progress UI
+'         - Can optionally generate a discussion summary after completion
+'     * Sort It Out:
+'         - Runs a structured Advocate vs Challenger dialogue using the same alternation engine
+'         - Missions can be auto-generated via LLM or selected manually; settings are persisted
+'         - Can optionally generate a discussion summary after completion
 '
-'  - Alternate / Secondary Model Support:
-'     * Supports selecting an alternate model config (via INI file) or toggling a configured second API.
-'     * `CallLlmWithSelectedModelAsync()` applies the selected alternate model only for the duration of the call
-'       and restores the original context configuration afterward (thread-safe via semaphore).
+'  - Model Selection / Tooling:
+'     * Alternate model support:
+'         - If an alternate model INI is configured, user can select an alternate model; the model is applied
+'           only for the duration of each call and then restored (semaphore-protected)
+'         - Legacy "second API" toggle is supported when configured
+'     * Tooling support:
+'         - Optional per-session tool selection and execution via `Globals.ThisAddIn.ExecuteToolingLoop`
+'         - Tooling UI is enabled/disabled based on the currently selected model's tooling capability
 '
-'  - Send to Doc:
-'     * Exports the transcript to a new Word document using Markdown insertion.
-'     * Handles roles explicitly (`user`, `assistant`, `autoresponder`) and formats each speaker properly.
+'  - Export:
+'     * "Send to Doc" exports the conversation to a new Word document using Markdown insertion,
+'       formatting speakers explicitly for `user`, `assistant`, and `autoresponder`
 '
 ' External Dependencies:
-'  - Uses `SharedLibrary.SharedMethods` for:
+'  - Markdig: Markdown-to-HTML conversion for transcript rendering and summary display
+'  - `SharedLibrary.SharedMethods`:
 '     * LLM calls and model configuration switching
-'     * OCR/PDF handling utilities
-'     * Shared dialogs (value selection, variable input form, message boxes, text editor)
-'  - Uses Markdig for Markdown-to-HTML conversion for transcript rendering.
+'     * OCR/PDF utilities and file extraction helpers
+'     * Shared dialogs (selection, variable input, message boxes, text editor)
+'  - `Globals.ThisAddIn`:
+'     * Word interop access, tooling loop, presentation extraction, drag/drop picker, progress UI helpers
 ' =============================================================================
 
-Option Strict On
+Option Strict Off
 Option Explicit On
 
 Imports System.ComponentModel
@@ -1024,6 +1036,13 @@ Public Class DiscussInky
             _selectedToolsForChat = Nothing
         End If
     End Sub
+
+    ''' <summary>
+    ''' Handles changes to the "Tooling log" checkbox. The checked state is consumed when executing the tooling loop
+    ''' to decide whether to show or hide the tooling log window.
+    ''' </summary>
+    ''' <param name="sender">The event source.</param>
+    ''' <param name="e">Event arguments.</param>
 
     Private Sub OnShowToolingLogChanged(sender As Object, e As EventArgs)
         ' No special handling needed - just uses the Checked state when calling ExecuteToolingLoop
@@ -2156,7 +2175,7 @@ Public Class DiscussInky
                 Dim activeDocContent = GetActiveDocumentContent()
                 If Not String.IsNullOrWhiteSpace(activeDocContent) Then
                     sb.AppendLine("<User's Active Document>")
-                    sb.AppendLine(TruncateForPrompt(activeDocContent, _context.INI_ChatCap))
+                    sb.AppendLine(activeDocContent)
                     sb.AppendLine("</User's Active Document>")
                     sb.AppendLine()
                 End If
@@ -2188,61 +2207,6 @@ Public Class DiscussInky
         End Try
     End Function
 
-    ''' <summary>
-    ''' Extracts the current Word document and selection details for prompt inclusion.
-    ''' </summary>
-    ''' <returns>Formatted string with document name, selected paragraph, and full text.</returns>
-    Private Function GetActiveDocumentContent() As String
-        Try
-            Dim app = Globals.ThisAddIn.Application
-            If app Is Nothing OrElse app.Documents.Count = 0 Then Return ""
-
-            Dim doc = app.ActiveDocument
-            If doc Is Nothing Then Return ""
-
-            Dim fullText = doc.Content.Text
-            Dim selectedPara = ""
-
-            ' Get current selection's paragraph
-            Try
-                Dim sel = app.Selection
-                If sel IsNot Nothing AndAlso sel.Paragraphs.Count > 0 Then
-                    selectedPara = sel.Paragraphs(1).Range.Text.Trim()
-                End If
-            Catch
-            End Try
-
-            Dim sb As New StringBuilder()
-            sb.AppendLine($"Document: {doc.Name}")
-
-            If Not String.IsNullOrWhiteSpace(selectedPara) Then
-                sb.AppendLine()
-                sb.AppendLine("Currently selected paragraph:")
-                sb.AppendLine(selectedPara)
-            End If
-
-            sb.AppendLine()
-            sb.AppendLine("Full document text:")
-            sb.AppendLine(fullText)
-
-            Return sb.ToString()
-
-        Catch
-            Return ""
-        End Try
-    End Function
-
-    ''' <summary>
-    ''' Limits long strings to the configured cap and annotates truncation.
-    ''' </summary>
-    ''' <param name="text">Input text.</param>
-    ''' <param name="maxLen">Maximum length.</param>
-    ''' <returns>Truncated or original text with annotation if truncated.</returns>
-    Private Function TruncateForPrompt(text As String, maxLen As Integer) As String
-        If String.IsNullOrEmpty(text) Then Return ""
-        If text.Length <= maxLen Then Return text
-        Return text.Substring(0, maxLen) & vbCrLf & $"...[TRUNCATED - showing {maxLen:N0} of {text.Length:N0} characters]"
-    End Function
 
 #End Region
 
@@ -2935,7 +2899,7 @@ Public Class DiscussInky
             Dim activeDocContent = GetActiveDocumentContent()
             If Not String.IsNullOrWhiteSpace(activeDocContent) Then
                 sb.AppendLine("<User's Active Document>")
-                sb.AppendLine(TruncateForPrompt(activeDocContent, _context.INI_ChatCap))
+                sb.AppendLine(activeDocContent)
                 sb.AppendLine("</User's Active Document>")
                 sb.AppendLine()
             End If
@@ -2994,7 +2958,7 @@ Public Class DiscussInky
             Dim activeDocContent = GetActiveDocumentContent()
             If Not String.IsNullOrWhiteSpace(activeDocContent) Then
                 sb.AppendLine("<User's Active Document>")
-                sb.AppendLine(TruncateForPrompt(activeDocContent, _context.INI_ChatCap))
+                sb.AppendLine(activeDocContent)
                 sb.AppendLine("</User's Active Document>")
                 sb.AppendLine()
             End If
@@ -3691,7 +3655,7 @@ Public Class DiscussInky
             Dim activeDocContent = GetActiveDocumentContent()
             If Not String.IsNullOrWhiteSpace(activeDocContent) Then
                 sb.AppendLine("<User's Active Document>")
-                sb.AppendLine(TruncateForPrompt(activeDocContent, _context.INI_ChatCap))
+                sb.AppendLine(activeDocContent)
                 sb.AppendLine("</User's Active Document>")
                 sb.AppendLine()
             End If
@@ -3746,7 +3710,7 @@ Public Class DiscussInky
             Dim activeDocContent = GetActiveDocumentContent()
             If Not String.IsNullOrWhiteSpace(activeDocContent) Then
                 sb.AppendLine("<User's Active Document>")
-                sb.AppendLine(TruncateForPrompt(activeDocContent, _context.INI_ChatCap))
+                sb.AppendLine(activeDocContent)
                 sb.AppendLine("</User's Active Document>")
                 sb.AppendLine()
             End If
@@ -3840,6 +3804,175 @@ Public Class DiscussInky
             ShowCustomMessageBox(summaryMarkdown, $"{SharedMethods.AN} Discussion Summary")
         End Try
     End Sub
+
+#End Region
+
+#Region "Active Document Context (with selection/cursor + bubbles)"
+
+    ''' <summary>
+    ''' Number of characters to capture before and after the cursor when there is no explicit selection.
+    ''' </summary>
+    Private Const CursorContextCharCount As Integer = 25
+
+    ''' <summary>
+    ''' Extracts the active Word document content for prompt inclusion, including:
+    ''' - document name + full text
+    ''' - either selected text OR cursor context (if selection is empty)
+    ''' - Word bubble comments (when available) via `ThisAddIn.BubblesExtract`
+    ''' </summary>
+    ''' <returns>Formatted string suitable for direct prompt inclusion.</returns>
+    Private Function GetActiveDocumentContent() As String
+        Try
+            Dim app = Globals.ThisAddIn.Application
+            If app Is Nothing Then
+                Debug.WriteLine("GetActiveDocumentContent: app is Nothing")
+                Return ""
+            End If
+            If app.Documents Is Nothing OrElse app.Documents.Count = 0 Then
+                Debug.WriteLine("GetActiveDocumentContent: No documents open")
+                Return ""
+            End If
+            If app Is Nothing OrElse app.Documents Is Nothing OrElse app.Documents.Count = 0 Then Return ""
+
+            Dim doc = app.ActiveDocument
+            If doc Is Nothing Then Return ""
+
+            Dim sb As New StringBuilder()
+            sb.AppendLine($"Document: {doc.Name}")
+
+            Dim fullText As String = ""
+            Dim docBubbles As String = ""
+
+            Dim haveWindow As Boolean = False
+            Dim originalRevisionsView As Microsoft.Office.Interop.Word.WdRevisionsView = Nothing
+            Dim originalShowRevisions As Boolean = False
+
+            Try
+                haveWindow = (app.ActiveWindow IsNot Nothing AndAlso app.ActiveWindow.View IsNot Nothing)
+                If haveWindow Then
+                    originalRevisionsView = app.ActiveWindow.View.RevisionsView
+                    originalShowRevisions = app.ActiveWindow.View.ShowRevisionsAndComments
+
+                    With app.ActiveWindow.View
+                        .RevisionsView = Microsoft.Office.Interop.Word.WdRevisionsView.wdRevisionsViewFinal
+                        .ShowRevisionsAndComments = False
+                    End With
+                End If
+
+                fullText = doc.Content.Text
+
+                Try
+                    docBubbles = ThisAddIn.BubblesExtract(doc.Content, True)
+                Catch
+                    docBubbles = ""
+                End Try
+
+            Finally
+                If haveWindow Then
+                    With app.ActiveWindow.View
+                        .RevisionsView = originalRevisionsView
+                        .ShowRevisionsAndComments = originalShowRevisions
+                    End With
+                End If
+            End Try
+
+            Dim selectionBlock As String = BuildSelectionOrCursorContextWithBubbles(doc)
+            If Not String.IsNullOrWhiteSpace(selectionBlock) Then
+                sb.AppendLine()
+                sb.AppendLine(selectionBlock.TrimEnd())
+            End If
+
+            sb.AppendLine()
+            sb.AppendLine("Full document text:")
+            sb.AppendLine(fullText)
+
+            If Not String.IsNullOrWhiteSpace(docBubbles) Then
+                sb.AppendLine()
+                sb.AppendLine("Comments / bubbles:")
+                sb.AppendLine(docBubbles)
+            End If
+
+            Return sb.ToString()
+
+        Catch ex As Exception
+            Debug.WriteLine($"GetActiveDocumentContent exception: {ex.Message}")
+            Return ""
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Builds a context block for either the current selection (if any) or a cursor-context window.
+    ''' Includes bubble comments found within that selection/cursor range.
+    ''' </summary>
+    ''' <param name="doc">Active document.</param>
+    ''' <returns>Formatted block or empty string.</returns>
+    Private Function BuildSelectionOrCursorContextWithBubbles(doc As Microsoft.Office.Interop.Word.Document) As String
+        Try
+            Dim app = doc.Application
+            Dim sel = app.Selection
+            If sel Is Nothing Then Return ""
+
+            Dim bubbles As String = ""
+
+            ' If actual selection exists, use it
+            If sel.Start <> sel.End AndAlso Not String.IsNullOrWhiteSpace(sel.Text) Then
+
+                Try
+                    bubbles = ThisAddIn.BubblesExtract(sel.Range, True)
+                Catch
+                    bubbles = ""
+                End Try
+
+                Dim sb As New StringBuilder()
+                sb.AppendLine("User selection:")
+                sb.AppendLine(sel.Text.Trim())
+
+                If Not String.IsNullOrWhiteSpace(bubbles) Then
+                    sb.AppendLine()
+                    sb.AppendLine("Selection comments / bubbles:")
+                    sb.AppendLine(bubbles)
+                End If
+
+                Return sb.ToString()
+            End If
+
+            ' Otherwise: capture cursor context (N chars before/after) + bubbles in that range
+            Dim cursorPos As Integer = sel.Start
+            Dim docStart As Integer = doc.Content.Start
+            Dim docEnd As Integer = doc.Content.End
+
+            Dim contextStart As Integer = Math.Max(docStart, cursorPos - CursorContextCharCount)
+            Dim contextEnd As Integer = Math.Min(docEnd, cursorPos + CursorContextCharCount)
+
+            Dim beforeRange = doc.Range(contextStart, cursorPos)
+            Dim afterRange = doc.Range(cursorPos, contextEnd)
+
+            Dim contextText As String = beforeRange.Text & "[cursor is here]" & afterRange.Text
+
+            Dim cursorRange = doc.Range(contextStart, contextEnd)
+            bubbles = ""
+            Try
+                bubbles = ThisAddIn.BubblesExtract(cursorRange, True)
+            Catch
+                bubbles = ""
+            End Try
+
+            Dim sb2 As New StringBuilder()
+            sb2.AppendLine("Cursor context:")
+            sb2.AppendLine(contextText.Trim())
+
+            If Not String.IsNullOrWhiteSpace(bubbles) Then
+                sb2.AppendLine()
+                sb2.AppendLine("Cursor-range comments / bubbles:")
+                sb2.AppendLine(bubbles)
+            End If
+
+            Return sb2.ToString()
+
+        Catch
+            Return ""
+        End Try
+    End Function
 
 #End Region
 

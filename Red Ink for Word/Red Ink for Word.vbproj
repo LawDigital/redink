@@ -171,11 +171,11 @@
     <Reference Include="DiffPlex, Version=1.9.0.0, Culture=neutral, PublicKeyToken=1d35e91d1bd7bc0f, processorArchitecture=MSIL">
       <HintPath>..\packages\DiffPlex.1.9.0\lib\net45\DiffPlex.dll</HintPath>
     </Reference>
-    <Reference Include="DocumentFormat.OpenXml, Version=3.3.0.0, Culture=neutral, PublicKeyToken=8fb06cb64d019a17, processorArchitecture=MSIL">
-      <HintPath>..\packages\DocumentFormat.OpenXml.3.3.0\lib\net46\DocumentFormat.OpenXml.dll</HintPath>
+    <Reference Include="DocumentFormat.OpenXml, Version=3.4.1.0, Culture=neutral, PublicKeyToken=8fb06cb64d019a17, processorArchitecture=MSIL">
+      <HintPath>..\packages\DocumentFormat.OpenXml.3.4.1\lib\net46\DocumentFormat.OpenXml.dll</HintPath>
     </Reference>
-    <Reference Include="DocumentFormat.OpenXml.Framework, Version=3.3.0.0, Culture=neutral, PublicKeyToken=8fb06cb64d019a17, processorArchitecture=MSIL">
-      <HintPath>..\packages\DocumentFormat.OpenXml.Framework.3.3.0\lib\net46\DocumentFormat.OpenXml.Framework.dll</HintPath>
+    <Reference Include="DocumentFormat.OpenXml.Framework, Version=3.4.1.0, Culture=neutral, PublicKeyToken=8fb06cb64d019a17, processorArchitecture=MSIL">
+      <HintPath>..\packages\DocumentFormat.OpenXml.Framework.3.4.1\lib\net46\DocumentFormat.OpenXml.Framework.dll</HintPath>
     </Reference>
     <Reference Include="Google.Api.CommonProtos, Version=2.17.0.0, Culture=neutral, PublicKeyToken=3ec5ea7f18953e47, processorArchitecture=MSIL">
       <HintPath>..\packages\Google.Api.CommonProtos.2.17.0\lib\net461\Google.Api.CommonProtos.dll</HintPath>
@@ -207,19 +207,19 @@
       <HintPath>..\packages\Google.Protobuf.3.33.2\lib\net45\Google.Protobuf.dll</HintPath>
     </Reference>
     <Reference Include="Grpc.Auth, Version=2.0.0.0, Culture=neutral, PublicKeyToken=d754f35622e28bad, processorArchitecture=MSIL">
-      <HintPath>..\packages\Grpc.Auth.2.71.0\lib\net462\Grpc.Auth.dll</HintPath>
+      <HintPath>..\packages\Grpc.Auth.2.76.0\lib\net462\Grpc.Auth.dll</HintPath>
     </Reference>
     <Reference Include="Grpc.Core, Version=2.0.0.0, Culture=neutral, PublicKeyToken=d754f35622e28bad, processorArchitecture=MSIL">
       <HintPath>..\packages\Grpc.Core.2.46.6\lib\net45\Grpc.Core.dll</HintPath>
     </Reference>
     <Reference Include="Grpc.Core.Api, Version=2.0.0.0, Culture=neutral, PublicKeyToken=d754f35622e28bad, processorArchitecture=MSIL">
-      <HintPath>..\packages\Grpc.Core.Api.2.71.0\lib\net462\Grpc.Core.Api.dll</HintPath>
+      <HintPath>..\packages\Grpc.Core.Api.2.76.0\lib\net462\Grpc.Core.Api.dll</HintPath>
     </Reference>
     <Reference Include="Grpc.Net.Client, Version=2.0.0.0, Culture=neutral, PublicKeyToken=d754f35622e28bad, processorArchitecture=MSIL">
-      <HintPath>..\packages\Grpc.Net.Client.2.71.0\lib\net462\Grpc.Net.Client.dll</HintPath>
+      <HintPath>..\packages\Grpc.Net.Client.2.76.0\lib\net462\Grpc.Net.Client.dll</HintPath>
     </Reference>
     <Reference Include="Grpc.Net.Common, Version=2.0.0.0, Culture=neutral, PublicKeyToken=d754f35622e28bad, processorArchitecture=MSIL">
-      <HintPath>..\packages\Grpc.Net.Common.2.71.0\lib\netstandard2.0\Grpc.Net.Common.dll</HintPath>
+      <HintPath>..\packages\Grpc.Net.Common.2.76.0\lib\netstandard2.0\Grpc.Net.Common.dll</HintPath>
     </Reference>
     <Reference Include="HtmlAgilityPack, Version=1.12.4.0, Culture=neutral, PublicKeyToken=bd319b19eaf3b43a, processorArchitecture=MSIL">
       <HintPath>..\packages\HtmlAgilityPack.1.12.4\lib\Net45\HtmlAgilityPack.dll</HintPath>
@@ -273,6 +273,15 @@
       <HintPath>..\packages\Microsoft.Office.Interop.PowerPoint.15.0.4420.1018\lib\net20\Microsoft.Office.Interop.PowerPoint.dll</HintPath>
       <EmbedInteropTypes>True</EmbedInteropTypes>
     </Reference>
+    <Reference Include="Microsoft.Web.WebView2.Core, Version=1.0.3650.58, Culture=neutral, PublicKeyToken=2a8ab48044d2601e, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Web.WebView2.1.0.3650.58\lib\net462\Microsoft.Web.WebView2.Core.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.Web.WebView2.WinForms, Version=1.0.3650.58, Culture=neutral, PublicKeyToken=2a8ab48044d2601e, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Web.WebView2.1.0.3650.58\lib\net462\Microsoft.Web.WebView2.WinForms.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.Web.WebView2.Wpf, Version=1.0.3650.58, Culture=neutral, PublicKeyToken=2a8ab48044d2601e, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Web.WebView2.1.0.3650.58\lib\net462\Microsoft.Web.WebView2.Wpf.dll</HintPath>
+    </Reference>
     <Reference Include="Microsoft.Win32.Registry, Version=5.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
       <HintPath>..\packages\Microsoft.Win32.Registry.5.0.0\lib\net461\Microsoft.Win32.Registry.dll</HintPath>
     </Reference>
@@ -314,32 +323,32 @@
     <Reference Include="PdfiumViewer, Version=2.13.0.0, Culture=neutral, PublicKeyToken=91e4789cfb0609e0, processorArchitecture=MSIL">
       <HintPath>..\packages\PdfiumViewer.2.13.0.0\lib\net20\PdfiumViewer.dll</HintPath>
     </Reference>
-    <Reference Include="PdfSharp, Version=6.2.3.0, Culture=neutral, PublicKeyToken=f94615aa0424f9eb, processorArchitecture=MSIL">
-      <HintPath>..\packages\PDFsharp.6.2.3\lib\netstandard2.0\PdfSharp.dll</HintPath>
+    <Reference Include="PdfSharp, Version=6.2.4.0, Culture=neutral, PublicKeyToken=f94615aa0424f9eb, processorArchitecture=MSIL">
+      <HintPath>..\packages\PDFsharp.6.2.4\lib\netstandard2.0\PdfSharp.dll</HintPath>
     </Reference>
-    <Reference Include="PdfSharp.BarCodes, Version=6.2.3.0, Culture=neutral, PublicKeyToken=f94615aa0424f9eb, processorArchitecture=MSIL">
-      <HintPath>..\packages\PDFsharp.6.2.3\lib\netstandard2.0\PdfSharp.BarCodes.dll</HintPath>
+    <Reference Include="PdfSharp.BarCodes, Version=6.2.4.0, Culture=neutral, PublicKeyToken=f94615aa0424f9eb, processorArchitecture=MSIL">
+      <HintPath>..\packages\PDFsharp.6.2.4\lib\netstandard2.0\PdfSharp.BarCodes.dll</HintPath>
     </Reference>
-    <Reference Include="PdfSharp.Charting, Version=6.2.3.0, Culture=neutral, PublicKeyToken=f94615aa0424f9eb, processorArchitecture=MSIL">
-      <HintPath>..\packages\PDFsharp.6.2.3\lib\netstandard2.0\PdfSharp.Charting.dll</HintPath>
+    <Reference Include="PdfSharp.Charting, Version=6.2.4.0, Culture=neutral, PublicKeyToken=f94615aa0424f9eb, processorArchitecture=MSIL">
+      <HintPath>..\packages\PDFsharp.6.2.4\lib\netstandard2.0\PdfSharp.Charting.dll</HintPath>
     </Reference>
-    <Reference Include="PdfSharp.Cryptography, Version=6.2.3.0, Culture=neutral, PublicKeyToken=f94615aa0424f9eb, processorArchitecture=MSIL">
-      <HintPath>..\packages\PDFsharp.6.2.3\lib\netstandard2.0\PdfSharp.Cryptography.dll</HintPath>
+    <Reference Include="PdfSharp.Cryptography, Version=6.2.4.0, Culture=neutral, PublicKeyToken=f94615aa0424f9eb, processorArchitecture=MSIL">
+      <HintPath>..\packages\PDFsharp.6.2.4\lib\netstandard2.0\PdfSharp.Cryptography.dll</HintPath>
     </Reference>
-    <Reference Include="PdfSharp.Quality, Version=6.2.3.0, Culture=neutral, PublicKeyToken=f94615aa0424f9eb, processorArchitecture=MSIL">
-      <HintPath>..\packages\PDFsharp.6.2.3\lib\netstandard2.0\PdfSharp.Quality.dll</HintPath>
+    <Reference Include="PdfSharp.Quality, Version=6.2.4.0, Culture=neutral, PublicKeyToken=f94615aa0424f9eb, processorArchitecture=MSIL">
+      <HintPath>..\packages\PDFsharp.6.2.4\lib\netstandard2.0\PdfSharp.Quality.dll</HintPath>
     </Reference>
-    <Reference Include="PdfSharp.Shared, Version=6.2.3.0, Culture=neutral, PublicKeyToken=f94615aa0424f9eb, processorArchitecture=MSIL">
-      <HintPath>..\packages\PDFsharp.6.2.3\lib\netstandard2.0\PdfSharp.Shared.dll</HintPath>
+    <Reference Include="PdfSharp.Shared, Version=6.2.4.0, Culture=neutral, PublicKeyToken=f94615aa0424f9eb, processorArchitecture=MSIL">
+      <HintPath>..\packages\PDFsharp.6.2.4\lib\netstandard2.0\PdfSharp.Shared.dll</HintPath>
     </Reference>
-    <Reference Include="PdfSharp.Snippets, Version=6.2.3.0, Culture=neutral, PublicKeyToken=f94615aa0424f9eb, processorArchitecture=MSIL">
-      <HintPath>..\packages\PDFsharp.6.2.3\lib\netstandard2.0\PdfSharp.Snippets.dll</HintPath>
+    <Reference Include="PdfSharp.Snippets, Version=6.2.4.0, Culture=neutral, PublicKeyToken=f94615aa0424f9eb, processorArchitecture=MSIL">
+      <HintPath>..\packages\PDFsharp.6.2.4\lib\netstandard2.0\PdfSharp.Snippets.dll</HintPath>
     </Reference>
-    <Reference Include="PdfSharp.System, Version=6.2.3.0, Culture=neutral, PublicKeyToken=f94615aa0424f9eb, processorArchitecture=MSIL">
-      <HintPath>..\packages\PDFsharp.6.2.3\lib\netstandard2.0\PdfSharp.System.dll</HintPath>
+    <Reference Include="PdfSharp.System, Version=6.2.4.0, Culture=neutral, PublicKeyToken=f94615aa0424f9eb, processorArchitecture=MSIL">
+      <HintPath>..\packages\PDFsharp.6.2.4\lib\netstandard2.0\PdfSharp.System.dll</HintPath>
     </Reference>
-    <Reference Include="PdfSharp.WPFonts, Version=6.2.3.0, Culture=neutral, PublicKeyToken=f94615aa0424f9eb, processorArchitecture=MSIL">
-      <HintPath>..\packages\PDFsharp.6.2.3\lib\netstandard2.0\PdfSharp.WPFonts.dll</HintPath>
+    <Reference Include="PdfSharp.WPFonts, Version=6.2.4.0, Culture=neutral, PublicKeyToken=f94615aa0424f9eb, processorArchitecture=MSIL">
+      <HintPath>..\packages\PDFsharp.6.2.4\lib\netstandard2.0\PdfSharp.WPFonts.dll</HintPath>
     </Reference>
     <Reference Include="PowerPointApi, Version=1.7.4.11, Culture=neutral, PublicKeyToken=7292cd2a8b1e0703, processorArchitecture=MSIL">
       <HintPath>..\packages\NetOffice.PowerPoint.1.7.4.11\lib\net45\PowerPointApi.dll</HintPath>
@@ -351,6 +360,9 @@
     </Reference>
     <Reference Include="System.CodeDom, Version=10.0.0.1, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
       <HintPath>..\packages\System.CodeDom.10.0.1\lib\net462\System.CodeDom.dll</HintPath>
+    </Reference>
+    <Reference Include="System.ComponentModel.Annotations, Version=4.2.1.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.ComponentModel.Annotations.5.0.0\lib\net461\System.ComponentModel.Annotations.dll</HintPath>
     </Reference>
     <Reference Include="System.ComponentModel.Composition" />
     <Reference Include="System.ComponentModel.DataAnnotations" />
@@ -448,33 +460,26 @@
     <Reference Include="System.Core" />
     <Reference Include="System.Xml.Linq" />
     <Reference Include="System.Data.DataSetExtensions" />
-    <Reference Include="UglyToad.PdfPig, Version=0.1.12.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
-      <HintPath>..\packages\PdfPig.0.1.12\lib\net471\UglyToad.PdfPig.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="UglyToad.PdfPig, Version=0.1.13.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
+      <HintPath>..\packages\PdfPig.0.1.13\lib\net471\UglyToad.PdfPig.dll</HintPath>
     </Reference>
-    <Reference Include="UglyToad.PdfPig.Core, Version=0.1.12.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
-      <HintPath>..\packages\PdfPig.0.1.12\lib\net471\UglyToad.PdfPig.Core.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="UglyToad.PdfPig.Core, Version=0.1.13.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
+      <HintPath>..\packages\PdfPig.0.1.13\lib\net471\UglyToad.PdfPig.Core.dll</HintPath>
     </Reference>
-    <Reference Include="UglyToad.PdfPig.DocumentLayoutAnalysis, Version=0.1.12.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
-      <HintPath>..\packages\PdfPig.0.1.12\lib\net471\UglyToad.PdfPig.DocumentLayoutAnalysis.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="UglyToad.PdfPig.DocumentLayoutAnalysis, Version=0.1.13.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
+      <HintPath>..\packages\PdfPig.0.1.13\lib\net471\UglyToad.PdfPig.DocumentLayoutAnalysis.dll</HintPath>
     </Reference>
-    <Reference Include="UglyToad.PdfPig.Fonts, Version=0.1.12.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
-      <HintPath>..\packages\PdfPig.0.1.12\lib\net471\UglyToad.PdfPig.Fonts.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="UglyToad.PdfPig.Fonts, Version=0.1.13.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
+      <HintPath>..\packages\PdfPig.0.1.13\lib\net471\UglyToad.PdfPig.Fonts.dll</HintPath>
     </Reference>
-    <Reference Include="UglyToad.PdfPig.Package, Version=0.1.12.0, Culture=neutral, processorArchitecture=MSIL">
-      <HintPath>..\packages\PdfPig.0.1.12\lib\net471\UglyToad.PdfPig.Package.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="UglyToad.PdfPig.Package, Version=0.1.13.0, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>..\packages\PdfPig.0.1.13\lib\net471\UglyToad.PdfPig.Package.dll</HintPath>
     </Reference>
-    <Reference Include="UglyToad.PdfPig.Tokenization, Version=0.1.12.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
-      <HintPath>..\packages\PdfPig.0.1.12\lib\net471\UglyToad.PdfPig.Tokenization.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="UglyToad.PdfPig.Tokenization, Version=0.1.13.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
+      <HintPath>..\packages\PdfPig.0.1.13\lib\net471\UglyToad.PdfPig.Tokenization.dll</HintPath>
     </Reference>
-    <Reference Include="UglyToad.PdfPig.Tokens, Version=0.1.12.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
-      <HintPath>..\packages\PdfPig.0.1.12\lib\net471\UglyToad.PdfPig.Tokens.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="UglyToad.PdfPig.Tokens, Version=0.1.13.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
+      <HintPath>..\packages\PdfPig.0.1.13\lib\net471\UglyToad.PdfPig.Tokens.dll</HintPath>
     </Reference>
     <Reference Include="VBIDEApi, Version=1.7.4.11, Culture=neutral, PublicKeyToken=7292cd2a8b1e0703, processorArchitecture=MSIL">
       <HintPath>..\packages\NetOffice.Core.1.7.4.11\lib\net45\VBIDEApi.dll</HintPath>
@@ -819,6 +824,7 @@
     <Error Condition="!Exists('..\packages\Whisper.net.Runtime.Cuda.Windows.1.9.0\build\Whisper.net.Runtime.Cuda.Windows.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Whisper.net.Runtime.Cuda.Windows.1.9.0\build\Whisper.net.Runtime.Cuda.Windows.targets'))" />
     <Error Condition="!Exists('..\packages\Whisper.net.Runtime.Metal.1.9.0\build\Whisper.net.Runtime.Metal.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Whisper.net.Runtime.Metal.1.9.0\build\Whisper.net.Runtime.Metal.targets'))" />
     <Error Condition="!Exists('..\packages\Whisper.net.Runtime.1.9.0\build\Whisper.net.Runtime.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Whisper.net.Runtime.1.9.0\build\Whisper.net.Runtime.targets'))" />
+    <Error Condition="!Exists('..\packages\Microsoft.Web.WebView2.1.0.3650.58\build\Microsoft.Web.WebView2.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Microsoft.Web.WebView2.1.0.3650.58\build\Microsoft.Web.WebView2.targets'))" />
   </Target>
   <Import Project="..\packages\System.ValueTuple.4.6.1\build\net471\System.ValueTuple.targets" Condition="Exists('..\packages\System.ValueTuple.4.6.1\build\net471\System.ValueTuple.targets')" />
   <Import Project="..\packages\Grpc.Core.2.46.6\build\net45\Grpc.Core.targets" Condition="Exists('..\packages\Grpc.Core.2.46.6\build\net45\Grpc.Core.targets')" />
@@ -827,4 +833,5 @@
   <Import Project="..\packages\Whisper.net.Runtime.Cuda.Windows.1.9.0\build\Whisper.net.Runtime.Cuda.Windows.targets" Condition="Exists('..\packages\Whisper.net.Runtime.Cuda.Windows.1.9.0\build\Whisper.net.Runtime.Cuda.Windows.targets')" />
   <Import Project="..\packages\Whisper.net.Runtime.Metal.1.9.0\build\Whisper.net.Runtime.Metal.targets" Condition="Exists('..\packages\Whisper.net.Runtime.Metal.1.9.0\build\Whisper.net.Runtime.Metal.targets')" />
   <Import Project="..\packages\Whisper.net.Runtime.1.9.0\build\Whisper.net.Runtime.targets" Condition="Exists('..\packages\Whisper.net.Runtime.1.9.0\build\Whisper.net.Runtime.targets')" />
+  <Import Project="..\packages\Microsoft.Web.WebView2.1.0.3650.58\build\Microsoft.Web.WebView2.targets" Condition="Exists('..\packages\Microsoft.Web.WebView2.1.0.3650.58\build\Microsoft.Web.WebView2.targets')" />
 </Project>

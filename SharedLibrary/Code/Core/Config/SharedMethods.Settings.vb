@@ -297,6 +297,9 @@ Namespace SharedLibrary
             saveConfigButton.Size = New System.Drawing.Size(saveButtonSize.Width + 20, saveButtonSize.Height + 10)
             saveConfigButton.Location = New System.Drawing.Point(expertConfigButton.Right + buttonSpacing, buttonYPos)
             settingsForm.Controls.Add(saveConfigButton)
+            If context.INI_NoLocalConfig Then
+                saveConfigButton.Enabled = False
+            End If
 
             Dim saveConfigToolTip As New System.Windows.Forms.ToolTip()
             saveConfigToolTip.SetToolTip(saveConfigButton, $"Will save the current configuration to a local copy of '{AN2}.ini' (overwriting any existing such file).")
