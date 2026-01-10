@@ -115,8 +115,8 @@ Partial Class Ribbon1
         Me.RI_ContentControls = Me.Factory.CreateRibbonButton
         Me.RI_InsertClipboard = Me.Factory.CreateRibbonButton
         Me.RI_Chat2 = Me.Factory.CreateRibbonButton
-        Me.RI_Transcriptor = Me.Factory.CreateRibbonButton
         Me.RI_DiscussInky = Me.Factory.CreateRibbonButton
+        Me.RI_Transcriptor = Me.Factory.CreateRibbonButton
         Me.RI_HelpMe = Me.Factory.CreateRibbonButton
         Me.Settings = Me.Factory.CreateRibbonButton
         Me.Group2 = Me.Factory.CreateRibbonGroup
@@ -160,11 +160,11 @@ Partial Class Ribbon1
         Me.Menu1.Items.Add(Me.RI_FreestyleNM)
         Me.Menu1.Items.Add(Me.RI_FreestyleAM)
         Me.Menu1.Items.Add(Me.RI_FreestyleRepeat)
+        Me.Menu1.Items.Add(Me.RI_Chat2)
+        Me.Menu1.Items.Add(Me.RI_DiscussInky)
         Me.Menu1.Items.Add(Me.RI_Search)
         Me.Menu1.Items.Add(Me.Menu2)
-        Me.Menu1.Items.Add(Me.RI_Chat2)
         Me.Menu1.Items.Add(Me.RI_Transcriptor)
-        Me.Menu1.Items.Add(Me.RI_DiscussInky)
         Me.Menu1.Items.Add(Me.RI_HelpMe)
         Me.Menu1.Items.Add(Me.Settings)
         Me.Menu1.KeyTip = "RI"
@@ -665,10 +665,10 @@ Partial Class Ribbon1
         '
         'RI_ConvertDocToTxt
         '
-        Me.RI_ConvertDocToTxt.Label = "Convert PDF To Txt"
+        Me.RI_ConvertDocToTxt.Label = "Convert PDFs To Txt"
         Me.RI_ConvertDocToTxt.Name = "RI_ConvertDocToTxt"
         Me.RI_ConvertDocToTxt.OfficeImageId = "ConvertInkMenu"
-        Me.RI_ConvertDocToTxt.ScreenTip = "Will convert PDF and other documents in a directory (and subdirectories) to TXT f" &
+        Me.RI_ConvertDocToTxt.ScreenTip = "Will convert PDFs and other documents in a directory (and subdirectories) to TXT f" &
     "iles for easier analysis by AI (will do OCR, if available)"
         Me.RI_ConvertDocToTxt.ShowImage = True
         '
@@ -700,11 +700,20 @@ Partial Class Ribbon1
         '
         'RI_Chat2
         '
-        Me.RI_Chat2.Label = "Chatbot"
+        Me.RI_Chat2.Label = "Word Chatbot"
         Me.RI_Chat2.Name = "RI_Chat2"
         Me.RI_Chat2.OfficeImageId = "ContactUs"
-        Me.RI_Chat2.ScreenTip = "Will open a window where you can chat with the LLM"
+        Me.RI_Chat2.ScreenTip = "Will open a window where you can chat with the LLM about your document and have it modified"
         Me.RI_Chat2.ShowImage = True
+        '
+        'RI_DiscussInky
+        '
+        Me.RI_DiscussInky.Label = "Discuss this, Inky"
+        Me.RI_DiscussInky.Name = "RI_DiscussInky"
+        Me.RI_DiscussInky.OfficeImageId = "ShareWithPeopleFromSharePane"
+        Me.RI_DiscussInky.ScreenTip = "Have Inky take the role of your chosen persona to discuss with you materials you provide it;" &
+    " you can also have two bots chat with each other"
+        Me.RI_DiscussInky.ShowImage = True
         '
         'RI_Transcriptor
         '
@@ -712,15 +721,6 @@ Partial Class Ribbon1
         Me.RI_Transcriptor.Name = "RI_Transcriptor"
         Me.RI_Transcriptor.OfficeImageId = "AudioRecordingInsert"
         Me.RI_Transcriptor.ShowImage = True
-        '
-        'RI_DiscussInky
-        '
-        Me.RI_DiscussInky.Label = "Discuss this"
-        Me.RI_DiscussInky.Name = "RI_DiscussInky"
-        Me.RI_DiscussInky.OfficeImageId = "ShareWithPeopleFromSharePane"
-        Me.RI_DiscussInky.ScreenTip = "Have Inky take the role of your chosen persona to discuss with you a document you" &
-    " provide"
-        Me.RI_DiscussInky.ShowImage = True
         '
         'RI_HelpMe
         '
