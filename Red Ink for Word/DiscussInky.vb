@@ -401,7 +401,7 @@ Public Class DiscussInky
     ''' </summary>
     ''' <returns>Language instruction string.</returns>
     Private Function GetLanguageInstruction() As String
-        Return "Always respond in the same language the user uses in their messages, regardless of the language of these instructions or the knowledge base."
+        Return "Always respond in the same language the user uses in their messages, regardless of the language of these instructions or the knowledge base. However, generally follow language instructions in your mission and persona description."
     End Function
 
     ''' <summary>
@@ -745,7 +745,7 @@ Public Class DiscussInky
     ''' Restores knowledge from various sources in priority order:
     ''' 1. Runtime cache (if Word hasn't been restarted)
     ''' 2. Persisted temp file (if checkbox is checked)
-    ''' 3. Previously saved file path from settings
+    ''' 3. Previously saved file or directory path from settings
     ''' </summary>
     Private Async Function RestoreKnowledgeAsync() As Task
         ' 1. Check runtime cache first (survives form close but not Word restart)
@@ -777,31 +777,127 @@ Public Class DiscussInky
             End If
         End If
 
-        ' 3. Try to reload from saved file path in settings
+        ' 3. Try to reload from saved file or directory path in settings
+        Dim savedPath As String = ""
         Try
-            Dim savedPath = My.Settings.DiscussKnowledgePath
-            If Not String.IsNullOrEmpty(savedPath) AndAlso File.Exists(savedPath) Then
-                ShowAssistantThinking()
+            savedPath = My.Settings.DiscussKnowledgePath
+        Catch
+            Return
+        End Try
+
+        If String.IsNullOrEmpty(savedPath) Then Return
+
+        Dim isFile = File.Exists(savedPath)
+        Dim isDirectory = Directory.Exists(savedPath)
+
+        If Not isFile AndAlso Not isDirectory Then
+            ' Path no longer exists - clear it from settings
+            Try
+                My.Settings.DiscussKnowledgePath = ""
+                My.Settings.Save()
+            Catch
+            End Try
+            Return
+        End If
+
+        Try
+            ShowAssistantThinking()
+
+            If isFile Then
+                ' Single file - use existing logic
                 Dim result = Await LoadSingleKnowledgeFileAsync(savedPath, False, False)
                 _knowledgeContent = result.Content
+                _knowledgeFilePath = savedPath
+
                 RemoveAssistantThinking()
 
                 If Not String.IsNullOrWhiteSpace(_knowledgeContent) Then
-                    _knowledgeFilePath = savedPath
+                    AppendSystemMessage($"Knowledge restored from file: {Path.GetFileName(savedPath)} ({_knowledgeContent.Length:N0} characters).")
+                End If
+            Else
+                ' Directory - reload all supported files
+                Dim ctx As New KnowledgeLoadingContext()
+                Dim filesToProcess As New List(Of String)()
 
-                    ' Update runtime cache
-                    _cachedKnowledgeContent = _knowledgeContent
-                    _cachedKnowledgeFilePath = _knowledgeFilePath
-
-                    ' Persist if checkbox is checked
-                    If _chkPersistKnowledge.Checked Then
-                        PersistKnowledgeToTempFile()
+                Dim allFiles = Directory.GetFiles(savedPath, "*.*", SearchOption.TopDirectoryOnly)
+                For Each f In allFiles
+                    Dim ext = Path.GetExtension(f).ToLowerInvariant()
+                    If SupportedKnowledgeExtensions.Contains(ext) Then
+                        filesToProcess.Add(f)
+                        If ext = ".pdf" Then
+                            ctx.HasPdfFiles = True
+                        End If
                     End If
+                Next
 
-                    UpdateWindowTitle()
+                ' Apply same limits as initial load
+                If filesToProcess.Count > KnowledgeLoadingContext.MaxFilesPerDirectory Then
+                    filesToProcess = filesToProcess.Take(KnowledgeLoadingContext.MaxFilesPerDirectory).ToList()
+                End If
+
+                If filesToProcess.Count = 0 Then
+                    RemoveAssistantThinking()
+                    AppendSystemMessage($"No supported files found in previously saved directory: {savedPath}")
+                    Return
+                End If
+
+                ' Load all files
+                Dim resultBuilder As New StringBuilder()
+                Dim useDocumentTags = (filesToProcess.Count > 1)
+                Dim loadedCount = 0
+
+                For Each filePath In filesToProcess
+                    Try
+                        Dim result = Await LoadSingleKnowledgeFileAsync(filePath, False, True)
+                        Dim content = result.Content
+
+                        If String.IsNullOrWhiteSpace(content) Then Continue For
+
+                        ctx.GlobalDocumentCounter += 1
+                        loadedCount += 1
+
+                        If useDocumentTags Then
+                            Dim docNum = ctx.GlobalDocumentCounter
+                            Dim fileName = Path.GetFileName(filePath)
+                            resultBuilder.Append($"<document{docNum} name=""{fileName}"">")
+                            resultBuilder.Append(content)
+                            resultBuilder.Append($"</document{docNum}>")
+                        Else
+                            resultBuilder.Append(content)
+                        End If
+                    Catch
+                        ' Skip failed files silently during restore
+                    End Try
+                Next
+
+                RemoveAssistantThinking()
+
+                If loadedCount > 0 Then
+                    _knowledgeContent = resultBuilder.ToString()
+                    _knowledgeFilePath = savedPath & " (directory)"
+                    AppendSystemMessage($"Knowledge restored from directory: {loadedCount} file(s), {_knowledgeContent.Length:N0} characters.")
+                Else
+                    AppendSystemMessage($"Failed to load any files from directory: {savedPath}")
+                    Return
                 End If
             End If
-        Catch
+
+            If Not String.IsNullOrWhiteSpace(_knowledgeContent) Then
+                ' Update runtime cache
+                _cachedKnowledgeContent = _knowledgeContent
+                _cachedKnowledgeFilePath = _knowledgeFilePath
+
+                ' Persist if checkbox is checked
+                If _chkPersistKnowledge.Checked Then
+                    PersistKnowledgeToTempFile()
+                End If
+
+                UpdateWindowTitle()
+            End If
+
+        Catch ex As Exception
+            RemoveAssistantThinking()
+            AppendSystemMessage($"Error restoring knowledge: {ex.Message}")
         End Try
     End Function
 
@@ -837,7 +933,14 @@ Public Class DiscussInky
             My.Settings.DiscussPersistKnowledge = _chkPersistKnowledge.Checked
             My.Settings.DiscussSelectedPersona = _currentPersonaName
             My.Settings.DiscussSelectedMission = _currentMissionName
-            My.Settings.DiscussKnowledgePath = If(_knowledgeFilePath, "")
+
+            ' Save the original path without " (directory)" suffix for proper restoration
+            Dim pathToSave = If(_knowledgeFilePath, "")
+            If pathToSave.EndsWith(" (directory)", StringComparison.OrdinalIgnoreCase) Then
+                pathToSave = pathToSave.Substring(0, pathToSave.Length - " (directory)".Length)
+            End If
+            My.Settings.DiscussKnowledgePath = pathToSave
+
             My.Settings.DiscussEnableTooling = _chkEnableTooling.Checked
             My.Settings.Save()
         Catch
@@ -1253,6 +1356,7 @@ Public Class DiscussInky
 
     ''' <summary>
     ''' Ensures the local persona file exists and opens it in the shared text editor.
+    ''' Reloads personas after editing if the file was modified.
     ''' </summary>
     Private Sub OnEditLocalPersona(sender As Object, e As EventArgs)
         Dim localPath = ExpandEnvironmentVariables(If(_context?.INI_DiscussInkyPathLocal, ""))
@@ -1273,7 +1377,6 @@ Public Class DiscussInky
             End Try
         End If
 
-
         ' Create file with sample content if it doesn't exist or contains only whitespace
         Dim needsSampleContent As Boolean = False
         If Not File.Exists(localPath) Then
@@ -1288,8 +1391,6 @@ Public Class DiscussInky
         End If
 
         If needsSampleContent Then
-
-
             Try
                 File.WriteAllText(localPath,
                     "; Discuss This Local Personas" & vbCrLf &
@@ -1305,8 +1406,39 @@ Public Class DiscussInky
             End Try
         End If
 
-        ShowTextFileEditor(localPath, $"{AN} - Edit Local Personas (changes active after restart):", False, _context)
+        ' Capture file hash before editing for reliable change detection
+        Dim hashBefore As String = GetFileHash(localPath)
+
+        ' ShowTextFileEditor is expected to be synchronous (modal dialog)
+        ShowTextFileEditor(localPath, $"{AN} - Edit Local Personas:", False, _context)
+
+        ' Check if file content actually changed (hash comparison is more reliable than timestamp)
+        Dim hashAfter As String = GetFileHash(localPath)
+
+        If Not String.Equals(hashBefore, hashAfter, StringComparison.Ordinal) Then
+            LoadPersonas()
+            UpdateWindowTitle()
+            UpdateSendButtonText()
+            AppendSystemMessage("Local personas reloaded.")
+        End If
     End Sub
+
+    ''' <summary>
+    ''' Computes a simple hash of file contents for change detection.
+    ''' Returns empty string if file doesn't exist or can't be read.
+    ''' </summary>
+    Private Shared Function GetFileHash(filePath As String) As String
+        Try
+            If Not File.Exists(filePath) Then Return ""
+            Dim bytes = File.ReadAllBytes(filePath)
+            Using sha = System.Security.Cryptography.SHA256.Create()
+                Dim hash = sha.ComputeHash(bytes)
+                Return System.Convert.ToBase64String(hash)
+            End Using
+        Catch
+            Return ""
+        End Try
+    End Function
 
 #End Region
 
@@ -1797,7 +1929,7 @@ Public Class DiscussInky
             UpdateWindowTitle()
 
             Try
-                My.Settings.DiscussKnowledgePath = If(isFile, selectedPath, "")
+                My.Settings.DiscussKnowledgePath = selectedPath  ' Save both files AND directories
                 My.Settings.Save()
             Catch
             End Try
@@ -2087,7 +2219,7 @@ Public Class DiscussInky
         If String.IsNullOrWhiteSpace(_knowledgeContent) Then
             systemPrompt = $"{dateContext} Generate a brief, friendly {langName} welcome that {randomWord} references it is {partOfDay} now. " &
                            "Tell the user they should load a knowledge document using the 'Load Knowledge' button (button name always in English) to start a discussion. " &
-                           $"You are ready to discuss any knowledge they provide. One short sentence, not talkative. {languageInstruction}"
+                           $"You are ready to discuss any knowledge they provide. One short sentence, not talkative. {languageInstruction} "
         Else
             ' Use persona prompt to shape the welcome message
             Dim personaContext = ""
@@ -3732,6 +3864,7 @@ Public Class DiscussInky
 
     ''' <summary>
     ''' Generates and displays a summary of the discussion after autorespond or sort out completes.
+    ''' Bypasses tooling since summary is a simple text generation task.
     ''' </summary>
     ''' <param name="roundCount">Number of rounds completed.</param>
     Private Async Function ShowDiscussionSummaryAsync(roundCount As Integer) As Task
@@ -3754,20 +3887,49 @@ Public Class DiscussInky
 
             ShowAssistantThinking()
 
-            ' Call LLM with the summary prompt
-            Dim summaryResult = Await CallLlmWithSelectedModelAsync(
-                _context.SP_DiscussThis_SumUp,
-                "<TEXTTOPROCESS>" & discussionText & "</TEXTTOPROCESS>")
+            ' Call LLM directly WITHOUT tooling - summary is a simple text task
+            ' that should never go through the tooling loop to avoid JSON responses
+            Await _modelSemaphore.WaitAsync().ConfigureAwait(False)
+            Dim backupConfig As ModelConfig = Nothing
+            Dim appliedAlternate As Boolean = False
+            Dim useSecondApi As Boolean = False
 
-            RemoveAssistantThinking()
+            Try
+                If _alternateModelSelected AndAlso _alternateModelConfig IsNot Nothing Then
+                    backupConfig = SharedMethods.GetCurrentConfig(_context)
+                    SharedMethods.ApplyModelConfig(_context, _alternateModelConfig)
+                    appliedAlternate = True
+                    useSecondApi = True
+                ElseIf _alternateModelSelected AndAlso _alternateModelConfig Is Nothing AndAlso _context.INI_SecondAPI Then
+                    useSecondApi = True
+                End If
 
-            If String.IsNullOrWhiteSpace(summaryResult) Then
-                AppendSystemMessage("Could not generate summary.")
-                Return
-            End If
+                ' Direct LLM call - explicitly bypass tooling for summaries
+                Dim summaryResult = Await LLM(_context,
+                    _context.SP_DiscussThis_SumUp,
+                    "<TEXTTOPROCESS>" & discussionText & "</TEXTTOPROCESS>",
+                    "",
+                    "",
+                    0,
+                    useSecondApi,
+                    True).ConfigureAwait(False)
 
-            ' Convert Markdown to HTML and display
-            ShowDiscussionSummaryHtml(summaryResult)
+                RemoveAssistantThinking()
+
+                If String.IsNullOrWhiteSpace(summaryResult) Then
+                    AppendSystemMessage("Could not generate summary.")
+                    Return
+                End If
+
+                ' Convert Markdown to HTML and display
+                ShowDiscussionSummaryHtml(summaryResult)
+
+            Finally
+                If appliedAlternate AndAlso backupConfig IsNot Nothing Then
+                    SharedMethods.RestoreDefaults(_context, backupConfig)
+                End If
+                _modelSemaphore.Release()
+            End Try
 
         Catch ex As Exception
             RemoveAssistantThinking()
