@@ -177,7 +177,7 @@
 '   ThisAddIn.FileRAG.vb            - File-based Retrieval-Augmented Generation (embeddings, chunking).
 '   ThisAddIn.Slides.vb             - PowerPoint slide generation from Word content.
 '   ThisAddIn.SpecialServices.vb    - Ancillary external service tasks (update fetch, licensing).
-'   ThisAddIn.TranslateDocuments.vb - Batch translation of Word `.docx` files via OpenXML (no interop editing).
+'   ThisAddIn.TranslateDocuments.vb - Batch translation / correction of Word `.docx` files via OpenXML (no interop editing).
 '   BridgeSubs.vb                   - COM-visible automation surface for external scripts/macros.
 '   Ribbon1.vb                      - Ribbon callbacks (buttons → Commands layer).
 '   VBA Helper\RI_Helper_Code_Word.bas - VBA macro helper for keyboard shortcuts (calls VSTO add-in methods).

@@ -201,10 +201,10 @@ Partial Class Ribbon1
         'RI_Correct
         '
         Me.RI_Correct.KeyTip = "C"
-        Me.RI_Correct.Label = "Correct"
+        Me.RI_Correct.Label = "Correct Text/Files"
         Me.RI_Correct.Name = "RI_Correct"
         Me.RI_Correct.OfficeImageId = "SpellingAndGrammar"
-        Me.RI_Correct.ScreenTip = "Will correct the selected text (clean and with a markup for visibility)"
+        Me.RI_Correct.ScreenTip = "Will correct the language the selected text or files (with a markup) if you do not select text"
         Me.RI_Correct.ShowImage = True
         '
         'Menu4

@@ -1669,6 +1669,7 @@ Namespace SharedLibrary
                     {"SP_Translate", context.SP_Translate},
                     {"SP_Translate_Document", context.SP_Translate_Document},
                     {"SP_Correct", context.SP_Correct},
+                    {"SP_Correct_Document", context.SP_Correct_Document},
                     {"SP_Improve", context.SP_Improve},
                     {"SP_Explain", context.SP_Explain},
                     {"SP_FindClause", context.SP_FindClause},
@@ -1698,6 +1699,7 @@ Namespace SharedLibrary
                     {"SP_MailSumup2", context.SP_MailSumup2},
                     {"SP_FreestyleText", context.SP_FreestyleText},
                     {"SP_FreestyleNoText", context.SP_FreestyleNoText},
+                    {"SP_Freestyle_Document", context.SP_Freestyle_Document},
                     {"SP_SwitchParty", context.SP_SwitchParty},
                     {"SP_Anonymize", context.SP_Anonymize},
                     {"SP_Rename", context.SP_Rename},
@@ -1759,6 +1761,7 @@ Namespace SharedLibrary
                     {"SP_Translate", Default_SP_Translate},
                     {"SP_Translate_Document", Default_SP_Translate_Document},
                     {"SP_Correct", Default_SP_Correct},
+                    {"SP_Correct_Document", Default_SP_Correct_Document},
                     {"SP_Improve", Default_SP_Improve},
                     {"SP_Explain", Default_SP_Explain},
                     {"SP_FindClause", Default_SP_FindClause},
@@ -1788,6 +1791,7 @@ Namespace SharedLibrary
                     {"SP_MailSumup2", Default_SP_MailSumup2},
                     {"SP_FreestyleText", Default_SP_FreestyleText},
                     {"SP_FreestyleNoText", Default_SP_FreestyleNoText},
+                    {"SP_Freestyle_Document", Default_SP_Freestyle_Document},
                     {"SP_SwitchParty", Default_SP_SwitchParty},
                     {"SP_Anonymize", Default_SP_Anonymize},
                     {"SP_Rename", Default_SP_Rename},
@@ -2770,6 +2774,7 @@ Namespace SharedLibrary
             variableValues.Add("SP_Translate", context.SP_Translate)
             variableValues.Add("SP_Translate_Document", context.SP_Translate_Document)
             variableValues.Add("SP_Correct", context.SP_Correct)
+            variableValues.Add("SP_Correct_Document", context.SP_Correct_Document)
             variableValues.Add("SP_Improve", context.SP_Improve)
             variableValues.Add("SP_Explain", context.SP_Explain)
             variableValues.Add("SP_FindClause", context.SP_FindClause)
@@ -2799,6 +2804,7 @@ Namespace SharedLibrary
             variableValues.Add("SP_MailSumup2", context.SP_MailSumup2)
             variableValues.Add("SP_FreestyleText", context.SP_FreestyleText)
             variableValues.Add("SP_FreestyleNoText", context.SP_FreestyleNoText)
+            variableValues.Add("SP_Freestyle_Document", context.SP_Freestyle_Document)
             variableValues.Add("SP_SwitchParty", context.SP_SwitchParty)
             variableValues.Add("SP_Anonymize", context.SP_Anonymize)
             variableValues.Add("SP_Rename", context.SP_Rename)
@@ -2933,6 +2939,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_Translate") Then context.SP_Translate = CStr(updatedValues("SP_Translate"))
                 If updatedValues.ContainsKey("SP_Translate_Document") Then context.SP_Translate_Document = CStr(updatedValues("SP_Translate_Document"))
                 If updatedValues.ContainsKey("SP_Correct") Then context.SP_Correct = CStr(updatedValues("SP_Correct"))
+                If updatedValues.ContainsKey("SP_Correct_Document") Then context.SP_Correct_Document = CStr(updatedValues("SP_Correct_Document"))
                 If updatedValues.ContainsKey("SP_Improve") Then context.SP_Improve = CStr(updatedValues("SP_Improve"))
                 If updatedValues.ContainsKey("SP_Explain") Then context.SP_Explain = CStr(updatedValues("SP_Explain"))
                 If updatedValues.ContainsKey("SP_FindClause") Then context.SP_FindClause = CStr(updatedValues("SP_FindClause"))
@@ -2962,6 +2969,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_MailSumup2") Then context.SP_MailSumup2 = CStr(updatedValues("SP_MailSumup2"))
                 If updatedValues.ContainsKey("SP_FreestyleText") Then context.SP_FreestyleText = CStr(updatedValues("SP_FreestyleText"))
                 If updatedValues.ContainsKey("SP_FreestyleNoText") Then context.SP_FreestyleNoText = CStr(updatedValues("SP_FreestyleNoText"))
+                If updatedValues.ContainsKey("SP_Freestyle_Document") Then context.SP_Freestyle_Document = CStr(updatedValues("SP_Freestyle_Document"))
                 If updatedValues.ContainsKey("SP_SwitchParty") Then context.SP_SwitchParty = CStr(updatedValues("SP_SwitchParty"))
                 If updatedValues.ContainsKey("SP_Anonymize") Then context.SP_Anonymize = CStr(updatedValues("SP_Anonymize"))
                 If updatedValues.ContainsKey("SP_Rename") Then context.SP_Rename = CStr(updatedValues("SP_Rename"))

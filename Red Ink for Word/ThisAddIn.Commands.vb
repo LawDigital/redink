@@ -103,6 +103,16 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Public Async Sub Correct()
         If INILoadFail() Then Return
+
+        Dim application As Word.Application = Globals.ThisAddIn.Application
+        Dim Selection As Microsoft.Office.Interop.Word.Selection = application.Selection
+
+        If Selection.Type = WdSelectionType.wdSelectionIP Then
+            CorrectWordDocuments()
+            Return
+        End If
+
+
         Dim result As String = Await ProcessSelectedText(InterpolateAtRuntime(SP_Correct), True, INI_KeepFormat2, INI_KeepParaFormatInline, Override(INI_ReplaceText2, INI_ReplaceText2Override), INI_DoMarkupWord, Override(INI_MarkupMethodWord, INI_MarkupMethodWordOverride), False, False, True, False, INI_KeepFormatCap, NoFormatAndFieldSaving:=Not Override(INI_ReplaceText2, INI_ReplaceText2Override))
     End Sub
 

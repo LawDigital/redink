@@ -95,6 +95,8 @@ Partial Public Class ThisAddIn
     Private Const PurePrefix As String = "Pure:"
     Private Const ClipboardPrefix As String = "Clipboard:"
     Private Const ClipboardPrefix2 As String = "Clip:"
+    Private Const FilePrefix As String = "File:"
+    Private Const FilePrefix2 As String = "Files:"
     Private Const PanePrefix As String = "Pane:"
     Private Const BubblesPrefix As String = "Bubbles:"
     Private Const PushbackPrefix As String = "Reply:"

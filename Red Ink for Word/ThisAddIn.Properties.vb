@@ -708,6 +708,15 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_Correct_Document As String
+        Get
+            Return _context.SP_Correct_Document
+        End Get
+        Set(value As String)
+            _context.SP_Correct_Document = value
+        End Set
+    End Property
+
     Public Shared Property SP_Improve As String
         Get
             Return _context.SP_Improve
@@ -970,6 +979,16 @@ Partial Public Class ThisAddIn
             _context.SP_FreestyleNoText = value
         End Set
     End Property
+
+    Public Shared Property SP_Freestyle_Document As String
+        Get
+            Return _context.SP_Freestyle_Document
+        End Get
+        Set(value As String)
+            _context.SP_Freestyle_Document = value
+        End Set
+    End Property
+
 
     Public Shared Property SP_SwitchParty As String
         Get
