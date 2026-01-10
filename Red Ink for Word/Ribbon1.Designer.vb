@@ -192,10 +192,10 @@ Partial Class Ribbon1
         '
         'RI_Translate
         '
-        Me.RI_Translate.Label = "Translate"
+        Me.RI_Translate.Label = "Translate Text/Files"
         Me.RI_Translate.Name = "RI_Translate"
         Me.RI_Translate.OfficeImageId = "TranslateMenu"
-        Me.RI_Translate.ScreenTip = "Translates the selected text into a language you choose"
+        Me.RI_Translate.ScreenTip = "Translates the selected text into a language you choose or files if you do not select text"
         Me.RI_Translate.ShowImage = True
         '
         'RI_Correct

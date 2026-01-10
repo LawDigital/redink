@@ -688,6 +688,17 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_Translate_Document As String
+        Get
+            Return _context.SP_Translate_Document
+        End Get
+        Set(value As String)
+            _context.SP_Translate_Document = value
+        End Set
+    End Property
+
+
+
     Public Shared Property SP_Correct As String
         Get
             Return _context.SP_Correct

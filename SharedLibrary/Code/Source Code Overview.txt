@@ -62,23 +62,7 @@
 '                                     UpdateAppConfig, ResetLocalAppConfig, GetActiveConfigFilePath.
 '   SharedMethods.UpdateIni         - INI file modification and update operations.
 '   SharedMethods.License           - Runtime license validation and user messaging.
-'                                     Main entry: LicenseOK(context, configDict).
-'                                     License Modes: GA (General Audience) uses LicensedTill from
-'                                     config or My.Settings; Beta uses BetaEndDate only.
-'                                     Features: LoadLicenseSettings, TryExtendLicenseToFixedEndDate,
-'                                     PerformGALicenseCheck, PerformBetaLicenseCheck,
-'                                     CheckGracePeriodWarning, CheckLicenseExpiryWarnings,
-'                                     ShowLicenseEntryForm (license type selection UI),
-'                                     ShouldShowLicenseWarning/BetaWarning, RecordWarningShown,
-'                                     IsBetaVersion, ParseVersionDateFromRDV, CheckUrlAvailable.
-'                                     Warning throttling via My.Settings counters.
-'   SharedContext.vb / ISharedContext - Cross-cutting context interface defining 150+ properties
-'                                     for API keys (INI_APIKey, INI_APIKey_2), model configurations
-'                                     (INI_Model, INI_Model_2, INI_Endpoint, INI_Temperature),
-'                                     system prompts (40+ SP_* properties), OAuth2 settings
-'                                     (INI_OAuth2*, TokenExpiry), ISearch settings (INI_ISearch_*),
-'                                     library paths (INI_*Path, INI_*PathLocal), markup settings
-'                                     (INI_MarkupMethod*, INI_MarkupDiffCap), and runtime state.
+'   SharedContext.vb / ISharedContext - Cross-cutting context interface (150+ properties).
 '
 ' [Core\LLM]
 '   ModelConfig                     - Model metadata and configuration container.
@@ -86,10 +70,8 @@
 '   MultiModelSelectorForm          - UI for multi-model selection strategy.
 '   SharedMethods.MainLLM           - Primary orchestration for LLM model invocation.
 '   SharedMethods.AlternateModels   - Fallback / multi-model strategy with secondary API support.
-'   JsonTemplateFormatter           - Mustache-like template engine for structured JSON output
-'                                     with loop support ({%for...%}...{%endfor%}), path selection
-'                                     (JSONPath), HTML→Markdown conversion (html:, htmlnocr:, nocr:),
-'                                     separator override, key-value mapping, source normalization.
+'   SharedMethods.AlternateModels.Tooling - Tooling capability helpers for model selection.
+'   JsonTemplateFormatter           - Mustache-like template engine for structured JSON output.
 '   MimeHelper                      - MIME type classification for assets.
 '   ImageDecoder                    - Convert embedded images to suitable analysis forms.
 '   SharedMethods.GoogleOAuthHelper - OAuth2 token handling for Google APIs.
@@ -108,103 +90,28 @@
 '   SplashScreen / SplashScreenWorks / SplashScreenCountDown - Startup and progress visuals.
 '   SharedMethods.CustomForms       - Dynamic form generation (ShowCustomInputBox, ShowCustomYesNoBox,
 '                                     ShowCustomWindow, ShowCustomVariableInputForm).
-'   frmAIChat                       - Persistent chat interface form for conversational AI.
-'                                     (Implemented per add-in: Red Ink for Excel\Form1.vb,
-'                                     Red Ink for Word\Form1.vb)
-'                                     Features: WebBrowser-based or TextBox chat UI, conversation
-'                                     history persistence (My.Settings.LastChatHistory), model
-'                                     switching (INI_Model / INI_Model_2), command execution
-'                                     (ParseCommands, ExecuteAnyCommands), document/selection
-'                                     context inclusion, ExtWSTrigger for worksheet injection.
 '
 ' [Core\Various]
-'   SharedMethods.FileImporter      - File ingestion pipeline (PDF, DOCX, TXT via PdfPig/OpenXML).
-'   SharedMethods.ProcessParameterPlaceholders - Placeholder expansion in user prompts with
-'                                     parameter definitions ({parameterN=Description;Type;Default;
-'                                     RangeOrOptions}), user input dialogs, type parsing (string,
-'                                     integer, long, double, boolean), range clamping, display→code
-'                                     mapping, JSON escaping.
+'   SharedMethods.FileImporter      - File ingestion pipeline (PDF, DOCX, TXT via PdfPig/OpenXML/Interop).
+'   SharedMethods.ProcessParameterPlaceholders - Placeholder expansion in user prompts.
 '   SharedMethods.VarHelpers        - Generic variable utilities and environment expansion.
-'                                     Includes ExpandEnvironmentVariables.
 '
 ' [CommonFeatures\Embeddings]
 '   EmbeddingStore.vb               - ONNX-based neural embedding store for semantic search.
-'                                     Uses Sentence-Transformer models (all-MiniLM-L6-v2-onnx).
-'                                     Features: IndexDocument, Search with cosine similarity,
-'                                     configurable scope (all docs vs current doc).
 '   EmbeddingStore_BagOfWords.vb    - Lightweight bag-of-words fallback for offline/simple scenarios.
-'                                     Term frequency vectorization, stopword filtering, bigrams,
-'                                     SimpleTokenizer, RebuildVectors.
-'   MlNetTokenizer.vb               - SentencePiece/WordPiece tokenization wrapper using 
-'                                     Microsoft.ML.Tokenizers. TokenizeToIds with padding/truncation,
-'                                     TokenOffset tracking (Text, Start, End properties).
-'   OnnxAnonymizer.vb               - ONNX-based Named Entity Recognition (NER) with selective
-'                                     anonymization. BIO tagging (B-PER, I-PER, O), configurable
-'                                     entity types whitelist, reversible placeholder generation.
+'   MlNetTokenizer.vb               - SentencePiece/WordPiece tokenization wrapper.
+'   OnnxAnonymizer.vb               - ONNX-based Named Entity Recognition (NER) with selective anonymization.
 '   TextChunk / TokenOffset / SearchResult - Data models for chunking, offsets, and search ranking.
 '
 ' [CommonFeatures]
 '   AnonymizationModule.vb          - Top-level anonymization workflow coordinator.
-'                                     Reads redink-anon.txt config, supports modes (none/silent/ask/
-'                                     askshow/show), types (0-4), regex patterns via PatternInfo
-'                                     (RegexPattern, Prefix, GroupID), wildcards, {{prefix}} 
-'                                     placeholders, re-identification via EntitiesMappings.
-'   HelpMeInky.vb                   - Interactive "Help me, Inky!" assistant window.
-'                                     WebBrowser-based chat UI, Markdown rendering via Markdig
-'                                     (_mdPipeline), conversation history (_history), manual loading
-'                                     from remote/local paths (GetManualOnceAsync, GetManualTextFreshAsync),
-'                                     optional configuration file inclusion (GetConfigurationContent),
-'                                     HTML sanitization (SanitizeConfigContent), LLM calls 
-'                                     (CallHelpMeLlmAsync), welcome generation, chat persistence.
-'   DiscussInky                     - Extended discussion interface for document analysis.
+'   HelpMeInky.vb                   - Interactive "Help me, Inky!" assistant window (SharedLibrary).
 '   SharedMethods.MyStyleHelpers    - Styling helpers (fonts/colors/themes) with DefineMyStyle.
 '   SharedMethods.PromptLibrary     - Reusable LLM prompt templates loaded from INI_PromptLibPath.
-'                                     Features: ShowPromptSelector (prompt library UI with
-'                                     local/remote file support), prompt categorization.
 '   SharedMethods.TextFileEditor    - Text file manipulation operations.
 '   UpdateHandler.vb                - VSTO update checking and installation with retry logic.
-'                                     Constants: MaxDailyUpdateRetries (5), LogMaxBytes (120000),
-'                                     LogMaxLines (2000), LogKeepLines (1500).
-'                                     Features: CheckAndInstallUpdates, PeriodicCheckForUpdates,
-'                                     RunVstoInstaller, SaveTimestamp, TrimLogFile.
-'                                     Supports ClickOnce deployment, local VSTO installers,
-'                                     periodic checks, user prompts (UIInvokePrompt, UIInvokeYesNo),
-'                                     retry state management (GetRetryStateFromSettings, 
-'                                     SetRetryStateToSettings, ResetRetryIfNewDay), trust zone
-'                                     detection (GetUrlZoneName, IsTrustNotGranted), splash screens.
 '   WebAgentInterpreter.vb          - JSON-based scripting engine for automated web tasks.
-'                                     Top-level structure: meta, env (base_url, headers, secrets,
-'                                     variables), steps array.
-'                                     Commands: set_user_agent, set_headers, set_cookies, open_url,
-'                                     wait, find, extract_text, extract_html, extract_attribute,
-'                                     download_url, save_file, read_file, http_request, set_var,
-'                                     template, delete_file, send_email_report, log, enable_dynamic,
-'                                     array_push, if, foreach, render_report, llm/llm_analyze.
-'                                     Features: Mustache templating (SimpleMustacheRender), condition
-'                                     evaluation (EvalCondition: exists, ==, contains, ~=, ||),
-'                                     retry/backoff, selector strategies (xpath/css/text/regex via
-'                                     ResolveSelector, CssToXPath), dynamic content expansion
-'                                     (ExpandDynamicContentAsync), auto link extraction 
-'                                     (AutoExtractLinks), LLM result sanitization (SanitizeLlmResult,
-'                                     ExtractFirstJsonStructure, TryParseJson), secret resolution,
-'                                     debug logging (DebugLogStepStart/End, DebugSnapshot).
 '   FactExtractionService.vb        - Multi-file structured fact extraction module.
-'                                     Classes: ExtractionSchemaColumn (Name, Type), ExtractionRow,
-'                                     FactExtractionAggregateResult (Schema, Rows, Errors, ProcessedFiles,
-'                                     FailedFiles, FailedFileNames, SourceDirectory).
-'                                     Features: RunFactExtractionAsync (batch file processing with
-'                                     AI-driven JSON extraction), ParseSingleFileJson, ParseUserSchemaSpec,
-'                                     MergeIntoAggregate (combines results across files with File column),
-'                                     date normalization (ParseFlexibleDate, NormalizeDate supporting
-'                                     ISO, dd.MM.yyyy, month names, year-only formats), date clamping
-'                                     (ApplyDateClamps with From/To boundaries), SortAggregate,
-'                                     GenerateSchemaFromAiAsync, BuildConstrainedSystemPrompt (fixed schema),
-'                                     MergeRowsByKeyAsync (LLM-driven row consolidation by date or key),
-'                                     FallbackMergeRowsGeneric, DetectSortColumnFromSpec.
-'                                     Settings constants: Setting_ManualInstruction, Setting_DateColumns,
-'                                     Setting_SortColumn, Setting_SortDirection, Setting_DoOcr,
-'                                     Setting_DateClampFrom, Setting_DateClampTo, Setting_OutputLanguage,
-'                                     Setting_DateOutputFormat.
 '
 ' [InstallationWizard]
 '   InitialConfig                   - First-run setup wizard.
@@ -212,72 +119,11 @@
 '
 ' [Interop]
 '   WinAPI / WindowsWrapper / NativeMethods - Managed wrappers for Windows APIs.
-'                                     SetForegroundWindow, FindWindow, GetForegroundWindow,
-'                                     SetWindowPos, ShowWindow, AllowSetForegroundWindow,
-'                                     GetWindowThreadProcessId, AttachThreadInput, EnumWindows,
-'                                     IsWindowVisible, GetWindowText, GetCurrentThreadId.
 '
 ' [Definitions]
 '   SharedContext.vb                - Cross-cutting context implementing ISharedContext.
-'                                     Holds all runtime state: API keys, endpoints, models,
-'                                     system prompts (40+ SP_* properties), OAuth tokens, paths.
-'                                     Instructions for adding new properties included in file header.
-'   SharedMethods.Constants.vb      - Application-wide constants including:
-'                                     - AN/AN2/AN3/AN4/AN5/AN7/AN8 naming constants 
-'                                       ("Red Ink", "redink", URLs, "Inky")
-'                                     - CopyrightNotice
-'                                     - Trigger constants (NoThinkTrigger, RKModeTrigger1-3)
-'                                     - WebAgent defaults (WebAgent_DefaultFromEMail/Name)
-'                                     - ISearch limits (MaxTries, MaxMaxDepth, MaxResults, 
-'                                       MaxSearchTimeout, DefTries, DefResults, DefMaxDepth,
-'                                       DefSearchTimeout)
-'                                     - Registry paths (RegPath_Base, RegPath_CodeBasis, 
-'                                       RegPath_IniPath, RegPath_IniPrio, RegPath_PermitSilentInitUpdates)
-'                                     - Regex separators (RegexSeparator1 "|||", RegexSeparator2 "§§§")
-'                                     - Anonymization constants (AnonFile, AnonPlaceholder,
-'                                       AnonPrefix, AnonSuffix)
-'                                     - JSONCheckPrompt for JSON validation
-'                                     - UI defaults (Default_PaneWidth, PromptLogCap)
-'                                     - Default system prompts (Default_SP_Translate, Default_SP_Correct,
-'                                       Default_SP_Improve, Default_SP_Shorten, Default_SP_Filibuster,
-'                                       Default_SP_ArgueAgainst, Default_SP_InsertClipboard,
-'                                       Default_SP_Summarize, Default_SP_FreestyleText/NoText,
-'                                       Default_SP_MailReply, Default_SP_MailSumup/2,
-'                                       Default_SP_SwitchParty, Default_SP_Anonymize, Default_SP_Rename,
-'                                       Default_SP_Redact, Default_SP_CheckforII, Default_SP_Markup,
-'                                       Default_SP_ExtractSchema, Default_SP_Extract,
-'                                       Default_SP_MergeDateRows, Default_SP_RangeOfCells,
-'                                       Default_SP_ParseFile, Default_SP_WriteNeatly,
-'                                       Default_SP_Add_KeepFormulasIntact/KeepHTMLIntact/KeepInlineIntact,
-'                                       Default_SP_Add_Bubbles/BubblesReply/BubblesExtract/Bubbles_Format,
-'                                       Default_SP_Add_Batch, Default_SP_Add_Slides, Default_SP_BubblesExcel,
-'                                       Default_SP_Add_Revisions, Default_SP_MarkupRegex,
-'                                       Default_SP_ChatWord), SP_CleanTextPrompt for TTS preprocessing.
-'                                     - Path dictionaries (DefaultINIPaths, HelperPaths, UpdatePaths)
-'                                     - Remote URLs (Default_HelpMeInkyPath, ExcelHelperUrl,
-'                                       WordHelperUrl, RemoteDefaultsUrl)
-'                                     - LicenseText with all third-party attributions
-'                                     - Licensing system constants:
-'                                       NewHomeURL, BetaUpgradeInstructions, PrivateLicenseYears (5),
-'                                       TestingPeriod (6 months), MaxLicenseYearsInFuture (5),
-'                                       LicenseCheckDisabledYears (100), BetaEndDate, GracePeriodDays (5),
-'                                       GracePeriodWarningIntervals (5), LicenseWarningDays array,
-'                                       LicenseWarningInterval (5), BetaWarningNoUpgradeDays (7),
-'                                       BetaWarningInterval (5), BetaWarningDays (3).
-'                                     - Global license state: LicensedTill, LicenseStatus, LicenseUsers,
-'                                       LicenseContact, LicenseNoWarning, LicenseCheckDisabled,
-'                                       LicenseFromConfig.
-'                                     - LicenseTypeInfo class with GetLicenseTypes(versionDate).
-'                                     - IntelligentMergeCallback delegate.
-'   SharedMethods.Constants.OwnBuild.Security.vb
-'                                   - Security-related constants (partial class extension).
-'                                     Provides optional hardcoded values for:
-'                                     - Int_CodeBasis: Encryption key (Private, string)
-'                                     - alloweddomains: Permitted domain whitelist (Public, string)
-'                                     When empty strings, values fall back to registry lookup
-'                                     at RegPath_Base + RegPath_CodeBasis.
-'                                     Separated from main Constants.vb for local security
-'                                     configuration; should not commit secrets to repository.
+'   SharedMethods.Constants.vb      - Application-wide constants (naming, triggers, paths, prompts, licensing).
+'   SharedMethods.Constants.OwnBuild.Security.vb - Security-related constants (partial class extension).
 '
 ' [Converter]
 '   MarkdownToRtfConverter          - Modified upstream library (MarkdownToRTF) for RTF generation.
@@ -287,62 +133,96 @@
 ' =============================================================================
 '
 ' [Red Ink for Word]
-'   ThisAddIn.Transcriptor.vb       - Speech recognition and transcription module.
-'                                     Classes: TranscriptionForm, StopForm.
-'                                     Speech Engines: Vosk (local), Whisper.net (local),
-'                                     Google Cloud Speech V1 (cloud-based with streaming).
-'                                     Audio capture: NAudio WaveInEvent, WasapiLoopbackCapture
-'                                     (multi-source support for microphone + system audio).
-'                                     Features: Real-time transcription with partial results,
-'                                     speaker identification/diarization (Vosk embeddings,
-'                                     Google speaker tags), file transcription (audio/video),
-'                                     culture/language selection, audio device selection,
-'                                     sleep lock management (SetThreadExecutionState),
-'                                     OAuth2 token refresh (GetFreshSTTToken).
-'                                     Processing: transcript post-processing via prompt library,
-'                                     LoadTranscriptPrompts, ProcessButton for LLM refinement.
-'   ThisAddIn.TextToSpeech.vb       - Text-to-Speech synthesis module.
-'                                     Engines: Google Cloud TTS, OpenAI TTS, System.Speech.
-'                                     Features: GenerateAudioFromText, GenerateAndPlayAudio,
-'                                     CreatePodcast (multi-voice conversation generation),
-'                                     ParseTextToConversation, MergeAudioFiles (NAudio),
-'                                     SSML support, pitch/rate control, voice selection,
-'                                     sleep lock management, OAuth2 token handling.
-'   ThisAddIn.TextToSpeech.Form.vb  - TTS configuration and playback UI.
-'   ThisAddIn.TextToSpeech.Commands.vb - TTS command handlers for ribbon integration.
-'   ThisAddIn.ContextSearch.vb      - Context-aware document search and highlighting.
-'                                     Search Modes: LLM direct (SP_ContextSearch/Multi),
-'                                     Embedding-based semantic search (EmbeddingStore),
-'                                     Bag-of-Words keyword matching (EmbeddingStore_BagofWords).
-'                                     Chunking: Sentence-based with configurable overlap.
-'                                     Features: RunSearch_Embed, RunSearch_bow, RunIndexing,
-'                                     search triggers (SearchNextTrigger, EmbedTrigger,
-'                                     BoWTrigger, RefreshTrigger), result highlighting via
-'                                     Word comments, ESC-key cancellation.
+'   ThisAddIn.vb                    - VSTO entry point: startup sequencing, event wiring, config bridge,
+'                                     update checks, HTTP listener startup/shutdown, constants/triggers,
+'                                     COM automation exposure (RequestComAddInAutomationService → BridgeSubs).
+'   ThisAddIn.Properties.vb         - Context holder (SharedContext) + Override() helpers + RDV.
+'   ThisAddIn.Commands.vb           - Ribbon/context menu command handlers (Translate, Correct, Improve,
+'                                     Anonymize, Shorten, SwitchParty, Freestyle, ShowChatForm, etc.).
+'                                     Hosts HelpMeInky() (SharedLibrary) and DiscussInky() (Word-only UI).
+'   ThisAddIn.Commands.Freestyle.vb - Freeform/ad-hoc prompt execution and content generation.
+'   ThisAddIn.Menu.vb               - Context menu creation & teardown; maps triggers → command handlers.
+'   Form1.vb (frmAIChat)            - Word chat UI: include doc/selection/other docs, markdown rendering,
+'                                     command execution, model switching, "Sources" tooling toggle/picker.
+'   DiscussInky.vb                  - Extended discussion UI (Word-only): personas, missions, knowledge loading,
+'                                     auto-respond + sort-out flows, optional "Sources" tooling integration.
+'   DragDropForm.vb                 - File/folder drag & drop selector (FileOnly/DirectoryOnly/Both modes).
+'   ThisAddIn.FileHelpers.vb        - Word file ingestion helpers (txt/rtf/doc/docx/pdf/pptx + OCR).
+'   ThisAddIn.Helpers.vb            - Shared helper routines (text diff, HTML/Markdown conversion, dialogs).
+'   ThisAddIn.WordHelpers.vb        - Word-range/document manipulations (selection, insertion, cleanup).
+'   ThisAddIn.WordSearchHelper.vb   - Specialized search routines (clauses, hidden prompts, regex etc.).
+'   ThisAddIn.Redactions.vb         - PDF redaction pipeline (LLM-driven plan + PdfPig/PDFsharp rendering),
+'                                     burn-in image-only mode, pdfium loading, metadata stripping.
+'                                     Classes: PdfRedactionService, TextPosition, RedactionRangeDto,
+'                                     RedactionItemDto, RedactionResponseDto, RedactionRectangle, ArialFontResolver.
+'   ThisAddIn.TextToSpeech.vb       - Text-to-Speech (Google/OpenAI/System.Speech), SSML, playback, podcast mode.
+'   ThisAddIn.TextToSpeech.Form.vb  - TTS settings/voice picker UI (TTSSelectionForm), audio preview/playback.
+'   ThisAddIn.TextToSpeech.Commands.vb - Ribbon/context command handlers for TTS.
+'   ThisAddIn.Transcriptor.vb       - Speech-to-text transcription (Vosk/Whisper/Google streaming), audio capture.
+'   ThisAddIn.ContextSearch.vb      - Context-aware search: LLM direct, embeddings, bag-of-words; highlights via comments.
+'   ThisAddIn.Processing.vb         - Main selection processing pipeline and insertion/format preservation.
+'   ThisAddIn.Processing.Comments.vb - Word "bubbles" (comments) insertion/reply/extract helpers.
+'   ThisAddIn.Processing.HTMLToWord.vb - HTML → Word renderer for markdown/comment insertion flows.
+'   ThisAddIn.Processing.FormatSaveAndRestore.vb - Formatting capture/restore for fields/footnotes/endnotes/highlights.
 '   ThisAddIn.Processing.SearchGrounding.vb - Web search grounding for LLM responses.
-'   ThisAddIn.Commands.vb           - Command methods for ribbon actions (Translate, Correct,
-'                                     Improve, Anonymize, Shorten, SwitchParty, Freestyle,
-'                                     ShowChatForm, HelpMeInky, ShowSettings).
-'                                     Freestyle parsing: prefix triggers (CellByCellPrefix,
-'                                     TextPrefix, BubblesPrefix, PanePrefix, BatchPrefix,
-'                                     PurePrefix, ExtTrigger, ExtTriggerFixed, ExtWSTrigger,
-'                                     ColorTrigger, ObjectTrigger).
+'   ThisAddIn.Processing.Tooling.vb - "Sources" tooling loop (LLM tool-calling orchestration) + log file output.
+'   ThisAddIn.PaneAndMerge.vb       - Task pane orchestration, pane content updates, merge/view logic.
+'   ThisAddIn.WebAgent.vb           - WebAgent Word UI for running WebAgentInterpreter scripts.
+'   ThisAddIn.WebExtension.vb       - Localhost HTTP listener (browser extension → Word insertion).
+'                                     Port: 12334; command: redink_sendtoword; UI thread marshaling.
+'   ThisAddIn.FindHiddenPrompt.vb   - Hidden/prompt-injection detection (invisible text, bidi/zero-width, etc.).
+'   ThisAddIn.FindClause.vb         - Clause / structured legal text identification.
+'   ThisAddIn.DocCheck.vb           - Rule-set-driven review runner (clause checks + bubbles).
+'   ThisAddIn.DocStyle.vb           - Learn/apply paragraph styles via JSON templates; list/numbering preservation.
+'   ThisAddIn.FileRAG.vb            - File-based Retrieval-Augmented Generation (embeddings, chunking).
 '   ThisAddIn.Slides.vb             - PowerPoint slide generation from Word content.
+'   ThisAddIn.SpecialServices.vb    - Ancillary external service tasks (update fetch, licensing).
+'   ThisAddIn.TranslateDocuments.vb - Batch translation of Word `.docx` files via OpenXML (no interop editing).
+'   BridgeSubs.vb                   - COM-visible automation surface for external scripts/macros.
+'   Ribbon1.vb                      - Ribbon callbacks (buttons → Commands layer).
+'   VBA Helper\RI_Helper_Code_Word.bas - VBA macro helper for keyboard shortcuts (calls VSTO add-in methods).
+'   VBA Helper\redink_cleanempty.dotm - Empty template for building redink_helper.dotm.
+'   VBA Helper\readme.txt           - Build instructions for Word macro helper.
 '
 ' [Red Ink for Excel]
-'   Form1.vb (frmAIChat)            - Excel-integrated chat interface.
-'                                     Features: Worksheet/selection context inclusion,
-'                                     command execution (ApplyLLMInstructions with undo),
-'                                     ExtWSTrigger for multi-worksheet inclusion,
-'                                     GatherSelectedWorksheets, model switching,
-'                                     conversation persistence, TopMost control.
-'   ThisAddIn.FactExtractor.vb      - Fact extraction UI for FactExtractionService.
+'   ThisAddIn.vb                    - VSTO entry point: startup/shutdown, config bridge, undo tracking,
+'                                     automation bridge (RequestComAddInAutomationService → BridgeSubs).
+'   ThisAddIn.Properties.vb         - Context holder (SharedContext) + RDV.
+'   ThisAddIn.Commands.vb           - Command handlers: Translate, Correct, Improve, Anonymize, Shorten,
+'                                     SwitchParty, Freestyle variants, file triggers, HelpMeInky, settings.
+'                                     Classes: FileLoadingContext.
+'   Form1.vb (frmAIChat)            - Excel chat UI: include worksheet/selection, optional write access,
+'                                     model switch, inline command parsing/execution against sheet.
+'                                     Classes: ParsedCommand.
+'   ThisAddIn.Pane.vb               - Task pane workflow + IntelligentMerge callback; applies parsed
+'                                     instructions to sheet.
+'   ThisAddIn.FileHelpers.vb        - Excel file ingestion helpers (txt/rtf/doc/docx/pdf + OCR) and GetFileName().
+'   DragDropForm.vb                 - File/folder drag & drop selector (FileOnly/DirectoryOnly/Both modes).
+'   ThisAddIn.FactExtractor.vb      - Fact extraction UI wired to SharedLibrary.FactExtractionService.
 '   ThisAddIn.CSVAnalyzer.vb        - CSV file analysis and processing.
 '   ThisAddIn.FileRenamer.vb        - AI-assisted file renaming.
-'   ThisAddIn.Commands.vb           - Command methods with Freestyle batch processing,
-'                                     file/directory selection, line number targeting.
+'   BridgeSubs.vb                   - COM-visible automation surface for external scripts/macros.
+'   Ribbon1.vb                      - Ribbon callbacks (buttons → Commands layer).
 '
 ' [Red Ink for Outlook]
-'   ThisAddIn.Commands.vb           - Email processing commands (MailReply, MailSumup).
-'   ThisAddIn.WebExtension.vb       - Web extension integration and listener.
+'   ThisAddIn.vb                    - VSTO entry point: startup sequencing (two-phase initialization),
+'                                     OLE message filter (OleMessageFilter class), UI thread marshaling,
+'                                     config bridge, explorer/inspector lifecycle, power mode watcher,
+'                                     delayed startup with fallback timer, COM retry logic (ComRetry).
+'   ThisAddIn.Properties.vb         - Context holder (SharedContext) + Override() helpers + InitialConfigFailed.
+'   ThisAddIn.Commands.vb           - Email processing commands (MailReply, MailSumup, Translate, Correct,
+'                                     Improve, Shorten, Freestyle, etc.) and clipboard helpers.
+'                                     Includes email-context resolution, chain summarization, markup strategies.
+'   ThisAddIn.Helpers.vb            - Shared helper routines (text diff, HTML/Markdown conversion, dialogs).
+'   ThisAddIn.Processing.vb         - Background processing: HTTP listener, watchdog timers, update check.
+'   ThisAddIn.WebExtension.vb       - "Inky" local web UI + API route handler, job scheduling,
+'                                     markdown→HTML rendering, model switching (primary/secondary),
+'                                     browser sanitization. Classes: LlmJob, InkyState, ChatTurn.
+'   ThisAddIn.WebExtension.ListenerAndPower.vb
+'                                   - HttpListener lifecycle, suspend/resume handling, watchdog recovery,
+'                                     stuck detection. Classes: PowerNotificationWindow.
+'   ThisAddIn.WebExtension.FileHelpers.vb
+'                                   - Office/text extraction helpers for browser file uploads
+'                                     (Word/Excel/PPT/textlike).
+'   Ribbon1.vb / Ribbon2.vb         - Ribbon callbacks (buttons → Commands layer, dynamic enable/disable).
 '

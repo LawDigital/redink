@@ -698,6 +698,12 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
+
+
+
+
+
+
     ''' <summary>
     ''' Prompts the user for a file or directory, reads content using GetFileContent(),
     ''' and saves the extracted text as a .txt file at the same location (or optionally in a subdirectory).

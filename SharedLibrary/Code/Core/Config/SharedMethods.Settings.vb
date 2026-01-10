@@ -1667,6 +1667,7 @@ Namespace SharedLibrary
                     {"LogoPathMedium", context.INI_LogoPathMedium},
                     {"LotoPathLarge", context.INI_LogoPathLarge},
                     {"SP_Translate", context.SP_Translate},
+                    {"SP_Translate_Document", context.SP_Translate_Document},
                     {"SP_Correct", context.SP_Correct},
                     {"SP_Improve", context.SP_Improve},
                     {"SP_Explain", context.SP_Explain},
@@ -1756,6 +1757,7 @@ Namespace SharedLibrary
                     {"ISearch_Apply_SP", Default_INI_ISearch_Apply_SP},
                     {"ISearch_Apply_SP_Markup", Default_INI_ISearch_Apply_SP_Markup},
                     {"SP_Translate", Default_SP_Translate},
+                    {"SP_Translate_Document", Default_SP_Translate_Document},
                     {"SP_Correct", Default_SP_Correct},
                     {"SP_Improve", Default_SP_Improve},
                     {"SP_Explain", Default_SP_Explain},
@@ -2766,6 +2768,7 @@ Namespace SharedLibrary
             variableValues.Add("DocStylePathLocal", context.INI_DocStylePathLocal)
             variableValues.Add("PromptLib_Transcript", context.INI_PromptLibPath_Transcript)
             variableValues.Add("SP_Translate", context.SP_Translate)
+            variableValues.Add("SP_Translate_Document", context.SP_Translate_Document)
             variableValues.Add("SP_Correct", context.SP_Correct)
             variableValues.Add("SP_Improve", context.SP_Improve)
             variableValues.Add("SP_Explain", context.SP_Explain)
@@ -2928,6 +2931,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("DoMarkupOutlook") Then context.INI_DoMarkupOutlook = CBool(updatedValues("DoMarkupOutlook"))
                 If updatedValues.ContainsKey("DoMarkupWord") Then context.INI_DoMarkupWord = CBool(updatedValues("DoMarkupWord"))
                 If updatedValues.ContainsKey("SP_Translate") Then context.SP_Translate = CStr(updatedValues("SP_Translate"))
+                If updatedValues.ContainsKey("SP_Translate_Document") Then context.SP_Translate_Document = CStr(updatedValues("SP_Translate_Document"))
                 If updatedValues.ContainsKey("SP_Correct") Then context.SP_Correct = CStr(updatedValues("SP_Correct"))
                 If updatedValues.ContainsKey("SP_Improve") Then context.SP_Improve = CStr(updatedValues("SP_Improve"))
                 If updatedValues.ContainsKey("SP_Explain") Then context.SP_Explain = CStr(updatedValues("SP_Explain"))
@@ -3089,10 +3093,10 @@ Namespace SharedLibrary
             Dim baseWidth As Integer = 450
             Dim formWidth As Integer = CInt(baseWidth * 1.3)
 
-            Dim BrandedVersion As String = If(String.IsNullOrWhiteSpace(INI_LogoPath_Cached & INI_LogoPathMedium_Cached & INI_LogoPathLarge_Cached), "", If(String.IsNullOrWhiteSpace(context.INI_BrandingName), "Branded version", $"Branded version for {context.INI_BrandingName}"))
+            Dim BrandedVersion As String = If(String.IsNullOrWhiteSpace(INI_LogoPath_Cached & INI_LogoPathMedium_Cached & INI_LogoPathLarge_Cached), "", If(String.IsNullOrWhiteSpace(context.INI_BrandingName), "Branded version", $"Branded version For {context.INI_BrandingName}"))
 
             ' Calculate height based on text content
-            Dim ExpireText As String = $"{vbCrLf}{vbCrLf}(your {If(String.IsNullOrEmpty(LicenseStatus), "(undefined license type)", LicenseStatus)} for {LicenseUsers} user(s) expires on {LicensedTill.ToString("dd-MMM-yyyy")})"
+            Dim ExpireText As String = $"{vbCrLf}{vbCrLf}(your {If(String.IsNullOrEmpty(LicenseStatus), "(undefined license type)", LicenseStatus)} For {LicenseUsers} user(s) expires On {LicensedTill.ToString("dd-MMM-yyyy")})"
             Dim testRichTextBox As New System.Windows.Forms.RichTextBox() With {
                             .Font = standardFont,
                             .Text = $"{AN}{vbCrLf}{context.RDV}{ExpireText}{vbCrLf}{If(BrandedVersion = "", "", $"{vbCrLf}{BrandedVersion}{vbCrLf}")}{vbCrLf}By David Rosenthal & Team{vbCrLf}{vbCrLf}{CopyrightNotice}{vbCrLf}{vbCrLf}All rights reserved.{vbCrLf}{vbCrLf}{AN4}{vbCrLf}{vbCrLf}Local Chat: {AN7}"

@@ -138,6 +138,7 @@ Namespace SharedLibrary
                 context.INI_Model = If(configDict.ContainsKey("Model"), configDict("Model"), "")
 
                 context.SP_Translate = If(configDict.ContainsKey("SP_Translate"), configDict("SP_Translate"), Default_SP_Translate)
+                context.SP_Translate_Document = If(configDict.ContainsKey("SP_Translate_Document"), configDict("SP_Translate_Document"), Default_SP_Translate_Document)
                 context.SP_Correct = If(configDict.ContainsKey("SP_Correct"), configDict("SP_Correct"), Default_SP_Correct)
                 context.SP_Improve = If(configDict.ContainsKey("SP_Improve"), configDict("SP_Improve"), Default_SP_Improve)
                 context.SP_Explain = If(configDict.ContainsKey("SP_Explain"), configDict("SP_Explain"), Default_SP_Explain)

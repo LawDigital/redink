@@ -43,6 +43,7 @@ Imports System.IO
 Imports System.Windows.Forms
 Imports DocumentFormat.OpenXml.Drawing
 Imports DocumentFormat.OpenXml.Wordprocessing
+Imports Google.Cloud.Speech.V1.LanguageCodes
 Imports Microsoft.Office.Interop.PowerPoint
 Imports Microsoft.Office.Interop.Word
 Imports NetOffice.PowerPointApi
@@ -81,7 +82,16 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Public Async Sub InOther()
         If INILoadFail() Then Return
-        TranslateLanguage = SLib.ShowCustomInputBox("Enter your target language", $"{AN} Translate", True)
+
+        Dim application As Word.Application = Globals.ThisAddIn.Application
+        Dim Selection As Microsoft.Office.Interop.Word.Selection = application.Selection
+
+        If Selection.Type = WdSelectionType.wdSelectionIP Then
+            TranslateWordDocuments()
+            Return
+        End If
+
+        TranslateLanguage = SLib.ShowCustomInputBox("Enter your target language (e.g., English, German, French):", $"{AN} Translate", True)
         If Not String.IsNullOrEmpty(TranslateLanguage) Then
             Dim result As String = Await ProcessSelectedText(InterpolateAtRuntime(SP_Translate), True, INI_KeepFormat1, INI_KeepParaFormatInline, INI_ReplaceText1, False, 0, False, False, True, False, INI_KeepFormatCap, NoFormatAndFieldSaving:=Not INI_ReplaceText1)
         End If
