@@ -51,6 +51,7 @@ Imports DocumentFormat.OpenXml
 Imports DocumentFormat.OpenXml.Office2010.CustomUI
 Imports DocumentFormat.OpenXml.Presentation
 Imports DocumentFormat.OpenXml.Wordprocessing
+Imports Google.Rpc.Context.AttributeContext.Types
 Imports Microsoft.Office.Interop.PowerPoint
 Imports Microsoft.Office.Interop.Word
 Imports NetOffice.PowerPointApi
@@ -729,6 +730,7 @@ Partial Public Class ThisAddIn
             Dim DoMultiModel As Boolean = True
             Dim DoBubblesExtract As Boolean = False
             Dim DoPushback As Boolean = False
+            Dim DoFiles As Boolean = False
 
             ' Build instruction strings for user guidance
             Dim MarkupInstruct As String = $"start With '{MarkupPrefixAll}' for markups"
@@ -746,6 +748,7 @@ Partial Public Class ThisAddIn
             Dim LibInstruct As String = $"; add '{LibTrigger}' for library search"
             Dim NetInstruct As String = $"; add '{NetTrigger}' for internet search"
             Dim PureInstruct As String = $"; use '{PurePrefix}' for direct prompting"
+            Dim FileInstruct As String = $"; use '{FilePrefix}' for modifying file(s)"
             Dim ChunkInstruct As String = $"; add '{ChunkTrigger}' for iterating through the text"
             Dim BubblesExtractInstruct As String = $"; add '{BubblesExtractTrigger}' for including bubble comments"
             Dim ObjectInstruct As String = $"; add '{ObjectTrigger}'/'{ObjectTrigger2}' for adding a file object"
@@ -836,7 +839,7 @@ Partial Public Class ThisAddIn
                             System.Tuple.Create("OK, use window", $"Use this to automatically insert '{ClipboardPrefix}' as a prefix.", ClipboardPrefix),
                             System.Tuple.Create("OK, use pane", $"Use this to automatically insert '{PanePrefix}' as a prefix.", PanePrefix)
                         }
-                    OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute ({ClipboardInstruct} or {SlidesInstruct}){PromptLibInstruct}{ExtInstruct}{AddOnInstruct}{PureInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle (using " & If(UseSecondAPI, INI_Model_2, INI_Model) & ")", False, "", My.Settings.LastPrompt, OptionalButtons).Trim()
+                    OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute ({ClipboardInstruct} or {SlidesInstruct}){PromptLibInstruct}{ExtInstruct}{AddOnInstruct}{PureInstruct}{FileInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle (using " & If(UseSecondAPI, INI_Model_2, INI_Model) & ")", False, "", My.Settings.LastPrompt, OptionalButtons).Trim()
                 End If
             Else
                 OtherPrompt = LastPrompt
@@ -962,6 +965,7 @@ Partial Public Class ThisAddIn
 
                 ' TOOLS / SOURCES
                 AddItem("setsources", "Select sources/tools available for tooling-capable models (session scope).")
+                AddItem("loadurl", "Retrieve the text of a particular URL given.")
 
                 ' PRIVACY / TRANSFORMS
                 AddItem("anonymize", "Anonymize/redact the current selection (no LLM call).")
@@ -1085,6 +1089,44 @@ Partial Public Class ThisAddIn
             ' Find hidden prompts in document
             If String.Equals(OtherPrompt.Trim(), "findhiddenprompts", StringComparison.OrdinalIgnoreCase) Then
                 FindHiddenPrompts()
+                Return
+            End If
+
+            ' Load the content of an URL                                 
+            If String.Equals(OtherPrompt.Trim(), "loadurl", StringComparison.OrdinalIgnoreCase) Then
+                Dim url As String = SLib.ShowCustomInputBox("Please enter the URL to retrieve the content from:", $"{AN} - Load URL Content", True, "https://")
+                If String.IsNullOrWhiteSpace(url) OrElse url.ToLower() = "esc" Then Return
+
+                InfoBox.ShowInfoBox($"Retrieving content from {url.Trim()} ...")
+
+                ' Run WebView2 on background and wait synchronously to stay on UI thread
+                Dim content As String = ""
+                Dim webViewTask As Task(Of String) = RetrieveWebsiteContent_WebView2(url.Trim(), 0)
+
+                ' Wait for completion while pumping messages to keep UI responsive
+                While Not webViewTask.IsCompleted
+                    System.Windows.Forms.Application.DoEvents()
+                    System.Threading.Thread.Sleep(50)
+                End While
+
+                ' Get the result (we're still on the original UI thread)
+                If webViewTask.Status = TaskStatus.RanToCompletion Then
+                    content = webViewTask.Result
+                End If
+
+                InfoBox.ShowInfoBox("")
+
+                If String.IsNullOrWhiteSpace(content) Then
+                    ShowCustomMessageBox("Could not retrieve content from the specified URL.")
+                    Return
+                End If
+
+                Debug.WriteLine($"[loadurl] Inserting {content.Length} characters into document")
+
+                ' We're on the UI thread - safe to access Word objects
+                selection.Range.Collapse(Direction:=Word.WdCollapseDirection.wdCollapseEnd)
+                selection.InsertAfter(vbCrLf & vbCrLf & content)
+
                 Return
             End If
 
@@ -1627,6 +1669,12 @@ Partial Public Class ThisAddIn
                 DoPushback = True
                 DoChunks = False
                 DoBubblesExtract = True
+            ElseIf OtherPrompt.StartsWith(FilePrefix, StringComparison.OrdinalIgnoreCase) Then
+                OtherPrompt = OtherPrompt.Substring(FilePrefix.Length).Trim()
+                DoFiles = True
+            ElseIf OtherPrompt.StartsWith(FilePrefix2, StringComparison.OrdinalIgnoreCase) Then
+                OtherPrompt = OtherPrompt.Substring(FilePrefix2.Length).Trim()
+                DoFiles = True
             End If
 
             ' {net} trigger: Enable internet search
@@ -1648,7 +1696,7 @@ Partial Public Class ThisAddIn
 
             ' If model supports tooling, handle tool selection
             Dim selectedToolsForSession As List(Of ModelConfig) = Nothing
-            If modelSupportsTool Then
+            If modelSupportsTool AndAlso Not DoFiles Then
                 selectedToolsForSession = SelectToolsForSession(DoToolSelection, ToolFriendlyName)
                 If selectedToolsForSession Is Nothing Then
                     ' User cancelled tool selection
@@ -1665,7 +1713,7 @@ Partial Public Class ThisAddIn
 
             ' {multimodel} trigger: Prompt for multiple model selection
             SelectedAlternateModels = Nothing
-            If UseSecondAPI AndAlso Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) AndAlso OtherPrompt.IndexOf(MultiModelTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
+            If UseSecondAPI AndAlso Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) AndAlso OtherPrompt.IndexOf(MultiModelTrigger, StringComparison.OrdinalIgnoreCase) >= 0 AndAlso Not DoFiles Then
                 If Not DoMarkup AndAlso Not DoBubbles AndAlso Not DoPushback AndAlso Not DoSlides Then
                     If Not ShowMultipleModelSelection(_context, INI_AlternateModelPath) OrElse SelectedAlternateModels Is Nothing OrElse SelectedAlternateModels.Count = 0 Then
                         Return
@@ -1679,7 +1727,7 @@ Partial Public Class ThisAddIn
             ' === MyStyle prompt integration ===
 
             ' {mystyle} trigger: Select and apply personal style prompt
-            If Not String.IsNullOrWhiteSpace(INI_MyStylePath) And OtherPrompt.IndexOf(MyStyleTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
+            If Not String.IsNullOrWhiteSpace(INI_MyStylePath) AndAlso OtherPrompt.IndexOf(MyStyleTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
                 Dim StylePath As String = ExpandEnvironmentVariables(INI_MyStylePath)
                 If Not IO.File.Exists(StylePath) Then
                     ShowCustomMessageBox("No MyStyle prompt file has been found. You may have to first create a MyStyle prompt. Go to 'Analyze' and use 'Define MyStyle' to do so - will abort.")
@@ -1695,7 +1743,7 @@ Partial Public Class ThisAddIn
             ' === Additional document integration ===
 
             ' {adddoc} trigger: Gather content from other open Word documents
-            If Not String.IsNullOrEmpty(OtherPrompt) And OtherPrompt.IndexOf(AddDocTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
+            If Not String.IsNullOrEmpty(OtherPrompt) AndAlso OtherPrompt.IndexOf(AddDocTrigger, StringComparison.OrdinalIgnoreCase) >= 0 AndAlso Not Dofiles Then
 
                 InsertDocs = GatherSelectedDocuments()
                 Debug.WriteLine($"GatherSelectedDocs returned: {Left(InsertDocs, 3000)}")
@@ -1716,19 +1764,16 @@ Partial Public Class ThisAddIn
             ' === External file/directory embedding ===
 
             ' Handles {doc}, {dir}, and {path} triggers with unified document numbering
-
-            Dim fileResult = Await ProcessExternalFileTriggers(OtherPrompt)
-            If Not fileResult.Success Then
-                Return
+            If Not DoFiles Then
+                Dim fileResult = Await ProcessExternalFileTriggers(OtherPrompt)
+                If Not fileResult.Success Then
+                    Return
+                End If
+                OtherPrompt = fileResult.ModifiedPrompt
             End If
-            OtherPrompt = fileResult.ModifiedPrompt
-
-            Debug.WriteLine(OtherPrompt)
-
-
             ' === File object selection (for LLM APIs that support file attachments) ===
 
-            If DoFileObject Then
+            If DoFileObject And Not Dofiles Then
                 If DoFileObjectClip Then
                     ' Use clipboard content as file object
                     FileObject = "clipboard"
@@ -1845,7 +1890,7 @@ Partial Public Class ThisAddIn
             ' === User confirmation for processing without text selection ===
 
             ' Prompt user to process full document when bubbles or chunks mode is active but no text selected
-            If NoText AndAlso (DoBubbles Or DoChunks) Then
+            If NoText AndAlso (DoBubbles Or DoChunks) AndAlso DoFiles Then
                 Dim FullDocument As Integer = ShowCustomYesNoBox("You have not selected text. Ask the LLM to comment on the full document?", "Yes", "No, abort")
                 If FullDocument = 1 Then
                     Dim document As Word.Document = application.ActiveDocument
@@ -1857,7 +1902,7 @@ Partial Public Class ThisAddIn
             End If
 
             ' Prompt user to process full document when markup mode is active but no text selected
-            If NoText AndAlso DoMarkup Then
+            If NoText AndAlso DoMarkup AndAlso Not Dofiles Then
                 Dim FullDocument As Integer = ShowCustomYesNoBox("You have not selected text. Do the markup on the full document?", "Yes", "No, abort")
                 If FullDocument = 1 Then
                     Dim document As Word.Document = application.ActiveDocument
@@ -1869,7 +1914,7 @@ Partial Public Class ThisAddIn
             End If
 
             ' Confirm markup placement when configuration specifies append mode
-            If Not DoInplace AndAlso DoMarkup Then
+            If Not DoInplace AndAlso DoMarkup AndAlso Not Dofiles Then
                 Dim AppendMarkup As Integer = ShowCustomYesNoBox("You have asked for a markup to be created, but according to the configuration, it will not replace your current selection but added to it at the end. Is this really what you want?", "Yes, add markup ", "No, replace text with markup")
                 If AppendMarkup = 0 Then
                     Return
@@ -1881,10 +1926,22 @@ Partial Public Class ThisAddIn
 
             ' === System prompt construction based on selected mode ===
 
+            If DoFiles Then
+                Try
+                    CorrectWordDocuments(SP_Freestyle_Document, "_freestyle", UseSecondAPI)
+                Catch ex As System.Exception
+                    ' Handle any unexpected errors during freestyle execution
+                    ShowCustomMessageBox("Error in Freestyle ('File:'): " & ex.Message, "Error")
+                End Try
+                Return
+            End If
+
             ' Handle pure prefix mode: use prompt directly as system prompt without additional processing
             If OtherPrompt.StartsWith(PurePrefix, StringComparison.OrdinalIgnoreCase) Then
                 OtherPrompt = OtherPrompt.Substring(PurePrefix.Length).Replace("(a file object follows)", "").Replace("(a clipboard object follows)", "").Trim()
                 SysPrompt = OtherPrompt
+                DoClipboard = True
+                DoChunks = False
             Else
                 ' Construct system prompt based on selected feature mode
                 If DoLib Then
@@ -1934,7 +1991,7 @@ Partial Public Class ThisAddIn
 
         Catch ex As System.Exception
             ' Handle any unexpected errors during freestyle execution
-            MessageBox.Show("Error in Freestyle: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            ShowCustomMessageBox("Error in Freestyle: " & ex.Message)
         End Try
     End Sub
 

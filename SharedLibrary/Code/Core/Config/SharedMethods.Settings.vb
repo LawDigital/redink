@@ -297,6 +297,9 @@ Namespace SharedLibrary
             saveConfigButton.Size = New System.Drawing.Size(saveButtonSize.Width + 20, saveButtonSize.Height + 10)
             saveConfigButton.Location = New System.Drawing.Point(expertConfigButton.Right + buttonSpacing, buttonYPos)
             settingsForm.Controls.Add(saveConfigButton)
+            If context.INI_NoLocalConfig Then
+                saveConfigButton.Enabled = False
+            End If
 
             Dim saveConfigToolTip As New System.Windows.Forms.ToolTip()
             saveConfigToolTip.SetToolTip(saveConfigButton, $"Will save the current configuration to a local copy of '{AN2}.ini' (overwriting any existing such file).")
@@ -1664,7 +1667,9 @@ Namespace SharedLibrary
                     {"LogoPathMedium", context.INI_LogoPathMedium},
                     {"LotoPathLarge", context.INI_LogoPathLarge},
                     {"SP_Translate", context.SP_Translate},
+                    {"SP_Translate_Document", context.SP_Translate_Document},
                     {"SP_Correct", context.SP_Correct},
+                    {"SP_Correct_Document", context.SP_Correct_Document},
                     {"SP_Improve", context.SP_Improve},
                     {"SP_Explain", context.SP_Explain},
                     {"SP_FindClause", context.SP_FindClause},
@@ -1694,6 +1699,7 @@ Namespace SharedLibrary
                     {"SP_MailSumup2", context.SP_MailSumup2},
                     {"SP_FreestyleText", context.SP_FreestyleText},
                     {"SP_FreestyleNoText", context.SP_FreestyleNoText},
+                    {"SP_Freestyle_Document", context.SP_Freestyle_Document},
                     {"SP_SwitchParty", context.SP_SwitchParty},
                     {"SP_Anonymize", context.SP_Anonymize},
                     {"SP_Rename", context.SP_Rename},
@@ -1753,7 +1759,9 @@ Namespace SharedLibrary
                     {"ISearch_Apply_SP", Default_INI_ISearch_Apply_SP},
                     {"ISearch_Apply_SP_Markup", Default_INI_ISearch_Apply_SP_Markup},
                     {"SP_Translate", Default_SP_Translate},
+                    {"SP_Translate_Document", Default_SP_Translate_Document},
                     {"SP_Correct", Default_SP_Correct},
+                    {"SP_Correct_Document", Default_SP_Correct_Document},
                     {"SP_Improve", Default_SP_Improve},
                     {"SP_Explain", Default_SP_Explain},
                     {"SP_FindClause", Default_SP_FindClause},
@@ -1783,6 +1791,7 @@ Namespace SharedLibrary
                     {"SP_MailSumup2", Default_SP_MailSumup2},
                     {"SP_FreestyleText", Default_SP_FreestyleText},
                     {"SP_FreestyleNoText", Default_SP_FreestyleNoText},
+                    {"SP_Freestyle_Document", Default_SP_Freestyle_Document},
                     {"SP_SwitchParty", Default_SP_SwitchParty},
                     {"SP_Anonymize", Default_SP_Anonymize},
                     {"SP_Rename", Default_SP_Rename},
@@ -2763,7 +2772,9 @@ Namespace SharedLibrary
             variableValues.Add("DocStylePathLocal", context.INI_DocStylePathLocal)
             variableValues.Add("PromptLib_Transcript", context.INI_PromptLibPath_Transcript)
             variableValues.Add("SP_Translate", context.SP_Translate)
+            variableValues.Add("SP_Translate_Document", context.SP_Translate_Document)
             variableValues.Add("SP_Correct", context.SP_Correct)
+            variableValues.Add("SP_Correct_Document", context.SP_Correct_Document)
             variableValues.Add("SP_Improve", context.SP_Improve)
             variableValues.Add("SP_Explain", context.SP_Explain)
             variableValues.Add("SP_FindClause", context.SP_FindClause)
@@ -2793,6 +2804,7 @@ Namespace SharedLibrary
             variableValues.Add("SP_MailSumup2", context.SP_MailSumup2)
             variableValues.Add("SP_FreestyleText", context.SP_FreestyleText)
             variableValues.Add("SP_FreestyleNoText", context.SP_FreestyleNoText)
+            variableValues.Add("SP_Freestyle_Document", context.SP_Freestyle_Document)
             variableValues.Add("SP_SwitchParty", context.SP_SwitchParty)
             variableValues.Add("SP_Anonymize", context.SP_Anonymize)
             variableValues.Add("SP_Rename", context.SP_Rename)
@@ -2925,7 +2937,9 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("DoMarkupOutlook") Then context.INI_DoMarkupOutlook = CBool(updatedValues("DoMarkupOutlook"))
                 If updatedValues.ContainsKey("DoMarkupWord") Then context.INI_DoMarkupWord = CBool(updatedValues("DoMarkupWord"))
                 If updatedValues.ContainsKey("SP_Translate") Then context.SP_Translate = CStr(updatedValues("SP_Translate"))
+                If updatedValues.ContainsKey("SP_Translate_Document") Then context.SP_Translate_Document = CStr(updatedValues("SP_Translate_Document"))
                 If updatedValues.ContainsKey("SP_Correct") Then context.SP_Correct = CStr(updatedValues("SP_Correct"))
+                If updatedValues.ContainsKey("SP_Correct_Document") Then context.SP_Correct_Document = CStr(updatedValues("SP_Correct_Document"))
                 If updatedValues.ContainsKey("SP_Improve") Then context.SP_Improve = CStr(updatedValues("SP_Improve"))
                 If updatedValues.ContainsKey("SP_Explain") Then context.SP_Explain = CStr(updatedValues("SP_Explain"))
                 If updatedValues.ContainsKey("SP_FindClause") Then context.SP_FindClause = CStr(updatedValues("SP_FindClause"))
@@ -2955,6 +2969,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_MailSumup2") Then context.SP_MailSumup2 = CStr(updatedValues("SP_MailSumup2"))
                 If updatedValues.ContainsKey("SP_FreestyleText") Then context.SP_FreestyleText = CStr(updatedValues("SP_FreestyleText"))
                 If updatedValues.ContainsKey("SP_FreestyleNoText") Then context.SP_FreestyleNoText = CStr(updatedValues("SP_FreestyleNoText"))
+                If updatedValues.ContainsKey("SP_Freestyle_Document") Then context.SP_Freestyle_Document = CStr(updatedValues("SP_Freestyle_Document"))
                 If updatedValues.ContainsKey("SP_SwitchParty") Then context.SP_SwitchParty = CStr(updatedValues("SP_SwitchParty"))
                 If updatedValues.ContainsKey("SP_Anonymize") Then context.SP_Anonymize = CStr(updatedValues("SP_Anonymize"))
                 If updatedValues.ContainsKey("SP_Rename") Then context.SP_Rename = CStr(updatedValues("SP_Rename"))
@@ -3086,10 +3101,10 @@ Namespace SharedLibrary
             Dim baseWidth As Integer = 450
             Dim formWidth As Integer = CInt(baseWidth * 1.3)
 
-            Dim BrandedVersion As String = If(String.IsNullOrWhiteSpace(INI_LogoPath_Cached & INI_LogoPathMedium_Cached & INI_LogoPathLarge_Cached), "", If(String.IsNullOrWhiteSpace(context.INI_BrandingName), "Branded version", $"Branded version for {context.INI_BrandingName}"))
+            Dim BrandedVersion As String = If(String.IsNullOrWhiteSpace(INI_LogoPath_Cached & INI_LogoPathMedium_Cached & INI_LogoPathLarge_Cached), "", If(String.IsNullOrWhiteSpace(context.INI_BrandingName), "Branded version", $"Branded version For {context.INI_BrandingName}"))
 
             ' Calculate height based on text content
-            Dim ExpireText As String = $"{vbCrLf}{vbCrLf}(your {If(String.IsNullOrEmpty(LicenseStatus), "(undefined license type)", LicenseStatus)} for {LicenseUsers} user(s) expires on {LicensedTill.ToString("dd-MMM-yyyy")})"
+            Dim ExpireText As String = $"{vbCrLf}{vbCrLf}(your {If(String.IsNullOrEmpty(LicenseStatus), "(undefined license type)", LicenseStatus)} For {LicenseUsers} user(s) expires On {LicensedTill.ToString("dd-MMM-yyyy")})"
             Dim testRichTextBox As New System.Windows.Forms.RichTextBox() With {
                             .Font = standardFont,
                             .Text = $"{AN}{vbCrLf}{context.RDV}{ExpireText}{vbCrLf}{If(BrandedVersion = "", "", $"{vbCrLf}{BrandedVersion}{vbCrLf}")}{vbCrLf}By David Rosenthal & Team{vbCrLf}{vbCrLf}{CopyrightNotice}{vbCrLf}{vbCrLf}All rights reserved.{vbCrLf}{vbCrLf}{AN4}{vbCrLf}{vbCrLf}Local Chat: {AN7}"
