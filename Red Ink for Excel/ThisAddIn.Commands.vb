@@ -820,6 +820,7 @@ Partial Public Class ThisAddIn
         Dim PaneInstruct As String = $"use '{PanePrefix}' for using the pane"
         Dim ExtInstruct As String = $"; insert '{ExtTrigger}' or '{ExtTriggerFixed}' (multiple times) for including the text of (a) file(s) (txt, docx, pdf), {ExtDirTrigger} for a directory of text files, or '{ExtWSTrigger}' to add more worksheet(s)"
         Dim AddonInstruct As String = $"; add '{ColorTrigger}' to check for colorcodes"
+        Dim NoFormulasInstruct As String = $"; add '{NoFormulasTrigger}' to ignore formulas in cells"
         Dim ObjectInstruct As String = $"; add '{ObjectTrigger}'/'{ObjectTrigger2}' for adding a file object"
         Dim FileObject As String = ""
         Dim InsertWS As String = ""
@@ -834,6 +835,9 @@ Partial Public Class ThisAddIn
                 DoFileObject = True
             End If
         End If
+
+        AddonInstruct += NoFormulasInstruct.Replace("; add", ",")
+
         Dim PromptLibInstruct As String = ""
         If INI_PromptLib Then
             PromptLibInstruct = " or press 'OK' for the prompt library"
@@ -1009,6 +1013,11 @@ Partial Public Class ThisAddIn
         If Not String.IsNullOrEmpty(OtherPrompt) And OtherPrompt.IndexOf(ColorTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
             DoColor = True
             OtherPrompt = Regex.Replace(OtherPrompt, Regex.Escape(ColorTrigger), "", RegexOptions.IgnoreCase)
+        End If
+
+        If Not String.IsNullOrEmpty(OtherPrompt) And OtherPrompt.IndexOf(NoFormulasTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
+            DoFormulas = False
+            OtherPrompt = Regex.Replace(OtherPrompt, Regex.Escape(NoFormulasTrigger), "", RegexOptions.IgnoreCase)
         End If
 
         ' === External file/directory embedding ===

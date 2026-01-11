@@ -141,7 +141,10 @@ Namespace SharedLibrary
             Property INI_LocalModelPath As String
             Property INI_TTSEndpoint As String
             Property SP_Translate As String
+            Property SP_Translate_Document As String
             Property SP_Correct As String
+
+            Property SP_Correct_Document As String
             Property SP_Improve As String
             Property SP_Explain As String
             Property SP_FindClause As String
@@ -171,6 +174,7 @@ Namespace SharedLibrary
             Property SP_MailSumup2 As String
             Property SP_FreestyleText As String
             Property SP_FreestyleNoText As String
+            Property SP_Freestyle_Document As String
             Property SP_SwitchParty As String
             Property SP_Anonymize As String
             Property SP_Extract As String
@@ -409,7 +413,9 @@ Namespace SharedLibrary
         Public Property INI_LocalModelPath As String Implements ISharedContext.INI_LocalModelPath
         Public Property INI_TTSEndpoint As String Implements ISharedContext.INI_TTSEndpoint
         Public Property SP_Translate As String Implements ISharedContext.SP_Translate
+        Public Property SP_Translate_Document As String Implements ISharedContext.SP_Translate_Document
         Public Property SP_Correct As String Implements ISharedContext.SP_Correct
+        Public Property SP_Correct_Document As String Implements ISharedContext.SP_Correct_Document
         Public Property SP_Improve As String Implements ISharedContext.SP_Improve
         Public Property SP_Explain As String Implements ISharedContext.SP_Explain
         Public Property SP_FindClause As String Implements ISharedContext.SP_FindClause
@@ -442,6 +448,7 @@ Namespace SharedLibrary
         Public Property SP_MailSumup2 As String Implements ISharedContext.SP_MailSumup2
         Public Property SP_FreestyleText As String Implements ISharedContext.SP_FreestyleText
         Public Property SP_FreestyleNoText As String Implements ISharedContext.SP_FreestyleNoText
+        Public Property SP_Freestyle_Document As String Implements ISharedContext.SP_Freestyle_Document
         Public Property SP_SwitchParty As String Implements ISharedContext.SP_SwitchParty
         Public Property SP_Anonymize As String Implements ISharedContext.SP_Anonymize
         Public Property SP_Extract As String Implements ISharedContext.SP_Extract

@@ -98,7 +98,6 @@ Namespace SharedLibrary
             If Not RedInkLogo Then
                 Try
 
-                    Debug.WriteLine("INI_LogoPath_Cached: " & INI_LogoPath_Cached)
                     Dim logoPath As String = Nothing
                     Select Case logoType
                         Case LogoType.Standard
