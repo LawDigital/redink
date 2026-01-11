@@ -198,7 +198,9 @@ Partial Public Class ThisAddIn
             Dim p4 As New SLib.InputParameter("Sort direction", displaySortDirection)
             p4.Options = New System.Collections.Generic.List(Of String) From {"Ascending", "Descending"}
             Dim p5 As New SLib.InputParameter("Multiple files", multipleFiles)
-            Dim p6 As New SLib.InputParameter("Do OCR if needed (PDFs)", doOcr)
+            ' OCR checkbox: pass Nothing if OCR is unavailable to show disabled checkbox
+            Dim ocrAvailable As Boolean = SharedMethods.IsOcrAvailable(_context)
+            Dim p6 As New SLib.InputParameter("Do OCR if needed (PDFs)", If(ocrAvailable, CObj(doOcr), Nothing))
             Dim p9 As New SLib.InputParameter("Output language", UserOutputLanguage)
             Dim p10 As New SLib.InputParameter("Date format (e.g., yyyy-MM-dd; empty=default)", dateOutputFormat)
             Dim pMergeEnable As New SLib.InputParameter("Permit row merging (if requested)", mergeRowsViaLlm)
@@ -230,6 +232,41 @@ Partial Public Class ThisAddIn
                 extraAction =
                         Sub()
                             Try
+                                ' Create file with sample content if it doesn't exist or contains only whitespace
+                                Dim needsSampleContent As Boolean = False
+                                If Not File.Exists(localPath) Then
+                                    needsSampleContent = True
+                                Else
+                                    Try
+                                        Dim content As String = File.ReadAllText(localPath, System.Text.Encoding.UTF8)
+                                        needsSampleContent = String.IsNullOrWhiteSpace(content)
+                                    Catch
+                                        needsSampleContent = True
+                                    End Try
+                                End If
+
+                                If needsSampleContent Then
+                                    Try
+                                        File.WriteAllText(localPath,
+                                            "; Red Ink Fact Extractor - Local Library" & vbCrLf &
+                                            "; Format: Title | Instruction | SchemaSpec | MergeEnable | MergeDateCol | MergeInstruction" & vbCrLf &
+                                            "; " & vbCrLf &
+                                            "; SchemaSpec types: text, number, integer, decimal, date, datetime, other" & vbCrLf &
+                                            "; Use * after type to mark preferred sort column (e.g., date*)" & vbCrLf &
+                                            "; Lines starting with ; are comments" & vbCrLf &
+                                            vbCrLf &
+                                            "Contract Summary|Extract the key contract metadata including parties, dates, and financial terms.|Contract Title:text; Party A:text; Party B:text; Effective Date:date*; Expiration Date:date; Contract Value:decimal; Currency:text; Governing Law:text|False|0|" & vbCrLf & vbCrLf &
+                                            "Contract Obligations|Extract all contractual obligations, deadlines, and responsible parties.|Obligation:text; Responsible Party:text; Due Date:date*; Frequency:text; Penalty Clause:text|True|3|Merge obligations with the same due date and responsible party" & vbCrLf & vbCrLf &
+                                            "Payment Schedule|Extract payment milestones, amounts, and due dates from the contract.|Milestone:text; Payment Date:date*; Amount:decimal; Currency:text; Payment Terms:text; Status:text|True|2|Consolidate payments scheduled for the same date" & vbCrLf & vbCrLf &
+                                            "Termination Clauses|Identify all termination and exit provisions.|Clause Type:text; Trigger Condition:text; Notice Period:text; Effective Date:date*; Consequences:text|False|0|" & vbCrLf & vbCrLf &
+                                            "Renewal Terms|Extract automatic renewal and extension provisions.|Renewal Type:text; Renewal Date:date*; Duration:text; Notice Deadline:date; Conditions:text|False|0|" & vbCrLf,
+                                            System.Text.Encoding.UTF8)
+                                    Catch ex As Exception
+                                        ShowCustomMessageBox($"Tried to create a sample file but could not: {ex.Message}")
+                                        Return
+                                    End Try
+                                End If
+
                                 ' Open the local library in the editor
                                 SLib.ShowTextFileEditor(localPath, $"{AN} Local Library '{localPath}':", False, _context)
                             Catch ex As Exception
@@ -432,8 +469,7 @@ Partial Public Class ThisAddIn
 
             ' AI schema generation (only if still no schema)
             If (fixedSchema Is Nothing OrElse fixedSchema.Count = 0) AndAlso (manualOverrides Or preparedMissingInstruction) AndAlso String.IsNullOrWhiteSpace(manualSchemaText) Then
-                Dim aiSchema = Await GenerateSchemaFromAiAsync(effectiveInstruction,
-                                                               AddressOf InterpolateAtRuntime,
+                Dim aiSchema = Await GenerateSchemaFromAiAsync(AddressOf InterpolateAtRuntime,
                                                                AddressOf LLM,
                                                                useSecondApi, _context)
                 If aiSchema Is Nothing OrElse aiSchema.Count = 0 Then

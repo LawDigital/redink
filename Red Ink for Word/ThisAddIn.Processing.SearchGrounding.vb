@@ -7,19 +7,22 @@
 '
 ' Workflow:
 '  - ConsultInternet: Builds search prompts, optionally requests approval, runs searches, and prepares follow-up prompts.
-'  - PerformSearchGrounding: Executes the HTTP search, extracts unique URLs, retrieves qualifying content, and aggregates it.
-'  - RetrieveWebsiteContent/CrawlWebsite: Crawl discovered pages within bounded depth, timeout, and error limits while harvesting paragraph text.
-'  - CrawlContext/GetAbsoluteUrl: Maintain crawl state and normalize relative links.
+'  - PerformSearchGrounding: Executes the HTTP search, extracts unique URLs using response masks, retrieves qualifying content, and aggregates it.
+'  - RetrieveWebsiteContent/CrawlWebsite: Crawl discovered pages within bounded depth, timeout, cancellation/error limits, while harvesting paragraph text.
+'  - CrawlContext/GetAbsoluteUrl: Maintain crawl state, enforce dedupe/error thresholds, and normalize relative links.
+'  - RetrieveWebsiteContent_WebView2/UnescapeJsonString: (Optional) Use WebView2 to render JavaScript pages, scroll for lazy-loaded content, and extract cleaned body text.
 '
 ' External Dependencies:
 '  - SharedLibrary.SharedLibrary.SharedMethods for interpolation, UI dialogues, and LLM access.
-'  - HtmlAgilityPack for HTML parsing.
+'  - HtmlAgilityPack for HTML parsing (HttpClient crawl path).
+'  - Microsoft.Web.WebView2.Core / Microsoft.Web.WebView2.WinForms for JS-rendered content retrieval (optional path).
 ' =============================================================================
 
 Option Explicit On
 Option Strict On
 
 Imports System.Diagnostics
+Imports System.IO
 Imports System.Net
 Imports System.Net.Http
 Imports System.Text.RegularExpressions
@@ -28,21 +31,24 @@ Imports System.Threading.Tasks
 Imports System.Windows.Forms
 Imports HtmlAgilityPack
 Imports SharedLibrary.SharedLibrary.SharedMethods
+Imports Microsoft.Web.WebView2.Core
 
 ''' <summary>
 ''' Provides search-grounding helpers that connect Word instructions with external internet content.
 ''' </summary>
 Partial Public Class ThisAddIn
 
+    Const UseWebView2ForISearch As Boolean = True ' Set to True to enable WebView2-based content retrieval
+
     ''' <summary>
     ''' Coordinates LLM-based search-term generation, optional approval, remote search execution, and prompt selection.
     ''' </summary>
     ''' <param name="DoMarkup">Determines whether the markup-specific system prompt is used when selected text exists.</param>
     ''' <returns>True when search preparation completes successfully; otherwise False.</returns>
-    Public Async Function ConsultInternet(DoMarkup As Boolean) As Task(Of Boolean)
+    Public Function ConsultInternet(DoMarkup As Boolean) As Task(Of Boolean)
+        Dim tcs As New TaskCompletionSource(Of Boolean)()
 
         Try
-
             InfoBox.ShowInfoBox("Asking the LLM to determine the necessary searchterms for your instruction ...")
 
             Dim SysPromptTemp As String
@@ -52,23 +58,51 @@ Partial Public Class ThisAddIn
 
             SysPromptTemp = InterpolateAtRuntime(INI_ISearch_SearchTerm_SP)
 
-            SearchTerms = Await LLM(SysPromptTemp, If(SelectedText = "", "", "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>"), "", "", 0)
+            ' Use polling instead of Await to stay on UI thread
+            Dim llmTask As Task(Of String) = LLM(SysPromptTemp, If(SelectedText = "", "", "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>"), "", "", 0)
+
+            While Not llmTask.IsCompleted
+                System.Windows.Forms.Application.DoEvents()
+                System.Threading.Thread.Sleep(50)
+            End While
+
+            If llmTask.Status = TaskStatus.RanToCompletion Then
+                SearchTerms = llmTask.Result
+            Else
+                SearchTerms = ""
+            End If
 
             If String.IsNullOrWhiteSpace(SearchTerms) Then
                 InfoBox.ShowInfoBox("")
                 ShowCustomMessageBox("The LLM failed to establish searchterms. Will abort.")
-                Return False
+                tcs.SetResult(False)
+                Return tcs.Task
             End If
 
             If INI_ISearch_Approve Then
                 InfoBox.ShowInfoBox("")
                 Dim approveresult As Integer = ShowCustomYesNoBox("These are the searchterms that the LLM wants to issue to " & INI_ISearch_Name & ": {SearchTerms}", "Approve", "Abort", $"{AN} Internet Search", 5, " = 'Approve'")
-                If approveresult = 0 Or approveresult = 2 Then Return False
+                If approveresult = 0 Or approveresult = 2 Then
+                    tcs.SetResult(False)
+                    Return tcs.Task
+                End If
             End If
 
             InfoBox.ShowInfoBox($"Now using {INI_ISearch_Name} to search for '{SearchTerms}' ...")
 
-            SearchResults = Await PerformSearchGrounding(SearchTerms, INI_ISearch_URL, INI_ISearch_ResponseMask1, INI_ISearch_ResponseMask2, INI_ISearch_Tries, INI_ISearch_MaxDepth)
+            ' Use polling instead of Await for PerformSearchGrounding
+            Dim searchTask As Task(Of List(Of String)) = PerformSearchGrounding(SearchTerms, INI_ISearch_URL, INI_ISearch_ResponseMask1, INI_ISearch_ResponseMask2, INI_ISearch_Tries, INI_ISearch_MaxDepth)
+
+            While Not searchTask.IsCompleted
+                System.Windows.Forms.Application.DoEvents()
+                System.Threading.Thread.Sleep(50)
+            End While
+
+            If searchTask.Status = TaskStatus.RanToCompletion Then
+                SearchResults = searchTask.Result
+            Else
+                SearchResults = New List(Of String)()
+            End If
 
             SearchResult = String.Join(Environment.NewLine, SearchResults.Select(Function(result, index) $"<SEARCHRESULT{index + 1}>{result}</SEARCHRESULT{index + 1}>"))
 
@@ -79,27 +113,23 @@ Partial Public Class ThisAddIn
                 SysPrompt = InterpolateAtRuntime(INI_ISearch_Apply_SP)
             End If
 
-            Return True
+            tcs.SetResult(True)
 
         Catch ex As System.Exception
             MessageBox.Show("Error in ConsultInternet: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
-            Return False
+            tcs.SetResult(False)
         End Try
 
+        Return tcs.Task
     End Function
 
     ''' <summary>
     ''' Executes the configured internet search, extracts unique URLs using response masks, retrieves qualifying content, and returns the collected snippets.
     ''' </summary>
-    ''' <param name="SGTerms">Search expression provided to the internet search endpoint.</param>
-    ''' <param name="ISearch_URL">Base search URL that precedes the encoded search terms.</param>
-    ''' <param name="ISearch_ResponseMask1">Start delimiter used to locate URLs in the response.</param>
-    ''' <param name="ISearch_ResponseMask2">End delimiter used to locate URLs in the response.</param>
-    ''' <param name="ISearch_Tries">Maximum number of URLs that will be processed.</param>
-    ''' <param name="ISearch_MaxDepth">Maximum crawl depth per retrieved URL.</param>
-    ''' <returns>List of plain-text contents harvested from the visited URLs.</returns>
-    Public Async Function PerformSearchGrounding(SGTerms As String, ISearch_URL As String, ISearch_ResponseMask1 As String, ISearch_ResponseMask2 As String, ISearch_Tries As Integer, ISearch_MaxDepth As Integer) As Task(Of List(Of String))
+    Public Function PerformSearchGrounding(SGTerms As String, ISearch_URL As String, ISearch_ResponseMask1 As String, ISearch_ResponseMask2 As String, ISearch_Tries As Integer, ISearch_MaxDepth As Integer) As Task(Of List(Of String))
+        Dim tcs As New TaskCompletionSource(Of List(Of String))()
         Dim results As New List(Of String)
+
         Using httpClient As New HttpClient()
             Try
                 ' Construct the search URL
@@ -109,9 +139,22 @@ Partial Public Class ThisAddIn
 
                 ' Get search results HTML
                 httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
-                httpClient.Timeout = TimeSpan.FromSeconds(30) ' Set to an appropriate value
-                Dim searchResponse As String = Await httpClient.GetStringAsync(searchUrl)
-                'Debug.WriteLine("Search response: " & Left(searchResponse, 10000))
+                httpClient.Timeout = TimeSpan.FromSeconds(30)
+
+                ' Use polling instead of Await
+                Dim httpTask As Task(Of String) = httpClient.GetStringAsync(searchUrl)
+
+                While Not httpTask.IsCompleted
+                    System.Windows.Forms.Application.DoEvents()
+                    System.Threading.Thread.Sleep(50)
+                End While
+
+                Dim searchResponse As String = ""
+                If httpTask.Status = TaskStatus.RanToCompletion Then
+                    searchResponse = httpTask.Result
+                Else
+                    Throw New HttpRequestException("Failed to get search results")
+                End If
 
                 InfoBox.ShowInfoBox($"Extracting URLs ...")
 
@@ -125,14 +168,10 @@ Partial Public Class ThisAddIn
                     Dim rawUrl As String = match.Groups(1).Value
                     Dim decodedUrl As String = WebUtility.UrlDecode(rawUrl.Replace(ISearch_ResponseMask1, ""))
 
-                    ' Check if the decoded URL already exists in the list
                     If Not extractedUrls.Contains(decodedUrl) Then
                         extractedUrls.Add(decodedUrl)
                         URLList += decodedUrl & vbCrLf
                         InfoBox.ShowInfoBox(URLList)
-                        'Debug.WriteLine("URL added: " & decodedUrl)
-                    Else
-                        'Debug.WriteLine("Duplicate URL skipped: " & decodedUrl)
                     End If
 
                     If extractedUrls.Count >= ISearch_Tries Then Exit For
@@ -141,39 +180,59 @@ Partial Public Class ThisAddIn
                 ' Visit each extracted URL and retrieve content
                 For Each url In extractedUrls
                     Try
-                        Dim content As String = Await RetrieveWebsiteContent(url, ISearch_MaxDepth, httpClient)
-                        'Debug.WriteLine("URL {url} provides:" & content)
+                        Dim content As String = ""
+
+                        If UseWebView2ForISearch Then
+                            ' Use polling for WebView2
+                            Dim webViewTask As Task(Of String) = RetrieveWebsiteContent_WebView2(url, 0)
+
+                            While Not webViewTask.IsCompleted
+                                System.Windows.Forms.Application.DoEvents()
+                                System.Threading.Thread.Sleep(50)
+                            End While
+
+                            If webViewTask.Status = TaskStatus.RanToCompletion Then
+                                content = webViewTask.Result
+                            End If
+                        Else
+                            ' Use polling for HttpClient crawl
+                            Dim crawlTask As Task(Of String) = RetrieveWebsiteContent(url, ISearch_MaxDepth, httpClient)
+
+                            While Not crawlTask.IsCompleted
+                                System.Windows.Forms.Application.DoEvents()
+                                System.Threading.Thread.Sleep(50)
+                            End While
+
+                            If crawlTask.Status = TaskStatus.RanToCompletion Then
+                                content = crawlTask.Result
+                            End If
+                        End If
+
                         If Not String.IsNullOrWhiteSpace(content) Then
                             If Len(content) > ISearch_MinChars Then
                                 results.Add(content)
                                 InfoBox.ShowInfoBox($"{url} resulted in: " & Left(content.Replace(vbCr, "").Replace(vbLf, "").Replace(vbCrLf, ""), 1000))
-                                'Debug.WriteLine("Content=" & content)
-                            Else
-                                'Debug.WriteLine("Content (not considered)=" & content)
                             End If
                         End If
                     Catch ex As Exception
-                        'Debug.WriteLine($"Error retrieving content from URL: {url} - {ex.Message}")
+                        Debug.WriteLine($"Error retrieving content from URL: {url} - {ex.Message}")
                     End Try
                 Next
 
             Catch ex As HttpRequestException
-                'Debug.WriteLine($"HTTP Request Error: {ex.Message}")
                 ShowCustomMessageBox("An error occurred when searching and analyzing the Internet (HTTP request error: " & ex.Message & ")")
             Catch ex As TaskCanceledException
-                'Debug.WriteLine("Request timed out or was canceled.")
                 ShowCustomMessageBox("An error occurred when searching and analyzing the Internet (request timed-out or was canceled: " & ex.Message & ")")
             Catch ex As Exception
-                'Debug.WriteLine($"An error occurred: {ex.Message}")
                 ShowCustomMessageBox("An error occurred when searching and analyzing the Internet (" & ex.Message & ")")
             Finally
-                httpClient.Dispose()
                 InfoBox.ShowInfoBox("")
             End Try
         End Using
-        Return results
-    End Function
 
+        tcs.SetResult(results)
+        Return tcs.Task
+    End Function
     ''' <summary>
     ''' Crawls a base URL up to the specified depth, captures paragraph text, strips HTML, and enforces timeout plus error limits.
     ''' </summary>
@@ -352,6 +411,250 @@ Partial Public Class ThisAddIn
             ' Invalid relative URL handling
             Return String.Empty
         End Try
+    End Function
+
+
+    '========================= WebView 2 Alternative Implementation ============================
+
+    ''' <summary>
+    ''' Retrieves website content using WebView2 (Edge-based, built into Windows).
+    ''' Handles JavaScript rendering without external browser downloads.
+    ''' </summary>
+    ''' <param name="baseUrl">The URL to fetch.</param>
+    ''' <param name="maxChars">Maximum characters to return. 0 or negative = no limit.</param>
+    Private Function RetrieveWebsiteContent_WebView2(baseUrl As String, Optional maxChars As Integer = 0) As Task(Of String)
+        Dim tcs As New TaskCompletionSource(Of String)()
+
+        ' Create a new STA thread for WebView2 (it requires its own message loop)
+        Dim thread As New System.Threading.Thread(
+            Sub()
+                Dim result As String = ""
+                Dim form As Form = Nothing
+                Dim webView As Microsoft.Web.WebView2.WinForms.WebView2 = Nothing
+
+                Try
+                    Debug.WriteLine($"[WebView2] Fetching: {baseUrl} (maxChars: {If(maxChars <= 0, "unlimited", maxChars.ToString())})")
+
+                    ' Create a temporary user data folder
+                    Dim userDataFolder As String = Path.Combine(Path.GetTempPath(), "RedInkWebView2")
+                    Directory.CreateDirectory(userDataFolder)
+
+                    ' Create the form - larger size to trigger more content loading
+                    form = New Form() With {
+                        .Width = 1920,
+                        .Height = 4000,
+                        .ShowInTaskbar = False,
+                        .FormBorderStyle = FormBorderStyle.None,
+                        .StartPosition = FormStartPosition.Manual,
+                        .Location = New System.Drawing.Point(-5000, -5000),
+                        .Opacity = 0
+                    }
+
+                    webView = New Microsoft.Web.WebView2.WinForms.WebView2() With {
+                        .Dock = DockStyle.Fill
+                    }
+
+                    form.Controls.Add(webView)
+
+                    Dim navigationCompleted As Boolean = False
+                    Dim navigationSuccess As Boolean = False
+                    Dim contentExtracted As Boolean = False
+
+                    ' Set up event handlers
+                    AddHandler webView.CoreWebView2InitializationCompleted,
+                        Sub(s, e)
+                            If e.IsSuccess Then
+                                Debug.WriteLine("[WebView2] CoreWebView2 initialized, navigating...")
+                                webView.CoreWebView2.Navigate(baseUrl)
+                            Else
+                                Debug.WriteLine($"[WebView2] Initialization failed: {e.InitializationException?.Message}")
+                                navigationCompleted = True
+                            End If
+                        End Sub
+
+                    AddHandler webView.NavigationCompleted,
+                        Sub(s, e)
+                            navigationSuccess = e.IsSuccess
+                            Debug.WriteLine($"[WebView2] Navigation completed. Success: {e.IsSuccess}, Status: {e.WebErrorStatus}")
+
+                            If e.IsSuccess Then
+                                ' Use a timer to wait for JS rendering - 5 seconds
+                                Dim timer As New System.Windows.Forms.Timer() With {.Interval = 5000}
+                                AddHandler timer.Tick,
+                                    Sub(ts, te)
+                                        timer.Stop()
+                                        timer.Dispose()
+
+                                        Try
+                                            ' Scroll to trigger lazy loading
+                                            Dim scrollScript As String = "
+(async function() {
+    var totalHeight = document.body.scrollHeight;
+    var viewportHeight = window.innerHeight || 1000;
+    var currentPosition = 0;
+    
+    while (currentPosition < totalHeight) {
+        window.scrollTo(0, currentPosition);
+        await new Promise(r => setTimeout(r, 200));
+        currentPosition += viewportHeight;
+        totalHeight = document.body.scrollHeight;
+    }
+    
+    window.scrollTo(0, 0);
+    await new Promise(r => setTimeout(r, 300));
+    return 'done';
+})();
+"
+                                            webView.CoreWebView2.ExecuteScriptAsync(scrollScript).ContinueWith(
+                                                Sub(scrollTask)
+                                                    ' Wait after scrolling
+                                                    System.Threading.Thread.Sleep(2000)
+
+                                                    form.BeginInvoke(
+                                                        Sub()
+                                                            Try
+                                                                ' Simple extraction - get full body text
+                                                                Dim extractScript As String = "
+(function() {
+    // Remove script/style/noscript to reduce noise
+    var toRemove = document.querySelectorAll('script, style, noscript, nav, footer, header');
+    toRemove.forEach(function(el) { try { el.remove(); } catch(e) {} });
+    
+    // Get body text
+    var text = document.body ? (document.body.innerText || '') : '';
+    
+    // Clean up whitespace
+    text = text.replace(/\n{3,}/g, '\n\n').replace(/[ \t]+/g, ' ').trim();
+    
+    return text;
+})();
+"
+                                                                webView.CoreWebView2.ExecuteScriptAsync(extractScript).ContinueWith(
+                                                                    Sub(t)
+                                                                        form.BeginInvoke(
+                                                                            Sub()
+                                                                                Try
+                                                                                    If t.IsCompleted AndAlso Not t.IsFaulted Then
+                                                                                        result = UnescapeJsonString(t.Result)
+                                                                                        Debug.WriteLine($"[WebView2] Extracted {result.Length} chars (full content)")
+                                                                                    End If
+                                                                                Catch ex As Exception
+                                                                                    Debug.WriteLine($"[WebView2] Extract error: {ex.Message}")
+                                                                                End Try
+                                                                                contentExtracted = True
+                                                                            End Sub)
+                                                                    End Sub)
+                                                            Catch ex As Exception
+                                                                Debug.WriteLine($"[WebView2] Script error: {ex.Message}")
+                                                                contentExtracted = True
+                                                            End Try
+                                                        End Sub)
+                                                End Sub)
+                                        Catch ex As Exception
+                                            Debug.WriteLine($"[WebView2] Timer error: {ex.Message}")
+                                            contentExtracted = True
+                                        End Try
+                                    End Sub
+                                timer.Start()
+                            Else
+                                navigationCompleted = True
+                            End If
+                        End Sub
+
+                    ' Show form and start async initialization
+                    form.Show()
+
+                    ' Initialize WebView2 asynchronously
+                    Dim env = CoreWebView2Environment.CreateAsync(Nothing, userDataFolder)
+                    env.ContinueWith(
+                        Sub(t)
+                            form.BeginInvoke(
+                                Sub()
+                                    If t.IsCompleted AndAlso Not t.IsFaulted Then
+                                        webView.EnsureCoreWebView2Async(t.Result)
+                                    Else
+                                        Debug.WriteLine($"[WebView2] Environment creation failed")
+                                        navigationCompleted = True
+                                    End If
+                                End Sub)
+                        End Sub)
+
+                    ' Run message loop with timeout - 90 seconds
+                    Dim startTime As DateTime = DateTime.Now
+                    Dim timeout As TimeSpan = TimeSpan.FromSeconds(90)
+
+                    While Not contentExtracted AndAlso Not navigationCompleted AndAlso (DateTime.Now - startTime) < timeout
+                        System.Windows.Forms.Application.DoEvents()
+                        System.Threading.Thread.Sleep(50)
+                    End While
+
+                    Debug.WriteLine($"[WebView2] Loop ended. Content: {result.Length} chars, elapsed: {(DateTime.Now - startTime).TotalSeconds:F1}s")
+
+                Catch ex As Exception
+                    Debug.WriteLine($"[WebView2] Error: {ex.Message}")
+                Finally
+                    Try : webView?.Dispose() : Catch : End Try
+                    Try : form?.Close() : form?.Dispose() : Catch : End Try
+                End Try
+
+                ' Apply character limit only if explicitly requested (maxChars > 0)
+                Dim finalResult As String = result.Trim()
+                If maxChars > 0 AndAlso finalResult.Length > maxChars Then
+                    ' Try to cut at a sentence boundary
+                    Dim cutPoint As Integer = maxChars
+                    Dim lastPeriod As Integer = finalResult.LastIndexOf("."c, maxChars - 1)
+                    Dim lastNewline As Integer = finalResult.LastIndexOf(vbLf, maxChars - 1)
+
+                    If lastPeriod > maxChars * 0.8 Then
+                        cutPoint = lastPeriod + 1
+                    ElseIf lastNewline > maxChars * 0.8 Then
+                        cutPoint = lastNewline
+                    End If
+
+                    finalResult = finalResult.Substring(0, cutPoint).Trim()
+                    Debug.WriteLine($"[WebView2] Trimmed to {finalResult.Length} chars (limit was {maxChars})")
+                End If
+
+                tcs.TrySetResult(finalResult)
+            End Sub)
+
+        thread.SetApartmentState(System.Threading.ApartmentState.STA)
+        thread.Start()
+
+        Return tcs.Task
+    End Function
+    ''' <summary>
+    ''' Unescapes a JSON string returned by ExecuteScriptAsync.
+    ''' </summary>
+    Private Function UnescapeJsonString(jsonString As String) As String
+        If String.IsNullOrEmpty(jsonString) Then Return ""
+
+        ' Remove surrounding quotes
+        If jsonString.StartsWith("""") AndAlso jsonString.EndsWith("""") Then
+            jsonString = jsonString.Substring(1, jsonString.Length - 2)
+        End If
+
+        ' Handle null
+        If jsonString = "null" Then Return ""
+
+        ' Unescape common sequences
+        Try
+            jsonString = jsonString.Replace("\n", vbLf)
+            jsonString = jsonString.Replace("\r", vbCr)
+            jsonString = jsonString.Replace("\t", vbTab)
+            jsonString = jsonString.Replace("\\", "\")
+            jsonString = jsonString.Replace("\""", """")
+
+            ' Handle unicode escapes like \u0027
+            Dim unicodePattern As String = "\\u([0-9A-Fa-f]{4})"
+            jsonString = Regex.Replace(jsonString, unicodePattern,
+                Function(m) ChrW(Convert.ToInt32(m.Groups(1).Value, 16)).ToString())
+
+        Catch ex As Exception
+            Debug.WriteLine($"[WebView2] Unescape error: {ex.Message}")
+        End Try
+
+        Return jsonString
     End Function
 
 End Class

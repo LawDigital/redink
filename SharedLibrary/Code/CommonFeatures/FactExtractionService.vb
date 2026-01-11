@@ -1,5 +1,28 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: FactExtractionService.vb
+' Purpose: Aggregates structured "fact extraction" results across multiple input files by calling an LLM
+'          and parsing a JSON response into a common schema + row set.
+'
+' Architecture:
+'  - Schema Model: `ExtractionSchemaColumn` defines column name and a simple type hint (e.g., text/date/number).
+'  - Row Model: `ExtractionRow` stores values aligned to the aggregate schema order.
+'  - Parsing: `ParseSingleFileJson` parses LLM JSON payloads with `schema`, `rows`, `file_name`, `notes`.
+'    `rows` may be array-of-arrays or array-of-objects (mapped by column names).
+'  - Date Handling: `ParseFlexibleDate` and `NormalizeDate` normalize user/LLM-provided date strings.
+'    Date columns specified by 1-based indices are normalized on merge and can be range-clamped.
+'  - Aggregation: `MergeIntoAggregate` merges per-file schema + rows into a master result and adds a `File` column.
+'  - Sorting: `SortAggregate` sorts rows by a 1-based column index using type hints for date-like columns.
+'  - Orchestration: `RunFactExtractionAsync` iterates files, loads content, invokes the LLM, merges results,
+'    optionally merges grouped rows via an LLM, applies clamps, sorts, and reports progress/cancellation.
+'
+' External Dependencies:
+'  - `Newtonsoft.Json.Linq` for JSON parsing.
+'  - `WebAgentInterpreter.SanitizeLlmResult` for response sanitization.
+'  - `ISharedContext` for prompt templates (`SP_Extract`, `SP_ExtractSchema`, `SP_MergeDateRows`).
+' =============================================================================
 
 Option Explicit On
 Option Strict On
@@ -11,39 +34,126 @@ Imports SharedLibrary.SharedLibrary.SharedContext
 
 Namespace SharedLibrary
 
+    ''' <summary>
+    ''' Fact extraction orchestration helpers: schema parsing, date normalization, aggregation, sorting, and optional row merging.
+    ''' </summary>
     Public Module FactExtractionService
 
+        ''' <summary>
+        ''' Defines a single schema column produced/consumed by extraction.
+        ''' </summary>
         <DebuggerDisplay("{Name} ({Type})")>
         Public Class ExtractionSchemaColumn
+            ''' <summary>
+            ''' Column name as used in schema and row mappings.
+            ''' </summary>
             Public Property Name As String
+
+            ''' <summary>
+            ''' Type hint for comparison/normalization: text | date | datetime | time | number | other.
+            ''' </summary>
             Public Property Type As String ' text | date | datetime | time | number | other
         End Class
 
+        ''' <summary>
+        ''' Represents one extracted row aligned to the aggregate schema order.
+        ''' </summary>
         Public Class ExtractionRow
+            ''' <summary>
+            ''' Row cell values in schema order.
+            ''' </summary>
             Public Property Values As System.Collections.Generic.List(Of Object)
         End Class
 
+        ''' <summary>
+        ''' Aggregate extraction result across multiple input files.
+        ''' </summary>
         Public Class FactExtractionAggregateResult
+            ''' <summary>
+            ''' Aggregate schema across all processed files.
+            ''' </summary>
             Public Property Schema As System.Collections.Generic.List(Of ExtractionSchemaColumn)
+
+            ''' <summary>
+            ''' Aggregate rows across all processed files (aligned to <see cref="Schema"/>).
+            ''' </summary>
             Public Property Rows As System.Collections.Generic.List(Of ExtractionRow)
+
+            ''' <summary>
+            ''' Collected non-fatal errors encountered during processing.
+            ''' </summary>
             Public Property Errors As System.Collections.Generic.List(Of String)
+
+            ''' <summary>
+            ''' Count of files successfully processed and merged.
+            ''' </summary>
             Public Property ProcessedFiles As Integer
+
+            ''' <summary>
+            ''' Count of files that failed (derived from <see cref="FailedFileNames"/>).
+            ''' </summary>
             Public Property FailedFiles As Integer
+
+            ''' <summary>
+            ''' Basenames of files that failed (missing, empty text, parse failures, LLM failures).
+            ''' </summary>
             Public Property FailedFileNames As System.Collections.Generic.List(Of String)
+
+            ''' <summary>
+            ''' Source directory associated with the run.
+            ''' </summary>
             Public Property SourceDirectory As String
         End Class
 
+        ''' <summary>
+        ''' Setting key: manual instruction for extraction run.
+        ''' </summary>
         Public Const Setting_ManualInstruction As String = "Extraction_ManualInstruction"
+
+        ''' <summary>
+        ''' Setting key: user-specified date columns (1-based index list).
+        ''' </summary>
         Public Const Setting_DateColumns As String = "Extraction_DateColumns"
+
+        ''' <summary>
+        ''' Setting key: sort column (1-based index).
+        ''' </summary>
         Public Const Setting_SortColumn As String = "Extraction_SortColumn"
+
+        ''' <summary>
+        ''' Setting key: sort direction (ASC/DESC).
+        ''' </summary>
         Public Const Setting_SortDirection As String = "Extraction_SortDirection"
+
+        ''' <summary>
+        ''' Setting key: whether OCR should be used when loading file content.
+        ''' </summary>
         Public Const Setting_DoOcr As String = "Extraction_DoOcr"
+
+        ''' <summary>
+        ''' Setting key: inclusive lower date clamp bound for filtering rows.
+        ''' </summary>
         Public Const Setting_DateClampFrom As String = "Extraction_DateClampFrom"
+
+        ''' <summary>
+        ''' Setting key: inclusive upper date clamp bound for filtering rows.
+        ''' </summary>
         Public Const Setting_DateClampTo As String = "Extraction_DateClampTo"
+
+        ''' <summary>
+        ''' Setting key: output language for extraction.
+        ''' </summary>
         Public Const Setting_OutputLanguage As String = "Extraction_OutputLanguage"
+
+        ''' <summary>
+        ''' Setting key: output format for dates (currently not applied in this module).
+        ''' </summary>
         Public Const Setting_DateOutputFormat As String = "Extraction_DateOutputFormat"
 
 
+        ''' <summary>
+        ''' Parses a date string using supported formats, returning <see cref="Date"/> when recognized; otherwise <c>Nothing</c>.
+        ''' </summary>
         Public Function ParseFlexibleDate(raw As String) As Date?
             If String.IsNullOrWhiteSpace(raw) Then Return Nothing
             Dim t = raw.Trim()
@@ -105,6 +215,10 @@ Namespace SharedLibrary
             Return Nothing
         End Function
 
+        ''' <summary>
+        ''' Normalizes recognized dates to ISO-like forms depending on the apparent input precision (year, year-month, or full date).
+        ''' Unrecognized values are returned unchanged.
+        ''' </summary>
         Public Function NormalizeDate(raw As String) As String
             Dim p = ParseFlexibleDate(raw)
             If Not p.HasValue Then Return raw
@@ -119,6 +233,9 @@ Namespace SharedLibrary
             Return p.Value.ToString("yyyy-MM-dd", Globalization.CultureInfo.InvariantCulture)
         End Function
 
+        ''' <summary>
+        ''' Converts normalized date strings (yyyy / yyyy-MM / yyyy-MM-dd or other supported formats) into comparable <see cref="Date"/> values.
+        ''' </summary>
         Private Function ToComparableDate(normalized As String) As Date?
             If String.IsNullOrWhiteSpace(normalized) Then Return Nothing
             Dim s = normalized.Trim()
@@ -129,6 +246,10 @@ Namespace SharedLibrary
             Return ParseFlexibleDate(s)
         End Function
 
+        ''' <summary>
+        ''' Parses a single-file extraction JSON payload into schema, rows, file name and notes.
+        ''' Expected top-level keys: <c>schema</c>, <c>rows</c>, <c>file_name</c>, <c>notes</c>.
+        ''' </summary>
         Public Function ParseSingleFileJson(json As String) As (schema As System.Collections.Generic.List(Of ExtractionSchemaColumn), rows As System.Collections.Generic.List(Of ExtractionRow), fileName As String, notes As String)
             Dim schema As New System.Collections.Generic.List(Of ExtractionSchemaColumn)
             Dim rows As New System.Collections.Generic.List(Of ExtractionRow)
@@ -169,6 +290,9 @@ Namespace SharedLibrary
             Return (schema, rows, fileName, notes)
         End Function
 
+        ''' <summary>
+        ''' Converts a JSON token into a VB value suitable for storing in <see cref="ExtractionRow.Values"/>.
+        ''' </summary>
         Private Function ConvertToken(tok As JToken) As Object
             If tok Is Nothing Then Return ""
             Select Case tok.Type
@@ -180,6 +304,10 @@ Namespace SharedLibrary
             End Select
         End Function
 
+        ''' <summary>
+        ''' Parses a user schema specification string (<c>name[:type][*]</c> tokens separated by <c>;</c>) into a schema list.
+        ''' The optional trailing <c>*</c> marks the column as a sort column for <see cref="DetectSortColumnFromSpec"/>.
+        ''' </summary>
         Public Function ParseUserSchemaSpec(spec As String) As System.Collections.Generic.List(Of ExtractionSchemaColumn)
             Dim result As New System.Collections.Generic.List(Of ExtractionSchemaColumn)
             If String.IsNullOrWhiteSpace(spec) Then Return result
@@ -203,6 +331,10 @@ Namespace SharedLibrary
             Return result
         End Function
 
+        ''' <summary>
+        ''' Detects the 1-based sort column index from a schema specification string by finding a token marked with trailing <c>*</c>.
+        ''' Returns 0 when no sort column is marked.
+        ''' </summary>
         Public Function DetectSortColumnFromSpec(spec As String) As Integer
             If String.IsNullOrWhiteSpace(spec) Then Return 0
             Dim idx = 0
@@ -220,13 +352,15 @@ Namespace SharedLibrary
             Return 0
         End Function
 
-        Public Async Function GenerateSchemaFromAiAsync(instruction As String,
-                                                        interpolateSystemPromptFunc As Func(Of String, String),
+        ''' <summary>
+        ''' Calls the LLM to generate a schema-only JSON payload and returns the parsed schema list.
+        ''' </summary>
+        Public Async Function GenerateSchemaFromAiAsync(interpolateSystemPromptFunc As Func(Of String, String),
                                                         llmFunc As Func(Of String, String, String, String, Integer, Boolean, Boolean, Threading.Tasks.Task(Of String)),
                                                         useSecondApi As Boolean,
                                                         context As ISharedContext) As Threading.Tasks.Task(Of System.Collections.Generic.List(Of ExtractionSchemaColumn))
             Dim userText = ""
-            Dim systemPrompt = interpolateSystemPromptFunc(context.SP_ExtractSchema)
+            Dim systemPrompt = interpolateSystemPromptFunc(context.SP_ExtractSchema)   ' Will cause OtherPrompt etc. to be included
             Dim jsonResp = Await llmFunc(systemPrompt, userText, "", "", 0, useSecondApi, False)
             jsonResp = WebAgentInterpreter.SanitizeLlmResult(jsonResp)
             Dim schemaOnly As New System.Collections.Generic.List(Of ExtractionSchemaColumn)
@@ -250,6 +384,9 @@ Namespace SharedLibrary
             Return schemaOnly
         End Function
 
+        ''' <summary>
+        ''' Appends a fixed ordered schema constraint to an existing system prompt.
+        ''' </summary>
         Public Function BuildConstrainedSystemPrompt(originalInterpolatedPrompt As String,
                                                      fixedSchema As System.Collections.Generic.List(Of ExtractionSchemaColumn)) As String
             If fixedSchema Is Nothing OrElse fixedSchema.Count = 0 Then Return originalInterpolatedPrompt
@@ -262,6 +399,9 @@ Namespace SharedLibrary
             Return sb.ToString()
         End Function
 
+        ''' <summary>
+        ''' Merges per-file schema and rows into the aggregate result, ensuring a <c>File</c> column and normalizing configured date columns.
+        ''' </summary>
         Public Sub MergeIntoAggregate(master As FactExtractionAggregateResult,
                                       schema As System.Collections.Generic.List(Of ExtractionSchemaColumn),
                                       rows As System.Collections.Generic.List(Of ExtractionRow),
@@ -311,6 +451,9 @@ Namespace SharedLibrary
             Next
         End Sub
 
+        ''' <summary>
+        ''' Filters aggregate rows by keeping only rows whose configured date columns are within the optional clamp range.
+        ''' </summary>
         Private Sub ApplyDateClamps(result As FactExtractionAggregateResult,
                                     dateColumnsUser As System.Collections.Generic.List(Of Integer),
                                     clampFromRaw As String,
@@ -338,6 +481,9 @@ Namespace SharedLibrary
             result.Rows = keep
         End Sub
 
+        ''' <summary>
+        ''' Sorts aggregate rows by the specified 1-based column index and direction.
+        ''' </summary>
         Public Sub SortAggregate(result As FactExtractionAggregateResult,
                                  sortColumn As Integer,
                                  sortDir As String)
@@ -355,6 +501,9 @@ Namespace SharedLibrary
                              End Function)
         End Sub
 
+        ''' <summary>
+        ''' Compares two cell values using an optional type hint.
+        ''' </summary>
         Private Function CompareValues(a As Object, b As Object, typeHint As String) As Integer
             If a Is Nothing AndAlso b Is Nothing Then Return 0
             If a Is Nothing Then Return -1
@@ -378,6 +527,9 @@ Namespace SharedLibrary
             Return String.Compare(sa, sb, StringComparison.OrdinalIgnoreCase)
         End Function
 
+        ''' <summary>
+        ''' Executes fact extraction over a set of files and returns an aggregate result with schema, rows, and errors.
+        ''' </summary>
         Public Async Function RunFactExtractionAsync(filePaths As System.Collections.Generic.List(Of String),
                                              instruction As String,
                                              dateColumnsUser As System.Collections.Generic.List(Of Integer),
@@ -507,6 +659,9 @@ Namespace SharedLibrary
         End Function
 
 
+        ''' <summary>
+        ''' Groups aggregate rows by a 1-based key column and merges each group into a single row (via LLM or fallback merge).
+        ''' </summary>
         Private Async Function MergeRowsByKeyAsync(agg As FactExtractionAggregateResult,
                                                    keyColumn As Integer,
                                                    mergeInstruction As String,
@@ -630,13 +785,11 @@ Namespace SharedLibrary
             End If
         End Function
 
-        Private Function GetNormalizedDateValue(row As ExtractionRow, dateColIdxZeroBased As Integer) As String
-            If row Is Nothing OrElse dateColIdxZeroBased < 0 OrElse dateColIdxZeroBased >= row.Values.Count Then Return ""
-            Dim raw = CStr(row.Values(dateColIdxZeroBased))
-            If String.IsNullOrWhiteSpace(raw) Then Return ""
-            Return NormalizeDate(raw)
-        End Function
 
+
+        ''' <summary>
+        ''' Fallback group merge that selects/concatenates values across rows using schema type hints.
+        ''' </summary>
         Private Function FallbackMergeRowsGeneric(rows As System.Collections.Generic.List(Of ExtractionRow),
                                                   schema As System.Collections.Generic.List(Of ExtractionSchemaColumn),
                                                   keyColIdx As Integer,

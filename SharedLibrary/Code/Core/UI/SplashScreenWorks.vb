@@ -1,11 +1,29 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
+' =============================================================================
+' File: SplashScreenWorks.vb
+' Purpose: Provides a borderless WinForms splash form displaying a message (optionally
+'          with a seconds countdown) and a logo.
+'
+' Architecture:
+'  - UI Composition: A `PictureBox` (logo) and `Label` (message) arranged side-by-side.
+'  - Countdown: `StartCountdown()` runs a background `Task` that delays in 1-second ticks and
+'    marshals UI updates to the UI thread via `Invoke` when required.
+'  - Message Updates: `UpdateMessage()` changes the label text and recalculates its size.
+'  - Cancellation: ESC cancels the countdown and raises `CancelRequested` before closing the form.
+'  - Window Interaction: Uses Win32 `ReleaseCapture`/`SendMessage` to allow dragging a borderless form.
+' =============================================================================
+
+
 Option Strict On
 Option Explicit On
 
 Namespace SharedLibrary
 
+    ''' <summary>
+    ''' Borderless splash screen form showing a logo and message with an optional countdown.
+    ''' </summary>
     Public Class SplashScreenWorks
         Inherits System.Windows.Forms.Form
 
@@ -17,15 +35,21 @@ Namespace SharedLibrary
         Private countdownCts As System.Threading.CancellationTokenSource
 
         ''' <summary>
-        ''' Fires when the user presses Esc.
+        ''' Raised when the user presses ESC while the splash screen has focus.
         ''' </summary>
         Public Event CancelRequested As System.EventHandler
 
         ' ─── WinAPI for borderless dragging ───────────────────────────
+        ''' <summary>
+        ''' Releases the current mouse capture to allow initiating a window move drag operation.
+        ''' </summary>
         <System.Runtime.InteropServices.DllImport("user32.dll", SetLastError:=True)>
         Private Shared Function ReleaseCapture() As Boolean
         End Function
 
+        ''' <summary>
+        ''' Sends a window message used here to emulate dragging a caption on a borderless form.
+        ''' </summary>
         <System.Runtime.InteropServices.DllImport("user32.dll", SetLastError:=True)>
         Private Shared Function SendMessage(
     ByVal hWnd As IntPtr,
@@ -35,14 +59,23 @@ Namespace SharedLibrary
 ) As IntPtr
         End Function
 
+        ''' <summary>
+        ''' Window message for non-client left button down (caption drag is initiated using HTCAPTION).
+        ''' </summary>
         Private Const WM_NCLBUTTONDOWN As Integer = &HA1
+
+        ''' <summary>
+        ''' Hit-test value indicating the title bar / caption area.
+        ''' </summary>
         Private Const HTCAPTION As Integer = 2
 
         ''' <summary>
-        ''' customText: text prefix  
-        ''' formWidth/Height: if >0, override autosize  
-        ''' countdownSeconds: initial countdown length (0=no countdown)  
+        ''' Initializes a new splash screen instance.
         ''' </summary>
+        ''' <param name="customText">Prefix text shown in the label.</param>
+        ''' <param name="formWidth">Client width override (0 keeps auto-size behavior).</param>
+        ''' <param name="formHeight">Client height override (0 keeps auto-size behavior).</param>
+        ''' <param name="countdownSeconds">Initial countdown length in seconds (0 disables countdown).</param>
         Public Sub New(
     Optional ByVal customText As String = "Please wait …",
     Optional ByVal formWidth As Integer = 0,
@@ -59,7 +92,7 @@ Namespace SharedLibrary
 
             ' ─── Logo ─────────────────────────────────────────────────
             picLogo = New System.Windows.Forms.PictureBox() With {
-        .Image = New System.Drawing.Bitmap(My.Resources.Red_Ink_Logo),
+        .Image = New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)),
         .SizeMode = System.Windows.Forms.PictureBoxSizeMode.Zoom
     }
             Me.Controls.Add(picLogo)
@@ -95,7 +128,7 @@ Namespace SharedLibrary
             Dim labelY As Integer = padding + (logoSize - textSize.Height) \ 2
             lblMessage.SetBounds(labelX, labelY, textSize.Width, textSize.Height)
 
-            ' Auto‐size form to content (unless overridden)
+            ' Auto-size form to content (unless overridden)
             Dim clientW As Integer = lblMessage.Right + padding
             Dim clientH As Integer = logoSize + padding * 2
             If formWidth > 0 Then clientW = formWidth
@@ -112,8 +145,9 @@ Namespace SharedLibrary
         End Sub
 
         ''' <summary>
-        ''' Updates the label instantly without affecting the countdown.
+        ''' Updates the label text and recalculates its size.
         ''' </summary>
+        ''' <param name="newMessage">The new message to render in the label.</param>
         Public Sub UpdateMessage(ByVal newMessage As String)
             lblMessage.Text = newMessage
             Dim newSize As System.Drawing.Size = System.Windows.Forms.TextRenderer.MeasureText(newMessage, lblMessage.Font)
@@ -122,8 +156,10 @@ Namespace SharedLibrary
         End Sub
 
         ''' <summary>
-        ''' Stops any running countdown and starts a new one.
+        ''' Restarts the countdown from the specified value, optionally updating the base message prefix.
         ''' </summary>
+        ''' <param name="seconds">New countdown duration in seconds.</param>
+        ''' <param name="newBaseText">Optional replacement for the base message prefix.</param>
         Public Sub RestartCountdown(
     ByVal seconds As Integer,
     Optional ByVal newBaseText As String = Nothing)
@@ -138,7 +174,8 @@ Namespace SharedLibrary
         End Sub
 
         ''' <summary>
-        ''' Fires every second on a background Task and updates the UI via Invoke.
+        ''' Starts (or restarts) the countdown task.
+        ''' Cancels any previously started countdown via `countdownCts`.
         ''' </summary>
         Private Sub StartCountdown()
             ' Cancel previous if running
@@ -171,7 +208,7 @@ Namespace SharedLibrary
         End Sub
 
         ''' <summary>
-        ''' ESC closes + raises CancelRequested.
+        ''' Handles ESC key press: cancels countdown, raises `CancelRequested`, and closes the form.
         ''' </summary>
         Private Sub OnKeyDown(ByVal sender As Object, ByVal e As System.Windows.Forms.KeyEventArgs)
             If e.KeyCode = System.Windows.Forms.Keys.Escape Then
@@ -182,8 +219,9 @@ Namespace SharedLibrary
         End Sub
 
         ''' <summary>
-        ''' Allow dragging borderless form.
+        ''' Enables dragging the borderless form by sending a caption drag message on left mouse down.
         ''' </summary>
+        ''' <param name="e">Mouse event data.</param>
         Protected Overrides Sub OnMouseDown(ByVal e As System.Windows.Forms.MouseEventArgs)
             MyBase.OnMouseDown(e)
             If e.Button = System.Windows.Forms.MouseButtons.Left Then

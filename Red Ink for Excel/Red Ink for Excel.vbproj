@@ -34,7 +34,7 @@
     <TargetFrameworkProfile />
     <BootstrapperEnabled>true</BootstrapperEnabled>
     <TargetCulture>en</TargetCulture>
-    <AutoIncrementApplicationRevision>true</AutoIncrementApplicationRevision>
+    <AutoIncrementApplicationRevision>false</AutoIncrementApplicationRevision>
     <UpdateEnabled>false</UpdateEnabled>
     <UpdateInterval>0</UpdateInterval>
     <UpdateIntervalUnits>days</UpdateIntervalUnits>
@@ -44,21 +44,21 @@
     <LoadBehavior>3</LoadBehavior>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Develop'">
-    <ApplicationVersion>0.2.0.704</ApplicationVersion>
+    <ApplicationVersion>1.1.0.700</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\develop\excel\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/develop/excel/</InstallUrl>
     <ProductName>Red Ink for Excel %28Develop%29</ProductName>
     <FriendlyName>Red Ink for Excel %28Develop%29</FriendlyName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Preview'">
-    <ApplicationVersion>1.0.0.201</ApplicationVersion>
+    <ApplicationVersion>1.1.10.200</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\preview\excel\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/preview/excel/</InstallUrl>
     <ProductName>Red Ink for Excel %28Preview%29</ProductName>
     <FriendlyName>Red Ink for Excel %28Preview%29</FriendlyName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'GA'">
-    <ApplicationVersion>1.0.0.1</ApplicationVersion>
+    <ApplicationVersion>1.1.10.0</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\ga\excel\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/ga/excel/</InstallUrl>
     <ProductName>Red Ink for Excel</ProductName>

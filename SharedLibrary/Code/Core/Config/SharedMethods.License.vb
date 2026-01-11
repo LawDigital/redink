@@ -1,6 +1,34 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
+' =============================================================================
+' File: SharedMethods.License.vb
+' Purpose: Implements runtime license validation and related user messaging.
+'
+' Architecture:
+'  - Configuration Sources:
+'     - `configDict` (central configuration) can provide `LicensedTill`, `LicenseStatus`,
+'       `LicenseUsers`, `LicenseContact`, and `LicenseNoWarning`.
+'     - `My.Settings` persists per-user values for `LicensedTill`, `LicenseStatus`,
+'       `LicenseUsers` and warning counters/dates.
+'  - License Modes:
+'     - GA (General Audience): Uses `LicensedTill` (config or `My.Settings`) and prompts
+'       for license entry when missing or expired (subject to grace period).
+'     - Beta: Uses `BetaEndDate` only; license storage via `My.Settings` is not offered.
+'  - Warning Throttling:
+'     - Expiry warnings are shown at specific day intervals and throttled using
+'       `My.Settings.LicenseWarningStartCount`.
+'     - Grace period warnings are throttled using `My.Settings.GracePeriodWarningStartcount`.
+'     - Beta warnings are throttled using `My.Settings.LastBetaWarningDate` and
+'       `My.Settings.BetaWarningStartCount`.
+'  - External Dependencies:
+'     - UI helpers: `ShowCustomMessageBox`, `ShowCustomYesNoBox`
+'     - License types and metadata: `GetLicenseTypes`, `LicenseTypeInfo`
+'     - Configuration helpers/constants: `ParseBoolean`, `AppsUrl`, `NewHomeURL`,
+'       `AN`, `AN4`, `BetaEndDate`, `BetaUpgradeInstructions`, thresholds/interval constants.
+' =============================================================================
+
+
 Option Strict On
 Option Explicit On
 
@@ -14,20 +42,26 @@ Namespace SharedLibrary
 
 
         ''' <summary>
-        ''' Main license check function. Returns True if license is valid, False otherwise.
+        ''' Main license check entry point.
+        ''' Loads settings, determines GA vs Beta behavior, and returns <c>True</c> if usage is allowed.
         ''' </summary>
+        ''' <param name="context">Execution context (used for version display and license type lookup).</param>
+        ''' <param name="configDict">Configuration dictionary (typically centrally managed).</param>
+        ''' <returns>
+        ''' <c>True</c> if the license check allows continuation; otherwise <c>False</c>.
+        ''' </returns>
         Public Shared Function LicenseOK(ByVal context As ISharedContext,
                                           ByVal configDict As Dictionary(Of String, String)) As Boolean
             Try
-                ' Load license settings from config file and My.Settings
+                ' Load license settings from config file and My.Settings.
                 LoadLicenseSettings(configDict, context)
 
-                ' Check if license checking is disabled
+                ' Skip all checks if the config explicitly disabled them.
                 If LicenseCheckDisabled Then
                     Return True
                 End If
 
-                ' Determine if this is GA version or Beta
+                ' Determine if this is GA version or Beta based on AppsUrl prefix.
                 Dim isGAVersion As Boolean = AppsUrl.StartsWith(NewHomeURL, StringComparison.OrdinalIgnoreCase)
 
                 If isGAVersion Then
@@ -37,7 +71,8 @@ Namespace SharedLibrary
                 End If
 
             Catch ex As Exception
-                ' Fault tolerance - if license check fails, log and allow continuation
+                ' Fault tolerance: on unexpected errors, log a message and allow continuation.
+                ' (This is a deliberate "fail-open" behavior.)
                 Try
                     ShowCustomMessageBox($"License check encountered an error: {ex.Message}. Continuing with limited functionality.", AN)
                 Catch
@@ -47,27 +82,33 @@ Namespace SharedLibrary
         End Function
 
         ''' <summary>
-        ''' Loads license settings from config file and My.Settings
+        ''' Loads license-related settings from <paramref name="configDict"/> and/or <c>My.Settings</c>.
+        ''' Also sets flags such as <c>LicenseFromConfig</c> and <c>LicenseCheckDisabled</c>.
         ''' </summary>
+        ''' <param name="configDict">Configuration dictionary containing license keys.</param>
+        ''' <param name="context">
+        ''' Optional execution context. When provided, enables checking whether the stored license type
+        ''' implies a later fixed end date and updates <c>My.Settings.LicensedTill</c> accordingly.
+        ''' </param>
         Private Shared Sub LoadLicenseSettings(configDict As Dictionary(Of String, String), Optional context As ISharedContext = Nothing)
             Try
-                ' Reset the config flag
+                ' Reset the config flag.
                 LicenseFromConfig = False
 
-                ' Load LicenseContact from config
+                ' Load LicenseContact from config.
                 LicenseContact = If(configDict.ContainsKey("LicenseContact"), configDict("LicenseContact"), "")
 
-                ' Load LicenseNoWarning from config
+                ' Load LicenseNoWarning from config.
                 LicenseNoWarning = ParseBoolean(configDict, "LicenseNoWarning", False)
 
-                ' Determine if this is a Beta version (AppsUrl not pointing to redink.ai)
+                ' Determine if this is a Beta version (AppsUrl not pointing to NewHomeURL).
                 Dim isBetaVersion As Boolean = Not AppsUrl.StartsWith(NewHomeURL, StringComparison.OrdinalIgnoreCase)
 
-                ' Check if LicensedTill is "False" or more than 100 years in the future (disable checking)
+                ' Check if LicensedTill is "False"/"No" or more than LicenseCheckDisabledYears in the future.
                 If configDict.ContainsKey("LicensedTill") Then
                     Dim configValue = configDict("LicensedTill").Trim()
 
-                    ' Check for explicit disable values
+                    ' Check for explicit disable values.
                     If configValue.Equals("False", StringComparison.OrdinalIgnoreCase) OrElse
                configValue.Equals("No", StringComparison.OrdinalIgnoreCase) Then
                         LicenseCheckDisabled = True
@@ -76,43 +117,42 @@ Namespace SharedLibrary
                         Return
                     End If
 
-                    ' Try to parse the date from config
+                    ' Try to parse the date from config.
                     Dim configDate As Date
                     If Date.TryParse(configValue, configDate) Then
-                        ' Check if more than 100 years in future (disable checking)
+                        ' Disable checking if the config value is beyond LicenseCheckDisabledYears years.
                         If configDate > Date.Now.AddYears(LicenseCheckDisabledYears) Then
                             LicenseCheckDisabled = True
                             Return
                         End If
-                        ' Config file value takes precedence over everything
+
+                        ' Config file value takes precedence over everything.
                         LicensedTill = configDate
-                        LicenseFromConfig = True ' Mark that license came from config
+                        LicenseFromConfig = True ' Mark that license came from config.
                     Else
-                        ' Could not parse date - fall through to defaults
+                        ' Could not parse date - fall through to defaults.
                         LicensedTill = If(isBetaVersion, BetaEndDate, Date.MinValue)
                     End If
                 Else
-                    ' No LicensedTill in config file
+                    ' No LicensedTill in config file.
                     If isBetaVersion Then
-                        ' Beta version - always use BetaEndDate
+                        ' Beta version: always use BetaEndDate.
                         LicensedTill = BetaEndDate
                         LicenseUsers = 1
                         LicenseStatus = "Beta Test License"
                     Else
-                        ' GA version: use My.Settings if available, otherwise Date.MinValue
-                        ' (which will trigger the license entry form)
+                        ' GA version: use My.Settings if available, otherwise Date.MinValue (triggers entry form).
                         Try
                             If My.Settings.LicensedTill > Date.MinValue AndAlso
                                 My.Settings.LicensedTill < Date.MaxValue Then
                                 LicensedTill = My.Settings.LicensedTill
 
-                                ' Check if the license type has a FixedEndDate that is beyond current LicensedTill
-                                ' and silently update to the new date (only if context is available)
+                                ' If the stored license type implies a later fixed end date, extend silently.
                                 If context IsNot Nothing Then
                                     TryExtendLicenseToFixedEndDate(context)
                                 End If
                             Else
-                                ' No valid license date - set to MinValue to trigger entry form
+                                ' No valid license date - set to MinValue to trigger entry form.
                                 LicensedTill = Date.MinValue
                             End If
                         Catch
@@ -121,15 +161,16 @@ Namespace SharedLibrary
                     End If
                 End If
 
-                ' Load LicenseStatus - config takes precedence
+                ' Load LicenseStatus - config takes precedence.
                 If configDict.ContainsKey("LicenseStatus") Then
                     LicenseStatus = configDict("LicenseStatus")
-                    ' If config has LicenseStatus, also get LicenseUsers from config
+
+                    ' If config has LicenseStatus, also get LicenseUsers from config.
                     If configDict.ContainsKey("LicenseUsers") Then
                         Integer.TryParse(configDict("LicenseUsers"), LicenseUsers)
                     End If
                 ElseIf Not isBetaVersion Then
-                    ' Use My.Settings
+                    ' GA version without config status: use My.Settings.
                     Try
                         LicenseStatus = If(String.IsNullOrEmpty(My.Settings.LicenseStatus), "", My.Settings.LicenseStatus)
                         LicenseUsers = If(My.Settings.LicenseUsers > 0, My.Settings.LicenseUsers, 1)
@@ -140,7 +181,7 @@ Namespace SharedLibrary
                 End If
 
             Catch ex As Exception
-                ' Fault tolerance - determine reasonable defaults based on version
+                ' Fault tolerance: determine reasonable defaults based on version.
                 LicenseCheckDisabled = False
                 LicenseStatus = ""
                 LicenseFromConfig = False
@@ -150,13 +191,13 @@ Namespace SharedLibrary
         End Sub
 
         ''' <summary>
-        ''' Checks if the current license type (from My.Settings.LicenseStatus) has a FixedEndDate
-        ''' that is beyond the current LicensedTill and silently updates if so.
-        ''' Only extends if the license type does not allow user-defined end dates.
+        ''' If the current stored license type implies a later fixed end date than the currently stored
+        ''' <c>LicensedTill</c>, extends <c>LicensedTill</c> and persists the updated date to <c>My.Settings</c>.
         ''' </summary>
+        ''' <param name="context">Execution context used to resolve license types based on version date.</param>
         Private Shared Sub TryExtendLicenseToFixedEndDate(context As ISharedContext)
             Try
-                ' Only proceed if we have a valid LicenseStatus from My.Settings
+                ' Only proceed if we have a LicenseStatus from My.Settings.
                 Dim storedStatus As String = ""
                 Try
                     storedStatus = My.Settings.LicenseStatus
@@ -166,13 +207,13 @@ Namespace SharedLibrary
 
                 If String.IsNullOrEmpty(storedStatus) Then Return
 
-                ' Get the version date from context.RDV
+                ' Get the version date from context.RDV.
                 Dim versionDate As Date = ParseVersionDateFromRDV(context.RDV)
 
-                ' Get the license types using the version date
+                ' Get the license types using the version date.
                 Dim licenseTypes = GetLicenseTypes(versionDate)
 
-                ' Find the matching license type by name
+                ' Find the matching license type by name.
                 Dim matchingType As LicenseTypeInfo = Nothing
                 For Each lt In licenseTypes
                     If lt.Name.Equals(storedStatus, StringComparison.OrdinalIgnoreCase) Then
@@ -183,46 +224,49 @@ Namespace SharedLibrary
 
                 If matchingType Is Nothing Then Return
 
-                ' Only extend if the license type does NOT allow user-defined end dates
+                ' Only extend if the license type does NOT allow user-defined end dates.
                 If matchingType.UserDefinedEndDate Then Return
 
-                ' Check if this license type has a FixedEndDate
+                ' Require a fixed end date to extend.
                 If Not matchingType.FixedEndDate.HasValue Then Return
 
                 Dim fixedDate As Date = matchingType.FixedEndDate.Value
 
-                ' Only extend if the fixed date is beyond the current LicensedTill
+                ' Extend only if the fixed date is beyond the current LicensedTill.
                 If fixedDate > LicensedTill Then
-                    ' Silently update the license end date
                     LicensedTill = fixedDate
 
-                    ' Persist the updated date to My.Settings
+                    ' Persist the updated date to My.Settings.
                     Try
                         My.Settings.LicensedTill = LicensedTill
                         My.Settings.Save()
                     Catch
-                        ' Ignore save errors - we still use the updated value in memory
+                        ' Ignore save errors; updated value remains in memory.
                     End Try
                 End If
 
             Catch
-                ' Fault tolerance - ignore any errors in the extension check
+                ' Fault tolerance: ignore any errors in the extension check.
             End Try
         End Sub
 
         ''' <summary>
-        ''' Performs license check for GA (General Audience) version
+        ''' Performs the GA (General Audience) license check flow.
+        ''' Handles config-based licenses, user-stored licenses, expiry/grace period behavior,
+        ''' and optional prompting to update missing/expired licenses.
         ''' </summary>
+        ''' <param name="context">Execution context used for UI messages and license entry.</param>
+        ''' <returns><c>True</c> if the license check allows continuation; otherwise <c>False</c>.</returns>
         Private Shared Function PerformGALicenseCheck(context As ISharedContext) As Boolean
             Dim licenseExpired As Boolean = False
             Dim noLicenseConfigured As Boolean = False
 
-            ' If license came from config file with a valid future date, accept it without further checks
+            ' If license came from config file with a valid future date, accept it without further checks.
             If LicenseFromConfig Then
                 If Date.Now > LicensedTill Then
-                    ' Check if we're within the grace period
+                    ' Check if we're within the grace period.
                     If GracePeriodDays > 0 AndAlso Date.Now <= LicensedTill.AddDays(GracePeriodDays) Then
-                        ' Within grace period - show warning and allow continuation
+                        ' Within grace period: show warning and allow continuation.
                         CheckGracePeriodWarning(context, LicensedTill, False)
                         Return True
                     End If
@@ -240,20 +284,19 @@ Namespace SharedLibrary
                 Return True
             End If
 
-            ' Non-config license path: check My.Settings-based license
+            ' Non-config license path: check My.Settings-based license.
             If LicensedTill = Date.MinValue OrElse LicensedTill = Date.MaxValue Then
                 noLicenseConfigured = True
             ElseIf Date.Now > LicensedTill Then
-                ' Check if we're within the grace period
+                ' Check grace period.
                 If GracePeriodDays > 0 AndAlso Date.Now <= LicensedTill.AddDays(GracePeriodDays) Then
-                    ' Within grace period - show warning and allow continuation
                     CheckGracePeriodWarning(context, LicensedTill, False)
                     Return True
                 End If
                 licenseExpired = True
             End If
 
-            ' Handle expired license (past grace period)
+            ' Handle expired license (past grace period).
             If licenseExpired Then
                 Dim msg = BuildLicenseMessage(
     $"Your license for {AN} for {context.RDV} has EXPIRED on {LicensedTill:d}." & vbCrLf & vbCrLf &
@@ -264,7 +307,8 @@ Namespace SharedLibrary
                     If Not ShowLicenseEntryForm(context) Then
                         Return False
                     End If
-                    ' Re-validate after form: check if new license is valid
+
+                    ' Re-validate after form: check if new license is valid.
                     If LicensedTill = Date.MinValue OrElse LicensedTill = Date.MaxValue OrElse Date.Now > LicensedTill Then
                         Return False
                     End If
@@ -273,7 +317,7 @@ Namespace SharedLibrary
                 End If
             End If
 
-            ' Handle no license configured
+            ' Handle no license configured.
             If noLicenseConfigured Then
                 Dim msg = BuildLicenseMessage(
     $"No valid license is configured for {AN} for {context.RDV}." & vbCrLf & vbCrLf &
@@ -284,7 +328,8 @@ Namespace SharedLibrary
                     If Not ShowLicenseEntryForm(context) Then
                         Return False
                     End If
-                    ' Re-validate after form: check if new license is valid
+
+                    ' Re-validate after form: check if new license is valid.
                     If LicensedTill = Date.MinValue OrElse LicensedTill = Date.MaxValue OrElse Date.Now > LicensedTill Then
                         Return False
                     End If
@@ -293,7 +338,7 @@ Namespace SharedLibrary
                 End If
             End If
 
-            ' Check for upcoming expiry warnings
+            ' Check for upcoming expiry warnings.
             If Not LicenseNoWarning AndAlso LicensedTill > Date.Now AndAlso LicensedTill < Date.MaxValue Then
                 CheckLicenseExpiryWarnings(context, False)
             End If
@@ -302,20 +347,22 @@ Namespace SharedLibrary
         End Function
 
         ''' <summary>
-        ''' Checks if a grace period warning should be shown and displays it.
-        ''' Shows warning every GracePeriodWarningIntervals starts during the grace period.
-        ''' Only shows if LicenseNoWarning is False.
+        ''' Shows a grace period warning (when enabled) during the grace period after expiry.
+        ''' Warning frequency is throttled via <c>ShouldShowGracePeriodWarning</c>.
         ''' </summary>
+        ''' <param name="context">Execution context used for UI messages.</param>
+        ''' <param name="expiredDate">The original expiry date that started the grace period.</param>
+        ''' <param name="isBeta"><c>True</c> for beta messaging; otherwise GA messaging.</param>
         Private Shared Sub CheckGracePeriodWarning(context As ISharedContext, expiredDate As Date, isBeta As Boolean)
             Try
-                ' Skip warning if LicenseNoWarning is True
+                ' Skip warning if LicenseNoWarning is True.
                 If LicenseNoWarning Then Return
 
-                ' Calculate remaining grace period days
+                ' Calculate remaining grace period days.
                 Dim gracePeriodEnd As Date = expiredDate.AddDays(GracePeriodDays)
                 Dim remainingDays As Integer = CInt((gracePeriodEnd.Date - Date.Now.Date).TotalDays)
 
-                ' Check if we should show the warning based on start count
+                ' Check if we should show the warning based on start count.
                 If ShouldShowGracePeriodWarning() Then
                     Dim msg As String
                     If isBeta Then
@@ -349,17 +396,19 @@ Namespace SharedLibrary
                 End If
 
             Catch
-                ' Fault tolerance - ignore warning check errors
+                ' Fault tolerance: ignore warning check errors.
             End Try
         End Sub
 
 
         ''' <summary>
-        ''' Checks if grace period warning should be shown (every GracePeriodWarningIntervals starts)
+        ''' Returns whether a grace period warning should be shown on this start.
+        ''' Uses and updates <c>My.Settings.GracePeriodWarningStartcount</c>.
         ''' </summary>
+        ''' <returns><c>True</c> if the warning should be shown; otherwise <c>False</c>.</returns>
         Private Shared Function ShouldShowGracePeriodWarning() As Boolean
             Try
-                ' Increment start count
+                ' Increment start count.
                 Dim startCount As Integer = 0
                 Try
                     startCount = My.Settings.GracePeriodWarningStartcount + 1
@@ -370,7 +419,7 @@ Namespace SharedLibrary
                 My.Settings.GracePeriodWarningStartcount = startCount
                 My.Settings.Save()
 
-                ' Show warning if start count reaches the interval threshold
+                ' Show warning if start count reaches the interval threshold.
                 Return startCount >= GracePeriodWarningIntervals
 
             Catch
@@ -379,7 +428,7 @@ Namespace SharedLibrary
         End Function
 
         ''' <summary>
-        ''' Records that grace period warning was shown (resets the counter)
+        ''' Records that a grace period warning was shown by resetting the counter in <c>My.Settings</c>.
         ''' </summary>
         Private Shared Sub RecordGracePeriodWarningShown()
             Try
@@ -390,23 +439,26 @@ Namespace SharedLibrary
         End Sub
 
         ''' <summary>
-        ''' Performs license check for Beta version
+        ''' Performs the Beta license check flow based on <c>BetaEndDate</c>.
+        ''' Shows pre-expiry and expiry messaging, supports a grace period, and optionally opens upgrade instructions.
         ''' </summary>
+        ''' <param name="context">Execution context used for UI messages.</param>
+        ''' <returns><c>True</c> if the beta period (or its grace period) allows continuation; otherwise <c>False</c>.</returns>
         Private Shared Function PerformBetaLicenseCheck(context As ISharedContext) As Boolean
-            ' Track if we showed a warning to avoid double-warning from CheckLicenseExpiryWarnings
+            ' Track if we showed a warning to avoid double-warning from CheckLicenseExpiryWarnings.
             Dim warningAlreadyShown As Boolean = False
 
-            ' Check if BetaUpgradeInstructions URL is available
+            ' Check if BetaUpgradeInstructions URL is available.
             Dim upgradeAvailable = CheckUrlAvailable(BetaUpgradeInstructions)
 
             Debug.WriteLine("upgradeAvailable = " & upgradeAvailable)
 
-            ' Calculate days until beta end
+            ' Calculate days until beta end.
             Dim daysUntilBetaEnd As Integer = CInt((BetaEndDate.Date - Date.Now.Date).TotalDays)
 
             ' Show pre-expiry warning only if:
             ' - upgradeAvailable = True, OR
-            ' - 7 or fewer days remain until BetaEndDate
+            ' - BetaWarningNoUpgradeDays or fewer days remain until BetaEndDate.
             If Not Date.Now > BetaEndDate Then
                 Dim shouldShowBetaPreWarning As Boolean = upgradeAvailable OrElse daysUntilBetaEnd <= BetaWarningNoUpgradeDays
 
@@ -428,7 +480,7 @@ Namespace SharedLibrary
                             End Try
                         End If
                     Else
-                        ' No upgrade available but within 7 days - just inform
+                        ' No upgrade available but within threshold days - just inform.
                         msg = BuildLicenseMessage(
                             $"The beta test for {AN} ends in {daysUntilBetaEnd} day(s) on {BetaEndDate:d}." & vbCrLf & vbCrLf &
                             $"To continue using {AN} after that date, you will need to upgrade to the General Audience or Preview version. " &
@@ -441,16 +493,16 @@ Namespace SharedLibrary
                 End If
             End If
 
-            ' Check if beta has expired
+            ' Check if beta has expired.
             If Date.Now > BetaEndDate Then
-                ' Check if we're within the grace period
+                ' Check if we're within the grace period.
                 If GracePeriodDays > 0 AndAlso Date.Now <= BetaEndDate.AddDays(GracePeriodDays) Then
-                    ' Within grace period - show warning and allow continuation
+                    ' Within grace period: show warning and allow continuation.
                     CheckGracePeriodWarning(context, BetaEndDate, True)
                     Return True
                 End If
 
-                ' Past grace period - beta expired
+                ' Past grace period: beta expired.
                 If upgradeAvailable Then
                     Dim msg = BuildLicenseMessage(
                         $"Your beta test license for {AN} for {context.RDV} has EXPIRED on {BetaEndDate:d}." & vbCrLf & vbCrLf &
@@ -476,9 +528,9 @@ Namespace SharedLibrary
                 Return False
             End If
 
-            ' Upcoming expiry warnings for beta - only if no warning was already shown
+            ' Upcoming expiry warnings for beta - only if no warning was already shown.
             If Not warningAlreadyShown AndAlso Not LicenseNoWarning Then
-                ' Only show if upgrade available OR within 7 days
+                ' Only show if upgrade available OR within BetaWarningNoUpgradeDays days.
                 Dim shouldShowExpiryWarning As Boolean = upgradeAvailable OrElse daysUntilBetaEnd <= BetaWarningNoUpgradeDays
                 If shouldShowExpiryWarning Then
                     CheckLicenseExpiryWarnings(context, True)
@@ -489,9 +541,11 @@ Namespace SharedLibrary
         End Function
 
         ''' <summary>
-        ''' Checks license expiry warnings at 30, 15, 10, 5, 3, 1 days before expiry.
-        ''' Warnings are shown only once every LicenseWarningInterval starts.
+        ''' Shows license expiry warnings at configured day thresholds prior to expiry.
+        ''' Warning frequency is throttled using <c>My.Settings.LicenseWarningStartCount</c>.
         ''' </summary>
+        ''' <param name="context">Execution context used for UI messages.</param>
+        ''' <param name="isBeta"><c>True</c> for beta expiry messaging; otherwise GA messaging.</param>
         Private Shared Sub CheckLicenseExpiryWarnings(context As ISharedContext, isBeta As Boolean)
             Try
                 Dim expiryDate As Date = If(isBeta, BetaEndDate, LicensedTill)
@@ -499,7 +553,7 @@ Namespace SharedLibrary
 
                 For Each warningDay In LicenseWarningDays
                     If daysUntilExpiry = warningDay Then
-                        ' Check if we should show the warning based on start count
+                        ' Check if we should show the warning based on start count.
                         If Not ShouldShowLicenseWarning() Then
                             Exit For
                         End If
@@ -520,7 +574,7 @@ Namespace SharedLibrary
                                    "Your license is configured centrally. Contact your administrator to renew.",
                                    $"Please update your license at {AN4} or contact your administrator. Updating the license information is possible via 'Settings', then 'About {AN}'." & vbCrLf & vbCrLf & "Would you like to update your license information now?"))
 
-                            ' Only offer to update if license is NOT from config
+                            ' Only offer to update if license is NOT from config.
                             If LicenseFromConfig Then
                                 ShowCustomMessageBox(msg, $"{AN} License Warning")
                             Else
@@ -536,16 +590,18 @@ Namespace SharedLibrary
                     End If
                 Next
             Catch
-                ' Fault tolerance - ignore warning check errors
+                ' Fault tolerance: ignore warning check errors.
             End Try
         End Sub
 
         ''' <summary>
-        ''' Checks if license warning should be shown (every LicenseWarningInterval starts)
+        ''' Returns whether an expiry warning should be shown on this start.
+        ''' Uses and updates <c>My.Settings.LicenseWarningStartCount</c>.
         ''' </summary>
+        ''' <returns><c>True</c> if the warning should be shown; otherwise <c>False</c>.</returns>
         Private Shared Function ShouldShowLicenseWarning() As Boolean
             Try
-                ' Increment start count
+                ' Increment start count.
                 Dim startCount As Integer = 0
                 Try
                     startCount = My.Settings.LicenseWarningStartCount + 1
@@ -556,7 +612,7 @@ Namespace SharedLibrary
                 My.Settings.LicenseWarningStartCount = startCount
                 My.Settings.Save()
 
-                ' Show warning if start count reaches the interval threshold
+                ' Show warning if start count reaches the interval threshold.
                 Return startCount >= LicenseWarningInterval
 
             Catch
@@ -565,7 +621,7 @@ Namespace SharedLibrary
         End Function
 
         ''' <summary>
-        ''' Records that license warning was shown (resets the counter)
+        ''' Records that a license warning was shown by resetting the counter in <c>My.Settings</c>.
         ''' </summary>
         Private Shared Sub RecordLicenseWarningShown()
             Try
@@ -576,12 +632,14 @@ Namespace SharedLibrary
         End Sub
 
         ''' <summary>
-        ''' Shows the license entry form for users to select and configure their license.
-        ''' Returns False immediately if this is a beta version (no license storage in beta).
+        ''' Shows the license entry form for selecting a license type and persisting selection to <c>My.Settings</c>.
+        ''' Returns <c>False</c> immediately for beta versions (license storage is disabled in beta).
         ''' </summary>
+        ''' <param name="context">Execution context used to resolve license types and version date.</param>
+        ''' <returns><c>True</c> if the user saved a license successfully; otherwise <c>False</c>.</returns>
         Public Shared Function ShowLicenseEntryForm(context As ISharedContext) As Boolean
             Try
-                ' Beta version cannot store license information
+                ' Beta version cannot store license information.
                 Dim isBetaVersion As Boolean = Not AppsUrl.StartsWith(NewHomeURL, StringComparison.OrdinalIgnoreCase)
                 If isBetaVersion Then
                     ShowCustomMessageBox(
@@ -596,7 +654,7 @@ Namespace SharedLibrary
                 Dim licenseTypes = GetLicenseTypes(versionDate)
 
                 Using form As New Form()
-                    ' Enable DPI awareness
+                    ' Enable DPI awareness.
                     form.AutoScaleMode = AutoScaleMode.Dpi
                     form.AutoScaleDimensions = New System.Drawing.SizeF(96.0F, 96.0F)
 
@@ -608,13 +666,13 @@ Namespace SharedLibrary
                     form.ShowInTaskbar = True
                     form.TopMost = True
 
-                    ' Enable auto-sizing for the form
+                    ' Enable auto-sizing for the form.
                     form.AutoSize = True
                     form.AutoSizeMode = AutoSizeMode.GrowAndShrink
 
-                    ' Set icon
+                    ' Set icon.
                     Try
-                        Dim bmp As New System.Drawing.Bitmap(My.Resources.Red_Ink_Logo)
+                        Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
                         form.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
                     Catch
                     End Try
@@ -622,7 +680,7 @@ Namespace SharedLibrary
                     Dim font As New System.Drawing.Font("Segoe UI", 9.0F)
                     form.Font = font
 
-                    ' Use TableLayoutPanel for DPI-aware layout
+                    ' Use TableLayoutPanel for DPI-aware layout.
                     Dim mainLayout As New TableLayoutPanel() With {
                         .AutoSize = True,
                         .AutoSizeMode = AutoSizeMode.GrowAndShrink,
@@ -633,7 +691,7 @@ Namespace SharedLibrary
                     mainLayout.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
                     mainLayout.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
 
-                    ' Row 0: Title label (spans both columns)
+                    ' Row 0: Title label (spans both columns).
                     Dim titleLabel As New Label() With {
                         .Text = "Select your license type:",
                         .AutoSize = True,
@@ -643,7 +701,7 @@ Namespace SharedLibrary
                     mainLayout.Controls.Add(titleLabel, 0, 0)
                     mainLayout.SetColumnSpan(titleLabel, 2)
 
-                    ' Row 1: License type ComboBox (spans both columns)
+                    ' Row 1: License type ComboBox (spans both columns).
                     Dim cboLicenseType As New ComboBox() With {
                         .Width = 450,
                         .DropDownStyle = ComboBoxStyle.DropDownList,
@@ -655,7 +713,7 @@ Namespace SharedLibrary
                     mainLayout.Controls.Add(cboLicenseType, 0, 1)
                     mainLayout.SetColumnSpan(cboLicenseType, 2)
 
-                    ' Calculate max description height needed
+                    ' Calculate max description height needed.
                     Dim maxDescHeight = 0
                     Using g = form.CreateGraphics()
                         For Each lt In licenseTypes
@@ -664,7 +722,7 @@ Namespace SharedLibrary
                         Next
                     End Using
 
-                    ' Row 2: Description label (spans both columns)
+                    ' Row 2: Description label (spans both columns).
                     Dim lblDescription As New Label() With {
                         .Width = 450,
                         .Height = maxDescHeight + 10,
@@ -675,7 +733,7 @@ Namespace SharedLibrary
                     mainLayout.Controls.Add(lblDescription, 0, 2)
                     mainLayout.SetColumnSpan(lblDescription, 2)
 
-                    ' Row 3: License end date
+                    ' Row 3: License end date.
                     Dim lblEndDate As New Label() With {
                         .Text = "License valid until:",
                         .AutoSize = True,
@@ -692,7 +750,7 @@ Namespace SharedLibrary
                     }
                     mainLayout.Controls.Add(dtpEndDate, 1, 3)
 
-                    ' Row 4: Number of users
+                    ' Row 4: Number of users.
                     Dim lblUsers As New Label() With {
                         .Text = "Number of users:",
                         .AutoSize = True,
@@ -711,7 +769,7 @@ Namespace SharedLibrary
                     }
                     mainLayout.Controls.Add(nudUsers, 1, 4)
 
-                    ' Row 5: Buttons panel (spans both columns)
+                    ' Row 5: Buttons panel (spans both columns).
                     Dim buttonPanel As New FlowLayoutPanel() With {
                         .AutoSize = True,
                         .AutoSizeMode = AutoSizeMode.GrowAndShrink,
@@ -742,13 +800,13 @@ Namespace SharedLibrary
 
                     Dim result As Boolean = False
 
-                    ' Update UI based on license type selection
+                    ' Update UI based on license type selection.
                     AddHandler cboLicenseType.SelectedIndexChanged, Sub(s, e)
                                                                         If cboLicenseType.SelectedIndex >= 0 AndAlso cboLicenseType.SelectedIndex < licenseTypes.Count Then
                                                                             Dim selectedType = licenseTypes(cboLicenseType.SelectedIndex)
                                                                             lblDescription.Text = selectedType.Description
 
-                                                                            ' End date
+                                                                            ' End date.
                                                                             If selectedType.FixedEndDate.HasValue Then
                                                                                 dtpEndDate.Value = selectedType.FixedEndDate.Value
                                                                                 dtpEndDate.Enabled = False
@@ -756,7 +814,7 @@ Namespace SharedLibrary
                                                                                 dtpEndDate.Value = selectedType.DefaultEndDate.Value
                                                                                 dtpEndDate.Enabled = True
                                                                             ElseIf selectedType.UserDefinedEndDate Then
-                                                                                ' User-defined but no default: suggest end of current calendar year
+                                                                                ' User-defined but no default: suggest end of current calendar year.
                                                                                 dtpEndDate.Value = New Date(Date.Now.Year, 12, 31)
                                                                                 dtpEndDate.Enabled = True
                                                                             Else
@@ -764,7 +822,7 @@ Namespace SharedLibrary
                                                                                 dtpEndDate.Enabled = True
                                                                             End If
 
-                                                                            ' Users
+                                                                            ' Users.
                                                                             If selectedType.FixedUsers.HasValue Then
                                                                                 nudUsers.Value = selectedType.FixedUsers.Value
                                                                                 nudUsers.Enabled = False
@@ -777,10 +835,10 @@ Namespace SharedLibrary
                                                                         End If
                                                                     End Sub
 
-                    ' Save handler
+                    ' Save handler.
                     AddHandler btnSave.Click, Sub(s, e)
                                                   Try
-                                                      ' Validation
+                                                      ' Validation.
                                                       If cboLicenseType.SelectedIndex < 0 Then
                                                           ShowCustomMessageBox("Please select a license type.", AN)
                                                           Return
@@ -804,7 +862,7 @@ Namespace SharedLibrary
                                                           Return
                                                       End If
 
-                                                      ' Save to My.Settings
+                                                      ' Save to My.Settings.
                                                       LicenseStatus = licenseTypes(cboLicenseType.SelectedIndex).Name
                                                       LicenseUsers = users
                                                       LicensedTill = endDate
@@ -825,7 +883,7 @@ Namespace SharedLibrary
                                                     form.Close()
                                                 End Sub
 
-                    ' Set initial selection if we have a stored license
+                    ' Set initial selection if we have a stored license.
                     If Not String.IsNullOrEmpty(LicenseStatus) Then
                         For i = 0 To licenseTypes.Count - 1
                             If licenseTypes(i).Name.Equals(LicenseStatus, StringComparison.OrdinalIgnoreCase) Then
@@ -850,18 +908,21 @@ Namespace SharedLibrary
         End Function
 
         ''' <summary>
-        ''' Returns True if this is a beta version (license storage disabled)
+        ''' Returns <c>True</c> if this build is treated as a beta version (license storage disabled).
         ''' </summary>
         Public Shared Function IsBetaVersion() As Boolean
             Return Not AppsUrl.StartsWith(NewHomeURL, StringComparison.OrdinalIgnoreCase)
         End Function
 
         ''' <summary>
-        ''' Parses the version date from context.RDV (e.g., "Word (V.101225 Gen2 Beta Test)" -> December 10, 2025)
+        ''' Parses a version date from an RDV string by extracting 6 digits after "V." in DDMMYY format.
+        ''' Returns <see cref="Date.Now"/> if parsing fails.
         ''' </summary>
+        ''' <param name="rdv">A string that may contain a version marker such as "V.101225".</param>
+        ''' <returns>The parsed version date, or <see cref="Date.Now"/> on failure.</returns>
         Private Shared Function ParseVersionDateFromRDV(rdv As String) As Date
             Try
-                ' Find "V." followed by 6 digits (DDMMYY format)
+                ' Find "V." followed by 6 digits (DDMMYY format).
                 Dim vIndex = rdv.IndexOf("V.", StringComparison.OrdinalIgnoreCase)
                 If vIndex >= 0 AndAlso rdv.Length >= vIndex + 8 Then
                     Dim dateStr = rdv.Substring(vIndex + 2, 6)
@@ -874,13 +935,16 @@ Namespace SharedLibrary
                 End If
             Catch
             End Try
-            ' Default to current date if parsing fails
+
+            ' Default to current date if parsing fails.
             Return Date.Now
         End Function
 
         ''' <summary>
-        ''' Builds a license message with optional contact information appended
+        ''' Appends <c>LicenseContact</c> (if present) to the given message.
         ''' </summary>
+        ''' <param name="baseMessage">The message to display without contact details.</param>
+        ''' <returns>The message including optional contact information.</returns>
         Private Shared Function BuildLicenseMessage(baseMessage As String) As String
             If Not String.IsNullOrEmpty(LicenseContact) Then
                 Return baseMessage & vbCrLf & vbCrLf & LicenseContact
@@ -890,11 +954,15 @@ Namespace SharedLibrary
 
 
         ''' <summary>
-        ''' Checks if a URL is available (follows redirects, only accepts 2xx as available)
+        ''' Checks whether the given URL is reachable.
+        ''' Issues a HEAD request first (following redirects), and retries with GET if HEAD fails.
+        ''' Only 2xx responses are treated as available.
         ''' </summary>
+        ''' <param name="url">The URL to probe.</param>
+        ''' <returns><c>True</c> if a 2xx response is obtained; otherwise <c>False</c>.</returns>
         Private Shared Function CheckUrlAvailable(url As String) As Boolean
             Try
-                ' Enable TLS 1.2 and TLS 1.3 for HTTPS connections
+                ' Enable TLS 1.2 and TLS 1.3 for HTTPS connections.
                 ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12 Or SecurityProtocolType.Tls13
 
                 Dim request = DirectCast(WebRequest.Create(url), HttpWebRequest)
@@ -908,11 +976,11 @@ Namespace SharedLibrary
                     Using response = DirectCast(request.GetResponse(), HttpWebResponse)
                         Dim statusCode = CInt(response.StatusCode)
                         Debug.WriteLine($"{url} returned {response.StatusCode} ({statusCode})")
-                        ' Accept only 2xx status codes as available
+                        ' Accept only 2xx status codes as available.
                         Return statusCode >= 200 AndAlso statusCode < 300
                     End Using
                 Catch webEx As WebException
-                    ' Check if this is a 4xx/5xx error - if so, return False immediately
+                    ' Check if this is a 4xx/5xx error - if so, return False immediately.
                     If webEx.Response IsNot Nothing Then
                         Dim httpResponse = TryCast(webEx.Response, HttpWebResponse)
                         If httpResponse IsNot Nothing Then
@@ -920,14 +988,14 @@ Namespace SharedLibrary
                             Debug.WriteLine($"{url} HEAD failed with {httpResponse.StatusCode} ({statusCode})")
                             httpResponse.Close()
 
-                            ' 4xx (client errors including 404) and 5xx (server errors) mean URL is not available
+                            ' 4xx (client errors including 404) and 5xx (server errors) mean URL is not available.
                             If statusCode >= 400 Then
                                 Return False
                             End If
                         End If
                     End If
 
-                    ' HEAD might not be supported, retry with GET method
+                    ' HEAD might not be supported; retry with GET method.
                     Dim getRequest = DirectCast(WebRequest.Create(url), HttpWebRequest)
                     getRequest.Method = "GET"
                     getRequest.Timeout = 5000
@@ -938,20 +1006,20 @@ Namespace SharedLibrary
                     Using response = DirectCast(getRequest.GetResponse(), HttpWebResponse)
                         Dim statusCode = CInt(response.StatusCode)
                         Debug.WriteLine($"{url} GET returned {response.StatusCode} ({statusCode})")
-                        ' Accept only 2xx status codes as available
+                        ' Accept only 2xx status codes as available.
                         Return statusCode >= 200 AndAlso statusCode < 300
                     End Using
                 End Try
 
             Catch ex As WebException
-                ' Handle any remaining WebExceptions (including 404, 500, etc.)
+                ' Handle any remaining WebExceptions (including 404, 500, etc.).
                 If ex.Response IsNot Nothing Then
                     Dim httpResponse = TryCast(ex.Response, HttpWebResponse)
                     If httpResponse IsNot Nothing Then
                         Dim statusCode = CInt(httpResponse.StatusCode)
                         Debug.WriteLine($"{url} failed with {httpResponse.StatusCode} ({statusCode})")
                         httpResponse.Close()
-                        ' Only 2xx means available - everything else (including 404) is not available
+                        ' Only 2xx means available.
                         Return False
                     End If
                 End If
@@ -964,23 +1032,24 @@ Namespace SharedLibrary
         End Function
 
         ''' <summary>
-        ''' Checks if beta warning should be shown (every 3 days OR every BetaWarningInterval starts, whichever is sooner)
+        ''' Returns whether a beta warning should be shown.
+        ''' Triggers when either:
+        ''' - <c>BetaWarningDays</c> or more days have passed since the last warning, or
+        ''' - <c>BetaWarningInterval</c> or more starts occurred since last reset.
         ''' </summary>
+        ''' <returns><c>True</c> if a beta warning should be shown; otherwise <c>False</c>.</returns>
         Private Shared Function ShouldShowBetaWarning() As Boolean
             Try
-                ' Check days since last warning
+                ' Check days since last warning.
                 Dim lastWarning = My.Settings.LastBetaWarningDate
                 Dim daysSinceLastWarning = If(lastWarning = Date.MinValue, Integer.MaxValue, CInt((Date.Now.Date - lastWarning.Date).TotalDays))
 
-                ' Increment and check start count since last warning
+                ' Increment and check start count since last warning.
                 Dim startCount = My.Settings.BetaWarningStartCount + 1
                 My.Settings.BetaWarningStartCount = startCount
                 My.Settings.Save()
 
-                ' Show warning if either condition is met:
-                ' - First time ever (no previous warning date)
-                ' - BetaWarningDays or more days have passed since last warning
-                ' - BetaWarningInterval or more starts since last warning reset
+                ' Show warning if either condition is met.
                 Return daysSinceLastWarning >= BetaWarningDays OrElse startCount >= BetaWarningInterval
 
             Catch
@@ -989,7 +1058,7 @@ Namespace SharedLibrary
         End Function
 
         ''' <summary>
-        ''' Records that beta warning was shown (resets both date and counter)
+        ''' Records that a beta warning was shown by persisting the current date and resetting the start counter.
         ''' </summary>
         Private Shared Sub RecordBetaWarningShown()
             Try

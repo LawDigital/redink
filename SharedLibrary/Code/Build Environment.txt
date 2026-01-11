@@ -1,0 +1,131 @@
+﻿
+    =====================================================================================
+    RED INK BUILD ENVIRONMENT CONFIGURATION
+    =====================================================================================
+    
+    Overview:
+    ---------
+    The Red Ink solution uses a centralized MSBuild property "RedInkEnvironment" to control
+    environment-specific build settings. This property is defined in Directory.Build.props
+    at the solution root and is automatically imported by MSBuild for all projects.
+    
+    How It Works:
+    -------------
+    1. Directory.Build.props defines: <RedInkEnvironment>Develop|Preview|GA</RedInkEnvironment>
+
+    Example Directory.Build.props:
+
+    <Project>
+	    <PropertyGroup>
+		    <RedInkEnvironment>Develop</RedInkEnvironment>
+	    </PropertyGroup>
+    </Project>
+
+    2. Each .vbproj contains conditional PropertyGroups that activate based on this value
+
+       Example from Word VSTO project file:
+
+          <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Develop'">
+            <ApplicationVersion>1.0.0.700</ApplicationVersion>
+            <PublishUrl>..\clickonce\apps\develop\word\</PublishUrl>
+            <InstallUrl>https://redink.ai/apps/develop/word/</InstallUrl>
+            <ProductName>Red Ink for Word %28Develop%29</ProductName>
+            <FriendlyName>Red Ink for Word %28Develop%29</FriendlyName>
+          </PropertyGroup>
+          <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Preview'">
+            <ApplicationVersion>1.0.0.200</ApplicationVersion>
+            <PublishUrl>..\clickonce\apps\preview\word\</PublishUrl>
+            <InstallUrl>https://redink.ai/apps/preview/word/</InstallUrl>
+            <ProductName>Red Ink for Word %28Preview%29</ProductName>
+            <FriendlyName>Red Ink for Word %28Preview%29</FriendlyName>
+          </PropertyGroup>
+          <PropertyGroup Condition="'$(RedInkEnvironment)' == 'GA'">
+            <ApplicationVersion>1.0.0.0</ApplicationVersion>
+            <PublishUrl>..\clickonce\apps\ga\word\</PublishUrl>
+            <InstallUrl>https://redink.ai/apps/ga/word/</InstallUrl>
+            <ProductName>Red Ink for Word</ProductName>
+            <FriendlyName>Red Ink for Word</FriendlyName>
+          </PropertyGroup>
+
+        Example SharedLibrary conditional compilation symbols in .vbproj:
+
+	        <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Develop'">
+		        <DefineConstants>$(DefineConstants),DEVELOP</DefineConstants>
+	        </PropertyGroup>
+
+	        <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Preview'">
+		        <DefineConstants>$(DefineConstants),PREVIEW</DefineConstants>
+	        </PropertyGroup>
+
+	        <PropertyGroup Condition="'$(RedInkEnvironment)' != 'Develop' and '$(RedInkEnvironment)' != 'Preview'">
+		        <DefineConstants>$(DefineConstants),GA</DefineConstants>
+	        </PropertyGroup>
+ 
+    3. SharedLibrary uses matching conditional compilation symbols (DEVELOP, PREVIEW)
+       to control runtime behavior (URLs, version qualifiers, update intervals)
+    
+    Valid Environment Values:
+    -------------------------
+      Develop  - Development/internal testing builds
+                 - Higher version numbers (1.0.0.700) for rapid iteration
+                 - Publishes to: ..\clickonce\apps\develop\{app}\
+                 - Installs from: https://redink.ai/apps/develop/{app}/
+                 - Product name includes "(Develop)" suffix
+                 
+      Preview  - Pre-release/beta testing builds
+                 - Mid-range version numbers (1.0.0.200)
+                 - Publishes to: ..\clickonce\apps\preview\{app}\
+                 - Installs from: https://redink.ai/apps/preview/{app}/
+                 - Product name includes "(Preview)" suffix
+                 
+      GA       - General Audience (production) builds
+                 - Base version numbers (1.0.0.0)
+                 - Publishes to: ..\clickonce\apps\ga\{app}\
+                 - Installs from: https://redink.ai/apps/ga/{app}/
+                 - Product name has no suffix
+    
+    Changing the Build Environment:
+    --------------------------------
+    Method 1: Edit Directory.Build.props
+      <RedInkEnvironment>GA</RedInkEnvironment>
+      
+    Method 2: MSBuild command line override
+      msbuild RedInk.sln /p:RedInkEnvironment=Preview
+
+    Handling Git Merges across Environments:
+    ---------------------------------------
+
+    .gitattributes file at solution root includes:
+      
+      Directory.Build.props merge=ours
+    
+    SharedLibrary Integration:
+    --------------------------
+    The SharedLibrary project uses #If DEVELOP / #ElseIf PREVIEW / #Else directives
+    in SharedMethods.Constants.vb to set runtime properties:
+      - AppsUrl / AppsUrlDir  : Base URL and subdirectory for resources
+      - VersionQualifier      : Version string suffix (" Develop", " Preview", or "")
+      - DefaultUpdateIntervalDays : Update check frequency (varies by environment)
+     
+    Important Notes:
+    ----------------
+    - Ensure DefineConstants in project configurations include the appropriate symbol
+      (DEVELOP or PREVIEW) to match the RedInkEnvironment setting
+    - The %28 and %29 in ProductName/FriendlyName are URL-encoded parentheses ( and )
+    - All four VSTO projects (Excel, Word, Outlook) and SharedLibrary share this pattern
+    
+    Environment-Specific Build Configuration
+    =========================================
+    The following PropertyGroups are conditionally applied based on the $(RedInkEnvironment)
+    property imported from Directory.Build.props. Only one of these groups will be active
+    during any given build.
+    
+    Properties controlled per environment:
+      ApplicationVersion - ClickOnce version number
+      PublishUrl         - Local output path for ClickOnce publishing
+      InstallUrl         - Public URL where users install from
+      ProductName        - Display name shown during installation
+      FriendlyName       - VSTO-specific friendly name for the add-in
+
+    The differences ensure that builds for different environments are correctly versioned and 
+    have different names/URLs to avoid conflicts.

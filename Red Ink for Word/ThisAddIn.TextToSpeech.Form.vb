@@ -30,7 +30,7 @@ Imports System.Windows
 Imports System.Windows.Forms
 Imports Newtonsoft.Json
 Imports SharedLibrary.SharedLibrary.SharedMethods
-
+Imports SharedLibrary.SharedLibrary
 
 Partial Public Class ThisAddIn
 
@@ -158,7 +158,7 @@ Partial Public Class ThisAddIn
             _twoVoicesRequired = twoVoicesRequired
 
             ' --- FORM PROPERTIES ---
-            Dim bmp As New System.Drawing.Bitmap(My.Resources.Red_Ink_Logo)
+            Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
             Me.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
             Me.Text = _formTitle
             Me.StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen

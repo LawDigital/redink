@@ -193,7 +193,7 @@ Partial Public Class ThisAddIn
 
         ' Insert formatted text into the Word editor
         If Not ShowInWindow Then
-            InsertFormattedTextFast(sText & vbCrLf)
+            InsertFormattedTextFast(sText)
         Else
             Dim htmlContent As String = ConvertMarkupToRTF(TextforWindow & "\r\r" & sText)
             System.Threading.Tasks.Task.Run(Sub()
@@ -555,6 +555,12 @@ Partial Public Class ThisAddIn
         Try
             ' Existing helper that pastes an HTML fragment
             InsertTextWithFormat(markup, selRange, True, True)
+
+            ' Add a CRLF AFTER insertion (Word paragraph mark)
+            selRange.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
+            selRange.InsertAfter(vbCrLf & vbCrLf)
+            selRange.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
+
 
         Catch ex As System.Exception
             System.Windows.Forms.MessageBox.Show(

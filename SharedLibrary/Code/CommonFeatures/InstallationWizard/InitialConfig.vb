@@ -3,7 +3,6 @@
 
 ' =============================================================================
 ' File: InitialConfig.vb
-' Part of: Red Ink Shared Library
 ' Purpose: First-run installation wizard form for configuring Red Ink LLM API access.
 '          Provides provider-specific templates (OpenAI, Azure, Google Vertex, etc.),
 '          validates user input, supports remote configuration updates, and generates
@@ -11,174 +10,50 @@
 '
 ' Architecture Overview:
 ' ----------------------
-' InitialConfig is a modal wizard dialog that appears when no redink.ini file exists.
-' It uses a provider-centric design where each LLM provider (OpenAI, Azure, Google, etc.)
-' has a template of 9-13 configuration fields stored as List(Of AppConfigurationVariable).
+' InitialConfig is a modal WinForms wizard dialog typically shown when no Red Ink INI
+' configuration file exists for the host application.
+'
+' Configuration Templates:
+' ------------------------
+' Provider defaults are built into the form in PrepareConfigData() as a dictionary:
+'   providerConfigs(ProviderName) -> List(Of AppConfigurationVariable)
+' plus optional providerNotes(ProviderName) displayed below the fields.
+'
+' Remote Template Override (optional, user-confirmed):
+' ---------------------------------------------------
+' TryOverrideDefaultsFromRemote() can download an updated template list from
+' RemoteDefaultsUrl (custom INI with pipe-delimited field definitions), parse it via
+' TryParseRemoteDefaults(), and compare it against built-in defaults via AreDifferent().
+' If differences are found, the user can load the remote defaults.
 '
 ' Data Flow:
-' 1. PrepareConfigData() builds provider dictionary from hardcoded defaults
-' 2. TryOverrideDefaultsFromRemote() optionally downloads updated templates from server
-' 3. User selects provider from ComboBox -> LoadConfigForSelectedProvider() generates UI
-' 4. User edits TextBoxes -> SaveCurrentInputToConfig() syncs to AppConfigurationVariable.CurrentValue
-' 5. User clicks OK -> ValidateAllConfigs() enforces rules -> btnOK_Click() maps to ISharedContext
-' 6. CreateAppConfig() writes INI files to %APPDATA%\redink.ini (or app-specific paths)
+' ----------
+' 1. InitializeComponent() builds the static wizard UI.
+' 2. PrepareConfigData() creates provider templates and calls TryOverrideDefaultsFromRemote().
+' 3. Provider selection changes rebuild the dynamic UI via LoadConfigForSelectedProvider().
+'    Values are preserved across provider switching via SaveCurrentInputToSpecificConfig().
+' 4. OK click: SaveCurrentInputToConfig() -> ValidateAllConfigs() -> map config variables to
+'    ISharedContext -> CreateAppConfig() writes INI files -> closes wizard.
 '
-' Provider Templates (6 built-in):
-' ---------------------------------
-' Each provider defines 9-13 fields via AppConfigurationVariable:
-'   Common fields (all providers):
-'   - INI_APIKey: API key or private key
-'   - INI_Temperature: LLM temperature (0.0-2.0)
-'   - INI_Timeout: HTTP timeout in milliseconds
-'   - INI_Model: Model identifier (gpt-4.1, gemini-2.5-pro, etc.)
-'   - INI_Endpoint: API endpoint URL with {model} and {apikey} placeholders
-'   - INI_HeaderA/B: HTTP header name and value template
-'   - INI_APICall: JSON request body with {promptsystem}, {promptuser}, {temperature} placeholders
-'   - INI_Response: JSON response field to extract (e.g., "content" or "text")
+' Validation:
+' -----------
+' ValidateAllConfigs() applies AppConfigurationVariable.ValidationRule using simple checks:
+' NotEmpty, E-Mail ("@" heuristic), Hyperlink (http/https prefix), >0 integer, 0.0-2.0 range,
+' and max-value rules expressed as a decimal literal like "2.0" (accepts "." or "," separator).
 '
-'   OAuth2-specific fields (Google Vertex only):
-'   - INI_OAuth2ClientMail: Service account email
-'   - INI_OAuth2Scopes: OAuth2 scopes (space-separated)
-'   - INI_OAuth2Endpoint: Token endpoint URL
-'   - INI_OAuth2ATExpiry: Access token lifetime in seconds
-'
-' Remote Configuration Updates:
-' ------------------------------
-' TryOverrideDefaultsFromRemote() downloads provider templates from RemoteDefaultsUrl.
-' INI format specification:
-'   [ProviderName]
-'   Field1 = DisplayName|VarName|VarType|ValidationRule|DefaultValue
-'   Field2 = DisplayName|VarName|VarType|ValidationRule|DefaultValue
-'   ...
-'   Note = Optional user-facing hint text
-'
-' Example remote INI:
-'   [OpenAI]
-'   Field1 = API Key:|INI_APIKey|String|NotEmpty|
-'   Field2 = Temperature:|INI_Temperature|String|2.0|0.2
-'   Field3 = Model:|INI_Model|String|NotEmpty|gpt-4.1
-'   Note = Payment method required even for free accounts.
-'
-' AreDifferent() performs deep comparison (provider-by-provider, field-by-field).
-' User is prompted only if differences detected. Network errors are silent (never block wizard).
-'
-' Validation Rules (ValidateAllConfigs):
-' ---------------------------------------
-' Enforced via AppConfigurationVariable.ValidationRule:
-'   - "NotEmpty": String.IsNullOrWhiteSpace check
-'   - "E-Mail": Contains "@" check (simple heuristic)
-'   - "Hyperlink": StartsWith("http://") Or StartsWith("https://")
-'   - ">0": Integer.TryParse && value > 0
-'   - "0.0-2.0": Double.TryParse && value in range [0.0, 2.0]
-'   - "\d+\.\d+" (e.g., "2.0"): Max value validation, accepts "." or "," as decimal separator
-'
-' Decimal separator normalization: Replaces "," with ".", rejects multiple decimal points.
-'
-' State Management:
-' -----------------
-' CurrentValue preservation during provider switching:
-' 1. User selects "OpenAI", enters API key "sk-abc123...", temperature "0.5"
-' 2. User switches to "Google Gemini" via cmbProvider dropdown
-' 3. cmbProvider_SelectedIndexChanged fires:
-'    a. SaveCurrentInputToSpecificConfig(OpenAI vars) copies TextBox.Text -> CurrentValue
-'    b. _activeProvider = "Google Gemini"
-'    c. LoadConfigForSelectedProvider() clears panel, creates new TextBoxes from Gemini defaults
-' 4. User switches back to "OpenAI"
-'    a. LoadConfigForSelectedProvider() reads OpenAI vars' preserved CurrentValue ("sk-abc123...", "0.5")
-'    b. TextBoxes repopulated with saved values
-'
-' UI Layout (responsive):
+' OAuth2 (Google Vertex):
 ' -----------------------
-' Target width = Min(1050px, 80% screen width) for wrapping/sizing.
-' Control hierarchy (top to bottom):
-'   1. PictureBox (logo 50x50) + "Welcome to Red Ink" label
-'   2. LinkLabel with instructions (wraps to target width)
-'   3. "Select API provider:" label + ComboBox (6 providers)
-'   4. LinkLabel with additional info
-'   5. "Configuration For {Provider}:" label (updated on provider change)
-'   6. panelConfig (scrollable, dynamic Label+TextBox pairs, auto-height)
-'   7. "Use this config for Red Ink:" label + chkWord/chkOutlook/chkExcel
-'   8. btnOK + btnCancel
-'   9. invisibleLabel (forces form height adjustment)
+' Google Vertex includes additional OAuth2 fields. INI_OAuth2ATExpiry is an integer value in
+' seconds (not milliseconds).
 '
-' Panel height adjusts via PanelConfig_SizeChanged event -> repositions all controls below.
-'
-' Output Files (CreateAppConfig):
-' --------------------------------
-' Generates INI files for checked applications:
-'   - Word: %APPDATA%\redink.ini (SharedMethods.GetDefaultINIPath("Word"))
-'   - Excel: App-specific path if chkExcel checked
-'   - Outlook: App-specific path if chkOutlook checked
-'
-' INI format:
-'   ; Red Ink configuration file (automatically generated)
-'   ; Minimum configuration for OpenAI
-'   APIKey = sk-abc123...
-'   Endpoint = https://api.openai.com/v1/chat/completions
-'   HeaderA = Authorization
-'   HeaderB = Bearer {apikey}
-'   Temperature = 0.2
-'   Model = gpt-4.1
-'   OAuth2 = False
-'   ...
-'
-' VarName "INI_APIKey" is stripped to "APIKey" for INI output (remove "INI_" prefix).
-' Temperature is normalized to dot decimal separator (0.2 not 0,2) via CultureInfo.InvariantCulture.
-'
-' Error Handling:
-' ---------------
-'   - Remote download failures: Debug.WriteLine, silent (never block wizard)
-'   - Validation failures: ShowCustomMessageBox, return False, keep wizard open
-'   - File I/O errors: ShowCustomMessageBox in CreateAppConfig()
-'   - Provider switching errors: Try/Catch in cmbProvider_SelectedIndexChanged (ignore timing issues)
-'   - Parsing errors: TryParseRemoteDefaults returns False, wizard continues with built-in defaults
-'
-' Thread Safety:
-' --------------
-' NOT thread-safe. Must run on UI thread (standard WinForms requirement).
-' Remote download uses synchronous Wait() on HttpClient.GetStringAsync task.
-'
-' Performance:
+' File Output:
 ' ------------
-'   - Form initialization: <100ms for built-in providers
-'   - Remote defaults check: 10s timeout, user-prompted (opt-in)
-'   - UI rendering: Dynamic control creation for 9-13 fields per provider (~50ms)
-'   - Validation: Inline per-field checks, <1ms total
-'   - INI file write: <10ms per file
+' CreateAppConfig() writes a minimal INI using SharedMethods.GetDefaultINIPath(appName).
 '
-' Extension Points:
-' -----------------
-'   - Add provider: Extend PrepareConfigData() with new SubAdd() call
-'   - Custom validation: Add case to ValidateAllConfigs()
-'   - UI controls: Modify LoadConfigForSelectedProvider() to support ComboBox, NumericUpDown, etc.
-'   - Remote source: Change RemoteDefaultsUrl to organization-specific config server
-'   - Localization: Replace hardcoded English strings with resource file lookups
-'
-' Maintenance Notes:
-' ------------------
-'   - When adding provider: Update PrepareConfigData, optionally add to defaultOrder list
-'   - When adding VarName: Update btnOK_Click Select Case for ISharedContext mapping
-'   - When adding validation rule: Update ValidateAllConfigs() and AppConfigurationVariable.vb docs
-'   - Test with various screen sizes (min 900px, max 80% screen width)
-'   - Test decimal separator handling with European regional settings (comma separator)
-'
-' Dependencies:
-' -------------
-'   - AppConfigurationVariable.vb: Data model for configuration fields
-'   - ISharedContext (SharedContext.vb): Configuration storage interface
-'   - SharedMethods: UI helpers (ShowCustomMessageBox, ShowCustomYesNoBox, GetDefaultINIPath, etc.)
-'   - System.Windows.Forms: Form, Controls, DialogResult
-'   - System.Net.Http: HttpClient for remote defaults download
-'   - System.Drawing: Font, Color, Size, Point, Bitmap
-'
-' Known Limitations:
-' ------------------
-'   - VarType="String" for all fields; UI always renders TextBox (no ComboBox, NumericUpDown, etc.)
-'   - Email validation is simplistic (contains "@" check)
-'   - Remote defaults use custom INI format (not standard INI parser)
-'   - No undo/redo for configuration edits
-'   - No field-level tooltips (only provider-level notes at bottom)
-'
+' Known Comment/Code Mismatches to keep in mind:
+' ----------------------------------------------
+' - The layout uses a bottom "invisibleLabel" to force height computation; it is currently
+'   Visible=True (not invisible).
 ' =============================================================================
 
 Option Strict On
@@ -199,10 +74,9 @@ Namespace SharedLibrary
     ''' Guides users through provider selection, credential entry, and INI file generation.
     ''' </summary>
     ''' <remarks>
-    ''' Supports 6 providers (OpenAI, Azure, Google Gemini/Vertex, MTF, SafeSwissCloud).
-    ''' Each provider has 9-13 configuration fields with validation.
-    ''' State preserved when switching providers. Optional remote config updates.
-    ''' See file header (lines 1-200) for architecture details.
+    ''' Supports provider-specific templates stored as <see cref="AppConfigurationVariable"/> lists.
+    ''' State is preserved when switching providers by copying current TextBox content into each
+    ''' variable's <c>CurrentValue</c>.
     ''' </remarks>
     Public Class InitialConfig
         Inherits Form
@@ -210,16 +84,16 @@ Namespace SharedLibrary
         ''' <summary>Shared configuration context passed ByRef from host add-in (Word/Excel/Outlook).</summary>
         Private _context As ISharedContext
 
-        ''' <summary>Provider selection dropdown. Items populated from providerConfigs keys.</summary>
+        ''' <summary>Provider selection dropdown. Items populated from <c>providerConfigs</c> keys.</summary>
         Private WithEvents cmbProvider As ComboBox
 
-        ''' <summary>Checkbox: Apply configuration to Word add-in (creates %APPDATA%\redink.ini).</summary>
+        ''' <summary>Checkbox: Apply configuration to Word add-in (uses <c>GetDefaultINIPath("Word")</c>).</summary>
         Private chkWord As System.Windows.Forms.CheckBox
 
-        ''' <summary>Checkbox: Apply configuration to Outlook add-in (creates separate config file).</summary>
+        ''' <summary>Checkbox: Apply configuration to Outlook add-in (uses <c>GetDefaultINIPath("Outlook")</c>).</summary>
         Private chkOutlook As System.Windows.Forms.CheckBox
 
-        ''' <summary>Checkbox: Apply configuration to Excel add-in (creates separate config file).</summary>
+        ''' <summary>Checkbox: Apply configuration to Excel add-in (uses <c>GetDefaultINIPath("Excel")</c>).</summary>
         Private chkExcel As System.Windows.Forms.CheckBox
 
         ''' <summary>Scrollable panel containing dynamically generated Label+TextBox pairs for selected provider.</summary>
@@ -228,50 +102,57 @@ Namespace SharedLibrary
         ''' <summary>Label displaying "Configuration For {ProviderName}:" above configuration fields.</summary>
         Private lblCurrentProvider As System.Windows.Forms.Label
 
-        ''' <summary>Provider-to-configuration mapping. Key: Provider name, Value: List of 9-13 AppConfigurationVariable instances.</summary>
+        ''' <summary>
+        ''' Provider-to-configuration mapping. Key: provider name, Value: list of provider variables.
+        ''' </summary>
         Private providerConfigs As New Dictionary(Of String, List(Of AppConfigurationVariable))(StringComparer.OrdinalIgnoreCase)
 
-        ''' <summary>Optional per-provider notes displayed below configuration fields as gray Label.</summary>
+        ''' <summary>Optional per-provider note displayed at the bottom of the provider field list.</summary>
         Private providerNotes As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
 
-        ''' <summary>List of controls (Label, TextBox, note Label) currently displayed in panelConfig.</summary>
+        ''' <summary>
+        ''' Controls currently displayed in <c>panelConfig</c>.
+        ''' Expected layout order: Label, TextBox, Label, TextBox, ... plus optional note Label at the end.
+        ''' </summary>
         Private currentConfigControls As New List(Of Control)
 
-        ''' <summary>OK button: Validates input, maps to ISharedContext, writes INI files, closes wizard.</summary>
+        ''' <summary>OK button: Validates input, maps to <see cref="ISharedContext"/>, writes INI files, closes wizard.</summary>
         Private btnOK As Button
 
-        ''' <summary>Cancel button: Sets DialogResult.Cancel, InitialConfigFailed = True, closes wizard.</summary>
+        ''' <summary>Cancel button: Sets DialogResult.Cancel, <c>InitialConfigFailed=True</c>, closes wizard.</summary>
         Private btnCancel As Button
 
-        ''' <summary>Target width for form content (900px base + 150px, capped at 80% of screen width).</summary>
+        ''' <summary>Target width for form content: <c>Min(OverallWidth + 150, 80% of screen width)</c>.</summary>
         Private ReadOnly _targetWidth As Integer
 
-        ''' <summary>Flag to prevent event handlers from firing during InitializeComponent().</summary>
+        ''' <summary>Flag to prevent layout/event handlers from acting during initialization.</summary>
         Private isInitializing As Boolean = False
 
-        ''' <summary>Invisible 1x10 label positioned at bottom of form to force height recalculation.</summary>
+        ''' <summary>
+        ''' Bottom spacer label used to force height recalculation.
+        ''' Note: This label is currently configured with <c>Visible=True</c>.
+        ''' </summary>
         Private invisibleLabel As New System.Windows.Forms.Label() With {
             .Size = New System.Drawing.Size(1, 10),
             .Visible = True
         }
 
-        ''' <summary>Base width constant for form layout (900px). Actual target width = OverallWidth + 150, capped at 80% screen width.</summary>
+        ''' <summary>Base width constant used for responsive layout calculations.</summary>
         Private Const OverallWidth As Integer = 900
 
-        ''' <summary>Label for "Use this config for Red Ink:" checkbox row. Positioned dynamically below panelConfig.</summary>
+        ''' <summary>Label for the "Use this config ..." checkbox row (positioned dynamically below <c>panelConfig</c>).</summary>
         Private lblUseThisConfig As System.Windows.Forms.Label
 
-        ''' <summary>Tracks the provider whose fields are currently displayed in panelConfig. Used for state management during provider switching.</summary>
+        ''' <summary>
+        ''' Tracks the provider whose fields are currently displayed in <c>panelConfig</c>.
+        ''' Used to save/restore values during provider switching.
+        ''' </summary>
         Private _activeProvider As String = "OpenAI"
 
         ''' <summary>
-        ''' Constructor: Initializes wizard with shared configuration context and responsive layout.
+        ''' Initializes the wizard with the provided shared configuration context.
         ''' </summary>
         ''' <param name="context">Shared configuration interface passed ByRef from host add-in.</param>
-        ''' <remarks>
-        ''' Computes _targetWidth = Min(1050px, 80% screen width) for responsive layout.
-        ''' Sets form size, disables AutoScroll, calls InitializeComponent(), sets FormBorderStyle = Fixed3D.
-        ''' </remarks>
         Public Sub New(ByRef context As ISharedContext)
             _context = context
             _targetWidth = Math.Min(OverallWidth + 150, CInt(Screen.PrimaryScreen.WorkingArea.Width * 0.8))
@@ -282,15 +163,12 @@ Namespace SharedLibrary
             Me.FormBorderStyle = FormBorderStyle.Fixed3D
         End Sub
 
-
         ''' <summary>
         ''' Builds the wizard UI by creating and positioning all form controls.
         ''' </summary>
         ''' <remarks>
-        ''' Creates responsive layout (900-1050px width) with header, provider ComboBox, 
-        ''' dynamic configuration panel, application checkboxes, and OK/Cancel buttons.
-        ''' ComboBox width: Min(670, Max(300, available space)). Panel width: _targetWidth.
-        ''' See file header for detailed layout structure.
+        ''' This method also builds provider templates via <see cref="PrepareConfigData"/> and then renders the
+        ''' first provider's fields via <see cref="LoadConfigForSelectedProvider"/>.
         ''' </remarks>
         Private Sub InitializeComponent()
             isInitializing = True
@@ -307,7 +185,7 @@ Namespace SharedLibrary
             Me.Font = standardFont
 
             ' PictureBox (Logo)
-            Dim bmp As New Bitmap(My.Resources.Red_Ink_Logo_Large)
+            Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Large))
             Dim pictureBox As New PictureBox() With {
             .Image = bmp,
             .SizeMode = PictureBoxSizeMode.Zoom
@@ -346,7 +224,7 @@ Namespace SharedLibrary
                 $"How all this works is explained in the manual, which you can find at {SharedMethods.AN4}." &
                 If(String.IsNullOrWhiteSpace(defaultWordPath),
                    "",
-                   $" {AN2} will be stored at {defaultWordPath} for Word, which will also be used by Excel and Outlook unless they have their own {SharedMethods.AN2}.ini.")
+                   $" {SharedMethods.AN2} will be stored at {defaultWordPath} for Word, which will also be used by Excel and Outlook unless they have their own {SharedMethods.AN2}.ini.")
         }
             lblInfo.Location = New System.Drawing.Point(10, pictureBox.Bottom + 15)
             AddHandler lblInfo.LinkClicked, AddressOf LinkLabel_LinkClicked
@@ -482,10 +360,11 @@ Namespace SharedLibrary
             isInitializing = False
         End Sub
 
-
         ''' <summary>
-        ''' Event handler for panel size changes. Repositions controls below panel and adjusts form height.
+        ''' Handles panel size changes by repositioning controls below <c>panelConfig</c> and adjusting the form height.
         ''' </summary>
+        ''' <param name="sender">The <see cref="Panel"/> whose size changed.</param>
+        ''' <param name="e">Event arguments.</param>
         Private Sub PanelConfig_SizeChanged(sender As Object, e As EventArgs)
             If isInitializing OrElse lblUseThisConfig Is Nothing Then Exit Sub
             Dim panel = DirectCast(sender, Panel)
@@ -499,15 +378,14 @@ Namespace SharedLibrary
             Me.Height = invisibleLabel.Bottom + 20
         End Sub
 
-
         ''' <summary>
         ''' Builds provider configuration templates with default values and optional notes.
         ''' </summary>
         ''' <remarks>
         ''' Creates templates for 6 providers (OpenAI, Azure, Google Gemini, Google Vertex, MTF, SafeSwissCloud).
-        ''' Each has 9-13 fields. Google Vertex includes 4 OAuth2 fields. Validation rules: NotEmpty, Hyperlink, E-Mail, >0, 0.0-2.0.
-        ''' Calls TryOverrideDefaultsFromRemote() to check for updated templates. Performance: ~20ms local, 10s max remote (user opt-in).
-        ''' See file header "Provider Templates" section for field-by-field documentation.
+        ''' Each has 9-13 fields. Google Vertex includes 4 OAuth2 fields.
+        ''' Temperature validation is implemented either via explicit range rule "0.0-2.0" or via max-value literals (e.g., "2.0").
+        ''' Calls <see cref="TryOverrideDefaultsFromRemote"/> to optionally replace built-in defaults with remote defaults.
         ''' </remarks>
         Private Sub PrepareConfigData()
             providerConfigs.Clear()
@@ -530,18 +408,18 @@ Namespace SharedLibrary
                     providerConfigs(name) = clone
                 End Sub
 
-            ' OPENAI provider (9 fields + payment note)
+            ' OPENAI provider (10 fields + payment note)
             SubAdd("OpenAI",
                 New List(Of AppConfigurationVariable) From {
-                    New AppConfigurationVariable With {.DisplayName = "API Key:", .VarName = "INI_APIKey", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = ""},
-                    New AppConfigurationVariable With {.DisplayName = "Temperature:", .VarName = "INI_Temperature", .VarType = "String", .ValidationRule = "2.0", .DefaultValue = "0.2"},
+                    New AppConfigurationVariable With {.DisplayName = "API Key:", .VarName = "INI_APIKey", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "[[Your OpenAI API Key]]"},
                     New AppConfigurationVariable With {.DisplayName = "Timeout (ms):", .VarName = "INI_Timeout", .VarType = "Integer", .ValidationRule = ">0", .DefaultValue = "200000"},
-                    New AppConfigurationVariable With {.DisplayName = "Model:", .VarName = "INI_Model", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "gpt-5.1"},
-                    New AppConfigurationVariable With {.DisplayName = "Endpoint:", .VarName = "INI_Endpoint", .VarType = "String", .ValidationRule = "Hyperlink", .DefaultValue = "https://api.openai.com/v1/chat/completions"},
+                    New AppConfigurationVariable With {.DisplayName = "Model:", .VarName = "INI_Model", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "gpt-5.2"},
+                    New AppConfigurationVariable With {.DisplayName = "Endpoint:", .VarName = "INI_Endpoint", .VarType = "String", .ValidationRule = "Hyperlink", .DefaultValue = "https://api.openai.com/v1/responses"},
                     New AppConfigurationVariable With {.DisplayName = "HeaderA:", .VarName = "INI_HeaderA", .VarType = "String", .ValidationRule = "", .DefaultValue = "Authorization"},
                     New AppConfigurationVariable With {.DisplayName = "HeaderB:", .VarName = "INI_HeaderB", .VarType = "String", .ValidationRule = "", .DefaultValue = "Bearer {apikey}"},
-                    New AppConfigurationVariable With {.DisplayName = "APICall:", .VarName = "INI_APICall", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "{""model"":   ""{model}"",  ""messages"": [{""role"": ""system"",""content"": ""{promptsystem}""},{""role"": ""user"",""content"": ""{promptuser}""}],""temperature"": {temperature}}"},
-                    New AppConfigurationVariable With {.DisplayName = "Response tag:", .VarName = "INI_Response", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "content"}
+                    New AppConfigurationVariable With {.DisplayName = "APICall:", .VarName = "INI_APICall", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "{""model"": ""{model}"", ""input"": [{""role"": ""developer"", ""content"": [{""type"": ""input_text"",""text"": ""{promptsystem}""}]},{""role"": ""user"",""content"": [{""type"": ""input_text"",""text"": ""{promptuser}""}{objectcall}]}],""reasoning"": {""effort"": ""low""}}"},
+                    New AppConfigurationVariable With {.DisplayName = "APICall_Object:", .VarName = "INI_APICall_Object", .VarType = "String", .ValidationRule = "", .DefaultValue = "[application/pdf],{""type"": ""input_file"",""filename"": ""userfile.pdf"", ""file_data"": ""data:{mimetype};base64,{encodeddata}""}¦[image/png,image/jpeg,image/webp, image/gif],{""type"": ""input_image"",""image_url"": ""data:{mimetype};base64,{encodeddata}""}"},
+                    New AppConfigurationVariable With {.DisplayName = "Response tag:", .VarName = "INI_Response", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "text (rkmode_first)"}
                 })
             providerNotes("OpenAI") = "Note: When generating the API key with OpenAI, make sure you have added a valid payment method (e.g., credit card), even if you use ChatGPT for free or with an already paid subscription. You still need the payment method and a budget to pay for the actual consumption (costs are in our experience low)."
 
@@ -549,22 +427,22 @@ Namespace SharedLibrary
             SubAdd("Microsoft Azure OpenAI Services",
                 New List(Of AppConfigurationVariable) From {
                     New AppConfigurationVariable With {.DisplayName = "API Key:", .VarName = "INI_APIKey", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = ""},
-                    New AppConfigurationVariable With {.DisplayName = "Temperature:", .VarName = "INI_Temperature", .VarType = "String", .ValidationRule = "0.0-2.0", .DefaultValue = "0.2"},
+                    New AppConfigurationVariable With {.DisplayName = "Temperature:", .VarName = "INI_Temperature", .VarType = "String", .ValidationRule = "0.0-2.0", .DefaultValue = "1.0"},
                     New AppConfigurationVariable With {.DisplayName = "Timeout (ms):", .VarName = "INI_Timeout", .VarType = "Integer", .ValidationRule = ">0", .DefaultValue = "200000"},
-                    New AppConfigurationVariable With {.DisplayName = "Model:", .VarName = "INI_Model", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "gpt-4.1"},
-                    New AppConfigurationVariable With {.DisplayName = "Endpoint:", .VarName = "INI_Endpoint", .VarType = "String", .ValidationRule = "Hyperlink", .DefaultValue = "https://[your endpoint]/openai/deployments/[your deployment-id]/chat/completions?api-version=2024-06-01"},
+                    New AppConfigurationVariable With {.DisplayName = "Model:", .VarName = "INI_Model", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "gpt-5.2"},
+                    New AppConfigurationVariable With {.DisplayName = "Endpoint:", .VarName = "INI_Endpoint", .VarType = "String", .ValidationRule = "Hyperlink", .DefaultValue = "https://[[Your Azure Endpoint]]/openai/deployments/[your deployment-id]/chat/completions?api-version=2024-06-01"},
                     New AppConfigurationVariable With {.DisplayName = "HeaderA:", .VarName = "INI_HeaderA", .VarType = "String", .ValidationRule = "", .DefaultValue = "api-key"},
                     New AppConfigurationVariable With {.DisplayName = "HeaderB:", .VarName = "INI_HeaderB", .VarType = "String", .ValidationRule = "", .DefaultValue = "{apikey}"},
                     New AppConfigurationVariable With {.DisplayName = "APICall:", .VarName = "INI_APICall", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "{""messages"": [{""role"": ""system"",""content"": ""{promptsystem}""},{""role"": ""user"", ""content"": ""{promptuser}""}],""temperature"": {temperature}}"},
-                    New AppConfigurationVariable With {.DisplayName = "Response tag:", .VarName = "INI_Response", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "content"}
+                    New AppConfigurationVariable With {.DisplayName = "Response tag:", .VarName = "INI_Response", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "content (rkmode_first)"}
                 })
-            providerNotes("Microsoft Azure OpenAI Services") = ""
+            providerNotes("Microsoft Azure OpenAI Services") = "These may not be the latest possible settings available in your environment. Check your documentation to update this."
 
             ' GOOGLE GEMINI provider (9 fields, no note)
             SubAdd("Google Gemini",
                 New List(Of AppConfigurationVariable) From {
-                    New AppConfigurationVariable With {.DisplayName = "API Key:", .VarName = "INI_APIKey", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = ""},
-                    New AppConfigurationVariable With {.DisplayName = "Temperature:", .VarName = "INI_Temperature", .VarType = "String", .ValidationRule = "2.0", .DefaultValue = "0.2"},
+                    New AppConfigurationVariable With {.DisplayName = "API Key:", .VarName = "INI_APIKey", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "[[Your Google API Key]]"},
+                    New AppConfigurationVariable With {.DisplayName = "Temperature:", .VarName = "INI_Temperature", .VarType = "String", .ValidationRule = "0.0-2.0", .DefaultValue = "0.2"},
                     New AppConfigurationVariable With {.DisplayName = "Timeout (ms):", .VarName = "INI_Timeout", .VarType = "Integer", .ValidationRule = ">0", .DefaultValue = "200000"},
                     New AppConfigurationVariable With {.DisplayName = "Model:", .VarName = "INI_Model", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "gemini-2.5-pro"},
                     New AppConfigurationVariable With {.DisplayName = "Endpoint:", .VarName = "INI_Endpoint", .VarType = "String", .ValidationRule = "Hyperlink", .DefaultValue = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={apikey}"},
@@ -575,25 +453,25 @@ Namespace SharedLibrary
                 })
             providerNotes("Google Gemini") = ""
 
-            ' GOOGLE VERTEX provider (13 fields: 9 common + 4 OAuth2, includes service account note)
+            ' GOOGLE VERTEX provider (14 fields: 10 common + APICall_Object + 4 OAuth2, includes service account note)
             SubAdd("Google Vertex",
                 New List(Of AppConfigurationVariable) From {
-                    New AppConfigurationVariable With {.DisplayName = "Private Key (barebones, not PEM):", .VarName = "INI_APIKey", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = ""},
+                    New AppConfigurationVariable With {.DisplayName = "Private Key (barebones, not PEM):", .VarName = "INI_APIKey", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "[[Your Google private_key]]"},
                     New AppConfigurationVariable With {.DisplayName = "Temperature:", .VarName = "INI_Temperature", .VarType = "String", .ValidationRule = "2.0", .DefaultValue = "0.2"},
                     New AppConfigurationVariable With {.DisplayName = "Timeout (ms):", .VarName = "INI_Timeout", .VarType = "Integer", .ValidationRule = ">0", .DefaultValue = "200000"},
                     New AppConfigurationVariable With {.DisplayName = "Model:", .VarName = "INI_Model", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "gemini-2.5-pro"},
-                    New AppConfigurationVariable With {.DisplayName = "Endpoint:", .VarName = "INI_Endpoint", .VarType = "String", .ValidationRule = "Hyperlink", .DefaultValue = "https://europe-west1-aiplatform.googleapis.com/v1/projects/[your project ID]/locations/europe-west1/publishers/google/models/{model}:generateContent"},
+                    New AppConfigurationVariable With {.DisplayName = "Endpoint:", .VarName = "INI_Endpoint", .VarType = "String", .ValidationRule = "Hyperlink", .DefaultValue = "https://europe-west4-aiplatform.googleapis.com/v1/projects/[[Your Google project_id]]/locations/europe-west4/publishers/google/models/{model}:generateContent"},
                     New AppConfigurationVariable With {.DisplayName = "HeaderA:", .VarName = "INI_HeaderA", .VarType = "String", .ValidationRule = "", .DefaultValue = "Authorization"},
                     New AppConfigurationVariable With {.DisplayName = "HeaderB:", .VarName = "INI_HeaderB", .VarType = "String", .ValidationRule = "", .DefaultValue = "Bearer {apikey}"},
-                    New AppConfigurationVariable With {.DisplayName = "APICall:", .VarName = "INI_APICall", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "{""contents"": [{""role"": ""user"", ""parts"":[{""text"": ""{promptsystem} {promptuser}""}]}], ""generationConfig"": {""temperature"": {temperature}}}"},
+                    New AppConfigurationVariable With {.DisplayName = "APICall:", .VarName = "INI_APICall", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "{""contents"": [{""role"": ""user"", ""parts"":[{""text"": ""{promptsystem} {promptuser}""}{objectcall}]}], ""generationConfig"": {""temperature"": {temperature},  ""thinking_config"": {""thinking_budget"": 128}}}"},
+                    New AppConfigurationVariable With {.DisplayName = "APICall_Object:", .VarName = "INI_APICall_Object", .VarType = "String", .ValidationRule = "", .DefaultValue = ", {""inlineData"": {""mimeType"": ""{mimetype}"",""data"": ""{encodeddata}""}}"},
                     New AppConfigurationVariable With {.DisplayName = "Response tag:", .VarName = "INI_Response", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "text"},
-                    New AppConfigurationVariable With {.DisplayName = "OAuth2 'client_mail':", .VarName = "INI_OAuth2ClientMail", .VarType = "String", .ValidationRule = "E-Mail", .DefaultValue = "[service account mail]]@[your project ID].iam.gserviceaccount.com"},
+                    New AppConfigurationVariable With {.DisplayName = "OAuth2 'client_mail':", .VarName = "INI_OAuth2ClientMail", .VarType = "String", .ValidationRule = "E-Mail", .DefaultValue = "[[Your Google client_email]]"},
                     New AppConfigurationVariable With {.DisplayName = "OAuth2 'scopes':", .VarName = "INI_OAuth2Scopes", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "https://www.googleapis.com/auth/cloud-platform"},
                     New AppConfigurationVariable With {.DisplayName = "OAuth2 Endpoint:", .VarName = "INI_OAuth2Endpoint", .VarType = "String", .ValidationRule = "Hyperlink", .DefaultValue = "https://oauth2.googleapis.com/token"},
-                    New AppConfigurationVariable With {.DisplayName = "OAuth2 Access Token Expiry (ms):", .VarName = "INI_OAuth2ATExpiry", .VarType = "Integer", .ValidationRule = ">0", .DefaultValue = "3600"}
+                    New AppConfigurationVariable With {.DisplayName = "OAuth2 Access Token Expiry (seconds):", .VarName = "INI_OAuth2ATExpiry", .VarType = "Integer", .ValidationRule = ">0", .DefaultValue = "3600"}
                 })
             providerNotes("Google Vertex") = "Note: Requires OAuth2 service account to be configured via the GCP console. Private Key must be the raw key (not PEM)."
-
             ' MTF provider (9 fields, no note)
             SubAdd("MTF",
                 New List(Of AppConfigurationVariable) From {
@@ -629,7 +507,13 @@ Namespace SharedLibrary
 
         End Sub
 
-        ''' <summary>Downloads remote configuration text from URL with timeout. Returns True on success.</summary>
+        ''' <summary>
+        ''' Downloads text content from a URL with a timeout.
+        ''' </summary>
+        ''' <param name="url">URL to download.</param>
+        ''' <param name="timeoutMs">Timeout in milliseconds. A minimum timeout of 10 seconds is enforced.</param>
+        ''' <param name="content">On success, receives the downloaded text.</param>
+        ''' <returns>True when non-empty content was downloaded; otherwise False.</returns>
         Private Function TryDownloadString(url As String, timeoutMs As Integer, ByRef content As String) As Boolean
             content = Nothing
             Try
@@ -662,7 +546,20 @@ Namespace SharedLibrary
             Return False
         End Function
 
-        ''' <summary>Parses remote INI-format configuration text into provider dictionaries. Custom INI parser for pipe-delimited field definitions.</summary>
+        ''' <summary>
+        ''' Parses remote INI-format configuration text into provider dictionaries.
+        ''' </summary>
+        ''' <param name="ini">Remote INI text.</param>
+        ''' <param name="outConfigs">On success, receives provider configuration templates.</param>
+        ''' <param name="outNotes">On success, receives optional provider notes.</param>
+        ''' <returns>True on successful parse with at least one provider; otherwise False.</returns>
+        ''' <remarks>
+        ''' Format per section:
+        ''' <c>[ProviderName]</c>
+        ''' <c>FieldN = DisplayName|VarName|VarType|ValidationRule|DefaultValue</c>
+        ''' <c>Note = ...</c>
+        ''' Lines starting with <c>;</c> or <c>#</c> are ignored.
+        ''' </remarks>
         Private Function TryParseRemoteDefaults(ini As String,
                                             ByRef outConfigs As Dictionary(Of String, List(Of AppConfigurationVariable)),
                                             ByRef outNotes As Dictionary(Of String, String)) As Boolean
@@ -759,7 +656,12 @@ Namespace SharedLibrary
             Return False
         End Function
 
-        ''' <summary>Compares two strings for equality with JSON-aware whitespace normalization.</summary>
+        ''' <summary>
+        ''' Compares two strings for equality using normalization suitable for JSON-like payloads.
+        ''' </summary>
+        ''' <param name="a">First string.</param>
+        ''' <param name="b">Second string.</param>
+        ''' <returns>True if values are considered equal; otherwise False.</returns>
         Private Function StringsEqual(a As String, b As String) As Boolean
             If Object.ReferenceEquals(a, b) Then Return True
             If a Is Nothing OrElse b Is Nothing Then
@@ -782,8 +684,14 @@ Namespace SharedLibrary
             Return False
         End Function
 
-
-        ''' <summary>Removes all whitespace characters outside of quoted strings. Used by StringsEqual() for JSON-aware comparison.</summary>
+        ''' <summary>
+        ''' Removes whitespace characters occurring outside of quoted strings.
+        ''' </summary>
+        ''' <param name="s">Input string.</param>
+        ''' <returns>Normalized string without whitespace outside quotes.</returns>
+        ''' <remarks>
+        ''' Used by <see cref="StringsEqual"/> to compare JSON-like text while ignoring formatting differences.
+        ''' </remarks>
         Private Function StripWsOutsideQuotes(s As String) As String
             Dim sb As New StringBuilder(s.Length)
             Dim inStr As Boolean = False
@@ -813,7 +721,14 @@ Namespace SharedLibrary
             Return sb.ToString()
         End Function
 
-        ''' <summary>Performs deep comparison of local vs. remote provider configurations. Returns True if differences detected.</summary>
+        ''' <summary>
+        ''' Performs deep comparison of local vs. remote provider configurations.
+        ''' </summary>
+        ''' <param name="localCfg">Local provider templates.</param>
+        ''' <param name="localNotes">Local provider notes.</param>
+        ''' <param name="remoteCfg">Remote provider templates.</param>
+        ''' <param name="remoteNotes">Remote provider notes.</param>
+        ''' <returns>True if differences are detected; otherwise False.</returns>
         Private Function AreDifferent(localCfg As Dictionary(Of String, List(Of AppConfigurationVariable)),
                                   localNotes As Dictionary(Of String, String),
                                   remoteCfg As Dictionary(Of String, List(Of AppConfigurationVariable)),
@@ -924,16 +839,15 @@ Namespace SharedLibrary
 
         ''' <summary>
         ''' Attempts to download and apply remote provider configuration defaults.
-        ''' Prompts user for download permission, compares with local defaults, optionally overrides.
         ''' </summary>
         ''' <remarks>
-        ''' Prompts user to check RemoteDefaultsUrl for updated defaults. Downloads via TryDownloadString (10s timeout),
-        ''' parses via TryParseRemoteDefaults, compares via AreDifferent. If differences found, prompts to override.
-        ''' Never blocks wizard startup on network errors (all failures silent). Performance: ~200ms on fast network, 10s max timeout.
+        ''' Uses <c>RemoteDefaultsUrl</c> as the remote source and asks the user before downloading.
+        ''' If remote defaults differ from built-in defaults, the user can choose to replace the built-in maps.
+        ''' Network and parsing failures are caught and ignored.
         ''' </remarks>
         Private Sub TryOverrideDefaultsFromRemote()
 
-            Dim answer = ShowCustomYesNoBox($"You are about to run the {AN} Installation Wizard. Do you want to check on {RemoteDefaultsUrl} for updated default configuration information?", "Yes", "No, keep built-in")
+            Dim answer = ShowCustomYesNoBox($"You are about to run the {SharedMethods.AN} Installation Wizard. Do you want to check on {RemoteDefaultsUrl} for updated default configuration information?", "Yes", "No, keep built-in")
 
             If answer <> 1 Then Return
 
@@ -949,7 +863,7 @@ Namespace SharedLibrary
 
                 If AreDifferent(providerConfigs, providerNotes, rCfg, rNotes) Then
                     Dim choice = SharedMethods.ShowCustomYesNoBox(
-                    "Updated Default provider configurations are available online. Do you want To load And use those instead Of the built-In defaults now?",
+                    "Updated Default provider configurations are available online. Do you want To load and use those instead Of the built-In defaults now?",
                     "Use online defaults",
                     "Keep built-In")
 
@@ -967,9 +881,9 @@ Namespace SharedLibrary
             End Try
         End Sub
 
-
-
-        ''' <summary>Event handler for provider selection change. Saves current provider's input, switches active provider, regenerates UI.</summary>
+        ''' <summary>
+        ''' Handles provider selection changes by saving current inputs, switching the active provider, and rebuilding the provider UI.
+        ''' </summary>
         Private Sub cmbProvider_SelectedIndexChanged(sender As Object, e As EventArgs) Handles cmbProvider.SelectedIndexChanged
             Try
                 ' Step 1: Save values into the previously displayed provider
@@ -988,7 +902,12 @@ Namespace SharedLibrary
             End Try
         End Sub
 
-        ''' <summary>Copies current UI input (TextBox values) to AppConfigurationVariable.CurrentValue for active provider.</summary>
+        ''' <summary>
+        ''' Copies the current panel input into <see cref="AppConfigurationVariable.CurrentValue"/> for the active provider.
+        ''' </summary>
+        ''' <remarks>
+        ''' Relies on <c>currentConfigControls</c> being ordered as Label/TextBox pairs and matches variables by <c>DisplayName</c>.
+        ''' </remarks>
         Private Sub SaveCurrentInputToConfig()
             Dim selectedList = GetSelectedConfigList()
             If selectedList Is Nothing OrElse currentConfigControls.Count = 0 Then Return
@@ -1010,9 +929,13 @@ Namespace SharedLibrary
             Next
         End Sub
 
-
-        ''' <summary>Saves current UI inputs into specified provider config list during provider switching.</summary>
-        ''' <param name="targetConfig">Provider's variable list to update (from GetConfigListByName).</param>
+        ''' <summary>
+        ''' Saves current UI inputs into a specified provider config list during provider switching.
+        ''' </summary>
+        ''' <param name="targetConfig">Provider variable list to update.</param>
+        ''' <remarks>
+        ''' Relies on <c>currentConfigControls</c> being ordered as Label/TextBox pairs and matches variables by <c>DisplayName</c>.
+        ''' </remarks>
         Private Sub SaveCurrentInputToSpecificConfig(targetConfig As List(Of AppConfigurationVariable))
             If targetConfig Is Nothing OrElse currentConfigControls.Count = 0 Then Return
 
@@ -1031,11 +954,12 @@ Namespace SharedLibrary
             Next
         End Sub
 
-        ''' <summary>Dynamically generates Label+TextBox pairs for selected provider's configuration fields.</summary>
+        ''' <summary>
+        ''' Dynamically generates Label+TextBox pairs for the active provider's configuration fields.
+        ''' </summary>
         ''' <remarks>
-        ''' Two-pass layout: Pass 1 calculates max label width, Pass 2 creates controls.
-        ''' TextBox width = panelConfig.Width - maxLabelWidth - 30px. Sets panel height, triggers PanelConfig_SizeChanged.
-        ''' Performance: ~30ms per provider switch (9-13 fields). See file header for layout details.
+        ''' Creates a label and a textbox per configuration variable, then optionally appends a note label.
+        ''' The note label is informational only; it does not map to any <see cref="AppConfigurationVariable"/>.
         ''' </remarks>
         Private Sub LoadConfigForSelectedProvider()
             Dim selectedList As List(Of AppConfigurationVariable) = GetConfigListByName(_activeProvider)
@@ -1103,9 +1027,11 @@ Namespace SharedLibrary
             panelConfig.Height = yPos + 2
         End Sub
 
-        ''' <summary>Helper method to retrieve provider's configuration variable list by name.</summary>
+        ''' <summary>
+        ''' Retrieves a provider configuration list by provider name.
+        ''' </summary>
         ''' <param name="name">Provider name (e.g., "OpenAI", "Google Vertex").</param>
-        ''' <returns>List of AppConfigurationVariable instances, or Nothing if provider not found.</returns>
+        ''' <returns>Provider variable list, or Nothing if provider is not found.</returns>
         Private Function GetConfigListByName(name As String) As List(Of AppConfigurationVariable)
             If String.IsNullOrEmpty(name) Then Return Nothing
             Dim list As List(Of AppConfigurationVariable) = Nothing
@@ -1115,17 +1041,20 @@ Namespace SharedLibrary
             Return Nothing
         End Function
 
-        ''' <summary>Returns configuration variable list for currently active provider.</summary>
-        ''' <returns>List of AppConfigurationVariable instances for active provider, or Nothing if not found.</returns>
+        ''' <summary>
+        ''' Returns the variable list for the currently active provider.
+        ''' </summary>
+        ''' <returns>Provider variable list, or Nothing if provider is not found.</returns>
         Private Function GetSelectedConfigList() As List(Of AppConfigurationVariable)
             Return GetConfigListByName(_activeProvider)
         End Function
 
-        ''' <summary>OK button click handler. Validates input, maps to ISharedContext, writes INI files, closes wizard.</summary>
+        ''' <summary>
+        ''' OK button click handler.
+        ''' </summary>
         ''' <remarks>
-        ''' Execution: SaveCurrentInputToConfig → ValidateAllConfigs → Map VarName to ISharedContext → 
-        ''' CreateAppConfig (Word/Excel/Outlook) → Set DialogResult.OK, InitialConfigFailed=False, Close().
-        ''' Special case: Sets INI_OAuth2=True for Google Vertex. CInt() converts Timeout/OAuth2ATExpiry to Integer.
+        ''' Flow: SaveCurrentInputToConfig -> ValidateAllConfigs -> copy values to <see cref="ISharedContext"/> ->
+        ''' write INI files via <see cref="CreateAppConfig"/> -> close dialog.
         ''' </remarks>
         Private Sub btnOK_Click(sender As Object, e As EventArgs)
             Try
@@ -1155,6 +1084,7 @@ Namespace SharedLibrary
                         Case "INI_HeaderA" : _context.INI_HeaderA = cv.CurrentValue
                         Case "INI_HeaderB" : _context.INI_HeaderB = cv.CurrentValue
                         Case "INI_APICall" : _context.INI_APICall = cv.CurrentValue
+                        Case "INI_APICall_Object" : _context.INI_APICall_Object = cv.CurrentValue
                         Case "INI_Response" : _context.INI_Response = cv.CurrentValue
                         Case "INI_OAuth2ClientMail" : _context.INI_OAuth2ClientMail = cv.CurrentValue
                         Case "INI_OAuth2Scopes" : _context.INI_OAuth2Scopes = cv.CurrentValue
@@ -1176,29 +1106,47 @@ Namespace SharedLibrary
                 If chkExcel.Checked Then CreateAppConfig("Excel", providerName)
                 If chkOutlook.Checked Then CreateAppConfig("Outlook", providerName)
 
+                ShowCustomMessageBox(
+                            "You have completed a basic installation." & vbCrLf & vbCrLf &
+                            "To add more model configurations, Special Service configurations, get sample files " &
+                            "(including a prompt library) and change your settings, go to 'Settings', where you " &
+                            "will find in particular a button with 'Get More'. Use it." & vbCrLf & vbCrLf &
+                            $"Have fun using {SharedMethods.AN}!"
+                        )
+
                 ' Close wizard
                 Me.DialogResult = DialogResult.OK
                 _context.InitialConfigFailed = False
                 Me.Close()
 
             Catch ex As System.Exception
-                MessageBox.Show("Error in btnOK_Click: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                MessageBox.Show("Error finalizing configuration: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
             End Try
         End Sub
 
-        ''' <summary>Cancel button click handler. Closes wizard without saving, sets InitialConfigFailed flag.</summary>
+        ''' <summary>
+        ''' Cancel button click handler.
+        ''' </summary>
+        ''' <remarks>
+        ''' Closes the wizard without writing configuration files and sets <c>InitialConfigFailed=True</c>.
+        ''' </remarks>
         Private Sub btnCancel_Click(sender As Object, e As EventArgs)
             Me.DialogResult = DialogResult.Cancel
             _context.InitialConfigFailed = True
             Me.Close()
         End Sub
 
-        ''' <summary>Validates all configuration fields for active provider against validation rules.</summary>
-        ''' <returns>True if validation succeeded, False if failed (shows error, keeps wizard open).</returns>
+        ''' <summary>
+        ''' Validates all configuration fields for the active provider against validation rules.
+        ''' </summary>
+        ''' <returns>True if validation succeeded; otherwise False.</returns>
         ''' <remarks>
-        ''' Rules: NotEmpty, E-Mail (@), Hyperlink (http/https), >0 (positive int), 0.0-2.0 (range), \d+\.\d+ (max value).
-        ''' Accepts "." or "," as decimal separator. Validates app checkboxes (host must have at least one checked).
-        ''' BUG: "0.0-2.0" rule has early Return True (skips remaining fields).
+        ''' Validation rules are applied based on substring checks on <see cref="AppConfigurationVariable.ValidationRule"/>.
+        ''' Accepts "." or "," as decimal separator for the max-value validation rule.
+        '''
+        ''' Obvious issue in current implementation:
+        ''' The "0.0-2.0" rule returns True immediately after validating a single field and therefore skips the
+        ''' validation of remaining fields.
         ''' </remarks>
         Private Function ValidateAllConfigs() As Boolean
             Dim selectedList = GetSelectedConfigList()
@@ -1314,7 +1262,9 @@ Namespace SharedLibrary
             Return True
         End Function
 
-        ''' <summary>Event handler for LinkLabel clicks. Opens documentation URL in default browser.</summary>
+        ''' <summary>
+        ''' Handles a <see cref="LinkLabel.LinkClicked"/> event by opening the link target with the default application.
+        ''' </summary>
         Private Sub LinkLabel_LinkClicked(sender As Object, e As LinkLabelLinkClickedEventArgs)
             Try
                 Dim link = e.Link.LinkData.ToString()
@@ -1324,12 +1274,14 @@ Namespace SharedLibrary
             End Try
         End Sub
 
-        ''' <summary>Writes Red Ink configuration INI file for specified Office application.</summary>
+        ''' <summary>
+        ''' Writes a Red Ink configuration INI file for the specified Office application.
+        ''' </summary>
         ''' <param name="App">Office application name ("Word", "Excel", or "Outlook").</param>
-        ''' <param name="provider">Provider display name for INI comment.</param>
+        ''' <param name="provider">Provider display name for the INI comment.</param>
         ''' <remarks>
-        ''' Creates INI at %APPDATA%\redink.ini (Word) or app-specific paths (Excel/Outlook).
-        ''' Writes 14 keys. Temperature normalized to dot separator (0.2 not 0,2). UTF-8, CRLF. ~10ms per file.
+        ''' The output path is obtained via <see cref="SharedMethods.GetDefaultINIPath"/>.
+        ''' Temperature is normalized to a dot decimal separator using invariant culture formatting.
         ''' </remarks>
         Private Sub CreateAppConfig(App As String, provider As String)
             Try
@@ -1375,6 +1327,7 @@ Namespace SharedLibrary
                         {"HeaderB", _context.INI_HeaderB},
                         {"Response", _context.INI_Response},
                         {"APICall", _context.INI_APICall},
+                        {"APICall_Object", _context.INI_APICall_Object},
                         {"Timeout", _context.INI_Timeout.ToString()},
                         {"Temperature", normalizedTemp},
                         {"Model", _context.INI_Model},

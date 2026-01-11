@@ -1,21 +1,53 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
+' =============================================================================
+' File: ProgressForm.vb
+' Purpose:
+'   Provides a small modal WinForms dialog that displays a header, a progress bar,
+'   a status line, and a Cancel button.
+'
+' Architecture:
+'   - The form polls `ProgressBarModule` on a UI timer (250 ms) to update:
+'       - `ProgressBarModule.GlobalProgressMax`   -> progress bar maximum
+'       - `ProgressBarModule.GlobalProgressValue` -> progress bar value (clamped)
+'       - `ProgressBarModule.GlobalProgressLabel` -> status label text
+'   - If `ProgressBarModule.CancelOperation` becomes True, the form closes itself
+'     and returns `DialogResult.Cancel`.
+'   - Clicking Cancel sets `ProgressBarModule.CancelOperation` to True.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 
 Namespace SharedLibrary
 
+    ''' <summary>
+    ''' Modal progress/cancellation dialog that reflects progress state stored in <c>ProgressBarModule</c>.
+    ''' </summary>
     Public Class ProgressForm
         Inherits System.Windows.Forms.Form
 
+        ''' <summary>Progress bar reflecting <c>ProgressBarModule.GlobalProgressValue</c> and <c>.GlobalProgressMax</c>.</summary>
         Private WithEvents progressBar As System.Windows.Forms.ProgressBar
+
+        ''' <summary>Header label shown at the top of the dialog.</summary>
         Private WithEvents lblHeader As System.Windows.Forms.Label
+
+        ''' <summary>Status label shown under the progress bar.</summary>
         Private WithEvents lblStatus As System.Windows.Forms.Label
+
+        ''' <summary>Cancel button that sets <c>ProgressBarModule.CancelOperation</c>.</summary>
         Private WithEvents btnCancel As System.Windows.Forms.Button
+
+        ''' <summary>UI timer used to periodically poll <c>ProgressBarModule</c> and refresh the UI.</summary>
         Private WithEvents uiTimer As System.Windows.Forms.Timer
 
-        ' Constructor: receives the header text and the initial status text.
+        ''' <summary>
+        ''' Initializes a new instance of the progress dialog.
+        ''' </summary>
+        ''' <param name="headerText">Text displayed in the header label.</param>
+        ''' <param name="initialLabel">Initial text displayed in the status label.</param>
         Public Sub New(headerText As String, initialLabel As String)
             ' --- Use Font scaling ---
             Dim standardFont As New System.Drawing.Font(
@@ -35,8 +67,8 @@ Namespace SharedLibrary
             Me.ShowInTaskbar = False
             Me.Text = SharedMethods.AN ' headerText
 
-            ' --- Icon setzen ---
-            Dim bmp As New System.Drawing.Bitmap(My.Resources.Red_Ink_Logo)
+            ' --- Set icon ---
+            Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
             Me.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
 
             ' --- Header Label ---
@@ -87,7 +119,7 @@ Namespace SharedLibrary
 
             Me.Controls.Add(layout)
 
-            ' --- UI-Timer für periodische Updates ---
+            ' --- UI timer for periodic updates ---
             uiTimer = New System.Windows.Forms.Timer() With {
     .Interval = 250 ' Update every 250 ms
 }
@@ -95,7 +127,11 @@ Namespace SharedLibrary
             uiTimer.Start()
         End Sub
 
-        ' Timer tick event updates the progress bar and status label.
+        ''' <summary>
+        ''' Polls <c>ProgressBarModule</c> and updates the progress bar and status label; closes on cancellation.
+        ''' </summary>
+        ''' <param name="sender">Timer instance.</param>
+        ''' <param name="e">Event arguments.</param>
         Private Sub Timer_Tick(sender As Object, e As EventArgs)
             Try
                 ' Update the progress bar maximum and value.
@@ -116,12 +152,19 @@ Namespace SharedLibrary
             End Try
         End Sub
 
-        ' When the Cancel button is clicked, set the global cancel flag.
+        ''' <summary>
+        ''' Sets the global cancel flag.
+        ''' </summary>
+        ''' <param name="sender">The Cancel button.</param>
+        ''' <param name="e">Event arguments.</param>
         Private Sub btnCancel_Click(sender As Object, e As EventArgs)
             ProgressBarModule.CancelOperation = True
         End Sub
 
-        ' Stop the timer when the form is closed.
+        ''' <summary>
+        ''' Stops the UI timer and sets the cancel flag when the form is closed.
+        ''' </summary>
+        ''' <param name="e">Form closed event arguments.</param>
         Protected Overrides Sub OnFormClosed(e As System.Windows.Forms.FormClosedEventArgs)
             uiTimer.Stop()
             ProgressBarModule.CancelOperation = True

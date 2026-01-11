@@ -3,7 +3,6 @@
 
 ' =============================================================================
 ' File: AppConfigurationVariable.vb
-' Part of: Red Ink Shared Library
 ' Purpose: Data model for installation wizard configuration variables. Represents
 '          user-configurable settings (API keys, endpoints, timeouts, etc.) with
 '          metadata for dynamic UI generation, validation, and INI persistence.
@@ -34,9 +33,6 @@
 ' Dependencies:
 '   Consumed by: InitialConfig.vb (wizard form)
 '   Persisted to: ISharedContext properties -> INI files
-'
-' Thread Safety: Read-safe after construction; property setters NOT thread-safe.
-' Performance: Zero overhead; plain data class.
 ' =============================================================================
 
 Option Strict On

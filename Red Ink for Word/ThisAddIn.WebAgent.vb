@@ -1,33 +1,43 @@
 ﻿' Part of "Red Ink for Word"
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license terms see https://redink.ai.
 
 ' =============================================================================
 ' File: ThisAddIn.WebAgent.vb
-' Purpose: Implements WebAgent script selection, execution, and authoring capabilities
-'          for automated web interaction workflows driven by JSON scripts.
+' Purpose:
+'   Word add-in entry points for running and authoring WebAgent JSON scripts.
+'   This file contains UI-driven workflow orchestration; command semantics and
+'   step execution are implemented by `WebAgentInterpreter`.
 '
-' Architecture:
-'  - Script Discovery: Scans local and global directories (INI_WebAgentPathLocal, INI_WebAgentPath)
-'    for script files matching pattern '{AN2}-ag-*.json'. Local scripts take precedence.
-'  - Parameter & Secret Substitution: Pre-execution processing via ProcessParameterPlaceholders
-'    (handled by SharedLibrary) and ProcessWebAgentSecretPlaceholders (prompts user for secret values
-'    matching {{secret:Description; type}} pattern in env.secrets).
-'  - Pre-flight Validation: JSON parsing, confirmation dialogs for email send steps (ConfirmEmailSendSteps),
-'    relative URL warnings when base_url missing.
-'  - Interpreter Execution: WebAgentInterpreter.RunAsync executes script steps sequentially with support
-'    for retries, error handling, conditional branching, loops, LLM calls, HTTP operations, file I/O,
-'    templating, and email reporting.
-'  - Cancellation: ESC key monitoring via PollEscForCancel runs in background thread; cancels CancellationTokenSource
-'    on key press (debounced to prevent accidental triggers).
-'  - Output Handling: Final Markdown report displayed in custom dialog; user can insert into document,
-'    transfer to pane, or copy to clipboard (with optional Markdown-to-RTF conversion via InsertTextWithMarkdown).
-'  - Script Authoring (CreateModifyWebAgentScript): LLM-assisted creation or amendment of scripts.
-'    Provides WebAgentJSONInstruct and WebAgentParameterSpec as system prompts. Supports JSON validation
-'    with optional auto-correction loop. Saves to configured directories with .bak backup on overwrite.
-'  - Model Selection: Optional secondary API/model usage via INI_SecondAPI and INI_AlternateModelPath.
-'  - External Dependencies: WebAgentInterpreter class (interpreter logic), SharedLibrary.SharedMethods
-'    (UI dialogs, clipboard, text editor, model selection), Newtonsoft.Json (JSON parsing), Markdig
-'    (Markdown rendering for email HTML conversion).
+' Responsibilities (this file):
+'   - Script discovery and selection from configured directories:
+'       * `INI_WebAgentPathLocal` (preferred) and `INI_WebAgentPath`
+'       * pattern: `{AN2}-ag-*.json` (top directory only)
+'   - Pre-run substitutions:
+'       * user parameters via `SharedMethods.ProcessParameterPlaceholders`
+'       * secret placeholders in `env.secrets` via `ProcessWebAgentSecretPlaceholders`
+'         (prompts for values matching `{{secret:Description; type}}`)
+'   - Pre-flight validation and safety gates:
+'       * JSON parse/step presence validation
+'       * confirmation gate for `send_email_report` steps (`ConfirmEmailSendSteps`)
+'       * warnings for relative/scheme-less URLs when `env.base_url` is missing
+'   - Run control:
+'       * cancellation via `_webAgentRunCts` and an ESC polling task (`PollEscForCancel`)
+'   - Result handling:
+'       * shows final Markdown report and supports clipboard / document insertion /
+'         pane transfer (optionally via `InsertTextWithMarkdown`)
+'   - Script authoring workflow:
+'       * new or amend existing scripts (`CreateModifyWebAgentScript`)
+'       * saves to configured directory with `.bak` backup on overwrite
+'       * optional secondary model selection via `INI_SecondAPI` / `INI_AlternateModelPath`
+'
+' Threading notes:
+'   - ESC monitoring runs on a background `System.Threading.Tasks.Task`.
+'   - The interpreter run is cooperative-cancelled via `CancellationToken`.
+'
+' Key dependencies used in this file:
+'   - `WebAgentInterpreter` (execution engine; see `WebAgentInterpreter.vb`)
+'   - `SharedLibrary.SharedMethods` (UI dialogs, clipboard, editor, model selection)
+'   - `Newtonsoft.Json` (`JObject`/`JArray` parsing and mutation)
 ' =============================================================================
 
 Option Explicit On
@@ -335,6 +345,7 @@ Partial Public Class ThisAddIn
         End If
 
         ' 4) Pre-flight relative URL warnings
+        ' Skip URLs containing template placeholders (they will be resolved at runtime)
         Dim baseUrl As String = rootObj.SelectToken("env.base_url")?.ToString()
         Dim relativeIssues As New List(Of String)
         For Each st As JObject In stepsArr
@@ -343,6 +354,10 @@ Partial Public Class ThisAddIn
                 Dim p = TryCast(st("params"), JObject)
                 Dim rawUrl = p?("url")?.ToString()
                 If Not String.IsNullOrWhiteSpace(rawUrl) Then
+                    ' Skip validation if URL contains template placeholders - they resolve at runtime
+                    If rawUrl.Contains("{{") Then
+                        Continue For
+                    End If
                     If Not rawUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase) AndAlso
                        Not rawUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase) Then
                         If String.IsNullOrWhiteSpace(baseUrl) Then
@@ -350,7 +365,12 @@ Partial Public Class ThisAddIn
                         End If
                     End If
                 Else
-                    relativeIssues.Add($"Step id='{st.Value(Of String)("id")}' has empty or missing params.url.")
+                    ' Only warn about empty URLs if they don't appear to be template-based
+                    Dim urlToken = p?("url")
+                    If urlToken Is Nothing Then
+                        relativeIssues.Add($"Step id='{st.Value(Of String)("id")}' has missing params.url.")
+                    End If
+                    ' If url exists but is empty string, skip warning - might be set dynamically
                 End If
             End If
         Next
@@ -376,6 +396,9 @@ Partial Public Class ThisAddIn
             System.Threading.Tasks.Task.Run(Sub() PollEscForCancel(ctsWeb))
 
         Using interp As New WebAgentInterpreter()
+            ' Set up cancellation callback so LogWindow close can abort the run
+            interp.OnCancelRequested = Sub() CancelWebAgentRun()
+
             Dim sw As Stopwatch = Stopwatch.StartNew()
             Try
                 finalMd = Await interp.RunAsync(
@@ -459,428 +482,6 @@ Partial Public Class ThisAddIn
         End If
     End Sub
 
-    ''' <summary>
-    ''' Complete specification document for WebAgent JSON script format, provided to LLMs for reliable authoring.
-    ''' Covers: top-level structure (meta/env/steps), variable system, condition syntax, command reference,
-    ''' retry mechanics, error handling, dynamic expansion, auto link extraction, template rendering,
-    ''' selector objects, LLM result sanitization, common pitfalls, and authoring guidelines.
-    ''' Version: Generated from current WebAgentInterpreter implementation.
-    ''' </summary>
-    Public Const WebAgentJSONInstruct As String =
-        "WEB AGENT SCRIPT SPECIFICATION (for WebAgentInterpreter) " & vbCrLf &
-        "Version: Generated from current interpreter code. Provide this spec verbatim to an LLM so it can reliably author valid scripts." & vbCrLf &
-        "==================================================================================================================" & vbCrLf &
-        "1. TOP-LEVEL JSON STRUCTURE" & vbCrLf &
-        "{""meta"":{...},""env"":{...},""steps"":[ {StepObject}, ... ] }" & vbCrLf &
-        "All fields optional unless marked required." & vbCrLf &
-        "" & vbCrLf &
-        "meta:" & vbCrLf &
-        "  default_timeout_ms : Int (ms for steps without own timeout_ms)" & vbCrLf &
-        "  user_agent         : String (default 'WebAgentInterpreter/1.0')" & vbCrLf &
-        "" & vbCrLf &
-        "env:" & vbCrLf &
-        "  base_url   : String (used for resolving relative URLs)" & vbCrLf &
-        "  headers    : { headerName: value, ... } (applied globally first)" & vbCrLf &
-        "  secrets    : { name: valueOrReference } (if value starts with 'secret://', interpreter tries lookup in internal _secrets; returns '' if missing)" & vbCrLf &
-        "  variables  : { name: initialValue } (arbitrary JSON values become initial _vars entries)" & vbCrLf &
-        "" & vbCrLf &
-        "steps: Array of Step Objects executed sequentially (with possible jumps via on_error.goto or guard.else_goto)." & vbCrLf &
-        "Each Step Object keys:" & vbCrLf &
-        "  id          : String (recommended, used by jumps and reporting)" & vbCrLf &
-        "  command     : String (one of COMMAND LIST below)" & vbCrLf &
-        "  params      : Object (command-specific)" & vbCrLf &
-        "  timeout_ms  : Int (overrides default_timeout_ms for this step)" & vbCrLf &
-        "  retry       : { max:Int, delay_ms:Int, backoff:Double }  (exponential delay = delay_ms * backoff^(attemptIndex))" & vbCrLf &
-        "  on_error    : { action:""continue|goto|abort|retry"", goto:""StepId"" } (if step permanently fails after retries)" & vbCrLf &
-        "                action meanings:" & vbCrLf &
-        "                  continue = swallow error, proceed to next step" & vbCrLf &
-        "                  goto     = jump to specified step id (requires goto field)" & vbCrLf &
-        "                  abort    = rethrow (halts script)" & vbCrLf &
-        "                  retry    = (already exhausted normal retry) will rethrow (use only if you wrap externally)" & vbCrLf &
-        "                if on_error absent and _failHard=False (default), failures do not stop unless thrown" & vbCrLf &
-        "  assign      : { var: ""varName"", path:""jsonPath"" } (stores result; if path given, selects token by JToken.SelectToken)" & vbCrLf &
-        "  guard       : { if:""ConditionExpr"", else_goto:""StepId"" } (skip this step if condition FALSE; optional branch jump)" & vbCrLf &
-        "  wait_for    : { type:""time|url|selector"", ... } (post-step passive check/log – DOES NOT WAIT actively except type=time before step execution)" & vbCrLf &
-        "               time     => { type:""time"", timeout_ms:Int } (pre-step delay)" & vbCrLf &
-        "               url      => { type:""url"", value:""substring expected in last URL"" } (logs if not found)" & vbCrLf &
-        "               selector => { type:""selector"", selector:{...same selector object...} } (logs if missing)" & vbCrLf &
-        "" & vbCrLf &
-        "2. VARIABLE SYSTEM / TEMPLATE EXPANSION" & vbCrLf &
-        "Variables stored in internal _vars dictionary. Placeholders: {{varName}} or nested paths like {{object.prop}}." & vbCrLf &
-        "Special resolution rules:" & vbCrLf &
-        "  - {{env.DESKTOP}} returns user desktop path." & vbCrLf &
-        "  - {{base_url}} returns env.base_url (if set)." & vbCrLf &
-        "  - If placeholder unresolved it is left intact (still '{{...}}') and logged as unresolved." & vbCrLf &
-        "  - Templates are expanded in most string params via ExpandTemplates BEFORE execution." & vbCrLf &
-        "  - 'template' command performs Mustache-like render (supports #section, ^inverted, simple vars, triple {{{var}}}); then a second global variable expansion pass runs." & vbCrLf &
-        "Truthiness (_IsTruthy) for conditions: False if null, empty string, 'false','0','null','none','nil' (case-insensitive); empty non-string IEnumerable => False; everything else True." & vbCrLf &
-        "" & vbCrLf &
-        "3. CONDITION SYNTAX (used in guard.if and if.params.condition)" & vbCrLf &
-        "Supported forms (whitespace tolerant):" & vbCrLf &
-        "  exists {{var}}" & vbCrLf &
-        "  {{var}} == ""literal""            (string comparison, case-insensitive)" & vbCrLf &
-        "  {{var}} contains ""substring""    (case-insensitive)" & vbCrLf &
-        "  {{var}} ~= ""regex""              (Regex, Singleline + IgnoreCase)" & vbCrLf &
-        "  {{var}} == []                     (True if var is null, empty string, or empty enumerable)" & vbCrLf &
-        "Logical OR: expr1 || expr2 || expr3 (evaluated left→right, returns True on first True)." & vbCrLf &
-        "No AND operator explicitly; emulate with nested guards or De Morgan via OR." & vbCrLf &
-        "" & vbCrLf &
-        "4. IMPLICIT / COMMON VARIABLES" & vbCrLf &
-        "  base_url                (from env)" & vbCrLf &
-        "  last_http_status        (Int) after open_url / http_request" & vbCrLf &
-        "  last_http_elapsed_ms    (Int)" & vbCrLf &
-        "  last_step_id            (String)" & vbCrLf &
-        "  lastLlm                 (JObject or wrapper) parsed/sanitized LLM response (+ step/page metadata)" & vbCrLf &
-        "  lastLlm_raw             (Raw LLM text)" & vbCrLf &
-        "  lastLlm_page_url        (URL at time of LLM step)" & vbCrLf &
-        "  lastLlm_latency_ms      (Int)" & vbCrLf &
-        "  auto_links              (List<String>) extracted anchor URLs (auto extraction)" & vbCrLf &
-        "  auto_link_patterns      (List<String>) optional patterns (set via set_var or AddAutoLinkPattern; defaults included)" & vbCrLf &
-        "  auto_link_enable        (Boolean) enable/disable automatic link collection" & vbCrLf &
-        "  auto_link_min           (Int) minimal href length (default 15)" & vbCrLf &
-        "  all_decisions / decision_links (used if a custom step populates them; code supports accumulation pattern)" & vbCrLf &
-        "" & vbCrLf &
-        "5. SELECTOR OBJECT (used in extract_text / extract_html / extract_attribute / internal waits)" & vbCrLf &
-        "{ ""strategy"": ""xpath|css|text|regex"", ""value"": ""selectorValue"", optional:" & vbCrLf &
-        "  ""within"": {SelectorObject}  (scopes selection to nodes returned by nested selector)" & vbCrLf &
-        "  ""relative"": { ""position"": ""first|last|nth"", ""nth"": Int }" & vbCrLf &
-        "}" & vbCrLf &
-        "Strategy behaviors:" & vbCrLf &
-        "  xpath: value is raw XPath" & vbCrLf &
-        "  css  : limited CSS -> XPath translator (supports tag, .class, #id, [attr=value], :nth-child(n), descendant ' ', '>' direct child)" & vbCrLf &
-        "  text : value OR 'exact:literal' (case-insensitive substring unless 'exact:' prefix)" & vbCrLf &
-        "  regex: regex matched against normalized inner text" & vbCrLf &
-        "" & vbCrLf &
-        "6. COMMAND REFERENCE" & vbCrLf &
-        "Command names are case-insensitive; llm_analyze, llm, llmanalyze map to same implementation." & vbCrLf &
-        "" & vbCrLf &
-        "a) set_user_agent" & vbCrLf &
-        "  params: { ""user_agent"": ""string"" }" & vbCrLf &
-        "  result: { user_agent }" & vbCrLf &
-        "" & vbCrLf &
-        "b) set_headers" & vbCrLf &
-        "  params: { ""mode"":""replace|merge"", ""headers"": { name:value,... } }" & vbCrLf &
-        "  'replace' clears previous; 'merge'(default) adds/overwrites." & vbCrLf &
-        "  result: { headers: { ...effectiveHeaders } }" & vbCrLf &
-        "" & vbCrLf &
-        "c) set_cookies" & vbCrLf &
-        "  params: { ""cookies"": [ { name, value, domain, path, secure:Bool?, httpOnly:Bool? }, ... ] }" & vbCrLf &
-        "  result: { count: Int }" & vbCrLf &
-        "" & vbCrLf &
-        "d) open_url" & vbCrLf &
-        "  params: { url:String (required), method:String (default GET), headers:Object?, body:Any?, body_type:""json|form|raw"", return_body:Bool?, timeout_ms:Int?, retry:{max,delay_ms,backoff} }" & vbCrLf &
-        "  Loads page, sets DOM, auto extracts links, sets lastResponseUrl/Body." & vbCrLf &
-        "  result: { status, url, elapsed_ms, (body if return_body=True) }" & vbCrLf &
-        "" & vbCrLf &
-        "e) wait" & vbCrLf &
-        "  params: { ms:Int }" & vbCrLf &
-        "  result: { slept: ms }" & vbCrLf &
-        "" & vbCrLf &
-        "f) find" & vbCrLf &
-        "  params: { ""in"":""varName"", ""text"":""needle"", ""assign"":{""var"":""destVar""} }" & vbCrLf &
-        "  Case-insensitive substring search. result: { found:Boolean, index:Int|-1 }" & vbCrLf &
-        "" & vbCrLf &
-        "g) extract_text" & vbCrLf &
-        "  params: { selector:{...}, all:Bool?(default False), normalize_whitespace:Bool?(default True), regex:String?, group:Int? }" & vbCrLf &
-        "  If all=False ⇒ returns first matched text (after optional regex extraction). If all=True ⇒ returns List<String>." & vbCrLf &
-        "" & vbCrLf &
-        "h) extract_html" & vbCrLf &
-        "  params: { selector:{...}, outer:Bool?(default False) }" & vbCrLf &
-        "  Returns inner (default) or outer HTML of first match or """" if none." & vbCrLf &
-        "" & vbCrLf &
-        "i) extract_attribute" & vbCrLf &
-        "  params: { nodes_var:""varHoldingSerializedNodes"", attribute:""attrName"", var:""targetVar"" }" & vbCrLf &
-        "  Expects nodes_var to contain an enumerable of serialized node dicts (with 'attributes'). Collects attribute values list to targetVar." & vbCrLf &
-        "  result: null (stores list)" & vbCrLf &
-        "" & vbCrLf &
-        "j) download_url" & vbCrLf &
-        "  params: { url, target_dir, filename?, method?, headers?, body?, body_type? }" & vbCrLf &
-        "  Writes file. result: { path, status }" & vbCrLf &
-        "" & vbCrLf &
-        "k) save_file" & vbCrLf &
-        "  params: { path, content, encoding? }" & vbCrLf &
-        "  encoding==""binary"" ⇒ content must be Base64; else UTF-8 text." & vbCrLf &
-        "  result: { path }" & vbCrLf &
-        "" & vbCrLf &
-        "l) read_file" & vbCrLf &
-        "  params: { path, encoding? }" & vbCrLf &
-        "  encoding==""binary"" ⇒ returns Base64; else UTF-8 text." & vbCrLf &
-        "" & vbCrLf &
-        "m) http_request (generic, does NOT auto link-extract unless you parse body via subsequent open_url if needed)" & vbCrLf &
-        "  params: { url, method?, headers?, query:{k:v}, body, body_type, timeout_ms? }" & vbCrLf &
-        "  result: { status, headers:StringDump, body, url } (also sets DOM for body like open_url)" & vbCrLf &
-        "" & vbCrLf &
-        "n) set_var" & vbCrLf &
-        "  params: { name, value } (value may be any JSON; strings get template-expanded)" & vbCrLf &
-        "  result: { name, value }" & vbCrLf &
-        "" & vbCrLf &
-        "o) template" & vbCrLf &
-        "  params: { template:String(Mustache-lite), context:Object }" & vbCrLf &
-        "  Section rules (#name repeats over arrays; ^name for inverted). Triple {{{var}}} leaves raw (then second pass expansion)." & vbCrLf &
-        "  result: rendered String" & vbCrLf &
-        "" & vbCrLf &
-        "p) if" & vbCrLf &
-        "  params: { condition:String, steps:[StepObjects], else_steps:[StepObjects]? }" & vbCrLf &
-        "  Executes branch inline (sub-steps share same variable scope)." & vbCrLf &
-        "" & vbCrLf &
-        "q) foreach" & vbCrLf &
-        "  params: { list:""varNameHoldingArray"", item_var:""loopItemVar"", steps:[...], continue_on_error:Bool?, stop_on_error:Bool?, max_items:Int?, break_if_var_true:""varName"" }" & vbCrLf &
-        "  Loop variables added: item_var, item_var_index." & vbCrLf &
-        "  Error policy precedence: stop_on_error=True overrides continue_on_error." & vbCrLf &
-        "  Optional break_if_var_true variable checked each iteration." & vbCrLf &
-        "  result: { count:<iterationsSeen>, executed:<successfulBodies> }" & vbCrLf &
-        "" & vbCrLf &
-        "r) render_report" & vbCrLf &
-        "  params: { engine:? (ignored currently), template:String, context:Object?, output_path:String? }" & vbCrLf &
-        "  Produces Markdown; writes file if output_path (after expansion and ensuring no '{{' remain). Sets _finalMarkdown." & vbCrLf &
-        "  result: { output: ""(memory)"" or filePath }" & vbCrLf &
-        "" & vbCrLf &
-        "s) delete_file" & vbCrLf &
-        "  params: { path } result: Bool (true if deleted, false if absent/error)" & vbCrLf &
-        "" & vbCrLf &
-        "t) send_email_report" & vbCrLf &
-        "  params (most template-expanded safely):" & vbCrLf &
-        "    to (semicolon or comma separated)" & vbCrLf &
-        "    subject?  body_markdown? (if not full HTML, converted via Markdig)" & vbCrLf &
-        "    smtp_host, smtp_port?, smtp_ssl?(""true|false""), smtp_auth?, smtp_user?, smtp_pass?" & vbCrLf &
-        "    from_email?, from_name?, ip_override?, helo_domain?, net? (network domain override)" & vbCrLf &
-        "  Adds footer '(created using Red Ink WebAgent at <ip> from <domain>)' both HTML & plain." & vbCrLf &
-        "  Sends multipart/alternative (text/plain + text/html)." & vbCrLf &
-        "  result: Bool" & vbCrLf &
-        "" & vbCrLf &
-        "u) log" & vbCrLf &
-        "  params: { level:String, message:String } (message expanded) → appends to internal log." & vbCrLf &
-        "" & vbCrLf &
-        "v) enable_dynamic" & vbCrLf &
-        "  params: (ignored - may be sent same object as step) Enables dynamic fetch expansion (limited to MAX_DYNAMIC_FETCH=10)." & vbCrLf &
-        "" & vbCrLf &
-        "w) array_push" & vbCrLf &
-        "  params: { array:""targetArrayVar"", item_var:""existingVar"" | item:<inlineValue> }" & vbCrLf &
-        "  If array var absent or not JArray, creates new JArray. Appends deep-cloned token." & vbCrLf &
-        "  result: { pushed:Boolean, count:Int, array:String }" & vbCrLf &
-        "" & vbCrLf &
-        "x) llm / llm_analyze / llmanalyze" & vbCrLf &
-        "  params accepted synonyms:" & vbCrLf &
-        "    system | systemPrompt   (system role)" & vbCrLf &
-        "    user | prompt | input | arguments (user prompt text)" & vbCrLf &
-        "    temperature            (string or number; falls back to context INI)" & vbCrLf &
-        "    timeoutMs              (ms for this call)" & vbCrLf &
-        "    status_var             (if set & equals ""404"" and allow_llm_on_404 not true, step skipped)" & vbCrLf &
-        "    inner_attempts:Int     (internal re-tries if non-JSON or invalid, default 1)" & vbCrLf &
-        "    inner_delay_ms:Int     (delay between inner attempts)" & vbCrLf &
-        "  Validation / gating flags:" & vbCrLf &
-        "    retry_on_invalid:Bool       (throw if invalid so outer step retry triggers)" & vbCrLf &
-        "    reject_if_empty:Bool        (empty sanitized output invalid)" & vbCrLf &
-        "    reject_if_plaintext:Bool    (non-JSON invalid unless allow_non_json)" & vbCrLf &
-        "    allow_non_json:Bool         (overrides reject_if_plaintext)" & vbCrLf &
-        "    require_key:""k1,k2""        (all keys must exist unless require_key_all=False)" & vbCrLf &
-        "    require_key_all:Bool        (default True)" & vbCrLf &
-        "    require_array_key:""arr1,arr2"" (each must be JSON array)" & vbCrLf &
-        "    require_min_items:Int       (applies to each require_array_key array)" & vbCrLf &
-        "    log_raw:Bool                (dump raw output to debug file if debug enabled)" & vbCrLf &
-        "    max_preview:Int             (UI preview length, default 250)" & vbCrLf &
-        "  Output handling:" & vbCrLf &
-        "    - Removes fenced code blocks, prefers JSON in them, else tries first JSON substring." & vbCrLf &
-        "    - Wraps plaintext if needed with markers (_invalid reasons) if validation fails." & vbCrLf &
-        "    - Stores structured result in lastLlm and metadata fields; raw text in lastLlm_raw." & vbCrLf &
-        "" & vbCrLf &
-        "7. RETRY MECHANICS" & vbCrLf &
-        "At STEP level: 'retry' object controls entire step body incl. network call(s)." & vbCrLf &
-        "At SUB-STEPS inside foreach/if: internal retry loops replicate same pattern (attempt logging)." & vbCrLf &
-        "Backoff formula: effectiveDelay = delay_ms * (backoff ^ attemptIndex). attemptIndex starts at 0." & vbCrLf &
-        "" & vbCrLf &
-        "8. ERROR HANDLING" & vbCrLf &
-        "Network transient statuses recognized (IsTransientStatus): 408,425,429,500,502,503,504 cause automatic retry if step retry configured." & vbCrLf &
-        "on_error applied after all retries fail." & vbCrLf &
-        "failHard flag FALSE (compiled constant) so unhandled non-network failures usually logged and may proceed unless thrown." & vbCrLf &
-        "" & vbCrLf &
-        "9. DYNAMIC EXPANSION" & vbCrLf &
-        "enable_dynamic triggers post-load scanning of scripts & inline code for index_aza.php patterns and fetches up to MAX_DYNAMIC_FETCH (10) additional resources, appending their content to DOM HTML." & vbCrLf &
-        "" & vbCrLf &
-        "10. AUTO LINK EXTRACTION" & vbCrLf &
-        "After open_url/http_request load, AutoExtractLinks() collects anchors (//a[@href]) whose href length >= auto_link_min and matches any regex in auto_link_patterns (default supplied). Stored as auto_links list." & vbCrLf &
-        "Control flags via set_var: auto_link_enable (Bool), auto_link_patterns (List<String> or String), auto_link_min (Int)." & vbCrLf &
-        "" & vbCrLf &
-        "11. TEMPLATE SYSTEM (SimpleMustacheRender)" & vbCrLf &
-        "Supported: {{var}}, {{{var}}}, sections: {{#name}}...{{/name}}, inverted {{^name}}...{{/name}}. No lambdas. Nested keys via JSON paths inside context or top-level context properties." & vbCrLf &
-        "Unresolved vars are left as {{var}} for second pass global expansion." & vbCrLf &
-        "" & vbCrLf &
-        "12. ASSIGN PATH SEMANTICS" & vbCrLf &
-        "If assign.path present, interpreter converts result object to JToken, then SelectToken(path). If token missing, stores null." & vbCrLf &
-        "Use standard JSONPath-like JToken paths (e.g. 'data.items[0].title')." & vbCrLf &
-        "" & vbCrLf &
-        "13. FILE ENCODING NOTES" & vbCrLf &
-        "save_file / read_file with encoding 'binary' use Base64 payloads." & vbCrLf &
-        "download_url always writes raw bytes to file; does not auto base64 them." & vbCrLf &
-        "" & vbCrLf &
-        "14. URL RESOLUTION" & vbCrLf &
-        "Relative URL precedence: lastResponseUrl (if any) → base_url → unchanged string." & vbCrLf &
-        "Markdown-style [text](url) patterns sanitized; angle brackets <...> stripped if present." & vbCrLf &
-        "" & vbCrLf &
-        "15. LLM RESULT SANITIZATION LOGIC (SanitizeLlmResult)" & vbCrLf &
-        "1) Extract fenced code block(s) ```lang ...```; if any block parses as JSON, first one returned." & vbCrLf &
-        "2) Remove code fences if present; attempt full parse; else extract first balanced {...} or [...] substring; else strip stray backticks." & vbCrLf &
-        "" & vbCrLf &
-        "16. LOOP / FOREACH CAUTIONS" & vbCrLf &
-        "Inside foreach, modifications to item_var can affect subsequent logic but original enumerable enumerated from snapshot at loop start." & vbCrLf &
-        "break_if_var_true evaluated after iteration body." & vbCrLf &
-        "" & vbCrLf &
-        "17. DEBUG FLAGS (set via variables to True/False):" & vbCrLf &
-        "  debug, debug_allAttempts, debug_substeps, debug_var_changes, debug_include_script, debug_summary, debug_clear_llm_state," & vbCrLf &
-        "  allow_llm_on_404, llm_rethrow_all" & vbCrLf &
-        "Enable by setting corresponding variable to 'true' (string) or Boolean True (set_var)." & vbCrLf &
-        "" & vbCrLf &
-        "18. EXAMPLE MINIMAL SCRIPT" & vbCrLf &
-        "{""meta"":{""default_timeout_ms"":15000}," & vbCrLf &
-        """env"":{""base_url"":""https://example.com"",""variables"":{""searchTerm"":""widgets""}}," & vbCrLf &
-        """steps"":[ " & vbCrLf &
-        " {""id"":""open"",""command"":""open_url"",""params"":{""url"":""/products?q={{searchTerm}}""}, ""retry"":{""max"":2,""delay_ms"":1000,""backoff"":2}}," & vbCrLf &
-        " {""id"":""extract"",""command"":""extract_text"",""params"":{""selector"":{""strategy"":""css"",""value"":""h1""}}, ""assign"":{""var"":""pageTitle""}}," & vbCrLf &
-        " {""id"":""decide"",""command"":""if"",""params"":{""condition"":""{{pageTitle}} contains \""Widget\"""",""steps"":[{""id"":""ok"",""command"":""log"",""params"":{""level"":""info"",""message"":""Title ok: {{pageTitle}}""}}],""else_steps"":[{""id"":""warn"",""command"":""log"",""params"":{""level"":""warn"",""message"":""Unexpected title: {{pageTitle}}""}}]}}," & vbCrLf &
-        " {""id"":""llm"",""command"":""llm_analyze"",""params"":{""system"":""Summarize the title."",""user"":""Title: {{pageTitle}}"",""reject_if_empty"":true,""retry_on_invalid"":true,""require_key"":""summary""},""assign"":{""var"":""llmOut""}}," & vbCrLf &
-        " {""id"":""report"",""command"":""render_report"",""params"":{""template"":""# Report\n\nTitle: {{pageTitle}}\n\nLLM: {{llmOut.summary}}"",""output_path"":""{{env.DESKTOP}}\\report.md""}} ]}" & vbCrLf &
-        "" & vbCrLf &
-        "19. COMMON PITFALLS & PREVENTION" & vbCrLf &
-        "- Unresolved placeholders: Always ensure variables exist before referencing; logs show '[template] Unresolved placeholder'." & vbCrLf &
-        "- Using extract_attribute without serialized nodes: Must have a variable containing a list of serialized node objects (normally produced by a custom step; not directly by extract_text/html)." & vbCrLf &
-        "- Relying on AND logic: Use nested if or guard chains (no direct AND operator)." & vbCrLf &
-        "- LLM JSON validation: Provide explicit require_key / require_array_key for deterministic retries." & vbCrLf &
-        "- Guard skip logic: When guard condition false, step is skipped but considered successful; else_goto processed if provided." & vbCrLf &
-        "- open_url vs http_request: open_url supports return_body flag; http_request always returns body. Both set DOM context." & vbCrLf &
-        "- Binary file save/read: Must supply Base64 string when encoding=""binary""." & vbCrLf &
-        "- foreach list missing: Loop silently returns {count:0,executed:0} (log warns) – ensure list variable exists." & vbCrLf &
-        "" & vbCrLf &
-        "20. RECOMMENDED LLM AUTHORING GUIDELINES" & vbCrLf &
-        "- Always produce valid UTF-8 JSON with top-level object and 'steps' array." & vbCrLf &
-        "- Include 'id' for every step (unique, short, no spaces)." & vbCrLf &
-        "- For network steps requiring resilience, add retry:{max,delay_ms,backoff} AND (optionally) on_error to control flow." & vbCrLf &
-        "- Use assign with path when extracting subset from complex results (e.g., assign.path:'data.items[0]')." & vbCrLf &
-        "- For conditional branching prefer explicit if command rather than abusing guard for multi-step blocks." & vbCrLf &
-        "- For loops, ensure the source list variable is known to exist (initialize via set_var or prior assign)." & vbCrLf &
-        "- Provide require_key / require_array_key in llm_analyze to harden JSON outputs; combine with retry_on_invalid for reliability." & vbCrLf &
-        "- Avoid inventing unsupported commands or fields (strict list above)." & vbCrLf &
-        "- Keep URLs absolute or ensure base_url defined for relative forms." & vbCrLf &
-        "- Use enable_dynamic only when needed (dynamic pages); avoids extra fetch overhead." & vbCrLf &
-        "" & vbCrLf &
-        "END OF SPEC" & vbCrLf
-
-    Public Const WebAgentParameterSpec As String =
-            "WEB AGENT PARAMETER PLACEHOLDER SPEC (Additive to Main Script Spec)" & vbCrLf &
-            "Purpose: Enable runtime user parameterization inside a WebAgent script via numbered placeholders." & vbCrLf &
-            "-------------------------------------------------------------------------------------------------" & vbCrLf &
-            "OVERVIEW:" & vbCrLf &
-            "- Parameter DEFINITIONS embed inline in the script: {parameterN=...definition...}" & vbCrLf &
-            "- Parameter REFERENCES elsewhere: {parameterN}" & vbCrLf &
-            "- Definitions are collected, a dialog prompts user for values (unless zero definitions)." & vbCrLf &
-            "- After confirmation: definitions are removed and replaced by resolved (escaped) values; all matching {parameterN} references substituted with same value." & vbCrLf &
-            "- If user cancels, processing returns False and caller should abort execution." & vbCrLf &
-            "" & vbCrLf &
-            "REGEX MATCHES:" & vbCrLf &
-            "- Definition regex:  { parameter(\d+)= (.*?) }   (whitespace tolerant)" & vbCrLf &
-            "- Reference regex:   { parameter(\d+) }" & vbCrLf &
-            "" & vbCrLf &
-            "UNIQUENESS & ORDER:" & vbCrLf &
-            "- First definition for a given N wins; duplicates with same N are ignored." & vbCrLf &
-            "- UI prompt order = ascending parameter number." & vbCrLf &
-            "- Replacement inside script done from the end backward (reverse index) to preserve positions." & vbCrLf &
-            "" & vbCrLf &
-            "DEFINITION SYNTAX (semicolon-separated segments):" & vbCrLf &
-            "  {parameterN=Description ; Type ; DefaultValue ; RangeOrOptions ; ExtraOptions }" & vbCrLf &
-            "  Minimal form: {parameter1=Choose item} (Type defaults to string, default empty)" & vbCrLf &
-            "" & vbCrLf &
-            "SEGMENTS:" & vbCrLf &
-            "  [0] Description (mandatory, shown in UI)" & vbCrLf &
-            "  [1] Type (optional) → one of: string | integer | long | double | boolean (case-insensitive; default=string)" & vbCrLf &
-            "  [2] Default value (optional; interpreted per type)" & vbCrLf &
-            "  [3] EITHER a numeric range (only for integer/long/double) in form MIN-MAX (digits only) OR a comma list of options" & vbCrLf &
-            "  [4] If [3] was a range and this segment exists → treated as additional options list (comma separated)" & vbCrLf &
-            "" & vbCrLf &
-            "OPTIONS SYNTAX:" & vbCrLf &
-            "- Comma-separated: OptionA,OptionB,OptionC" & vbCrLf &
-            "- Each option may embed a display/code pair:  Display Text <actual_code>" & vbCrLf &
-            "  * If no <...> part present, display = code." & vbCrLf &
-            "  * The UI shows display text; stored code value is inserted into script." & vbCrLf &
-            "- Default value resolution: If DefaultValue matches a code entry, UI pre-selects corresponding display." & vbCrLf &
-            "" & vbCrLf &
-            "RANGE HANDLING (for numeric types):" & vbCrLf &
-            "- Pattern: ^\\d+\\s*-\\s*\\d+$ (integers only). Extracted as inclusive [min,max]." & vbCrLf &
-            "- User input (after mapping) clamped into range if parse succeeds." & vbCrLf &
-            "- For integer/long: value rounded (Math.Round) then cast to integral." & vbCrLf &
-            "- For double: stored as parsed (range still integer endpoints)." & vbCrLf &
-            "" & vbCrLf &
-            "TYPE PARSING & DEFAULTS:" & vbCrLf &
-            "- boolean: Boolean.TryParse; output lowercased 'true'/'false'." & vbCrLf &
-            "- integer/long: Integer/Long.TryParse; fallback 0 if invalid." & vbCrLf &
-            "- double: Double.TryParse (culture invariant rules depend on environment; recommend dot decimal)." & vbCrLf &
-            "- string: raw (after display→code mapping if options provided)." & vbCrLf &
-            "" & vbCrLf &
-            "SPECIAL / EMPTY SELECTION HANDLING:" & vbCrLf &
-            "- If chosen value (case-insensitive) starts with '(keine auswahl)', '(no selection)', or '---' → final inserted value = empty string." & vbCrLf &
-            "" & vbCrLf &
-            "JSON ESCAPING:" & vbCrLf &
-            "- Only backslash (\ → \\) and double quote ("" → \"") are escaped before insertion." & vbCrLf &
-            "- No other JSON normalization (caller must ensure placement inside valid JSON string literal positions)." & vbCrLf &
-            "" & vbCrLf &
-            "REFERENCE REPLACEMENT:" & vbCrLf &
-            "- Definitions are replaced in place (the entire {parameterN=...} token → final value)." & vbCrLf &
-            "- Simple references {parameterN} replaced with same value if definition existed." & vbCrLf &
-            "- References to undefined parameter numbers are left untouched." & vbCrLf &
-            "" & vbCrLf &
-            "BEHAVIOR WITH NO DEFINITIONS:" & vbCrLf &
-            "- Function returns True immediately; no prompt; references remain unchanged (allowing static placeholders)." & vbCrLf &
-            "" & vbCrLf &
-            "VALID EXAMPLES:" & vbCrLf &
-            "  {parameter1=API environment ; string ; prod ; prod<https://api.prod.example> , staging<https://api.staging.example> , dev<http://localhost:8080>} " & vbCrLf &
-            "  {parameter2=Max retries ; integer ; 3 ; 0-10}" & vbCrLf &
-            "  {parameter3=Confidence threshold ; double ; 0.65 ; 0-1 ; 0.25,0.5,0.65,0.75,0.9}" & vbCrLf &
-            "  {parameter4=Enable verbose logging ; boolean ; true}" & vbCrLf &
-            "  {parameter5=Output format ; string ; json ; json<application/json>,xml<application/xml>}" & vbCrLf &
-            "" & vbCrLf &
-            "UI PROMPT ORDER & CORRELATION:" & vbCrLf &
-            "- User sees description; for enumerated selections a dropdown of display labels." & vbCrLf &
-            "- After submit each selected/entered value is transformed (display→code, clamped, escaped) then substituted." & vbCrLf &
-            "" & vbCrLf &
-            "EDGE CASES / SAFEGUARDS:" & vbCrLf &
-            "- Whitespace around semicolons ignored (segments trimmed)." & vbCrLf &
-            "- Extra segments beyond defined semantics are ignored." & vbCrLf &
-            "- If range present but user input not numeric, original string left (then possibly empty if sentinel)." & vbCrLf &
-            "- Multiple identical options allowed but first matching code resolves default." & vbCrLf &
-            "- Duplicate parameter definitions: only first retained; later ones inert text until replaced when earlier removal shifts indexes (safe due to reverse replacement)." & vbCrLf &
-            "" & vbCrLf &
-            "INTEGRATION INTO JSON SCRIPTS:" & vbCrLf &
-            "- Place definitions where a literal value will finally appear (e.g. in place of a string literal's value body)." & vbCrLf &
-            "- Example inside JSON (ensure resulting JSON remains valid *after* replacement):" & vbCrLf &
-            "  ""url"": ""{parameter1=https://api.example.com ; string ; https://api.example.com}/v1/items""  (NOT RECOMMENDED because the definition will collapse into a raw URL → better put definition alone then follow with concatenation outside or define before and reference)" & vbCrLf &
-            "- Recommended pattern: define at top (outside JSON structural tokens if pre-processed) or as value of a string field by itself: ""base_url"": ""{parameter1=Base URL ; string ; https://api.example.com}""" & vbCrLf &
-            "" & vbCrLf &
-            "RECOMMENDED AUTHORING RULES FOR LLM:" & vbCrLf &
-            "- Use sequential numbering starting at 1; avoid gaps unless intentional." & vbCrLf &
-            "- Use descriptive, concise descriptions (≤ 60 chars)." & vbCrLf &
-            "- Provide defaults that yield a runnable script without user edits when possible." & vbCrLf &
-            "- Use ranges only when numeric validation is concretely useful; otherwise supply enumerated options." & vbCrLf &
-            "- Always ensure final substituted form keeps JSON valid (surround with quotes if expecting string)." & vbCrLf &
-            "- Do NOT reference {parameterN} without defining it unless deliberately leaving literal marker." & vbCrLf &
-            "" & vbCrLf &
-            "NON-VALID / ANTI-PATTERNS:" & vbCrLf &
-            "- {parameter1=}  (missing description)" & vbCrLf &
-            "- {parameterX=...} where X not numeric" & vbCrLf &
-            "- Embedding raw unescaped quotes in definition segments causing broken JSON context." & vbCrLf &
-            "" & vbCrLf &
-            "POST-PROCESSING OUTCOME SUMMARY:" & vbCrLf &
-            "- Success → script mutated with raw values inserted, function True." & vbCrLf &
-            "- Cancel → script unchanged from original input (except maybe partial test state), function False." & vbCrLf &
-            "" & vbCrLf &
-            "SECURITY CONSIDERATIONS:" & vbCrLf &
-            "- Only minimal JSON escaping; if values may inject additional JSON structure, caller must sandbox or further sanitize." & vbCrLf &
-            "- Angle-bracket code extraction is purely syntactic; no HTML interpretation." & vbCrLf &
-            "" & vbCrLf &
-            "QUICK TEMPLATE FOR LLM GENERATION:" & vbCrLf &
-            "- Integer with range: {parameter1=Retry count ; integer ; 3 ; 0-10}" & vbCrLf &
-            "- Double with options: {parameter2=Threshold ; double ; 0.75 ; 0.25,0.5,0.75,0.9}" & vbCrLf &
-            "- Enum string: {parameter3=Mode ; string ; safe ; safe<safe>,fast<fast>,audit<audit>}" & vbCrLf &
-            "- Boolean: {parameter4=Enable cache ; boolean ; false}" & vbCrLf &
-            "" & vbCrLf &
-            "END OF PARAMETER SPEC"
 
     ''' <summary>
     ''' LLM-assisted WebAgent script creation or amendment workflow.
@@ -1148,6 +749,688 @@ Partial Public Class ThisAddIn
         End Try
 
     End Sub
+
+
+    ''' <summary>
+    ''' Complete specification document for WebAgent JSON script format, provided to LLMs for reliable authoring.
+    ''' </summary>
+    Public Const WebAgentJSONInstruct As String =
+        "WEBAGENT SCRIPT SPECIFICATION" & vbCrLf &
+        "=============================" & vbCrLf &
+        "" & vbCrLf &
+        "OVERVIEW: WebAgent scripts are JSON documents that automate web interactions, data extraction, " &
+        "LLM analysis, and report generation. The interpreter executes steps sequentially using an HTTP client " &
+        "with cookie support, HTML parsing via HtmlAgilityPack, and template expansion for dynamic values." & vbCrLf &
+        "" & vbCrLf &
+        "EXECUTION FLOW:" & vbCrLf &
+        "1. Script JSON is parsed and validated" & vbCrLf &
+        "2. meta section configures timeouts and user-agent" & vbCrLf &
+        "3. env section initializes base_url, headers, secrets, and variables" & vbCrLf &
+        "4. steps array executes sequentially (jumps possible via on_error.goto or guard.else_goto)" & vbCrLf &
+        "5. Each step: guard check -> wait_for delay -> command execution -> assign result -> post-checks" & vbCrLf &
+        "6. Final output from render_report or execution log returned as Markdown" & vbCrLf &
+        "" & vbCrLf &
+        "=== TOP-LEVEL STRUCTURE ===" & vbCrLf &
+        "{" & vbCrLf &
+        "  ""meta"": { /* optional settings */ }," & vbCrLf &
+        "  ""env"": { /* optional environment */ }," & vbCrLf &
+        "  ""steps"": [ /* REQUIRED array of step objects */ ]" & vbCrLf &
+        "}" & vbCrLf &
+        "" & vbCrLf &
+        "META SECTION (optional):" & vbCrLf &
+        "- default_timeout_ms: Integer, default 30000. Applied to HTTP operations without explicit timeout." & vbCrLf &
+        "- user_agent: String, default ""WebAgentInterpreter/1.0"". Sent with all HTTP requests." & vbCrLf &
+        "" & vbCrLf &
+        "ENV SECTION (optional):" & vbCrLf &
+        "- base_url: String. Used to resolve relative URLs. Also available as {{base_url}} in templates." & vbCrLf &
+        "- headers: Object {name:value,...}. Applied to all HTTP requests. Can be overridden per-request." & vbCrLf &
+        "- secrets: Object {name:value,...}. Values starting with ""secret://"" trigger internal lookup. " &
+        "  Secrets are masked in logs. User prompted for {{secret:Description}} placeholders before execution." & vbCrLf &
+        "- variables: Object {name:value,...}. Initial values loaded into internal _vars dictionary. " &
+        "  Any JSON type allowed. Accessible via {{varName}} templates." & vbCrLf &
+        "" & vbCrLf &
+        "=== STEP OBJECT STRUCTURE ===" & vbCrLf &
+        "Each step in the steps array:" & vbCrLf &
+        "{" & vbCrLf &
+        "  ""id"": ""uniqueStepId"",        // RECOMMENDED: used for jumps, logging, debugging" & vbCrLf &
+        "  ""command"": ""commandName"",    // REQUIRED: see Command Reference below" & vbCrLf &
+        "  ""params"": { ... },            // Command-specific parameters" & vbCrLf &
+        "  ""timeout_ms"": 15000,          // Override default timeout for this step" & vbCrLf &
+        "  ""retry"": { ... },             // Retry configuration" & vbCrLf &
+        "  ""on_error"": { ... },          // Error handling after retries exhausted" & vbCrLf &
+        "  ""assign"": { ... },            // Store command result in variable" & vbCrLf &
+        "  ""guard"": { ... },             // Conditional execution" & vbCrLf &
+        "  ""wait_for"": { ... }           // Pre-step delay or post-step validation" & vbCrLf &
+        "}" & vbCrLf &
+        "" & vbCrLf &
+        "RETRY OBJECT:" & vbCrLf &
+        "{ ""max"": 3, ""delay_ms"": 1000, ""backoff"": 2.0 }" & vbCrLf &
+        "- max: Maximum retry attempts (0 = no retries)" & vbCrLf &
+        "- delay_ms: Initial delay before first retry" & vbCrLf &
+        "- backoff: Multiplier for exponential backoff. Formula: delay = delay_ms * backoff^attemptIndex" & vbCrLf &
+        "- Transient HTTP codes auto-trigger retry: 408, 425, 429, 500, 502, 503, 504" & vbCrLf &
+        "" & vbCrLf &
+        "ON_ERROR OBJECT:" & vbCrLf &
+        "{ ""action"": ""continue|goto|abort"", ""goto"": ""stepId"" }" & vbCrLf &
+        "- continue: Swallow error, proceed to next step" & vbCrLf &
+        "- goto: Jump to specified step id (requires goto field)" & vbCrLf &
+        "- abort: Re-throw exception, halt script execution" & vbCrLf &
+        "- Applied only after ALL retries exhausted" & vbCrLf &
+        "" & vbCrLf &
+        "ASSIGN OBJECT:" & vbCrLf &
+        "{ ""var"": ""variableName"", ""path"": ""json.path.to.value"" }" & vbCrLf &
+        "- var: Name to store result under in _vars dictionary" & vbCrLf &
+        "- path: Optional. Uses JToken.SelectToken to extract nested value (e.g., ""data.items[0].title"")" & vbCrLf &
+        "- If path specified but not found, stores null" & vbCrLf &
+        "- Result is deep-cloned before storage to prevent mutation" & vbCrLf &
+        "" & vbCrLf &
+        "GUARD OBJECT:" & vbCrLf &
+        "{ ""if"": ""condition expression"", ""else_goto"": ""stepId"" }" & vbCrLf &
+        "- if: Condition expression (see Condition Syntax below)" & vbCrLf &
+        "- If condition FALSE: step is SKIPPED (treated as success, not error)" & vbCrLf &
+        "- else_goto: Optional. If condition FALSE and else_goto set, jump to that step" & vbCrLf &
+        "" & vbCrLf &
+        "WAIT_FOR OBJECT:" & vbCrLf &
+        "{ ""type"": ""time|url|selector"", ... }" & vbCrLf &
+        "- type=""time"": { ""timeout_ms"": 2000 } - Delay BEFORE step execution" & vbCrLf &
+        "- type=""url"": { ""value"": ""substring"" } - AFTER step, logs warning if URL doesn't contain substring" & vbCrLf &
+        "- type=""selector"": { ""selector"": {...} } - AFTER step, logs warning if selector finds nothing" & vbCrLf &
+        "" & vbCrLf &
+        "=== TEMPLATE EXPANSION ===" & vbCrLf &
+        "Placeholders {{varName}} are expanded in most string parameters BEFORE execution." & vbCrLf &
+        "" & vbCrLf &
+        "RESOLUTION ORDER:" & vbCrLf &
+        "1. Check for special prefixes:" & vbCrLf &
+        "   - {{env.VARNAME}} -> System.Environment.GetEnvironmentVariable" & vbCrLf &
+        "   - {{env.DESKTOP}} -> Special case: user's Desktop folder path" & vbCrLf &
+        "   - {{base_url}} -> env.base_url value" & vbCrLf &
+        "2. Look up in _vars dictionary (case-insensitive)" & vbCrLf &
+        "3. For nested paths like {{object.prop.sub}}, navigate through JToken or object properties" & vbCrLf &
+        "4. If unresolved, placeholder remains as {{...}} in output (logged as warning)" & vbCrLf &
+        "" & vbCrLf &
+        "IMPORTANT: Unresolved placeholders are NOT errors - they remain literal. Check logs for warnings." & vbCrLf &
+        "" & vbCrLf &
+        "=== CONDITION SYNTAX ===" & vbCrLf &
+        "Used in guard.if and if command's condition parameter." & vbCrLf &
+        "" & vbCrLf &
+        "EXISTENCE CHECK:" & vbCrLf &
+        "  exists {{var}}   -> True if var exists and is non-empty" & vbCrLf &
+        "" & vbCrLf &
+        "EQUALITY:" & vbCrLf &
+        "  {{var}} == ""literal""    -> Case-insensitive string comparison" & vbCrLf &
+        "  {{var}} == true          -> Boolean comparison (handles string ""true""/""false"", ""1""/""0"")" & vbCrLf &
+        "  {{var}} == false" & vbCrLf &
+        "  {{var}} == []            -> True if null, empty string, or empty enumerable" & vbCrLf &
+        "" & vbCrLf &
+        "NUMERIC COMPARISONS:" & vbCrLf &
+        "  {{var}} > 10             -> Greater than" & vbCrLf &
+        "  {{var}} >= 10            -> Greater than or equal" & vbCrLf &
+        "  {{var}} < 10             -> Less than" & vbCrLf &
+        "  {{var}} <= 10            -> Less than or equal" & vbCrLf &
+        "  {{var}} >= {{other}}     -> Compare two variables" & vbCrLf &
+        "" & vbCrLf &
+        "STRING OPERATIONS:" & vbCrLf &
+        "  {{var}} contains ""text"" -> Case-insensitive substring search" & vbCrLf &
+        "  {{var}} ~= ""regex""      -> Regex match (IgnoreCase, Singleline)" & vbCrLf &
+        "" & vbCrLf &
+        "LOGICAL OPERATORS:" & vbCrLf &
+        "  expr1 || expr2           -> OR: returns True on first True (left-to-right)" & vbCrLf &
+        "  expr1 && expr2           -> AND: returns False on first False (left-to-right)" & vbCrLf &
+        "" & vbCrLf &
+        "TRUTHINESS RULES:" & vbCrLf &
+        "- False: null, empty string, ""false"", ""0"", ""null"", ""none"", ""nil"", empty enumerable" & vbCrLf &
+        "- True: everything else (including non-empty strings, non-zero numbers, non-empty collections)" & vbCrLf &
+        "" & vbCrLf &
+        "=== SELECTOR OBJECT ===" & vbCrLf &
+        "Used in extract_text, extract_html, wait_for selector." & vbCrLf &
+        "" & vbCrLf &
+        "{" & vbCrLf &
+        "  ""strategy"": ""xpath|css|text|regex""," & vbCrLf &
+        "  ""value"": ""selector expression""," & vbCrLf &
+        "  ""within"": { /* nested SelectorObject for scoping */ }," & vbCrLf &
+        "  ""relative"": { ""position"": ""first|last|nth"", ""nth"": 2 }" & vbCrLf &
+        "}" & vbCrLf &
+        "" & vbCrLf &
+        "STRATEGIES:" & vbCrLf &
+        "- xpath: Raw XPath expression (e.g., ""//div[@class='content']//a"")" & vbCrLf &
+        "- css: Limited CSS selector support:" & vbCrLf &
+        "  - Tag names: div, span, a" & vbCrLf &
+        "  - Classes: .className" & vbCrLf &
+        "  - IDs: #elementId" & vbCrLf &
+        "  - Attributes: [attr=value]" & vbCrLf &
+        "  - Pseudo: :nth-child(n)" & vbCrLf &
+        "  - Combinators: space (descendant), > (direct child)" & vbCrLf &
+        "- text: Substring match in element text (case-insensitive)" & vbCrLf &
+        "  - ""exact:literal"" prefix for exact match" & vbCrLf &
+        "- regex: Regex pattern matched against normalized inner text" & vbCrLf &
+        "" & vbCrLf &
+        "RELATIVE POSITIONING:" & vbCrLf &
+        "- first: Return only first match" & vbCrLf &
+        "- last: Return only last match" & vbCrLf &
+        "- nth: Return nth match (1-based index)" & vbCrLf &
+        "" & vbCrLf &
+        "=== IMPLICIT VARIABLES ===" & vbCrLf &
+        "These are automatically set by the interpreter:" & vbCrLf &
+        "" & vbCrLf &
+        "HTTP RESPONSE:" & vbCrLf &
+        "- last_http_status: Integer status code from last open_url/http_request" & vbCrLf &
+        "- last_http_elapsed_ms: Response time in milliseconds" & vbCrLf &
+        "" & vbCrLf &
+        "LLM RESULTS (after llm_analyze):" & vbCrLf &
+        "- lastLlm: Parsed/sanitized JSON response with metadata (step_id, page_url)" & vbCrLf &
+        "- lastLlm_raw: Raw LLM output text before sanitization" & vbCrLf &
+        "- lastLlm_page_url: URL that was current when LLM was called" & vbCrLf &
+        "- lastLlm_latency_ms: LLM call duration" & vbCrLf &
+        "- last_step_id: ID of the most recently executed step" & vbCrLf &
+        "" & vbCrLf &
+        "LINK EXTRACTION (after open_url):" & vbCrLf &
+        "- auto_links: List of extracted anchor URLs matching patterns" & vbCrLf &
+        "- auto_link_enable: Boolean to enable/disable (default true)" & vbCrLf &
+        "- auto_link_patterns: List of regex patterns for filtering links" & vbCrLf &
+        "- auto_link_min: Minimum href length (default 15)" & vbCrLf &
+        "" & vbCrLf &
+        "=== COMMAND REFERENCE ===" & vbCrLf &
+        "Command names are CASE-INSENSITIVE." & vbCrLf &
+        "" & vbCrLf &
+        "--- HTTP COMMANDS ---" & vbCrLf &
+        "" & vbCrLf &
+        "open_url: Load a page and parse HTML" & vbCrLf &
+        "  params: {" & vbCrLf &
+        "    ""url"": ""https://... or /relative"",  // REQUIRED. Template-expanded." & vbCrLf &
+        "    ""method"": ""GET|POST|..."",          // Default: GET" & vbCrLf &
+        "    ""headers"": { ""name"": ""value"" },    // Per-request headers" & vbCrLf &
+        "    ""body"": ""content or object"",       // Request body" & vbCrLf &
+        "    ""body_type"": ""json|form|raw"",      // How to encode body" & vbCrLf &
+        "    ""return_body"": true,                // Include body in result" & vbCrLf &
+        "    ""timeout_ms"": 15000,                // Override timeout" & vbCrLf &
+        "    ""retry"": { ""max"":2, ""delay_ms"":1000, ""backoff"":2 }  // Inline retry" & vbCrLf &
+        "  }" & vbCrLf &
+        "  result: { status, url, elapsed_ms, body? }" & vbCrLf &
+        "  SIDE EFFECTS: Sets DOM for selectors, auto-extracts links, sets lastResponseUrl/Body" & vbCrLf &
+        "" & vbCrLf &
+        "http_request: Generic HTTP request (no auto link extraction)" & vbCrLf &
+        "  params: {" & vbCrLf &
+        "    ""url"": ""..."",                      // REQUIRED" & vbCrLf &
+        "    ""method"": ""GET|POST|PUT|DELETE"",  // Default: GET" & vbCrLf &
+        "    ""headers"": { },                     // Per-request headers" & vbCrLf &
+        "    ""query"": { ""key"": ""value"" },      // Query parameters (URL-encoded)" & vbCrLf &
+        "    ""body"": ...,                        // Request body" & vbCrLf &
+        "    ""body_type"": ""json|form|raw"",     // Encoding" & vbCrLf &
+        "    ""timeout_ms"": 15000" & vbCrLf &
+        "  }" & vbCrLf &
+        "  result: { status, headers, body, url }" & vbCrLf &
+        "  SIDE EFFECTS: Sets DOM for body content" & vbCrLf &
+        "" & vbCrLf &
+        "download_url: Download file to disk" & vbCrLf &
+        "  params: {" & vbCrLf &
+        "    ""url"": ""..."",                      // REQUIRED" & vbCrLf &
+        "    ""target_dir"": ""C:\\path\\to\\dir"",  // REQUIRED. Created if missing." & vbCrLf &
+        "    ""filename"": ""file.pdf"",            // Default: download.bin" & vbCrLf &
+        "    ""method"": ""GET"",                   // HTTP method" & vbCrLf &
+        "    ""headers"": { }," & vbCrLf &
+        "    ""body"": ...," & vbCrLf &
+        "    ""body_type"": ""json|form|raw""" & vbCrLf &
+        "  }" & vbCrLf &
+        "  result: { path, status }" & vbCrLf &
+        "" & vbCrLf &
+        "set_user_agent: Change HTTP User-Agent" & vbCrLf &
+        "  params: { ""user_agent"": ""Custom Agent/1.0"" }" & vbCrLf &
+        "  result: { user_agent }" & vbCrLf &
+        "" & vbCrLf &
+        "set_headers: Configure default headers" & vbCrLf &
+        "  params: {" & vbCrLf &
+        "    ""mode"": ""merge|replace"",          // merge=add/overwrite, replace=clear first" & vbCrLf &
+        "    ""headers"": { ""Authorization"": ""Bearer ..."" }" & vbCrLf &
+        "  }" & vbCrLf &
+        "  result: { headers }" & vbCrLf &
+        "" & vbCrLf &
+        "set_cookies: Add cookies to jar" & vbCrLf &
+        "  params: {" & vbCrLf &
+        "    ""cookies"": [" & vbCrLf &
+        "      { ""name"": ""session"", ""value"": ""abc123"", ""domain"": "".example.com""," & vbCrLf &
+        "        ""path"": ""/"", ""secure"": true, ""httpOnly"": true }" & vbCrLf &
+        "    ]" & vbCrLf &
+        "  }" & vbCrLf &
+        "  result: { count }" & vbCrLf &
+        "" & vbCrLf &
+        "--- EXTRACTION COMMANDS ---" & vbCrLf &
+        "" & vbCrLf &
+        "extract_text: Extract text from DOM elements" & vbCrLf &
+        "  params: {" & vbCrLf &
+        "    ""selector"": { /* SelectorObject */ },  // REQUIRED" & vbCrLf &
+        "    ""all"": false,                         // false=first match, true=all matches as list" & vbCrLf &
+        "    ""normalize_whitespace"": true,         // Collapse whitespace" & vbCrLf &
+        "    ""regex"": ""pattern"",                  // Optional regex to extract portion" & vbCrLf &
+        "    ""group"": 0                            // Regex capture group index" & vbCrLf &
+        "  }" & vbCrLf &
+        "  result: String (all=false) or List<String> (all=true)" & vbCrLf &
+        "" & vbCrLf &
+        "extract_html: Extract HTML from DOM element" & vbCrLf &
+        "  params: {" & vbCrLf &
+        "    ""selector"": { /* SelectorObject */ }," & vbCrLf &
+        "    ""outer"": false                       // false=innerHTML, true=outerHTML" & vbCrLf &
+        "  }" & vbCrLf &
+        "  result: String (HTML content)" & vbCrLf &
+        "" & vbCrLf &
+        "extract_attribute: Extract attribute from serialized nodes" & vbCrLf &
+        "  params: {" & vbCrLf &
+        "    ""nodes_var"": ""varWithNodeList"",     // Variable holding serialized nodes" & vbCrLf &
+        "    ""attribute"": ""href"",                // Attribute name to extract" & vbCrLf &
+        "    ""var"": ""targetVariable""             // Where to store results" & vbCrLf &
+        "  }" & vbCrLf &
+        "  result: null (stores List<String> in target variable)" & vbCrLf &
+        "  NOTE: nodes_var must contain objects with 'attributes' property" & vbCrLf &
+        "" & vbCrLf &
+        "find: Search for substring in variable" & vbCrLf &
+        "  params: {" & vbCrLf &
+        "    ""in"": ""variableName"",               // Variable to search" & vbCrLf &
+        "    ""text"": ""needle"",                   // Substring to find (case-insensitive)" & vbCrLf &
+        "    ""assign"": { ""var"": ""resultVar"" }   // Optional: store boolean result" & vbCrLf &
+        "  }" & vbCrLf &
+        "  result: { found: Boolean, index: Int }" & vbCrLf &
+        "" & vbCrLf &
+        "--- VARIABLE COMMANDS ---" & vbCrLf &
+        "" & vbCrLf &
+        "set_var: Set or update a variable" & vbCrLf &
+        "  params: {" & vbCrLf &
+        "    ""name"": ""variableName"",             // REQUIRED" & vbCrLf &
+        "    ""value"": ""any JSON value""           // String values are template-expanded" & vbCrLf &
+        "  }" & vbCrLf &
+        "  result: { name, value }" & vbCrLf &
+        "" & vbCrLf &
+        "increment: Increment/decrement numeric variable" & vbCrLf &
+        "  params: {" & vbCrLf &
+        "    ""var"": ""counterName"",               // REQUIRED" & vbCrLf &
+        "    ""by"": 1,                             // Amount to add (negative to subtract)" & vbCrLf &
+        "    ""set_to"": 0                          // Optional: set absolute value instead" & vbCrLf &
+        "  }" & vbCrLf &
+        "  result: { var, old_value, new_value }" & vbCrLf &
+        "" & vbCrLf &
+        "array_push: Append item to array variable" & vbCrLf &
+        "  params: {" & vbCrLf &
+        "    ""array"": ""arrayVarName"",            // REQUIRED. Created if missing." & vbCrLf &
+        "    ""item_var"": ""varToAppend"",          // Use existing variable value" & vbCrLf &
+        "    ""item"": { /* inline value */ }      // OR specify inline value" & vbCrLf &
+        "  }" & vbCrLf &
+        "  result: { pushed, count, array }" & vbCrLf &
+        "" & vbCrLf &
+        "range: Generate integer array" & vbCrLf &
+        "  params: {" & vbCrLf &
+        "    ""var"": ""rangeVar"",                  // REQUIRED: target variable" & vbCrLf &
+        "    ""from"": 0,                           // Start value (default 0)" & vbCrLf &
+        "    ""to"": 10,                            // End value (exclusive)" & vbCrLf &
+        "    ""step"": 1                            // Increment (default 1)" & vbCrLf &
+        "  }" & vbCrLf &
+        "  result: { var, count }" & vbCrLf &
+        "" & vbCrLf &
+        "--- CONTROL FLOW COMMANDS ---" & vbCrLf &
+        "" & vbCrLf &
+        "if: Conditional execution" & vbCrLf &
+        "  params: {" & vbCrLf &
+        "    ""condition"": ""condition expression"", // See Condition Syntax" & vbCrLf &
+        "    ""steps"": [ /* steps if true */ ],    // REQUIRED" & vbCrLf &
+        "    ""else_steps"": [ /* steps if false */ ] // Optional" & vbCrLf &
+        "  }" & vbCrLf &
+        "  result: null" & vbCrLf &
+        "  NOTE: Sub-steps share same variable scope as parent" & vbCrLf &
+        "" & vbCrLf &
+        "foreach: Iterate over array" & vbCrLf &
+        "  params: {" & vbCrLf &
+        "    ""list"": ""arrayVarName"",             // REQUIRED: variable holding array" & vbCrLf &
+        "    ""item_var"": ""itemName"",             // REQUIRED: loop variable name" & vbCrLf &
+        "    ""steps"": [ /* steps per item */ ],  // REQUIRED" & vbCrLf &
+        "    ""continue_on_error"": true,          // Default true: continue on item error" & vbCrLf &
+        "    ""stop_on_error"": false,             // If true, overrides continue_on_error" & vbCrLf &
+        "    ""max_items"": 100,                   // Limit iterations" & vbCrLf &
+        "    ""break_if_var_true"": ""doneFlag""    // Exit if variable becomes truthy" & vbCrLf &
+        "  }" & vbCrLf &
+        "  result: { count, executed }" & vbCrLf &
+        "  LOOP VARIABLES: item_var (current item), item_var_index (0-based index)" & vbCrLf &
+        "  NOTE: If list variable missing, logs warning and returns {count:0, executed:0}" & vbCrLf &
+        "" & vbCrLf &
+        "while: Loop while condition true" & vbCrLf &
+        "  params: {" & vbCrLf &
+        "    ""condition"": ""condition expression"", // Re-evaluated each iteration" & vbCrLf &
+        "    ""steps"": [ /* loop body */ ]," & vbCrLf &
+        "    ""max_iterations"": 100,              // Safety limit (default 100)" & vbCrLf &
+        "    ""break_if_var_true"": ""doneFlag""    // Early exit condition" & vbCrLf &
+        "  }" & vbCrLf &
+        "  result: { iterations, executed }" & vbCrLf &
+        "" & vbCrLf &
+        "wait: Pause execution" & vbCrLf &
+        "  params: { ""ms"": 2000 }                // Milliseconds to wait" & vbCrLf &
+        "  result: { slept }" & vbCrLf &
+        "" & vbCrLf &
+        "log: Write to execution log" & vbCrLf &
+        "  params: {" & vbCrLf &
+        "    ""level"": ""info|warn|error"",        // Log level" & vbCrLf &
+        "    ""message"": ""Log message with {{vars}}""  // Template-expanded" & vbCrLf &
+        "  }" & vbCrLf &
+        "  result: null" & vbCrLf &
+        "" & vbCrLf &
+        "--- FILE COMMANDS ---" & vbCrLf &
+        "" & vbCrLf &
+        "save_file: Write content to file" & vbCrLf &
+        "  params: {" & vbCrLf &
+        "    ""path"": ""C:\\path\\file.txt"",        // REQUIRED. Directories created." & vbCrLf &
+        "    ""content"": ""text or base64"",        // Content to write" & vbCrLf &
+        "    ""encoding"": ""utf8|binary""           // binary requires Base64 content" & vbCrLf &
+        "  }" & vbCrLf &
+        "  result: { path }" & vbCrLf &
+        "" & vbCrLf &
+        "read_file: Read file content" & vbCrLf &
+        "  params: {" & vbCrLf &
+        "    ""path"": ""C:\\path\\file.txt"",        // REQUIRED" & vbCrLf &
+        "    ""encoding"": ""utf8|binary""           // binary returns Base64" & vbCrLf &
+        "  }" & vbCrLf &
+        "  result: String (file content)" & vbCrLf &
+        "" & vbCrLf &
+        "delete_file: Delete file" & vbCrLf &
+        "  params: { ""path"": ""C:\\path\\file.txt"" }" & vbCrLf &
+        "  result: Boolean (true if deleted, false if not found)" & vbCrLf &
+        "" & vbCrLf &
+        "--- TEMPLATE & REPORT COMMANDS ---" & vbCrLf &
+        "" & vbCrLf &
+        "template: Render Mustache-like template" & vbCrLf &
+        "  params: {" & vbCrLf &
+        "    ""template"": ""Hello {{name}}!"",      // Template text" & vbCrLf &
+        "    ""context"": { ""name"": ""World"" }     // Context for rendering" & vbCrLf &
+        "  }" & vbCrLf &
+        "  result: String (rendered output)" & vbCrLf &
+        "  SYNTAX:" & vbCrLf &
+        "  - {{var}} - Variable substitution" & vbCrLf &
+        "  - {{{var}}} - Raw (unescaped) substitution" & vbCrLf &
+        "  - {{#section}}...{{/section}} - Repeat for array, show if truthy" & vbCrLf &
+        "  - {{^section}}...{{/section}} - Inverted: show if falsy/empty" & vbCrLf &
+        "  NOTE: Second pass expands global _vars placeholders" & vbCrLf &
+        "" & vbCrLf &
+        "render_report: Generate final Markdown report" & vbCrLf &
+        "  params: {" & vbCrLf &
+        "    ""template"": ""# Report\\n\\n{{data}}"", // Mustache template" & vbCrLf &
+        "    ""context"": { },                       // Optional context" & vbCrLf &
+        "    ""output_path"": ""{{env.DESKTOP}}/report.md""  // Optional: save to file" & vbCrLf &
+        "  }" & vbCrLf &
+        "  result: { output }" & vbCrLf &
+        "  SIDE EFFECT: Sets _finalMarkdown (returned as script output)" & vbCrLf &
+        "  NOTE: If output_path contains unresolved {{...}}, file is NOT written" & vbCrLf &
+        "" & vbCrLf &
+        "send_email_report: Send email via SMTP" & vbCrLf &
+        "  params: {" & vbCrLf &
+        "    ""to"": ""user@example.com; other@example.com"",  // Semicolon/comma separated" & vbCrLf &
+        "    ""subject"": ""Report Subject""," & vbCrLf &
+        "    ""body_markdown"": ""# Email Body\\n\\nContent..."",  // Converted to HTML" & vbCrLf &
+        "    ""smtp_host"": ""smtp.example.com"",    // REQUIRED" & vbCrLf &
+        "    ""smtp_port"": 25," & vbCrLf &
+        "    ""smtp_ssl"": ""true|false""," & vbCrLf &
+        "    ""smtp_auth"": ""true|false""," & vbCrLf &
+        "    ""smtp_user"": ""username""," & vbCrLf &
+        "    ""smtp_pass"": ""password""," & vbCrLf &
+        "    ""from_email"": ""sender@example.com""," & vbCrLf &
+        "    ""from_name"": ""Sender Name""" & vbCrLf &
+        "  }" & vbCrLf &
+        "  result: Boolean (success)" & vbCrLf &
+        "  NOTE: Sends multipart/alternative (text + HTML). Footer auto-added." & vbCrLf &
+        "" & vbCrLf &
+        "--- LLM COMMAND ---" & vbCrLf &
+        "" & vbCrLf &
+        "llm_analyze (aliases: llm, llmanalyze): Call LLM API" & vbCrLf &
+        "  params: {" & vbCrLf &
+        "    // PROMPTS (use one from each group):" & vbCrLf &
+        "    ""system"": ""System prompt..."",       // OR ""systemPrompt""" & vbCrLf &
+        "    ""user"": ""User prompt..."",           // OR ""prompt"", ""input"", ""arguments""" & vbCrLf &
+        "    " & vbCrLf &
+        "    // OPTIONS:" & vbCrLf &
+        "    ""temperature"": ""0.7"",               // String or number" & vbCrLf &
+        "    ""timeoutMs"": 60000,                 // Override timeout" & vbCrLf &
+        "    ""status_var"": ""httpStatus"",         // Skip if var equals ""404"" (unless allow_llm_on_404)" & vbCrLf &
+        "    " & vbCrLf &
+        "    // INNER RETRY (before step-level retry):" & vbCrLf &
+        "    ""inner_attempts"": 3,                // Retry if invalid JSON (default 1)" & vbCrLf &
+        "    ""inner_delay_ms"": 800,              // Delay between inner attempts" & vbCrLf &
+        "    " & vbCrLf &
+        "    // VALIDATION FLAGS:" & vbCrLf &
+        "    ""retry_on_invalid"": true,           // Throw if invalid (triggers step retry)" & vbCrLf &
+        "    ""reject_if_empty"": true,            // Empty output = invalid" & vbCrLf &
+        "    ""reject_if_plaintext"": true,        // Non-JSON = invalid (default true)" & vbCrLf &
+        "    ""allow_non_json"": false,            // Override reject_if_plaintext" & vbCrLf &
+        "    ""require_key"": ""key1,key2"",        // Required top-level JSON keys" & vbCrLf &
+        "    ""require_key_all"": true,            // ALL keys required (default true)" & vbCrLf &
+        "    ""require_array_key"": ""items"",      // Key must be JSON array" & vbCrLf &
+        "    ""require_min_items"": 1,             // Minimum array length" & vbCrLf &
+        "    " & vbCrLf &
+        "    // DEBUG:" & vbCrLf &
+        "    ""log_raw"": true,                    // Dump raw output to debug log" & vbCrLf &
+        "    ""max_preview"": 250                  // UI preview length" & vbCrLf &
+        "  }" & vbCrLf &
+        "  result: JObject with parsed response + metadata (step_id, page_url)" & vbCrLf &
+        "  " & vbCrLf &
+        "  SANITIZATION PROCESS:" & vbCrLf &
+        "  1. Extract content from ```json...``` code blocks if present" & vbCrLf &
+        "  2. Attempt full JSON parse" & vbCrLf &
+        "  3. Extract first balanced {...} or [...] substring" & vbCrLf &
+        "  4. Strip stray backticks" & vbCrLf &
+        "  5. Validate against require_key/require_array_key rules" & vbCrLf &
+        "  " & vbCrLf &
+        "  VARIABLES SET: lastLlm, lastLlm_raw, lastLlm_page_url, lastLlm_latency_ms, last_step_id" & vbCrLf &
+        "" & vbCrLf &
+        "--- SPECIAL COMMANDS ---" & vbCrLf &
+        "" & vbCrLf &
+        "enable_dynamic: Enable dynamic content expansion" & vbCrLf &
+        "  params: { } (ignored)" & vbCrLf &
+        "  result: { status, dynamic }" & vbCrLf &
+        "  EFFECT: After page load, scans for AJAX endpoints and fetches up to 10 additional resources" & vbCrLf &
+        "" & vbCrLf &
+        "=== URL RESOLUTION ===" & vbCrLf &
+        "Relative URLs are resolved using this precedence:" & vbCrLf &
+        "1. lastResponseUrl (if previous request made)" & vbCrLf &
+        "2. env.base_url (if configured)" & vbCrLf &
+        "3. URL used as-is (will fail if not absolute)" & vbCrLf &
+        "" & vbCrLf &
+        "URL SANITIZATION:" & vbCrLf &
+        "- Markdown [text](url) format: extracts url portion" & vbCrLf &
+        "- Angle brackets <url>: strips brackets" & vbCrLf &
+        "" & vbCrLf &
+        "=== DEBUG FLAGS ===" & vbCrLf &
+        "Set via env.variables or set_var command:" & vbCrLf &
+        "" & vbCrLf &
+        "- debug: Enable debug logging to file (Desktop/RI_Debug_Webagent.txt)" & vbCrLf &
+        "- debug_allAttempts: Log all retry attempts, not just final" & vbCrLf &
+        "- debug_substeps: Log sub-step execution in foreach/if" & vbCrLf &
+        "- debug_var_changes: Log variable value changes" & vbCrLf &
+        "- debug_include_script: Log masked script JSON at start" & vbCrLf &
+        "- debug_summary: Log final execution summary" & vbCrLf &
+        "- debug_to_logwindow: Mirror debug to UI log window" & vbCrLf &
+        "- debug_clear_llm_state: Clear lastLlm between non-LLM steps" & vbCrLf &
+        "- allow_llm_on_404: Don't skip LLM if status_var is ""404""" & vbCrLf &
+        "- llm_rethrow_all: Re-throw all LLM exceptions" & vbCrLf &
+        "" & vbCrLf &
+        "=== BEST PRACTICES ===" & vbCrLf &
+        "1. Always include unique 'id' for every step (for debugging and jumps)" & vbCrLf &
+        "2. Use retry + on_error for network operations" & vbCrLf &
+        "3. Initialize variables in env.variables before referencing" & vbCrLf &
+        "4. Use require_key/require_array_key for LLM validation" & vbCrLf &
+        "5. Set base_url or use absolute URLs to avoid resolution issues" & vbCrLf &
+        "6. Prefer 'if' command over 'guard' for multi-step conditional blocks" & vbCrLf &
+        "7. Use assign.path to extract specific values from complex results" & vbCrLf &
+        "8. Check that list variables exist before foreach (missing = silent skip)" & vbCrLf &
+        "" & vbCrLf &
+        "=== COMMON MISTAKES ===" & vbCrLf &
+        "- Unresolved {{placeholders}} are NOT errors - check logs for warnings" & vbCrLf &
+        "- foreach with missing list silently returns {count:0, executed:0}" & vbCrLf &
+        "- extract_attribute needs serialized node objects, not raw HTML" & vbCrLf &
+        "- Binary file operations require Base64 encoding" & vbCrLf &
+        "- Guard skip is success, not error - flow continues normally" & vbCrLf &
+        "- render_report's output_path skips write if unresolved placeholders remain" & vbCrLf &
+        "" & vbCrLf &
+        "END OF SPECIFICATION"
+
+
+
+    ''' <summary>
+    ''' Parameter placeholder specification for user-defined runtime parameters in WebAgent scripts.
+    ''' </summary>
+    Public Const WebAgentParameterSpec As String =
+        "WEBAGENT PARAMETER PLACEHOLDER SPECIFICATION" & vbCrLf &
+        "=============================================" & vbCrLf &
+        "" & vbCrLf &
+        "PURPOSE: Enable runtime user input for WebAgent scripts. Parameters are defined inline " &
+        "and replaced with user-provided values before script execution." & vbCrLf &
+        "" & vbCrLf &
+        "PROCESSING FLOW:" & vbCrLf &
+        "1. Script loaded from file" & vbCrLf &
+        "2. Regex scans for parameter DEFINITIONS: {parameterN=...}" & vbCrLf &
+        "3. If definitions found, user prompted with dialog" & vbCrLf &
+        "4. Values substituted into script (definitions AND references)" & vbCrLf &
+        "5. Script proceeds to normal execution" & vbCrLf &
+        "" & vbCrLf &
+        "=== SYNTAX ===" & vbCrLf &
+        "" & vbCrLf &
+        "DEFINITION (where value should appear):" & vbCrLf &
+        "  {parameterN=Description ; Type ; Default ; RangeOrOptions}" & vbCrLf &
+        "" & vbCrLf &
+        "REFERENCE (reuse same value elsewhere):" & vbCrLf &
+        "  {parameterN}" & vbCrLf &
+        "" & vbCrLf &
+        "EXAMPLES:" & vbCrLf &
+        "  ""base_url"": ""{parameter1=API URL ; string ; https://api.example.com}""" & vbCrLf &
+        "  ""timeout"": {parameter2=Timeout seconds ; integer ; 30 ; 5-120}" & vbCrLf &
+        "  ""mode"": ""{parameter3=Mode ; string ; prod ; prod<production>,dev<development>}""" & vbCrLf &
+        "" & vbCrLf &
+        "=== DEFINITION SEGMENTS ===" & vbCrLf &
+        "Separated by semicolons, whitespace trimmed:" & vbCrLf &
+        "" & vbCrLf &
+        "[0] Description (REQUIRED)" & vbCrLf &
+        "    - Shown in UI prompt" & vbCrLf &
+        "    - Keep concise (<60 chars)" & vbCrLf &
+        "" & vbCrLf &
+        "[1] Type (optional, default: string)" & vbCrLf &
+        "    - string: Any text value" & vbCrLf &
+        "    - integer: Whole number" & vbCrLf &
+        "    - long: Large whole number" & vbCrLf &
+        "    - double: Decimal number" & vbCrLf &
+        "    - boolean: true/false" & vbCrLf &
+        "" & vbCrLf &
+        "[2] Default (optional)" & vbCrLf &
+        "    - Pre-filled value in UI" & vbCrLf &
+        "    - For options: matches code value for pre-selection" & vbCrLf &
+        "" & vbCrLf &
+        "[3] Range OR Options (optional)" & vbCrLf &
+        "    RANGE (numeric types only):" & vbCrLf &
+        "      - Format: MIN-MAX (e.g., ""0-100"")" & vbCrLf &
+        "      - Values clamped to range" & vbCrLf &
+        "    " & vbCrLf &
+        "    OPTIONS (any type):" & vbCrLf &
+        "      - Comma-separated list" & vbCrLf &
+        "      - Simple: ""opt1,opt2,opt3""" & vbCrLf &
+        "      - With codes: ""Display Text<code>,Other<other>""" & vbCrLf &
+        "      - UI shows display text, script receives code" & vbCrLf &
+        "" & vbCrLf &
+        "[4] Extra Options (optional)" & vbCrLf &
+        "    - If [3] was a range, this adds option list" & vbCrLf &
+        "    - Example: ""0-100 ; 25,50,75,100""" & vbCrLf &
+        "" & vbCrLf &
+        "=== DETAILED EXAMPLES ===" & vbCrLf &
+        "" & vbCrLf &
+        "STRING WITH OPTIONS (display<code> syntax):" & vbCrLf &
+        "  {parameter1=Environment ; string ; prod ; " &
+        "Production<https://api.prod.com>,Staging<https://api.staging.com>,Dev<http://localhost:8080>}" & vbCrLf &
+        "  -> UI shows: Production, Staging, Dev" & vbCrLf &
+        "  -> Script gets: https://api.prod.com (or selected URL)" & vbCrLf &
+        "" & vbCrLf &
+        "INTEGER WITH RANGE:" & vbCrLf &
+        "  {parameter2=Max retries ; integer ; 3 ; 0-10}" & vbCrLf &
+        "  -> Accepts 0-10, values outside clamped" & vbCrLf &
+        "" & vbCrLf &
+        "DOUBLE WITH PRESET OPTIONS:" & vbCrLf &
+        "  {parameter3=Threshold ; double ; 0.75 ; 0.25,0.5,0.75,0.9,1.0}" & vbCrLf &
+        "  -> Dropdown with common values" & vbCrLf &
+        "" & vbCrLf &
+        "BOOLEAN:" & vbCrLf &
+        "  {parameter4=Enable debug ; boolean ; false}" & vbCrLf &
+        "  -> Outputs: true or false (lowercase)" & vbCrLf &
+        "" & vbCrLf &
+        "SIMPLE STRING (no options):" & vbCrLf &
+        "  {parameter5=Search term ; string ; default query}" & vbCrLf &
+        "  -> Free text input" & vbCrLf &
+        "" & vbCrLf &
+        "=== REPLACEMENT RULES ===" & vbCrLf &
+        "" & vbCrLf &
+        "1. First definition for each N wins (duplicates ignored)" & vbCrLf &
+        "2. UI prompts in ascending parameter number order" & vbCrLf &
+        "3. After user confirms:" & vbCrLf &
+        "   - Each {parameterN=...} replaced with final value" & vbCrLf &
+        "   - Each {parameterN} replaced with same value" & vbCrLf &
+        "4. Replacement proceeds from end of script backward (preserves positions)" & vbCrLf &
+        "" & vbCrLf &
+        "JSON ESCAPING:" & vbCrLf &
+        "- Backslash: \\ -> \\\\" & vbCrLf &
+        "- Quote: "" -> \\""" & vbCrLf &
+        "- No other escaping applied" & vbCrLf &
+        "" & vbCrLf &
+        "EMPTY SELECTION:" & vbCrLf &
+        "If user selects value starting with:" & vbCrLf &
+        "  ""(no selection)"", ""(keine auswahl)"", or ""---""" & vbCrLf &
+        "-> Empty string inserted" & vbCrLf &
+        "" & vbCrLf &
+        "=== PLACEMENT IN JSON ===" & vbCrLf &
+        "" & vbCrLf &
+        "CORRECT - Definition as complete string value:" & vbCrLf &
+        "  ""base_url"": ""{parameter1=API URL ; string ; https://api.example.com}""" & vbCrLf &
+        "  -> After: ""base_url"": ""https://api.example.com""" & vbCrLf &
+        "" & vbCrLf &
+        "CORRECT - Definition for numeric value (no quotes needed in result):" & vbCrLf &
+        "  ""timeout"": {parameter2=Timeout ; integer ; 30}" & vbCrLf &
+        "  -> After: ""timeout"": 30" & vbCrLf &
+        "" & vbCrLf &
+        "CORRECT - Reference after definition:" & vbCrLf &
+        "  ""primary"": ""{parameter1=URL ; string ; https://example.com}""," & vbCrLf &
+        "  ""secondary"": ""{parameter1}/backup""" & vbCrLf &
+        "  -> After: ""primary"": ""https://example.com"", ""secondary"": ""https://example.com/backup""" & vbCrLf &
+        "" & vbCrLf &
+        "AVOID - Definition embedded in larger string:" & vbCrLf &
+        "  ""url"": ""{parameter1=Base;string;https://api.com}/v1/items""" & vbCrLf &
+        "  -> Works but less clear; prefer separate definition" & vbCrLf &
+        "" & vbCrLf &
+        "=== AUTHORING GUIDELINES ===" & vbCrLf &
+        "" & vbCrLf &
+        "1. Use sequential numbering: parameter1, parameter2, parameter3..." & vbCrLf &
+        "2. Place definition where final value should appear" & vbCrLf &
+        "3. Use references {parameterN} for reuse (not definitions)" & vbCrLf &
+        "4. Provide sensible defaults for runnable scripts" & vbCrLf &
+        "5. For string values inside JSON, wrap definition in quotes" & vbCrLf &
+        "6. For numeric/boolean, omit quotes (bare definition)" & vbCrLf &
+        "7. Keep descriptions concise but descriptive" & vbCrLf &
+        "8. Use display<code> syntax when UI text differs from value" & vbCrLf &
+        "" & vbCrLf &
+        "=== COMMON MISTAKES ===" & vbCrLf &
+        "" & vbCrLf &
+        "INVALID - Missing description:" & vbCrLf &
+        "  {parameter1=}" & vbCrLf &
+        "" & vbCrLf &
+        "INVALID - Non-numeric parameter number:" & vbCrLf &
+        "  {parameterX=Description}" & vbCrLf &
+        "" & vbCrLf &
+        "PROBLEMATIC - Unquoted string in JSON context:" & vbCrLf &
+        "  ""name"": {parameter1=Name ; string ; John}" & vbCrLf &
+        "  -> Results in invalid JSON: ""name"": John" & vbCrLf &
+        "  -> Correct: ""name"": ""{parameter1=Name ; string ; John}""" & vbCrLf &
+        "" & vbCrLf &
+        "PROBLEMATIC - Reference before definition:" & vbCrLf &
+        "  References resolve only if definition exists somewhere in script" & vbCrLf &
+        "" & vbCrLf &
+        "=== CANCELLATION ===" & vbCrLf &
+        "" & vbCrLf &
+        "If user cancels the parameter dialog:" & vbCrLf &
+        "- Script execution aborts" & vbCrLf &
+        "- No changes applied to original script" & vbCrLf &
+        "" & vbCrLf &
+        "If no definitions found:" & vbCrLf &
+        "- No dialog shown" & vbCrLf &
+        "- Script executes immediately" & vbCrLf &
+        "- Any {parameterN} references remain as literal text" & vbCrLf &
+        "" & vbCrLf &
+        "END OF PARAMETER SPECIFICATION"
+
 
 
 End Class

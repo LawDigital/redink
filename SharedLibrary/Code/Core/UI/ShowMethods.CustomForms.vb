@@ -1,5 +1,30 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: ShowMethods.CustomForms.vb
+' Purpose: Provides modal WinForms dialogs used across the SharedLibrary for
+'          user interaction (selection lists, input boxes, message boxes, and
+'          multi-parameter input forms), including sizing/layout behavior and
+'          optional extra actions.
+'
+' Architecture:
+'  - Native window integration: Uses `FindWindow` / `SendMessage` (user32) and
+'    `WindowWrapper` ownership to optionally parent dialogs to Office app windows.
+'  - Selection UI: `ShowSelectionForm` shows a fixed dialog with a ListBox and
+'    OK/Cancel behavior.
+'  - Text input UI: `ShowCustomInputBox` supports single-line and multi-line input,
+'    optional shortcut insertion (Ctrl+P), and optional extra prefix buttons.
+'  - Decision UI: `ShowCustomYesNoBox` returns an integer result for two buttons,
+'    with optional auto-close and an optional extra button action.
+'  - Notifications: `ShowCustomMessageBox` (plain text), `ShowRTFCustomMessageBox`
+'    (RichTextBox), and `ShowHTMLCustomMessageBox` (WebBrowser on STA thread).
+'  - Parameter collection: `ShowCustomVariableInputForm` builds controls from an
+'    `InputParameter` array and writes back validated values when OK is pressed.
+'  - Rich editor window: `ShowCustomWindow` shows editable content (optionally RTF)
+'    with formatting buttons and multiple return modes.
+' =============================================================================
+
 
 Option Strict On
 Option Explicit On
@@ -15,6 +40,14 @@ Namespace SharedLibrary
     Partial Public Class SharedMethods
 
 
+        ''' <summary>
+        ''' Sends a message to the specified window handle (Win32).
+        ''' </summary>
+        ''' <param name="hWnd">Target window handle.</param>
+        ''' <param name="msg">Message identifier.</param>
+        ''' <param name="wParam">Additional message information (wParam).</param>
+        ''' <param name="lParam">Additional message information (lParam).</param>
+        ''' <returns>Message result.</returns>
         <DllImport("user32.dll", CharSet:=CharSet.Auto)>
         Private Shared Function SendMessage(
                     ByVal hWnd As IntPtr,
@@ -24,22 +57,32 @@ Namespace SharedLibrary
                 ) As IntPtr
         End Function
 
-        ' Add this import at the class level (with the other imports)
+        ''' <summary>
+        ''' Finds a top-level window by class name and/or window title (Win32).
+        ''' </summary>
+        ''' <param name="lpClassName">Window class name (e.g., "OpusApp").</param>
+        ''' <param name="lpWindowName">Window title; may be <c>Nothing</c>.</param>
+        ''' <returns>The window handle if found; otherwise <see cref="IntPtr.Zero"/>.</returns>
         <DllImport("user32.dll", SetLastError:=True, CharSet:=CharSet.Auto)>
         Private Shared Function FindWindow(lpClassName As String, lpWindowName As String) As IntPtr
         End Function
 
-        ' helper method to detect the calling application
+        ''' <summary>
+        ''' Detects an Office host application's top-level window handle for dialog ownership.
+        ''' </summary>
+        ''' <returns>
+        ''' The window handle if a known Office application class is found; otherwise <see cref="IntPtr.Zero"/>.
+        ''' </returns>
         Private Shared Function GetOfficeApplicationHwnd() As IntPtr
-            ' Try Word first
+            ' Try Word first.
             Dim hwnd As IntPtr = FindWindow("OpusApp", Nothing)
             If hwnd <> IntPtr.Zero Then Return hwnd
 
-            ' Try Excel
+            ' Try Excel.
             hwnd = FindWindow("XLMAIN", Nothing)
             If hwnd <> IntPtr.Zero Then Return hwnd
 
-            ' Try Outlook
+            ' Try Outlook.
             hwnd = FindWindow("rctrl_renwnd32", Nothing)
             If hwnd <> IntPtr.Zero Then Return hwnd
 
@@ -47,6 +90,15 @@ Namespace SharedLibrary
         End Function
 
 
+        ''' <summary>
+        ''' Shows a fixed-size modal dialog with a prompt and a list of options to select from.
+        ''' </summary>
+        ''' <param name="prompt">Prompt text shown above the list.</param>
+        ''' <param name="title">Window title.</param>
+        ''' <param name="options">Options to populate the ListBox.</param>
+        ''' <returns>
+        ''' The selected option string, or the sentinel string <c>"ESC"</c> when canceled/closed via Escape.
+        ''' </returns>
         Public Shared Function ShowSelectionForm(
                                             prompt As String,
                                             title As String,
@@ -55,11 +107,11 @@ Namespace SharedLibrary
 
             Dim selectedOption As String = "ESC"
 
-            ' Form konfigurieren und DPI‑Unterstützung
+            ' Configure the form and DPI support.
             Dim inputForm As New System.Windows.Forms.Form() With {
         .Text = title,
         .FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedDialog,
-        .StartPosition = System.Windows.Forms.FormStartPosition.CenterParent,
+        .StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen,
         .MinimizeBox = False,
         .MaximizeBox = False,
         .ShowInTaskbar = False,
@@ -70,11 +122,11 @@ Namespace SharedLibrary
     }
             inputForm.Font = New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
 
-            ' Logo als Icon
-            Dim bmp As New System.Drawing.Bitmap(My.Resources.Red_Ink_Logo)
+            ' Use logo as icon.
+            Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
             inputForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
 
-            ' Haupt-Layout: Prompt, ListBox, Buttons
+            ' Main layout: prompt, ListBox, buttons.
             Dim layout As New System.Windows.Forms.TableLayoutPanel() With {
         .Dock = System.Windows.Forms.DockStyle.Fill,
         .ColumnCount = 1,
@@ -85,7 +137,7 @@ Namespace SharedLibrary
             layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
             inputForm.Controls.Add(layout)
 
-            ' Prompt-Label mit automatischem Zeilenumbruch
+            ' Prompt label with automatic wrapping.
             Dim labelPrompt As New System.Windows.Forms.Label() With {
         .Text = prompt,
         .AutoSize = True,
@@ -95,7 +147,7 @@ Namespace SharedLibrary
     }
             layout.Controls.Add(labelPrompt, 0, 0)
 
-            ' ListBox mit Padding
+            ' ListBox with padding.
             Dim listPanel As New System.Windows.Forms.Panel() With {
         .Dock = System.Windows.Forms.DockStyle.Fill,
         .Padding = New System.Windows.Forms.Padding(20)
@@ -109,7 +161,7 @@ Namespace SharedLibrary
             listBoxOptions.Items.AddRange(options.ToArray())
             listPanel.Controls.Add(listBoxOptions)
 
-            ' Buttons linksbündig mit Abstand
+            ' Left-aligned buttons with spacing.
             Dim panelButtons As New System.Windows.Forms.FlowLayoutPanel() With {
         .Dock = System.Windows.Forms.DockStyle.Fill,
         .FlowDirection = System.Windows.Forms.FlowDirection.LeftToRight,
@@ -120,25 +172,25 @@ Namespace SharedLibrary
     }
             layout.Controls.Add(panelButtons, 0, 2)
 
-            ' OK-Button
+            ' OK button.
             Dim buttonOK As New System.Windows.Forms.Button() With {
         .Text = "OK",
         .DialogResult = System.Windows.Forms.DialogResult.OK,
         .Enabled = False,
         .AutoSize = True,
-        .Padding = New System.Windows.Forms.Padding(8, 4, 8, 4),
+        .Padding = New System.Windows.Forms.Padding(8, 4, 5, 4),
         .Margin = New System.Windows.Forms.Padding(0, 0, 20, 0)
     }
             AddHandler buttonOK.Click, Sub()
                                            selectedOption = CStr(listBoxOptions.SelectedItem)
                                        End Sub
 
-            ' Cancel-Button (jetzt gleiche Margin‑Top wie OK)
+            ' Cancel button.
             Dim buttonCancel As New System.Windows.Forms.Button() With {
         .Text = "Cancel",
         .DialogResult = System.Windows.Forms.DialogResult.Cancel,
         .AutoSize = True,
-        .Padding = New System.Windows.Forms.Padding(8, 4, 8, 4),
+        .Padding = New System.Windows.Forms.Padding(8, 4, 5, 4),
         .Margin = New System.Windows.Forms.Padding(0, 0, 0, 0)
     }
             AddHandler buttonCancel.Click, Sub()
@@ -149,12 +201,12 @@ Namespace SharedLibrary
             panelButtons.Controls.Add(buttonOK)
             panelButtons.Controls.Add(buttonCancel)
 
-            ' Sicherstellen, dass beide Buttons dieselbe Höhe haben
+            ' Ensure both buttons have the same height.
             Dim btnHeight As Integer = Math.Max(buttonOK.Height, buttonCancel.Height)
             buttonOK.Height = btnHeight
             buttonCancel.Height = btnHeight
 
-            ' Ereignisse für ListBox
+            ' ListBox events.
             AddHandler listBoxOptions.SelectedIndexChanged, Sub()
                                                                 buttonOK.Enabled = (listBoxOptions.SelectedItem IsNot Nothing)
                                                             End Sub
@@ -167,7 +219,7 @@ Namespace SharedLibrary
                                                    End Sub
             If listBoxOptions.Items.Count > 0 Then listBoxOptions.SelectedIndex = 0
 
-            ' Tastenkürzel
+            ' Keyboard shortcuts.
             inputForm.AcceptButton = buttonOK
             inputForm.CancelButton = buttonCancel
             AddHandler inputForm.KeyDown, Sub(sender As Object, e As System.Windows.Forms.KeyEventArgs)
@@ -178,13 +230,38 @@ Namespace SharedLibrary
                                               End If
                                           End Sub
 
-            ' Dialog anzeigen
+            ' Show dialog.
             inputForm.TopMost = True
-            inputForm.ShowDialog()
+
+            Dim hwndOwner As IntPtr = GetOfficeApplicationHwnd() ' Uses OpusApp/XLMAIN/rctrl_renwnd32
+            If hwndOwner <> IntPtr.Zero Then
+                inputForm.ShowDialog(New WindowWrapper(hwndOwner))
+            Else
+                inputForm.ShowDialog()
+            End If
+
             Return selectedOption
         End Function
 
 
+        ''' <summary>
+        ''' Shows a modal input dialog supporting single-line or multi-line text entry.
+        ''' </summary>
+        ''' <param name="prompt">Prompt text shown above the input field.</param>
+        ''' <param name="title">Window title.</param>
+        ''' <param name="SimpleInput">
+        ''' If <c>True</c>, uses a single-line TextBox; otherwise uses a multi-line TextBox with vertical scrolling.
+        ''' </param>
+        ''' <param name="DefaultValue">Initial text in the input field.</param>
+        ''' <param name="CtrlP">Text inserted at caret position when Ctrl+P is pressed (if non-empty).</param>
+        ''' <param name="OptionalButtons">
+        ''' Optional extra buttons (up to 5). Each tuple is (ButtonLabel, TooltipText, PrefixToPrepend).
+        ''' When clicked, the dialog returns OK and the prefix may be prepended to the final text.
+        ''' </param>
+        ''' <returns>
+        ''' On OK: the entered (and possibly prefixed) text.
+        ''' On Cancel: returns <c>"ESC"</c> for multi-line mode and <c>""</c> for single-line mode.
+        ''' </returns>
         Public Shared Function ShowCustomInputBox(
                                                     prompt As String,
                                                     title As String,
@@ -194,24 +271,24 @@ Namespace SharedLibrary
                                                     Optional OptionalButtons As System.Tuple(Of System.String, System.String, System.String)() = Nothing
                                                 ) As String
 
-            ' Screen working area (accounts for taskbar, etc.)
+            ' Screen working area (accounts for taskbar, etc.).
             Dim wa As System.Drawing.Rectangle = Screen.FromPoint(Cursor.Position).WorkingArea
 
-            ' Multi-line sizing rule: height = 1/6 of screen; width = 2 x
+            ' Multi-line sizing rule: height = 1/6 of screen; width based on height.
             Dim desiredInputHeight As Integer = 0
             Dim desiredInputWidth As Integer = 0
             If Not SimpleInput Then
                 desiredInputHeight = Math.Max(150, CInt(wa.Height / 6.0))
                 desiredInputWidth = CInt(desiredInputHeight * 3)
-                desiredInputWidth = Math.Min(desiredInputWidth, wa.Width - 60) ' margin to fit in screen
+                desiredInputWidth = Math.Min(desiredInputWidth, wa.Width - 60) ' Margin to fit in screen.
             End If
 
-            ' Create and configure the form (resizable in both modes)
+            ' Create and configure the form (resizable in both modes).
             Dim inputForm As New Form() With {
                 .Opacity = 0,
                 .Text = title,
                 .FormBorderStyle = FormBorderStyle.Sizable,
-                .StartPosition = FormStartPosition.Manual, ' we will center within working area after layout
+                .StartPosition = FormStartPosition.Manual, ' Center within working area after layout.
                 .MaximizeBox = False,
                 .MinimizeBox = False,
                 .ShowInTaskbar = False,
@@ -221,15 +298,15 @@ Namespace SharedLibrary
                 .AutoSizeMode = AutoSizeMode.GrowAndShrink
             }
 
-            ' Set the icon
-            Dim bmp As New Bitmap(My.Resources.Red_Ink_Logo)
+            ' Set the icon.
+            Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
             inputForm.Icon = Icon.FromHandle(bmp.GetHicon())
 
-            ' Standard font
+            ' Standard font.
             Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, FontStyle.Regular, GraphicsUnit.Point)
             inputForm.Font = standardFont
 
-            ' Main layout for dynamic resizing
+            ' Main layout for dynamic resizing.
             Dim mainLayout As New TableLayoutPanel() With {
                 .Dock = DockStyle.Fill,
                 .ColumnCount = 1,
@@ -240,16 +317,16 @@ Namespace SharedLibrary
             }
             mainLayout.ColumnStyles.Add(New ColumnStyle(SizeType.Percent, 100.0F))
             If SimpleInput Then
-                mainLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))         ' label
-                mainLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))         ' single-line textbox
-                mainLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))         ' buttons
+                mainLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))         ' Label.
+                mainLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))         ' Single-line TextBox.
+                mainLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))         ' Buttons.
             Else
-                mainLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))         ' label
-                mainLayout.RowStyles.Add(New RowStyle(SizeType.Percent, 100.0F))  ' multi-line textbox grows/shrinks
-                mainLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))         ' buttons
+                mainLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))         ' Label.
+                mainLayout.RowStyles.Add(New RowStyle(SizeType.Percent, 100.0F))  ' Multi-line TextBox grows/shrinks.
+                mainLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))         ' Buttons.
             End If
 
-            ' Prompt label (wrap to initial target width; updated on resize)
+            ' Prompt label (wrap to initial target width; updated on resize).
             Dim initialLabelWrap As Integer = If(SimpleInput,
                                                  Math.Min(wa.Width - 120, 700),
                                                  Math.Max(400, desiredInputWidth))
@@ -262,7 +339,7 @@ Namespace SharedLibrary
             promptLabel.Dock = DockStyle.Top
             mainLayout.Controls.Add(promptLabel, 0, 0)
 
-            ' Input TextBox
+            ' Input TextBox.
             Dim inputTextBox As New TextBox() With {
                 .Font = standardFont,
                 .Multiline = Not SimpleInput,
@@ -271,18 +348,18 @@ Namespace SharedLibrary
                 .Text = DefaultValue
             }
             If SimpleInput Then
-                ' Single-line: compute height, stretch horizontally with the form
+                ' Single-line: compute height, stretch horizontally with the form.
                 inputTextBox.Height = TextRenderer.MeasureText("Wy", standardFont).Height + 6
                 inputTextBox.Anchor = AnchorStyles.Left Or AnchorStyles.Right
                 inputTextBox.Width = initialLabelWrap
             Else
-                ' Multi-line: initial size by rule; allow growing with the form
+                ' Multi-line: initial size by rule; allow growing with the form.
                 inputTextBox.MinimumSize = New Size(desiredInputWidth, desiredInputHeight)
                 inputTextBox.Dock = DockStyle.Fill
             End If
             mainLayout.Controls.Add(inputTextBox, 0, 1)
 
-            ' OK and Cancel buttons
+            ' OK and Cancel buttons.
             Dim okButton As New Button() With {.Text = "OK", .AutoSize = True, .Font = standardFont}
             Dim cancelButton As New Button() With {.Text = "Cancel", .AutoSize = True, .Font = standardFont}
 
@@ -295,7 +372,7 @@ Namespace SharedLibrary
                                                inputForm.Close()
                                            End Sub
 
-            ' Bottom flow with wrapping to keep all buttons visible if space narrows
+            ' Bottom flow with wrapping so all buttons remain visible if space narrows.
             Dim bottomFlow As New FlowLayoutPanel() With {
                 .FlowDirection = FlowDirection.LeftToRight,
                 .AutoSize = True,
@@ -307,7 +384,7 @@ Namespace SharedLibrary
             bottomFlow.Controls.Add(okButton)
             bottomFlow.Controls.Add(cancelButton)
 
-            ' Optional extra buttons (max 5): label, tooltip, and prefix
+            ' Optional extra buttons (max 5): label, tooltip, and prefix.
             Dim selectedPrefix As String = Nothing
             If OptionalButtons IsNot Nothing AndAlso OptionalButtons.Length > 0 Then
                 Dim tip As New System.Windows.Forms.ToolTip()
@@ -336,15 +413,15 @@ Namespace SharedLibrary
             mainLayout.Controls.Add(bottomFlow, 0, 2)
             inputForm.Controls.Add(mainLayout)
 
-            ' Resize handler to keep label wrapping sensible when the user resizes the form
+            ' Resize handler to keep label wrapping sensible when the user resizes the form.
             AddHandler inputForm.Resize, Sub()
-                                             ' Available width for content inside padding
+                                             ' Available width for content inside padding.
                                              Dim available As Integer = Math.Max(300, mainLayout.ClientSize.Width)
                                              promptLabel.MaximumSize = New Size(available, 0)
                                              promptLabel.Invalidate()
                                          End Sub
 
-            ' KeyDown handlers for Enter/Escape
+            ' KeyDown handlers for Enter/Escape.
             If SimpleInput Then
                 AddHandler inputTextBox.KeyDown, Sub(sender, e)
                                                      If e.KeyCode = Keys.Enter Then
@@ -367,7 +444,7 @@ Namespace SharedLibrary
                                                  End Sub
             End If
 
-            ' Ctrl+P insertion, if provided
+            ' Ctrl+P insertion, if provided.
             If Not String.IsNullOrEmpty(CtrlP) Then
                 AddHandler inputTextBox.KeyDown, Sub(sender, e)
                                                      If e.KeyCode = Keys.P AndAlso e.Modifiers = Keys.Control Then
@@ -382,77 +459,96 @@ Namespace SharedLibrary
             ' After AutoSize computed, clamp to screen, set MinimumSize (so buttons stay visible),
             ' disable AutoSize to allow user resizing, and center within the working area.
             AddHandler inputForm.Shown, Sub()
-                                            ' Let AutoSize produce the preferred size first
+                                            ' Let AutoSize produce the preferred size first.
                                             inputForm.PerformLayout()
 
                                             Dim maxW As Integer = wa.Width - 40
                                             Dim maxH As Integer = wa.Height - 40
 
-                                            ' Compute space used by non-textbox rows and window chrome
+                                            ' Compute space used by non-textbox rows and window chrome.
                                             Dim chromeH As Integer = inputForm.Height - inputForm.ClientSize.Height
                                             Dim labelH As Integer = promptLabel.PreferredSize.Height
                                             Dim buttonsH As Integer = bottomFlow.PreferredSize.Height
                                             Dim paddingV As Integer = mainLayout.Padding.Vertical
-                                            Dim gaps As Integer = bottomFlow.Margin.Top ' vertical gap above buttons
+                                            Dim gaps As Integer = bottomFlow.Margin.Top ' Vertical gap above buttons.
 
                                             Dim fixedRowsH As Integer = paddingV + labelH + gaps + buttonsH
                                             Dim maxClientH As Integer = maxH - chromeH
 
                                             If Not SimpleInput Then
-                                                ' Allocate remaining height to the textbox, but stay within working area
+                                                ' Allocate remaining height to the textbox, but stay within working area.
                                                 Dim textH As Integer = Math.Max(100, Math.Min(desiredInputHeight, maxClientH - fixedRowsH))
 
-                                                ' Set client size so all rows are visible
+                                                ' Set client size so all rows are visible.
                                                 Dim newClientH As Integer = Math.Min(fixedRowsH + textH, maxClientH)
 
-                                                ' Keep current width (already autosized) but clamp to screen
+                                                ' Keep current width (already autosized) but clamp to screen.
                                                 Dim newClientW As Integer = Math.Min(inputForm.ClientSize.Width, maxW)
 
                                                 inputForm.ClientSize = New Size(newClientW, newClientH)
                                             Else
-                                                ' SimpleInput: just clamp to screen
+                                                ' SimpleInput: just clamp to screen.
                                                 If inputForm.Width > maxW Then inputForm.Width = maxW
                                                 If inputForm.Height > maxH Then inputForm.Height = maxH
                                             End If
 
-                                            ' Minimum cannot be smaller than the current fully-visible content
+                                            ' Minimum cannot be smaller than the current fully-visible content.
                                             inputForm.MinimumSize = inputForm.Size
 
-                                            ' Now allow resizing (keep MinimumSize so content/buttons never get clipped)
+                                            ' Now allow resizing (keep MinimumSize so content/buttons never get clipped).
                                             inputForm.AutoSize = False
 
-                                            ' Center within working area
+                                            ' Center within working area.
                                             inputForm.Location = New System.Drawing.Point(
                                                 wa.X + (wa.Width - inputForm.Width) \ 2,
                                                 wa.Y + (wa.Height - inputForm.Height) \ 2
                                             )
                                         End Sub
 
-            ' Ensure focus/topmost
+            ' Ensure focus/topmost.
             inputForm.TopMost = True
             inputForm.BringToFront()
             inputForm.Focus()
 
-            ' Show the dialog, optionally owned by Outlook
+            ' Show the dialog, optionally owned by Outlook.
+            'Dim Result As DialogResult
+            'If title.Contains("Browser") Then
+            'Dim outlookApp As Object = CreateObject("Outlook.Application")
+            'If outlookApp IsNot Nothing Then
+            'Dim explorer As Object = outlookApp.GetType().InvokeMember("ActiveExplorer", BindingFlags.GetProperty, Nothing, outlookApp, Nothing)
+            'If explorer IsNot Nothing Then
+            'explorer.GetType().InvokeMember("WindowState", BindingFlags.SetProperty, Nothing, explorer, New Object() {1})
+            'explorer.GetType().InvokeMember("Activate", BindingFlags.InvokeMethod, Nothing, explorer, Nothing)
+            'End If
+            'End If
+            'inputForm.Opacity = 1
+            'Dim outlookHwnd As IntPtr = FindWindow("rctrl_renwnd32", Nothing)
+            'Result = inputForm.ShowDialog(New WindowWrapper(outlookHwnd))
+            'Else
+            'inputForm.Opacity = 1
+            'Result = inputForm.ShowDialog()
+            'End If
+
+            ' Show the dialog, must be owned by Outlook (only then the title may contains "Browser").
             Dim Result As DialogResult
             If title.Contains("Browser") Then
-                Dim outlookApp As Object = CreateObject("Outlook.Application")
-                If outlookApp IsNot Nothing Then
-                    Dim explorer As Object = outlookApp.GetType().InvokeMember("ActiveExplorer", BindingFlags.GetProperty, Nothing, outlookApp, Nothing)
-                    If explorer IsNot Nothing Then
-                        explorer.GetType().InvokeMember("WindowState", BindingFlags.SetProperty, Nothing, explorer, New Object() {1})
-                        explorer.GetType().InvokeMember("Activate", BindingFlags.InvokeMethod, Nothing, explorer, Nothing)
-                    End If
+                ' Activate Outlook window via Win32 (no COM object needed since we're already in-process).
+                Dim outlookHwnd As IntPtr = FindWindow("rctrl_renwnd32", Nothing)
+                If outlookHwnd <> IntPtr.Zero Then
+                    Const SW_RESTORE As Integer = 9
+                    Const WM_SYSCOMMAND As Integer = &H112
+                    Const SC_RESTORE As Integer = &HF120
+                    SendMessage(outlookHwnd, WM_SYSCOMMAND, New IntPtr(SC_RESTORE), IntPtr.Zero)
+                    SetForegroundWindow(outlookHwnd)
                 End If
                 inputForm.Opacity = 1
-                Dim outlookHwnd As IntPtr = FindWindow("rctrl_renwnd32", Nothing)
                 Result = inputForm.ShowDialog(New WindowWrapper(outlookHwnd))
             Else
                 inputForm.Opacity = 1
                 Result = inputForm.ShowDialog()
             End If
 
-            ' Return the entered text or appropriate default
+            ' Return the entered text or appropriate default.
             If Result = DialogResult.OK Then
                 Dim finalText As String = inputTextBox.Text
                 If Not String.IsNullOrEmpty(selectedPrefix) AndAlso Not finalText.StartsWith(selectedPrefix, StringComparison.OrdinalIgnoreCase) Then
@@ -465,7 +561,24 @@ Namespace SharedLibrary
             End If
         End Function
 
+        <DllImport("user32.dll")>
+        Private Shared Function SetForegroundWindow(hWnd As IntPtr) As Boolean
+        End Function
 
+
+        ''' <summary>
+        ''' Shows a modal Yes/No-style dialog with two custom button labels and an optional auto-close timer.
+        ''' </summary>
+        ''' <param name="bodyText">Dialog body text (truncated to 10000 characters as implemented).</param>
+        ''' <param name="button1Text">Text for the first button (result 1).</param>
+        ''' <param name="button2Text">Text for the second button (result 2).</param>
+        ''' <param name="header">Dialog title. Defaults to <c>AN</c>.</param>
+        ''' <param name="autoCloseSeconds">If set, the dialog closes after this many seconds and returns 3.</param>
+        ''' <param name="Defaulttext">Suffix appended to the countdown label text.</param>
+        ''' <param name="extraButtonText">Optional extra button text (only when no auto-close is active).</param>
+        ''' <param name="extraButtonAction">Action invoked when the extra button is clicked.</param>
+        ''' <param name="CloseAfterExtra">If <c>True</c>, closes the dialog after invoking the extra action.</param>
+        ''' <returns>1 for button1, 2 for button2, 3 for auto-close; otherwise 0 (initial value).</returns>
         Public Shared Function ShowCustomYesNoBox(
                         ByVal bodyText As String,
                         ByVal button1Text As String,
@@ -478,87 +591,55 @@ Namespace SharedLibrary
                         Optional CloseAfterExtra As Boolean = False
                     ) As Integer
 
-            ' Truncate if too long
-            Dim isTruncated As Boolean = False
-            If bodyText.Length > 10000 Then
-                bodyText = bodyText.Substring(0, 10000)
-                isTruncated = True
-            End If
+            ' Screen working area.
+            Dim wa As Rectangle = Screen.FromPoint(Cursor.Position).WorkingArea
+            Dim maxScreenHeight As Integer = CInt(wa.Height * 0.5)
+            Dim maxScreenWidth As Integer = CInt(wa.Width * 0.9)
 
-            ' Create and configure form
+            ' Constants.
+            Const MIN_WIDTH As Integer = 450
+            Const PADDING As Integer = 20
+            Const BUTTON_GAP As Integer = 10
+            Const ASPECT_RATIO As Double = 16.0 / 9.0
+
+            ' Create and configure form (resizable).
             Dim messageForm As New Form() With {
-            .Opacity = 0,
-            .Text = header,
-            .FormBorderStyle = FormBorderStyle.FixedDialog,
-            .StartPosition = FormStartPosition.CenterScreen,
-            .MaximizeBox = False,
-            .MinimizeBox = False,
-            .ShowInTaskbar = False,
-            .TopMost = True,
-            .AutoScaleMode = AutoScaleMode.Font,
-            .AutoSize = True,
-            .AutoSizeMode = AutoSizeMode.GrowAndShrink
-        }
+                .Opacity = 0,
+                .Text = header,
+                .FormBorderStyle = FormBorderStyle.Sizable,
+                .StartPosition = FormStartPosition.CenterScreen,
+                .MaximizeBox = False,
+                .MinimizeBox = False,
+                .ShowInTaskbar = False,
+                .TopMost = True,
+                .AutoScaleMode = AutoScaleMode.Font
+            }
 
-            ' Icon
-            Dim bmpIcon As New Bitmap(My.Resources.Red_Ink_Logo)
+            ' Icon.
+            Dim bmpIcon As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
             messageForm.Icon = Icon.FromHandle(bmpIcon.GetHicon())
 
-            ' Font
+            ' Font.
             Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, FontStyle.Regular, GraphicsUnit.Point)
             messageForm.Font = standardFont
 
-            ' Layout containers
-            Dim maxLabelWidth = 480
-            Dim maxScreenHeight = Screen.PrimaryScreen.WorkingArea.Height - 100
-
-            Dim mainFlow As New FlowLayoutPanel() With {
-            .FlowDirection = FlowDirection.TopDown,
-            .Dock = DockStyle.Fill,
-            .AutoSize = True,
-            .AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            .Padding = New Padding(20),
-            .MaximumSize = New Size(maxLabelWidth + 40, 0)
-        }
-
-            ' Body label
-            Dim bodyLabel As New System.Windows.Forms.Label() With {
-            .Text = bodyText,
-            .Font = standardFont,
-            .AutoSize = True,
-            .MaximumSize = New Size(maxLabelWidth, maxScreenHeight \ 2)
-        }
-            mainFlow.Controls.Add(bodyLabel)
-
-            ' “Text truncated” label, if needed
-            If isTruncated Then
-                Dim truncatedLabel As New System.Windows.Forms.Label() With {
-                .Text = "(text has been truncated)",
+            ' Create buttons first to measure their size.
+            Dim button1 As New Button() With {
+                .Text = button1Text,
+                .AutoSize = True,
+                .Font = standardFont
+            }
+            Dim button2 As New Button() With {
+                .Text = button2Text,
+                .AutoSize = True,
+                .Font = standardFont
+            }
+            Dim countdownLabel As New System.Windows.Forms.Label() With {
                 .Font = standardFont,
                 .AutoSize = True
             }
-                mainFlow.Controls.Add(truncatedLabel)
-            End If
 
-            ' Countdown label (for auto-close)
-            Dim countdownLabel As New System.Windows.Forms.Label() With {
-            .Font = standardFont,
-            .AutoSize = True
-        }
-
-            ' Yes/No buttons
-            Dim button1 As New Button() With {
-            .Text = button1Text,
-            .AutoSize = True,
-            .Font = standardFont
-        }
-            Dim button2 As New Button() With {
-            .Text = button2Text,
-            .AutoSize = True,
-            .Font = standardFont
-        }
-
-            ' Result variable
+            ' Result variable.
             Dim result As Integer = 0
 
             AddHandler button1.Click, Sub()
@@ -570,52 +651,165 @@ Namespace SharedLibrary
                                           messageForm.Close()
                                       End Sub
 
-            ' Bottom flow for buttons (+ countdown)
+            ' Bottom flow for buttons.
             Dim bottomFlow As New FlowLayoutPanel() With {
-                        .FlowDirection = FlowDirection.LeftToRight,
-                        .AutoSize = True,
-                        .AutoSizeMode = AutoSizeMode.GrowAndShrink,
-                        .Margin = New Padding(0, 20, 0, 0)
-                    }
+                .FlowDirection = FlowDirection.LeftToRight,
+                .AutoSize = True,
+                .AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                .Dock = DockStyle.Bottom,
+                .Padding = New Padding(PADDING, BUTTON_GAP, PADDING, PADDING),
+                .WrapContents = True
+            }
             bottomFlow.Controls.Add(button1)
             bottomFlow.Controls.Add(button2)
 
-            ' --- optional extra button, double distance from other buttons ---
+            ' Optional extra button.
+            Dim extraButton As Button = Nothing
             If (Not autoCloseSeconds.HasValue) AndAlso
-       (Not String.IsNullOrEmpty(extraButtonText)) AndAlso
-       (extraButtonAction IsNot Nothing) Then
+               (Not String.IsNullOrEmpty(extraButtonText)) AndAlso
+               (extraButtonAction IsNot Nothing) Then
 
-
-                Dim extraButton As New System.Windows.Forms.Button() With {
-                            .Text = extraButtonText,
-                            .AutoSize = True,
-                            .Font = standardFont,
-                                         .Margin = New System.Windows.Forms.Padding(10, button1.Margin.Top, 0, button1.Margin.Bottom)
-                        }
+                extraButton = New Button() With {
+                    .Text = extraButtonText,
+                    .AutoSize = True,
+                    .Font = standardFont,
+                    .Margin = New Padding(BUTTON_GAP, button1.Margin.Top, 0, button1.Margin.Bottom)
+                }
 
                 AddHandler extraButton.Click,
-            Sub()
-                Try
-                    extraButtonAction.Invoke()
-                Catch ex As System.Exception
-                    ' Optional: log or handle exception
-                End Try
-                If CloseAfterExtra Then messageForm.Close()
-            End Sub
+                    Sub()
+                        Try
+                            extraButtonAction.Invoke()
+                        Catch ex As System.Exception
+                            ' Swallow to keep dialog functional.
+                        End Try
+                        If CloseAfterExtra Then messageForm.Close()
+                    End Sub
 
                 bottomFlow.Controls.Add(extraButton)
             End If
 
-
             If autoCloseSeconds.HasValue Then
                 bottomFlow.Controls.Add(countdownLabel)
             End If
-            mainFlow.Controls.Add(bottomFlow)
 
-            messageForm.Controls.Add(mainFlow)
+            ' Measure button panel height.
+            bottomFlow.PerformLayout()
+            Dim buttonPanelHeight As Integer = bottomFlow.PreferredSize.Height
 
+            ' Body label for text measurement.
+            Dim bodyLabel As New System.Windows.Forms.Label() With {
+                .Text = bodyText,
+                .Font = standardFont,
+                .AutoSize = True
+            }
 
-            ' Auto-close timer
+            ' Calculate optimal dimensions with 16:9 aspect ratio preference.
+            Dim chromeWidth As Integer = messageForm.Width - messageForm.ClientSize.Width + 20
+            Dim chromeHeight As Integer = messageForm.Height - messageForm.ClientSize.Height
+
+            ' Start with minimum width and calculate text height.
+            Dim contentWidth As Integer = MIN_WIDTH - 2 * PADDING
+            bodyLabel.MaximumSize = New Size(contentWidth, 0)
+            Dim textSize As Size = bodyLabel.GetPreferredSize(New Size(contentWidth, 0))
+
+            ' Try to achieve 16:9 ratio by widening if text is tall.
+            Dim targetHeight As Integer = textSize.Height + buttonPanelHeight + PADDING
+            Dim targetWidth As Integer = MIN_WIDTH
+
+            ' Iteratively widen to approach 16:9 ratio while text is taller than optimal.
+            Dim iterations As Integer = 0
+            While iterations < 20 AndAlso targetHeight > 0
+                Dim optimalHeight As Integer = CInt(targetWidth / ASPECT_RATIO)
+                If targetHeight <= optimalHeight OrElse targetWidth >= maxScreenWidth Then
+                    Exit While
+                End If
+
+                ' Increase width.
+                targetWidth = Math.Min(targetWidth + 50, maxScreenWidth)
+                contentWidth = targetWidth - 2 * PADDING - chromeWidth
+
+                bodyLabel.MaximumSize = New Size(contentWidth, 0)
+                textSize = bodyLabel.GetPreferredSize(New Size(contentWidth, 0))
+                targetHeight = textSize.Height + buttonPanelHeight + PADDING
+
+                iterations += 1
+            End While
+
+            ' Determine if scrolling is needed.
+            Dim needsScroll As Boolean = textSize.Height > (maxScreenHeight - buttonPanelHeight - PADDING)
+            Dim bodyPanelHeight As Integer
+
+            If needsScroll Then
+                bodyPanelHeight = maxScreenHeight - buttonPanelHeight - PADDING
+                ' Account for scrollbar width.
+                contentWidth = contentWidth - SystemInformation.VerticalScrollBarWidth
+                bodyLabel.MaximumSize = New Size(contentWidth, 0)
+            Else
+                bodyPanelHeight = textSize.Height
+            End If
+
+            ' Create scrollable body container.
+            Dim bodyScrollPanel As New Panel() With {
+                .Dock = DockStyle.Fill,
+                .AutoScroll = needsScroll,
+                .Padding = New Padding(PADDING, PADDING, PADDING, BUTTON_GAP)
+            }
+
+            bodyLabel.MaximumSize = New Size(contentWidth, 0)
+            bodyLabel.Location = New System.Drawing.Point(PADDING, PADDING)  ' Respect the left and top padding
+            bodyScrollPanel.Controls.Add(bodyLabel)
+
+            If needsScroll Then
+                bodyScrollPanel.AutoScrollMinSize = New Size(contentWidth, textSize.Height + PADDING)  ' Add padding to scroll size
+            End If
+
+            ' Main layout using TableLayoutPanel for proper resizing.
+            Dim mainLayout As New TableLayoutPanel() With {
+                .Dock = DockStyle.Fill,
+                .ColumnCount = 1,
+                .RowCount = 2,
+                .Padding = New Padding(0),
+                .Margin = New Padding(0)
+            }
+            mainLayout.ColumnStyles.Add(New ColumnStyle(SizeType.Percent, 100.0F))
+            mainLayout.RowStyles.Add(New RowStyle(SizeType.Percent, 100.0F)) ' Body expands.
+            mainLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))        ' Buttons fixed.
+
+            mainLayout.Controls.Add(bodyScrollPanel, 0, 0)
+            mainLayout.Controls.Add(bottomFlow, 0, 1)
+
+            messageForm.Controls.Add(mainLayout)
+
+            ' Calculate final form size.
+            Dim clientWidth As Integer = Math.Max(MIN_WIDTH, targetWidth) - chromeWidth
+            Dim clientHeight As Integer = bodyPanelHeight + buttonPanelHeight + PADDING + BUTTON_GAP
+
+            messageForm.ClientSize = New Size(clientWidth, clientHeight)
+
+            ' Set minimum size to ensure buttons always visible.
+            Dim minButtonWidth As Integer = bottomFlow.PreferredSize.Width + 2 * PADDING
+            messageForm.MinimumSize = New Size(
+                Math.Max(MIN_WIDTH, minButtonWidth + chromeWidth),
+                buttonPanelHeight + 100 + chromeHeight
+            )
+
+            ' Handle resize to update label wrapping.
+            AddHandler messageForm.Resize,
+                Sub()
+                    Dim availableWidth As Integer = bodyScrollPanel.ClientSize.Width - 2 * PADDING
+                    If bodyScrollPanel.AutoScroll Then
+                        availableWidth -= SystemInformation.VerticalScrollBarWidth
+                    End If
+                    bodyLabel.MaximumSize = New Size(Math.Max(100, availableWidth), 0)
+                    bodyLabel.PerformLayout()
+
+                    If bodyScrollPanel.AutoScroll Then
+                        bodyScrollPanel.AutoScrollMinSize = New Size(availableWidth, bodyLabel.PreferredHeight + PADDING)
+                    End If
+                End Sub
+
+            ' Auto-close timer.
             If autoCloseSeconds.HasValue Then
                 Dim remaining = autoCloseSeconds.Value
                 countdownLabel.Text = $"(closes in {remaining} seconds{Defaulttext})"
@@ -633,15 +827,39 @@ Namespace SharedLibrary
                 t.Start()
             End If
 
-            ' Show and return
+            ' Show and return.
             messageForm.TopMost = True
             messageForm.Opacity = 1
-            messageForm.ShowDialog()
+            messageForm.BringToFront()
+            messageForm.Focus()
             messageForm.Activate()
+
+            AddHandler messageForm.Shown,
+                Sub(sender, e)
+                    messageForm.TopMost = False
+                    messageForm.TopMost = True
+                    messageForm.Activate()
+                    messageForm.BringToFront()
+                End Sub
+
+            messageForm.ShowDialog()
             Return result
         End Function
 
-
+        ''' <summary>
+        ''' Shows a modal message dialog with OK button and optional auto-close behavior.
+        ''' </summary>
+        ''' <param name="bodyText">Text content (truncated to 10000 characters as implemented).</param>
+        ''' <param name="header">Dialog title. Defaults to <c>AN</c> if empty/whitespace.</param>
+        ''' <param name="autoCloseSeconds">If set, counts down and closes the dialog automatically.</param>
+        ''' <param name="Defaulttext">Suffix appended to the countdown label text.</param>
+        ''' <param name="SeparateThread">
+        ''' If <c>True</c> and auto-close is enabled, shows the dialog using <c>ShowDialog()</c>;
+        ''' otherwise uses <c>Show()</c> with <c>Application.DoEvents()</c>.
+        ''' </param>
+        ''' <param name="extraButtonText">Optional extra button text (only when no auto-close is active).</param>
+        ''' <param name="extraButtonAction">Action invoked when the extra button is clicked.</param>
+        ''' <param name="CloseAfterExtra">If <c>True</c>, closes the dialog after invoking the extra action.</param>
         Public Shared Sub ShowCustomMessageBox(
     ByVal bodyText As String,
     Optional header As String = AN,
@@ -672,7 +890,7 @@ Namespace SharedLibrary
         .AutoSize = False
     }
 
-            Dim bmpIcon As New System.Drawing.Bitmap(My.Resources.Red_Ink_Logo)
+            Dim bmpIcon As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
             messageForm.Icon = System.Drawing.Icon.FromHandle(bmpIcon.GetHicon())
 
             Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
@@ -680,8 +898,8 @@ Namespace SharedLibrary
 
             Dim wa As System.Drawing.Rectangle = System.Windows.Forms.Screen.PrimaryScreen.WorkingArea
             Dim paddingAll As System.Int32 = 20
-            Dim gapAboveButtons As System.Int32 = 10 ' keep existing gap logic
-            Dim spacerExtra As System.Int32 = 20    ' NEW: extra space between text and buttons
+            Dim gapAboveButtons As System.Int32 = 10 ' Keep existing gap logic.
+            Dim spacerExtra As System.Int32 = 20    ' Extra space between text and buttons.
             Dim minContentWidth As System.Int32 = 360
             Dim startContentWidth As System.Int32 = 500
             Dim maxWindowWidth As System.Int32 = CInt(System.Math.Floor(wa.Width * 0.5))
@@ -703,7 +921,7 @@ Namespace SharedLibrary
     }
             bottomFlow.Controls.Add(okButton)
 
-            ' optional extra button
+            ' Optional extra button.
             If (Not autoCloseSeconds.HasValue) AndAlso
        (Not System.String.IsNullOrEmpty(extraButtonText)) AndAlso
        (extraButtonAction IsNot Nothing) Then
@@ -722,6 +940,7 @@ Namespace SharedLibrary
                 Try
                     extraButtonAction.Invoke()
                 Catch ex As System.Exception
+                    ' Swallow to keep dialog functional.
                 End Try
                 If CloseAfterExtra Then messageForm.Close()
             End Sub
@@ -748,7 +967,7 @@ Namespace SharedLibrary
 
             Dim contentWidth As System.Int32 = System.Math.Max(minContentWidth, System.Math.Min(startContentWidth, maxWindowWidth - 2 * paddingAll))
             Dim pref As System.Drawing.Size = GetLabelPreferred(contentWidth)
-            Dim maxBodyHeightNoScroll As System.Int32 = System.Math.Max(100, maxWindowHeight - reservedBottomHeight - spacerExtra - 2 * paddingAll) ' include spacer in budget
+            Dim maxBodyHeightNoScroll As System.Int32 = System.Math.Max(100, maxWindowHeight - reservedBottomHeight - spacerExtra - 2 * paddingAll) ' Include spacer in budget.
 
             While (pref.Height > maxBodyHeightNoScroll) AndAlso ((contentWidth + 2 * paddingAll) < maxWindowWidth)
                 Dim stepW As System.Int32 = System.Math.Max(24, (maxWindowWidth - 2 * paddingAll - contentWidth) \ 3)
@@ -784,23 +1003,23 @@ Namespace SharedLibrary
                 bodyScrollPanel.AutoScrollMinSize = New System.Drawing.Size(usableTextWidth, pref.Height)
             End If
 
-            ' --- MAIN TABLE: now 3 rows: [text][SPACER][buttons] ---
+            ' Main table: [text][spacer][buttons].
             Dim table As New System.Windows.Forms.TableLayoutPanel() With {
         .Dock = System.Windows.Forms.DockStyle.Fill,
         .ColumnCount = 1,
-        .RowCount = 3, ' NEW
+        .RowCount = 3,
         .Padding = New System.Windows.Forms.Padding(paddingAll),
         .AutoSize = False,
         .Margin = New System.Windows.Forms.Padding(0)
     }
             table.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
-            table.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, bodyPanelHeight))  ' text
-            table.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, spacerExtra))       ' NEW spacer
-            table.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))                    ' buttons
+            table.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, bodyPanelHeight))  ' Text.
+            table.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, spacerExtra))       ' Spacer.
+            table.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))                  ' Buttons.
 
             table.Controls.Add(bodyScrollPanel, 0, 0)
 
-            ' NEW spacer: exact +20 px above the buttons
+            ' Spacer: exact spacerExtra above the buttons.
             Dim spacer As New System.Windows.Forms.Panel() With {.Height = spacerExtra, .Width = 1, .Margin = New System.Windows.Forms.Padding(0)}
             table.Controls.Add(spacer, 0, 1)
 
@@ -812,7 +1031,7 @@ Namespace SharedLibrary
             messageForm.Controls.Clear()
             messageForm.Controls.Add(table)
 
-            ' Final size: include spacerExtra
+            ' Final size: include spacerExtra.
             Dim clientW As System.Int32 = contentWidth + 2 * paddingAll
             Dim clientH As System.Int32 = bodyPanelHeight + spacerExtra + reservedBottomHeight + 2 * paddingAll
             clientW = System.Math.Min(clientW, maxWindowWidth)
@@ -845,8 +1064,8 @@ Namespace SharedLibrary
 
                     AddHandler messageForm.Shown,
                             Sub(sender, e)
-                                messageForm.TopMost = False  ' Reset first
-                                messageForm.TopMost = True   ' Then set again
+                                messageForm.TopMost = False  ' Reset first.
+                                messageForm.TopMost = True   ' Then set again.
                                 messageForm.Activate()
                                 messageForm.BringToFront()
                             End Sub
@@ -863,8 +1082,8 @@ Namespace SharedLibrary
 
                 AddHandler messageForm.Shown,
                         Sub(sender, e)
-                            messageForm.TopMost = False  ' Reset first
-                            messageForm.TopMost = True   ' Then set again
+                            messageForm.TopMost = False  ' Reset first.
+                            messageForm.TopMost = True   ' Then set again.
                             messageForm.Activate()
                             messageForm.BringToFront()
                         End Sub
@@ -878,6 +1097,14 @@ Namespace SharedLibrary
 
 
 
+
+        ''' <summary>
+        ''' Shows a modal RichTextBox-based message dialog (RTF content) with optional auto-close.
+        ''' </summary>
+        ''' <param name="bodyText">RTF content assigned to <see cref="RichTextBox.Rtf"/>.</param>
+        ''' <param name="header">Dialog title. Defaults to <c>AN</c> if empty/whitespace.</param>
+        ''' <param name="autoCloseSeconds">If set, closes the dialog after this many seconds.</param>
+        ''' <param name="Defaulttext">Suffix appended to the countdown label text.</param>
         Public Shared Sub ShowRTFCustomMessageBox(ByVal bodyText As String, Optional header As String = AN, Optional autoCloseSeconds As Integer? = Nothing, Optional Defaulttext As String = " - execution continues meanwhile")
 
             Dim RTFMessageForm As New System.Windows.Forms.Form()
@@ -888,7 +1115,7 @@ Namespace SharedLibrary
 
             If String.IsNullOrWhiteSpace(header) Then header = AN
 
-            ' Form attributes
+            ' Form attributes.
             RTFMessageForm.Opacity = 0
             RTFMessageForm.Text = header
             RTFMessageForm.FormBorderStyle = System.Windows.Forms.FormBorderStyle.Sizable
@@ -899,21 +1126,20 @@ Namespace SharedLibrary
             RTFMessageForm.TopMost = True
             RTFMessageForm.KeyPreview = True
 
-            ' Autoscale for fonts & DPI
+            ' Autoscale for fonts & DPI.
             RTFMessageForm.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Dpi
             RTFMessageForm.AutoScaleDimensions = New System.Drawing.SizeF(96.0F, 96.0F)
 
             RTFMessageForm.MinimumSize = New System.Drawing.Size(650, 335)
 
-            ' Icon
-            Dim bmp As New System.Drawing.Bitmap(My.Resources.Red_Ink_Logo)
+            ' Icon.
+            Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
             RTFMessageForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
 
-            ' Standard font
+            ' Standard font.
             Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
 
-            ' Body RTF box
-            ' Body RTF box
+            ' Body RTF box.
             bodyLabel.Font = standardFont
             bodyLabel.ReadOnly = True
             bodyLabel.BorderStyle = System.Windows.Forms.BorderStyle.None
@@ -923,7 +1149,7 @@ Namespace SharedLibrary
             bodyLabel.Location = New System.Drawing.Point(20, 20)
             bodyLabel.Width = 600
             bodyLabel.Height = 200
-            ' Anchor to all sides so it resizes with the form
+            ' Anchor to all sides so it resizes with the form.
             bodyLabel.Anchor = System.Windows.Forms.AnchorStyles.Top _
                      Or System.Windows.Forms.AnchorStyles.Left _
                      Or System.Windows.Forms.AnchorStyles.Right _
@@ -931,7 +1157,7 @@ Namespace SharedLibrary
             RTFMessageForm.Controls.Add(bodyLabel)
 
 
-            ' OK button & countdown label setup
+            ' OK button & countdown label setup.
             okButton.Font = standardFont
             okButton.Text = "OK"
             okButton.AutoSize = True
@@ -939,27 +1165,27 @@ Namespace SharedLibrary
             countdownLabel.Font = standardFont
             countdownLabel.AutoSize = True
 
-            ' Bottom panel to hold button + countdown, docked so it moves with resizing
+            ' Bottom panel to hold button + countdown, docked so it moves with resizing.
             Dim bottomPanel As New System.Windows.Forms.Panel()
             bottomPanel.Dock = System.Windows.Forms.DockStyle.Bottom
-            bottomPanel.Padding = New System.Windows.Forms.Padding(20)  ' 20px padding on all sides
+            bottomPanel.Padding = New System.Windows.Forms.Padding(20)  ' 20px padding on all sides.
             bottomPanel.Height = okButton.PreferredSize.Height + bottomPanel.Padding.Top + bottomPanel.Padding.Bottom
             RTFMessageForm.Controls.Add(bottomPanel)
 
-            ' Add controls into panel
+            ' Add controls into panel.
             bottomPanel.Controls.Add(okButton)
             bottomPanel.Controls.Add(countdownLabel)
             okButton.Location = New System.Drawing.Point(bottomPanel.Padding.Left, bottomPanel.Padding.Top)
             countdownLabel.Location = New System.Drawing.Point(okButton.Right + 10, bottomPanel.Padding.Top)
 
-            ' Ensure bodyLabel resizes when form is resized
+            ' Ensure bodyLabel resizes when form is resized.
             AddHandler RTFMessageForm.Resize, Sub(sender As Object, e As EventArgs)
                                                   Dim availableWidth As Integer = RTFMessageForm.ClientSize.Width - bodyLabel.Left - 20
                                                   Dim availableHeight As Integer = RTFMessageForm.ClientSize.Height - bottomPanel.Height - bodyLabel.Top - 20
                                                   bodyLabel.Size = New System.Drawing.Size(availableWidth, availableHeight)
                                               End Sub
 
-            ' Handlers
+            ' Handlers.
             Dim userClicked As Boolean = False
             AddHandler okButton.Click, Sub(sender As Object, e As EventArgs)
                                            userClicked = True
@@ -975,18 +1201,18 @@ Namespace SharedLibrary
                                                    End If
                                                End Sub
             AddHandler RTFMessageForm.Shown, Sub(sender As Object, e As EventArgs)
-                                                 ' Trigger initial resize layout
+                                                 ' Trigger initial resize layout.
                                                  RTFMessageForm.PerformLayout()
                                                  RTFMessageForm.Activate()
                                              End Sub
 
-            ' Initial form sizing: ensure 20px padding around button and RTF label sizing
+            ' Initial form sizing: ensure 20px padding around button and RTF label sizing.
             Dim formWidth As Integer = Math.Max(RTFMessageForm.MinimumSize.Width, bodyLabel.Width + 40)
             Dim formHeight As Integer = Math.Max(RTFMessageForm.MinimumSize.Height,
                                          bodyLabel.Bottom + 20 + bottomPanel.Height)
             RTFMessageForm.ClientSize = New System.Drawing.Size(formWidth, formHeight)
 
-            ' Auto-close timer
+            ' Auto-close timer.
             If autoCloseSeconds.HasValue AndAlso autoCloseSeconds > 0 Then
                 Dim remainingTime As Integer = autoCloseSeconds.Value
                 countdownLabel.Text = $"(closes in {remainingTime} seconds{Defaulttext})"
@@ -1013,8 +1239,8 @@ Namespace SharedLibrary
 
                 AddHandler RTFMessageForm.Shown,
                                         Sub(sender, e)
-                                            RTFMessageForm.TopMost = False  ' Reset first
-                                            RTFMessageForm.TopMost = True   ' Then set again
+                                            RTFMessageForm.TopMost = False  ' Reset first.
+                                            RTFMessageForm.TopMost = True   ' Then set again.
                                             RTFMessageForm.Activate()
                                             RTFMessageForm.BringToFront()
                                         End Sub
@@ -1033,8 +1259,8 @@ Namespace SharedLibrary
 
                 AddHandler RTFMessageForm.Shown,
                                         Sub(sender, e)
-                                            RTFMessageForm.TopMost = False  ' Reset first
-                                            RTFMessageForm.TopMost = True   ' Then set again
+                                            RTFMessageForm.TopMost = False  ' Reset first.
+                                            RTFMessageForm.TopMost = True   ' Then set again.
                                             RTFMessageForm.Activate()
                                             RTFMessageForm.BringToFront()
                                         End Sub
@@ -1046,6 +1272,15 @@ Namespace SharedLibrary
         End Sub
 
 
+        ''' <summary>
+        ''' Shows an HTML message dialog using a WinForms WebBrowser control on an STA thread.
+        ''' </summary>
+        ''' <param name="bodyText">HTML assigned to <see cref="WebBrowser.DocumentText"/>.</param>
+        ''' <param name="header">Dialog title. Defaults to <c>AN</c>.</param>
+        ''' <param name="Defaulttext">Unused parameter (kept for signature compatibility).</param>
+        ''' <param name="extraButtonText">Optional extra button text.</param>
+        ''' <param name="extraButtonAction">Action invoked when the extra button is clicked.</param>
+        ''' <param name="CloseAfterExtra">If <c>True</c>, closes the dialog after invoking the extra action.</param>
         Public Shared Sub ShowHTMLCustomMessageBox(
     ByVal bodyText As String,
     Optional header As String = AN,
@@ -1055,7 +1290,7 @@ Namespace SharedLibrary
     Optional CloseAfterExtra As Boolean = False
 )
             Dim t As New Thread(Sub()
-                                    ' Create and configure form
+                                    ' Create and configure form.
                                     Dim HTMLMessageForm As New System.Windows.Forms.Form() With {
                                 .Opacity = 0,
                                 .Text = header,
@@ -1070,20 +1305,20 @@ Namespace SharedLibrary
                                 .AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font
                             }
 
-                                    ' Header fallback
+                                    ' Header fallback.
                                     If String.IsNullOrWhiteSpace(header) Then
                                         HTMLMessageForm.Text = AN
                                     End If
 
-                                    ' Set the icon
-                                    Dim bmp As New System.Drawing.Bitmap(My.Resources.Red_Ink_Logo)
+                                    ' Set the icon.
+                                    Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
                                     HTMLMessageForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
 
-                                    ' Standard font
+                                    ' Standard font.
                                     Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
                                     HTMLMessageForm.Font = standardFont
 
-                                    ' WebBrowser mit 10px Margin
+                                    ' WebBrowser with margin.
                                     Dim htmlBrowser As New System.Windows.Forms.WebBrowser() With {
                                 .AllowNavigation = False,
                                 .WebBrowserShortcutsEnabled = False,
@@ -1096,14 +1331,14 @@ Namespace SharedLibrary
                             }
                                     AddHandler htmlBrowser.DocumentCompleted, Sub(sender2, e2)
                                                                                   If htmlBrowser.Document?.Body IsNot Nothing Then
-                                                                                      ' Body-Style mit 10px Margin innen
+                                                                                      ' Body style with margin matching the form.
                                                                                       htmlBrowser.Document.Body.Style =
                                                                                   $"background-color: rgb({HTMLMessageForm.BackColor.R}, {HTMLMessageForm.BackColor.G}, {HTMLMessageForm.BackColor.B}); " &
                                                                                   "font-family: 'Segoe UI'; font-size: 9pt; margin: 20px;"
                                                                                   End If
                                                                               End Sub
 
-                                    ' OK button
+                                    ' OK button.
                                     Dim okButton As New System.Windows.Forms.Button() With {
                                 .Text = "OK",
                                 .AutoSize = True,
@@ -1114,7 +1349,7 @@ Namespace SharedLibrary
                                                                    HTMLMessageForm.Close()
                                                                End Sub
 
-                                    ' Form‐level Escape
+                                    ' Form-level Escape.
                                     AddHandler HTMLMessageForm.KeyDown, Sub(sender2, e2)
                                                                             If e2.KeyCode = System.Windows.Forms.Keys.Escape Then
                                                                                 HTMLMessageForm.Close()
@@ -1122,12 +1357,12 @@ Namespace SharedLibrary
                                                                             End If
                                                                         End Sub
 
-                                    ' Activate on shown
+                                    ' Activate on shown.
                                     AddHandler HTMLMessageForm.Shown, Sub(sender2, e2)
                                                                           HTMLMessageForm.Activate()
                                                                       End Sub
 
-                                    ' Bottom flow panel
+                                    ' Bottom flow panel.
                                     Dim bottomFlow As New System.Windows.Forms.FlowLayoutPanel() With {
                                 .FlowDirection = System.Windows.Forms.FlowDirection.LeftToRight,
                                 .Dock = System.Windows.Forms.DockStyle.Bottom,
@@ -1137,7 +1372,7 @@ Namespace SharedLibrary
                             }
                                     bottomFlow.Controls.Add(okButton)
 
-                                    ' Optional extra button
+                                    ' Optional extra button.
                                     If (Not System.String.IsNullOrEmpty(extraButtonText)) AndAlso (extraButtonAction IsNot Nothing) Then
                                         Dim extraButton As New System.Windows.Forms.Button() With {
                                             .Text = extraButtonText,
@@ -1149,11 +1384,10 @@ Namespace SharedLibrary
                                         AddHandler extraButton.Click,
                                             Sub()
                                                 Try
-                                                    ' Execute the action - recursive ShowHTMLCustomMessageBox calls
-                                                    ' will spawn their own STA threads, so this is safe
+                                                    ' Execute the action. Recursive calls will spawn their own STA threads.
                                                     extraButtonAction.Invoke()
                                                 Catch ex As System.Exception
-                                                    ' Swallow to keep dialog functional
+                                                    ' Swallow to keep dialog functional.
                                                 End Try
                                                 If CloseAfterExtra Then HTMLMessageForm.Close()
                                             End Sub
@@ -1161,7 +1395,7 @@ Namespace SharedLibrary
                                         bottomFlow.Controls.Add(extraButton)
                                     End If
 
-                                    ' Compose form
+                                    ' Compose form.
                                     HTMLMessageForm.Controls.Add(htmlBrowser)
                                     HTMLMessageForm.Controls.Add(bottomFlow)
 
@@ -1171,16 +1405,15 @@ Namespace SharedLibrary
 
                                     AddHandler HTMLMessageForm.Shown,
                                         Sub(sender, e)
-                                            HTMLMessageForm.TopMost = False  ' Reset first
-                                            HTMLMessageForm.TopMost = True   ' Then set again
+                                            HTMLMessageForm.TopMost = False  ' Reset first.
+                                            HTMLMessageForm.TopMost = True   ' Then set again.
                                             HTMLMessageForm.Activate()
                                             HTMLMessageForm.BringToFront()
                                         End Sub
 
                                     HTMLMessageForm.Opacity = 1
 
-                                    ' Show dialog
-
+                                    ' Show dialog.
                                     HTMLMessageForm.ShowDialog()
                                 End Sub)
             t.SetApartmentState(System.Threading.ApartmentState.STA)
@@ -1188,13 +1421,19 @@ Namespace SharedLibrary
         End Sub
 
 
+        ''' <summary>
+        ''' Legacy HTML message dialog variant without extra button support; kept for compatibility.
+        ''' </summary>
+        ''' <param name="bodyText">HTML assigned to <see cref="WebBrowser.DocumentText"/>.</param>
+        ''' <param name="header">Dialog title. Defaults to <c>AN</c>.</param>
+        ''' <param name="Defaulttext">Unused parameter (kept for signature compatibility).</param>
         Public Shared Sub oldShowHTMLCustomMessageBox(
     ByVal bodyText As String,
     Optional header As String = AN,
     Optional Defaulttext As String = " - execution continues meanwhile"
 )
             Dim t As New Thread(Sub()
-                                    ' Create and configure form
+                                    ' Create and configure form.
                                     Dim HTMLMessageForm As New System.Windows.Forms.Form() With {
                                 .Opacity = 0,
                                 .Text = header,
@@ -1209,20 +1448,20 @@ Namespace SharedLibrary
                                 .AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font
                             }
 
-                                    ' Header fallback
+                                    ' Header fallback.
                                     If String.IsNullOrWhiteSpace(header) Then
                                         HTMLMessageForm.Text = AN
                                     End If
 
-                                    ' Set the icon
-                                    Dim bmp As New System.Drawing.Bitmap(My.Resources.Red_Ink_Logo)
+                                    ' Set the icon.
+                                    Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
                                     HTMLMessageForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
 
-                                    ' Standard font
+                                    ' Standard font.
                                     Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
                                     HTMLMessageForm.Font = standardFont
 
-                                    ' WebBrowser mit 10px Margin
+                                    ' WebBrowser with margin.
                                     Dim htmlBrowser As New System.Windows.Forms.WebBrowser() With {
                                 .AllowNavigation = False,
                                 .WebBrowserShortcutsEnabled = False,
@@ -1235,25 +1474,25 @@ Namespace SharedLibrary
                             }
                                     AddHandler htmlBrowser.DocumentCompleted, Sub(sender2, e2)
                                                                                   If htmlBrowser.Document?.Body IsNot Nothing Then
-                                                                                      ' Body-Style mit 10px Margin innen
+                                                                                      ' Body style with margin matching the form.
                                                                                       htmlBrowser.Document.Body.Style =
                                                                                   $"background-color: rgb({HTMLMessageForm.BackColor.R}, {HTMLMessageForm.BackColor.G}, {HTMLMessageForm.BackColor.B}); " &
                                                                                   "font-family: 'Segoe UI'; font-size: 9pt; margin: 20px;"
                                                                                   End If
                                                                               End Sub
 
-                                    ' OK button
+                                    ' OK button.
                                     Dim okButton As New System.Windows.Forms.Button() With {
                                 .Text = "OK",
                                 .AutoSize = True,
                                 .Font = standardFont,
-                                .Margin = New System.Windows.Forms.Padding(0) ' kein zusätzlicher Abstand hier
+                                .Margin = New System.Windows.Forms.Padding(0) ' No extra spacing here.
                             }
                                     AddHandler okButton.Click, Sub()
                                                                    HTMLMessageForm.Close()
                                                                End Sub
 
-                                    ' Form‐level Escape
+                                    ' Form-level Escape.
                                     AddHandler HTMLMessageForm.KeyDown, Sub(sender2, e2)
                                                                             If e2.KeyCode = System.Windows.Forms.Keys.Escape Then
                                                                                 HTMLMessageForm.Close()
@@ -1261,12 +1500,12 @@ Namespace SharedLibrary
                                                                             End If
                                                                         End Sub
 
-                                    ' Activate on shown
+                                    ' Activate on shown.
                                     AddHandler HTMLMessageForm.Shown, Sub(sender2, e2)
                                                                           HTMLMessageForm.Activate()
                                                                       End Sub
 
-                                    ' Bottom flow panel
+                                    ' Bottom flow panel.
                                     Dim bottomFlow As New System.Windows.Forms.FlowLayoutPanel() With {
                                 .FlowDirection = System.Windows.Forms.FlowDirection.LeftToRight,
                                 .Dock = System.Windows.Forms.DockStyle.Bottom,
@@ -1276,7 +1515,7 @@ Namespace SharedLibrary
                             }
                                     bottomFlow.Controls.Add(okButton)
 
-                                    ' Compose form
+                                    ' Compose form.
                                     HTMLMessageForm.Controls.Add(htmlBrowser)
                                     HTMLMessageForm.Controls.Add(bottomFlow)
 
@@ -1286,16 +1525,15 @@ Namespace SharedLibrary
 
                                     AddHandler HTMLMessageForm.Shown,
                                         Sub(sender, e)
-                                            HTMLMessageForm.TopMost = False  ' Reset first
-                                            HTMLMessageForm.TopMost = True   ' Then set again
+                                            HTMLMessageForm.TopMost = False  ' Reset first.
+                                            HTMLMessageForm.TopMost = True   ' Then set again.
                                             HTMLMessageForm.Activate()
                                             HTMLMessageForm.BringToFront()
                                         End Sub
 
                                     HTMLMessageForm.Opacity = 1
 
-                                    ' Show dialog
-
+                                    ' Show dialog.
                                     HTMLMessageForm.ShowDialog()
                                 End Sub)
             t.SetApartmentState(System.Threading.ApartmentState.STA)
@@ -1303,6 +1541,18 @@ Namespace SharedLibrary
         End Sub
 
 
+        ''' <summary>
+        ''' Shows a modal form that renders an array of input parameters as appropriate WinForms controls.
+        ''' </summary>
+        ''' <param name="prompt">Prompt text shown above the parameter list.</param>
+        ''' <param name="header">Dialog title (empty when null/whitespace).</param>
+        ''' <param name="params">Parameter array; each item is updated in-place when OK is pressed.</param>
+        ''' <param name="extraButtonText">Optional extra button text.</param>
+        ''' <param name="extraButtonAction">Action invoked when the extra button is clicked.</param>
+        ''' <param name="CloseAfterExtra">
+        ''' If <c>True</c>, closes the dialog after invoking the extra action and sets <see cref="DialogResult.Cancel"/>.
+        ''' </param>
+        ''' <returns><c>True</c> when OK is pressed; otherwise <c>False</c>.</returns>
         Public Shared Function ShowCustomVariableInputForm(
                                             ByVal prompt As String,
                                             ByVal header As String,
@@ -1324,14 +1574,14 @@ Namespace SharedLibrary
                 .AutoScaleDimensions = New SizeF(6.0F, 13.0F),
                 .AutoSize = True,
                 .AutoSizeMode = AutoSizeMode.GrowAndShrink,
-                .KeyPreview = True ' allow form to see Ctrl+Enter before controls
+                .KeyPreview = True ' Allow form to see Ctrl+Enter before controls.
             }
 
-            ' Set icon
-            Dim bmpIcon As New Bitmap(My.Resources.Red_Ink_Logo)
+            ' Set icon.
+            Dim bmpIcon As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
             inputForm.Icon = Icon.FromHandle(bmpIcon.GetHicon())
 
-            ' Layout
+            ' Layout.
             Dim mainLayout As New TableLayoutPanel() With {
                 .ColumnCount = 2,
                 .Dock = DockStyle.Fill,
@@ -1343,7 +1593,7 @@ Namespace SharedLibrary
             mainLayout.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
             mainLayout.ColumnStyles.Add(New ColumnStyle(SizeType.Percent, 100.0F))
 
-            ' Prompt label
+            ' Prompt label.
             Dim promptLabel As New System.Windows.Forms.Label() With {
                 .Text = prompt,
                 .AutoSize = True,
@@ -1353,7 +1603,7 @@ Namespace SharedLibrary
             mainLayout.Controls.Add(promptLabel, 0, 0)
             mainLayout.SetColumnSpan(promptLabel, 2)
 
-            ' Component container + tooltip
+            ' Component container + tooltip.
             Dim components As New System.ComponentModel.Container()
             Dim toolTip As New System.Windows.Forms.ToolTip(components) With {
                 .ShowAlways = True
@@ -1373,8 +1623,8 @@ Namespace SharedLibrary
 
                 Dim ctrl As Control
 
-                ' RULES:
-                ' 1. If value Is Nothing -> show DISABLED CheckBox (unchecked).
+                ' Rules:
+                ' 1. If value Is Nothing -> show disabled CheckBox (unchecked).
                 ' 2. If value Is Boolean -> show enabled CheckBox with that state.
                 ' 3. Else if options exist -> ComboBox.
                 ' 4. Else -> TextBox.
@@ -1415,7 +1665,7 @@ Namespace SharedLibrary
                     cb.Items.AddRange(param.Options.ToArray())
                     If param.Options.Contains(CStr(rawValue)) Then cb.SelectedItem = rawValue
 
-                    ' Adjust dropdown width
+                    ' Adjust dropdown width.
                     Dim maxItemWidth As Integer = 0
                     For Each it In cb.Items
                         Dim w = TextRenderer.MeasureText(CStr(it), cb.Font).Width
@@ -1425,7 +1675,7 @@ Namespace SharedLibrary
                     Dim scrollW = If(needsScroll, SystemInformation.VerticalScrollBarWidth, 0)
                     cb.DropDownWidth = Math.Max(cb.DropDownWidth, maxItemWidth + scrollW + 16)
 
-                    ' Tooltip if truncated
+                    ' Tooltip if truncated.
                     Dim updateToolTip As EventHandler =
                         Sub(sender As Object, eArgs As EventArgs)
                             Dim combo = DirectCast(sender, ComboBox)
@@ -1469,7 +1719,7 @@ Namespace SharedLibrary
                 mainLayout.Controls.Add(ctrl, 1, i + 1)
             Next
 
-            ' Buttons
+            ' Buttons.
             Dim buttonFlow As New FlowLayoutPanel() With {
                 .FlowDirection = FlowDirection.RightToLeft,
                 .Dock = DockStyle.Bottom,
@@ -1480,15 +1730,15 @@ Namespace SharedLibrary
             Dim btnOK As New Button() With {.Text = "OK", .AutoSize = True, .DialogResult = DialogResult.OK}
             Dim btnCancel As New Button() With {.Text = "Cancel", .AutoSize = True, .DialogResult = DialogResult.Cancel}
 
-            ' Add in this order so visual order is [OK][Cancel] with RightToLeft
+            ' Add in this order so visual order is [OK][Cancel] with RightToLeft.
             buttonFlow.Controls.Add(btnCancel)
             buttonFlow.Controls.Add(btnOK)
 
-            ' Ensure Tab order prefers OK when tabbing out of the last field
+            ' Ensure Tab order prefers OK when tabbing out of the last field.
             btnOK.TabIndex = 0
-            btnCancel.TabIndex = 2 ' will move to 1 if no extra button is added
+            btnCancel.TabIndex = 2 ' Will move to 1 if no extra button is added.
 
-            ' Optional extra button: same behavior as ShowCustomMessageBox
+            ' Optional extra button: same behavior as ShowCustomMessageBox.
             Dim extraButton As System.Windows.Forms.Button = Nothing
             If (Not System.String.IsNullOrEmpty(extraButtonText)) AndAlso (extraButtonAction IsNot Nothing) Then
                 extraButton = New System.Windows.Forms.Button() With {
@@ -1501,28 +1751,28 @@ Namespace SharedLibrary
                         Try
                             extraButtonAction.Invoke()
                         Catch ex As System.Exception
-                            ' swallow to keep dialog functional; mirror ShowCustomMessageBox behavior
+                            ' Swallow to keep dialog functional; mirror ShowCustomMessageBox behavior.
                         End Try
                         If CloseAfterExtra Then
-                            inputForm.DialogResult = DialogResult.Cancel ' do not commit changes implicitly
+                            inputForm.DialogResult = DialogResult.Cancel ' Do not commit changes implicitly.
                             inputForm.Close()
                         End If
                     End Sub
 
-                ' Place the extra button to the left of OK (RightToLeft flow)
+                ' Place the extra button to the left of OK (RightToLeft flow).
                 buttonFlow.Controls.Add(extraButton)
 
-                ' Tab order: OK first, then extra, then Cancel
+                ' Tab order: OK first, then extra, then Cancel.
                 extraButton.TabIndex = 1
             Else
-                ' No extra button: let Cancel be second
+                ' No extra button: let Cancel be second.
                 btnCancel.TabIndex = 1
             End If
 
             inputForm.Controls.Add(mainLayout)
             inputForm.Controls.Add(buttonFlow)
 
-            ' Ctrl+Enter should trigger OK anywhere on the form
+            ' Ctrl+Enter should trigger OK anywhere on the form.
             AddHandler inputForm.KeyDown,
                 Sub(sender As Object, e As KeyEventArgs)
                     If e.KeyCode = Keys.Enter AndAlso e.Control Then
@@ -1536,7 +1786,7 @@ Namespace SharedLibrary
 
             If result = DialogResult.OK Then
                 For Each param In params
-                    ' Skip disabled controls: keep existing Value
+                    ' Skip disabled controls: keep existing Value.
                     If param.InputControl IsNot Nothing AndAlso Not param.InputControl.Enabled Then
                         Continue For
                     End If
@@ -1557,7 +1807,7 @@ Namespace SharedLibrary
                             Dim valD As Double
                             Dim inputText As String = CType(param.InputControl, TextBox).Text.Trim()
 
-                            ' Normalize: replace comma with dot, then parse with invariant culture
+                            ' Normalize: replace comma with dot, then parse with invariant culture.
                             Dim normalizedInput As String = inputText.Replace(","c, "."c)
 
                             If Double.TryParse(normalizedInput, NumberStyles.Float, CultureInfo.InvariantCulture, valD) Then
@@ -1566,7 +1816,7 @@ Namespace SharedLibrary
                                 Throw New Exception($"Invalid value for {param.Name}.")
                             End If
                         Else
-                            ' Generic / string
+                            ' Generic / string.
                             If TypeOf param.InputControl Is TextBox Then
                                 param.Value = CType(param.InputControl, TextBox).Text
                             End If
@@ -1581,6 +1831,25 @@ Namespace SharedLibrary
             Return (result = DialogResult.OK)
         End Function
 
+        ''' <summary>
+        ''' Shows an editable dialog window with intro text, an editable RichTextBox (or plain text),
+        ''' and multiple completion options (use edited/original text; optional special return modes).
+        ''' </summary>
+        ''' <param name="introLine">Intro line displayed above the editor.</param>
+        ''' <param name="bodyText">Initial text content; converted to RTF unless <paramref name="NoRTF"/> is True.</param>
+        ''' <param name="finalRemark">Optional remark text shown below the editor.</param>
+        ''' <param name="header">Dialog title.</param>
+        ''' <param name="NoRTF">If True, uses plain text; otherwise assigns RTF into the editor.</param>
+        ''' <param name="Getfocus">If True and no parent handle is passed, attempts to parent to a detected Office window.</param>
+        ''' <param name="InsertMarkdown">If True, adds a button that returns the sentinel value "Markdown".</param>
+        ''' <param name="TransferToPane">If True, adds a button that returns the sentinel value "Pane".</param>
+        ''' <param name="parentWindowHwnd">Optional explicit parent window handle for dialog ownership.</param>
+        ''' <param name="PreserveLiterals">Passed through to Markdown-to-RTF conversion.</param>
+        ''' <returns>
+        ''' On OK buttons: returns edited text (RTF or plain) or original text (RTF or original input) as implemented.
+        ''' On Cancel: returns <see cref="String.Empty"/>.
+        ''' On special buttons: returns the sentinel strings "Markdown" or "Pane" as implemented.
+        ''' </returns>
         Public Shared Function ShowCustomWindow(
             introLine As String,
             ByVal bodyText As String,
@@ -1594,10 +1863,10 @@ Namespace SharedLibrary
             Optional PreserveLiterals As Boolean = False
         ) As String
 
-            ' Ursprünglichen Text merken
+            ' Store original body text.
             Dim OriginalText As String = bodyText
 
-            ' --- Abstände & Konstanten ---
+            ' Spacing & constants.
             Const leftMargin As Integer = 10
             Const rightPadding As Integer = 10
             Const spacing As Integer = 10
@@ -1605,7 +1874,7 @@ Namespace SharedLibrary
             Const remarkToButtonSpacing As Integer = 20
             Const bottomPadding As Integer = 20
 
-            ' --- Controls anlegen ---
+            ' Create controls.
             Dim styledForm As New System.Windows.Forms.Form()
             Dim introLabel As New System.Windows.Forms.Label()
             Dim bodyTextBox As New RichTextBox()
@@ -1621,18 +1890,18 @@ Namespace SharedLibrary
         .TextAlign = ContentAlignment.MiddleRight
     }
 
-            ' --- Screen / Max-Größe berechnen ---
+            ' Screen / max size calculation.
             Dim scrW = System.Windows.Forms.Screen.PrimaryScreen.WorkingArea.Width
             Dim scrH = System.Windows.Forms.Screen.PrimaryScreen.WorkingArea.Height
             Dim maxW = scrW \ 2
             Dim maxH = Math.Min(scrH \ 2, (maxW * 9) \ 16)
             maxW = Math.Min(maxW, (maxH * 16) \ 9)
 
-            ' --- Fallback–Minima ---
+            ' Fallback minima.
             Const minFormWStatic As Integer = 400
             Const minFormHStatic As Integer = 300
 
-            ' --- Formular-Eigenschaften ---
+            ' Form properties.
             styledForm.Text = header
             styledForm.FormBorderStyle = System.Windows.Forms.FormBorderStyle.Sizable
             styledForm.StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen
@@ -1643,15 +1912,15 @@ Namespace SharedLibrary
             styledForm.CancelButton = btnCancel
             styledForm.MinimumSize = New System.Drawing.Size(minFormWStatic, minFormHStatic)
 
-            ' Icon
-            Dim bmp As New System.Drawing.Bitmap(My.Resources.Red_Ink_Logo)
+            ' Icon.
+            Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
             styledForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
 
-            ' Einheitliche Schrift
+            ' Standard font.
             Dim stdFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
             styledForm.Font = stdFont
 
-            ' --- Intro-Label ---
+            ' Intro label.
             introLabel.Text = introLine
             introLabel.Font = stdFont
             introLabel.AutoSize = False
@@ -1661,7 +1930,7 @@ Namespace SharedLibrary
             introLabel.Anchor = AnchorStyles.Top Or AnchorStyles.Left Or AnchorStyles.Right
             styledForm.Controls.Add(introLabel)
 
-            ' --- Buttons ---
+            ' Buttons.
             btnEdited.Text = "OK, use edited text"
             Dim szE = TextRenderer.MeasureText(btnEdited.Text, stdFont)
             btnEdited.Size = New Size(szE.Width + 20, szE.Height + 10)
@@ -1692,7 +1961,7 @@ Namespace SharedLibrary
             styledForm.Controls.Add(btnOriginal)
             styledForm.Controls.Add(btnCancel)
 
-            ' --- BodyTextBox (align with CustomPaneControl) ---
+            ' BodyTextBox (align with CustomPaneControl).
             bodyTextBox.Font = New System.Drawing.Font("Segoe UI", 10.0F, FontStyle.Regular, GraphicsUnit.Point)
             bodyTextBox.Multiline = True
             bodyTextBox.ScrollBars = RichTextBoxScrollBars.Vertical
@@ -1706,17 +1975,17 @@ Namespace SharedLibrary
             bodyTextBox.Anchor = AnchorStyles.Top Or AnchorStyles.Left Or AnchorStyles.Right
             styledForm.Controls.Add(bodyTextBox)
 
-            ' LinkClicked: open directly (no Ctrl modifier), like CustomPaneControl
+            ' LinkClicked: open directly (no Ctrl modifier), like CustomPaneControl.
             AddHandler bodyTextBox.LinkClicked,
         Sub(senderObj As Object, e As LinkClickedEventArgs)
             Try
                 System.Diagnostics.Process.Start(New System.Diagnostics.ProcessStartInfo(e.LinkText) With {.UseShellExecute = True})
             Catch
-                ' ignore
+                ' Ignore.
             End Try
         End Sub
 
-            ' Copy handler: match CustomPaneControl behavior
+            ' Copy handler: match CustomPaneControl behavior.
             AddHandler bodyTextBox.KeyDown,
         Sub(sender As Object, e As System.Windows.Forms.KeyEventArgs)
             If (e.Control AndAlso (e.KeyCode = Keys.C OrElse e.KeyCode = Keys.Insert)) Then
@@ -1732,13 +2001,13 @@ Namespace SharedLibrary
                     End If
                     e.Handled = True
                 Catch
-                    ' fallback to default if anything goes wrong
+                    ' Fallback to default if anything goes wrong.
                 End Try
             End If
-            ' Do not intercept Ctrl+A (same as CustomPaneControl)
+            ' Do not intercept Ctrl+A (same as CustomPaneControl).
         End Sub
 
-            ' --- Optionales End-Label ---
+            ' Optional final remark label.
             Dim hasRemark = Not String.IsNullOrEmpty(finalRemark)
             If hasRemark Then
                 finalRemarkLabel.Text = finalRemark
@@ -1750,7 +2019,7 @@ Namespace SharedLibrary
                 styledForm.Controls.Add(finalRemarkLabel)
             End If
 
-            ' --- ToolStrip ---
+            ' ToolStrip.
             toolStrip.Dock = DockStyle.None
             For Each sym In New String() {"B", "I", "U", "•"}
                 Dim tsb As New ToolStripButton(sym) With {
@@ -1784,14 +2053,14 @@ Namespace SharedLibrary
             Next
             styledForm.Controls.Add(toolStrip)
 
-            ' Hint label (update text; no Ctrl+Click requirement)
+            ' Hint label.
             lblHint.Text = "Click a link to open"
             lblHint.Font = New System.Drawing.Font(stdFont, FontStyle.Italic)
             lblHint.ForeColor = Color.DimGray
             lblHint.Height = szE.Height + 6
             styledForm.Controls.Add(lblHint)
 
-            ' --- Dynamische Mindestgröße ---
+            ' Dynamic MinimumSize.
             Dim bodyTop = bodyTextBox.Top
             Dim bodyMinH = bodyTextBox.MinimumSize.Height
             Dim remHeight = If(hasRemark,
@@ -1821,7 +2090,7 @@ Namespace SharedLibrary
         Math.Max(minFormHStatic, dynamicMinH)
     )
 
-            ' --- Resize Handler ---
+            ' Resize handler.
             AddHandler styledForm.Resize,
         Sub(s, e)
             Dim fW = styledForm.ClientSize.Width
@@ -1860,26 +2129,26 @@ Namespace SharedLibrary
             End If
             btnCancel.Location = New System.Drawing.Point(nextX + gapButtons, btnY)
 
-            ' Toolstrip above textbox right aligned
+            ' Toolstrip above textbox right aligned.
             toolStrip.Location = New System.Drawing.Point(
                 leftMargin + bodyTextBox.Width - toolStrip.Width,
                 bodyTextBox.Top - toolStrip.Height - spacing
             )
             toolStrip.BringToFront()
 
-            ' Hint label aligns with right edge above buttons
+            ' Hint label aligns with right edge above buttons.
             lblHint.Width = 180
             lblHint.Location = New System.Drawing.Point(fW - lblHint.Width - rightPadding, introLabel.Top)
         End Sub
 
-            ' --- Initialgröße ---
+            ' Initial size.
             Dim initW = Math.Max(maxW, styledForm.MinimumSize.Width)
             Dim initH = Math.Max(maxH, styledForm.MinimumSize.Height)
             styledForm.ClientSize = New Size(initW, initH)
             styledForm.PerformLayout()
             styledForm.MinimumSize = styledForm.Size
 
-            ' --- Content assignment (match CustomPaneControl) ---
+            ' Content assignment (match CustomPaneControl).
             Dim rtf As String = Nothing
             If Not NoRTF Then
                 rtf = MarkdownToRtfConverter.Convert(bodyText, PreserveLiterals)
@@ -1891,7 +2160,7 @@ Namespace SharedLibrary
                     bodyTextBox.Text = bodyText
                 Else
                     bodyTextBox.Rtf = rtf
-                    ' Append NBSPs for hyperlinks (same as CustomPaneControl)
+                    ' Append NBSPs for hyperlinks (same as CustomPaneControl).
                     SharedMethods.AppendNbspForHyperlinks(bodyTextBox, rtf)
                 End If
             Catch ex As System.ComponentModel.Win32Exception
@@ -1900,13 +2169,13 @@ Namespace SharedLibrary
                 bodyTextBox.Text = bodyText
             End Try
 
-            ' Ensure URL detection is enabled (same as CustomPaneControl)
+            ' Ensure URL detection is enabled (same as CustomPaneControl).
             bodyTextBox.DetectUrls = True
             bodyTextBox.Select(0, 0)
 
             Dim OriginalTextBox As String = bodyTextBox.Text
 
-            ' --- Button-Handler ---
+            ' Button handlers.
             Dim returnValue As String = String.Empty
 
             AddHandler btnEdited.Click,
@@ -1951,15 +2220,15 @@ Namespace SharedLibrary
             styledForm.Close()
         End Sub
 
-            ' --- Dialog anzeigen ---
+            ' Show dialog.
             styledForm.BringToFront()
             styledForm.Focus()
             styledForm.Activate()
 
             AddHandler styledForm.Shown,
                     Sub(sender, e)
-                        styledForm.TopMost = False  ' Reset first
-                        styledForm.TopMost = True   ' Then set again
+                        styledForm.TopMost = False  ' Reset first.
+                        styledForm.TopMost = True   ' Then set again.
                         styledForm.Activate()
                         styledForm.BringToFront()
                     End Sub
@@ -1981,25 +2250,53 @@ Namespace SharedLibrary
         End Function
 
 
+        ''' <summary>
+        ''' Represents a single input parameter for <see cref="ShowCustomVariableInputForm"/>,
+        ''' including the UI control created to edit the parameter.
+        ''' </summary>
         Public Class InputParameter
+            ''' <summary>
+            ''' Display name used for the label.
+            ''' </summary>
             Public Property Name As System.String
+
+            ''' <summary>
+            ''' Current value. Its runtime type determines which control is created and how values are parsed back.
+            ''' </summary>
             Public Property Value As System.Object
+
+            ''' <summary>
+            ''' Optional list of allowed values (used for a ComboBox when <see cref="Value"/> is a string).
+            ''' </summary>
             Public Property Options As System.Collections.Generic.List(Of System.String)
+
+            ''' <summary>
+            ''' The WinForms control created for this parameter during dialog generation.
+            ''' </summary>
             Public Property InputControl As System.Windows.Forms.Control
 
-            ' Wichtig: parameterloser Ctor (wird bei "New InputParameter() With {...}" benötigt)
+            ' Important: parameterless constructor (required for "New InputParameter() With {...}").
             Public Sub New()
                 Me.Options = New System.Collections.Generic.List(Of System.String)()
             End Sub
 
-            ' Constructor für einfache Parameter
+            ''' <summary>
+            ''' Creates an <see cref="InputParameter"/> with a name and initial value.
+            ''' </summary>
+            ''' <param name="name">Display name.</param>
+            ''' <param name="value">Initial value.</param>
             Public Sub New(ByVal name As System.String, ByVal value As System.Object)
                 Me.New()
                 Me.Name = name
                 Me.Value = value
             End Sub
 
-            ' Overload für Parameter mit Options
+            ''' <summary>
+            ''' Creates an <see cref="InputParameter"/> with a name, initial value, and a list of selectable options.
+            ''' </summary>
+            ''' <param name="name">Display name.</param>
+            ''' <param name="value">Initial value.</param>
+            ''' <param name="options">Selectable options.</param>
             Public Sub New(ByVal name As System.String,
                    ByVal value As System.Object,
                    ByVal options As System.Collections.Generic.IEnumerable(Of System.String))

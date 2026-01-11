@@ -1,5 +1,33 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: SharedMethods.ProcessParameterPlaceholders.vb
+' Purpose: Expands `{parameterN=...}` definitions and `{parameterN}` references in a script by
+'          prompting the user for values and then replacing the placeholders in-place.
+'
+' Placeholder syntax:
+'  - Definition: `{parameterN = Description; type; default; range-or-options; options}`
+'    - `N` is an integer (e.g., `parameter1`, `parameter2`, ...).
+'    - `Description` is shown to the user.
+'    - `type` supports: `string`, `boolean`, `integer`, `long`, `double` (case-insensitive).
+'    - `default` is interpreted according to `type`.
+'    - `range-or-options` and `options` are parsed depending on `type`:
+'       - Numeric types: a `min-max` range (`\d+-\d+`) or an options list.
+'       - String type: an options list.
+'    - Options may include a display label and a code value via angle brackets:
+'      `Label <CodeValue>`. The UI shows `Label` while replacements use `CodeValue`.
+'  - Reference: `{parameterN}` inserts the value chosen for the corresponding definition.
+'
+' Replacement behavior:
+'  - Definitions are replaced first, then references.
+'  - If a placeholder occurrence is immediately surrounded by double quotes (ignoring whitespace),
+'    the replacement is JSON-escaped via `JsonEscape` before insertion.
+'
+' External dependencies:
+'  - `SharedMethods.InputParameter` and `ShowCustomVariableInputForm` (UI prompting)
+'  - `AN` (used in the UI caption text)
+' =============================================================================
 
 Option Strict On
 Option Explicit On
@@ -10,12 +38,25 @@ Imports System.Text.RegularExpressions
 Namespace SharedLibrary
     Partial Public Class SharedMethods
 
+        ' Placeholder examples:
         '   {parameter1 = Description; type; default; range-or-options; options}
         '   {parameter1}  (reference/reuse)
-        '   {parameter1 = Description; type; default; range-or-options; options}
-        '   {parameter1}  (reference/reuse)
+        '   {parameter2 = Description; type; default; range-or-options; options}
+        '   {parameter2}  (reference/reuse)
+
+        ''' <summary>
+        ''' Prompts for parameter values defined as `{parameterN=...}` in <paramref name="script"/> and replaces
+        ''' both definitions and `{parameterN}` references with the chosen values.
+        ''' </summary>
+        ''' <param name="script">Script text containing parameter definitions and/or references.</param>
+        ''' <returns>
+        ''' <c>True</c> if the user confirmed the parameter input form or if no parameter definitions exist;
+        ''' otherwise <c>False</c>.
+        ''' </returns>
         Public Shared Function ProcessParameterPlaceholders(ByRef script As String) As Boolean
+            ' Match `{parameterN=...}` definitions (captures N and definition body)
             Dim defRx As New System.Text.RegularExpressions.Regex("\{\s*parameter(\d+)\s*=\s*(.*?)\}", RegexOptions.IgnoreCase Or RegexOptions.Singleline)
+            ' Match `{parameterN}` references (captures N)
             Dim refRx As New System.Text.RegularExpressions.Regex("\{\s*parameter(\d+)\s*\}", RegexOptions.IgnoreCase)
 
             ' Collect definition matches first
@@ -44,6 +85,8 @@ Namespace SharedLibrary
 
             For Each num In paramDefs.Keys.OrderBy(Function(i) i)
                 Dim definition = paramDefs(num).Definition
+
+                ' Split definition by ';' into: description; type; default; (range or options); (options)
                 Dim segments = definition.Split(";"c).
                                       Select(Function(s) s.Trim()).
                                       Where(Function(s) s.Length > 0).ToArray()
@@ -56,6 +99,7 @@ Namespace SharedLibrary
                 Dim rangeTuple As (Integer?, Integer?) = (Nothing, Nothing)
                 Dim optsRaw As List(Of String) = Nothing
 
+                ' Parse numeric range or options
                 If (t = "integer" OrElse t = "long" OrElse t = "double") AndAlso segments.Length > 3 Then
                     If System.Text.RegularExpressions.Regex.IsMatch(segments(3), "^\d+\s*-\s*\d+$") Then
                         Dim parts = segments(3).Split("-"c)
@@ -69,9 +113,11 @@ Namespace SharedLibrary
                         optsRaw = SplitOptionsRespectingAngles(segments(3))
                     End If
                 ElseIf t = "string" AndAlso segments.Length > 3 Then
+                    ' Parse string options
                     optsRaw = SplitOptionsRespectingAngles(segments(3))
                 End If
 
+                ' Build display list and code list (supports `Label <Code>`)
                 Dim displayList As List(Of String) = Nothing
                 Dim codeList As List(Of String) = Nothing
                 If optsRaw IsNot Nothing AndAlso optsRaw.Count > 0 Then
@@ -92,12 +138,14 @@ Namespace SharedLibrary
                     Next
                 End If
 
+                ' Map default code value to its display value (if options are used)
                 Dim defaultDisplay As Object = defaultStr
                 If codeList IsNot Nothing Then
                     Dim idxDef = codeList.IndexOf(defaultStr)
                     If idxDef >= 0 Then defaultDisplay = displayList(idxDef)
                 End If
 
+                ' Parse typed default values by declared type
                 Dim typedDefault As Object
                 Select Case t
                     Case "boolean"
@@ -116,6 +164,7 @@ Namespace SharedLibrary
                         typedDefault = defaultDisplay
                 End Select
 
+                ' Create UI input parameter entry
                 If displayList IsNot Nothing Then
                     parameterDefs.Add(New SharedLibrary.SharedMethods.InputParameter(desc, typedDefault, displayList))
                 Else
@@ -127,12 +176,13 @@ Namespace SharedLibrary
 
             If parameterDefs.Count = 0 Then Return True
 
+            ' Prompt user for all parameters
             Dim prmArray = parameterDefs.ToArray()
             If Not ShowCustomVariableInputForm("Please configure your parameters:", $"{AN} Parameters", prmArray) Then
                 Return False
             End If
 
-            ' Build final RAW value map (no escaping yet; we will escape by context)
+            ' Build parameter number -> raw string value map (before context escaping)
             Dim valueByParamRaw As New Dictionary(Of Integer, String)()
             For i = 0 To metaList.Count - 1
                 Dim meta = metaList(i)
@@ -143,7 +193,7 @@ Namespace SharedLibrary
                 If meta.TypeName = "boolean" Then
                     finalValue = rawValue.ToLowerInvariant()
                 Else
-                    ' Map display -> code
+                    ' Map display -> code (if options were defined)
                     If meta.DisplayOptions IsNot Nothing Then
                         Dim idx = meta.DisplayOptions.IndexOf(rawValue)
                         If idx >= 0 Then
@@ -160,7 +210,7 @@ Namespace SharedLibrary
                         End If
                     End If
 
-                    ' Clamp numeric
+                    ' Clamp numeric values to range (if provided)
                     If meta.TypeName = "integer" OrElse meta.TypeName = "long" OrElse meta.TypeName = "double" Then
                         Dim num As Double
                         ' Normalize comma to dot, then parse with invariant culture
@@ -184,7 +234,7 @@ Namespace SharedLibrary
             ' Positional replacement (definitions first)
             Dim sb As New System.Text.StringBuilder(script)
 
-            ' Replace definitions (remove braces + template) with context-aware escaping
+            ' Replace definitions with context-aware escaping
             For Each m As Match In defMatches.Cast(Of Match)().OrderByDescending(Function(mm) mm.Index)
                 Dim paramNumber = Integer.Parse(m.Groups(1).Value)
                 Dim replRaw = If(valueByParamRaw.ContainsKey(paramNumber), valueByParamRaw(paramNumber), "")
@@ -194,7 +244,7 @@ Namespace SharedLibrary
                 sb.Insert(m.Index, repl)
             Next
 
-            ' Replace references {parameterN} with the same context-aware logic
+            ' Replace references `{parameterN}` with the same context-aware logic
             Dim temp = sb.ToString()
             Dim refMatches = refRx.Matches(temp)
             sb = New System.Text.StringBuilder(temp)
@@ -217,7 +267,12 @@ Namespace SharedLibrary
 
 
 
-        ' Split option list by commas that are outside of <...> blocks
+        ''' <summary>
+        ''' Splits a comma-separated option list, ignoring commas that appear inside angle brackets
+        ''' (e.g., in <c>Label &lt;Code,With,Commas&gt;</c>).
+        ''' </summary>
+        ''' <param name="input">The raw options string.</param>
+        ''' <returns>A list of option tokens (trimmed); may be empty.</returns>
         Private Shared Function SplitOptionsRespectingAngles(input As String) As List(Of String)
             Dim result As New List(Of String)()
             If String.IsNullOrWhiteSpace(input) Then Return result
@@ -244,13 +299,24 @@ Namespace SharedLibrary
             Return result
         End Function
 
-        ' Minimal JSON-escaping for insertion into quoted JSON strings
+        ''' <summary>
+        ''' Escapes backslash and double quote characters for insertion into a quoted JSON string value.
+        ''' </summary>
+        ''' <param name="s">Input string to escape.</param>
+        ''' <returns>The minimally escaped JSON string.</returns>
         Private Shared Function JsonEscape(s As String) As String
             If String.IsNullOrEmpty(s) Then Return s
             Return s.Replace("\", "\\").Replace("""", "\""")
         End Function
 
-        ' Detect if the placeholder occurrence is exactly enclosed by quotes: ..." {parameterN=...} "...
+        ''' <summary>
+        ''' Determines whether the placeholder occurrence at <paramref name="start"/> with <paramref name="length"/>
+        ''' is immediately enclosed by double quotes, ignoring surrounding whitespace.
+        ''' </summary>
+        ''' <param name="sb">The script builder used for replacement.</param>
+        ''' <param name="start">Start index of the placeholder match.</param>
+        ''' <param name="length">Length of the placeholder match.</param>
+        ''' <returns><c>True</c> if a double quote appears immediately before and after the placeholder.</returns>
         Private Shared Function IsSurroundedByQuotes(sb As System.Text.StringBuilder, start As Integer, length As Integer) As Boolean
             Dim li = start - 1
             While li >= 0 AndAlso Char.IsWhiteSpace(sb(li)) : li -= 1 : End While

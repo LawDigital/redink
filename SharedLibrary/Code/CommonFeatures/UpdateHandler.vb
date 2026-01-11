@@ -1,5 +1,26 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: UpdateHandler.vb
+' Purpose: Centralizes update checking and installation for VSTO add-ins, supporting both
+'          ClickOnce network deployments and local installer paths. Provides user prompting,
+'          a lightweight update splash UI, and a bounded update log with trimming.
+'
+' Architecture:
+'  - UI Bridge: Uses `MainControl`/`HostHandle` to marshal dialogs onto the UI thread and
+'    to bring relevant windows to the foreground.
+'  - Update Modes:
+'     - Network-deployed: ClickOnce `ApplicationDeployment` update check (sync and async).
+'     - Local-deployed: Constructs a `.vsto` path under the configured update folder.
+'  - Retry/Backoff: Tracks per-add-in daily retry state in `My.Settings` and may prompt the user
+'    to pause update checks after repeated failures.
+'  - Installer: Locates `VSTOInstaller.exe`, attempts a silent install first, then falls back
+'    to an interactive install that is brought to the foreground.
+'  - Logging: Writes to `%AppData%\{AN2}\updater.log` and trims by size/line count.
+'  - Configuration Updates: Optionally triggers INI configuration refresh via
+'    `SharedMethods.CheckForIniUpdates`.
+' =============================================================================
 
 
 Option Strict On
@@ -11,34 +32,77 @@ Imports System.Runtime.InteropServices
 Imports System.Text
 Imports System.Threading
 Imports System.Windows.Forms
+Imports SharedLibrary.SharedLibrary.SharedContext
 Imports SharedLibrary.SharedLibrary.SharedMethods
 
 Namespace SharedLibrary
+    ''' <summary>
+    ''' Provides update checking and installation for VSTO add-ins, including ClickOnce network deployments
+    ''' and local update paths. Includes UI prompts, retry tracking, and bounded logging.
+    ''' </summary>
     Public Class UpdateHandler
 
+        ''' <summary>
+        ''' Controls whether a "Checking updates …" splash is displayed for async network checks.
+        ''' </summary>
         Private Const ShowCheckingSplash As Boolean = False
+
+        ''' <summary>
+        ''' Maximum number of update-check failures to silently tolerate per day before prompting.
+        ''' </summary>
         Private Const MaxDailyUpdateRetries As Integer = 5
 
+        ''' <summary>Maximum log file size in bytes before trimming is initiated.</summary>
         Private Const LogMaxBytes As Integer = 120000      ' ~120 KB
+
+        ''' <summary>Maximum number of lines allowed in the update log before trimming.</summary>
         Private Const LogMaxLines As Integer = 2000
+
+        ''' <summary>Number of last lines to retain when trimming the update log.</summary>
         Private Const LogKeepLines As Integer = 1500       ' retain last 1.5k lines when trimming
 
+        ''' <summary>
+        ''' UI control used to marshal calls back onto the UI thread when necessary.
+        ''' </summary>
         Public Shared MainControl As System.Windows.Forms.Control
+
+        ''' <summary>
+        ''' Host window handle used to request foreground focus for dialogs.
+        ''' </summary>
         Public Shared HostHandle As IntPtr
+
+        ''' <summary>
+        ''' Splash screen instance shown while checking/installing updates.
+        ''' </summary>
         Private Shared _splash As SplashScreen
 
+        ''' <summary>
+        ''' Win32 API to adjust z-order and visibility to keep specific windows on top.
+        ''' </summary>
         <Runtime.InteropServices.DllImport("user32.dll")>
         Private Shared Function SetWindowPos(hWnd As IntPtr, hWndInsertAfter As IntPtr,
                                          X As Integer, Y As Integer, cx As Integer, cy As Integer,
                                          uFlags As UInteger) As Boolean
         End Function
 
+        ''' <summary>Win32 z-order constant for topmost windows.</summary>
         Private Shared ReadOnly HWND_TOPMOST As IntPtr = New IntPtr(-1)
+
+        ''' <summary>Win32 z-order constant for non-topmost windows.</summary>
         Private Shared ReadOnly HWND_NOTOPMOST As IntPtr = New IntPtr(-2)
+
+        ''' <summary>Do not change window size when calling `SetWindowPos`.</summary>
         Private Const SWP_NOSIZE As UInteger = &H1UI
+
+        ''' <summary>Do not change window position when calling `SetWindowPos`.</summary>
         Private Const SWP_NOMOVE As UInteger = &H2UI
+
+        ''' <summary>Show the window when calling `SetWindowPos`.</summary>
         Private Const SWP_SHOWWINDOW As UInteger = &H40UI
 
+        ''' <summary>
+        ''' Shows (or updates) the splash window with the specified message, marshaling to the UI thread when needed.
+        ''' </summary>
         Private Shared Sub ShowUpdatingSplash(message As String)
             Try
                 If MainControl IsNot Nothing AndAlso MainControl.InvokeRequired Then
@@ -50,6 +114,9 @@ Namespace SharedLibrary
             End Try
         End Sub
 
+        ''' <summary>
+        ''' Core splash display/update logic. Keeps the window top-most and attempts to bring it to the foreground.
+        ''' </summary>
         Private Shared Sub ShowUpdatingSplashCore(message As String)
             Try
                 If _splash Is Nothing OrElse _splash.IsDisposed Then
@@ -76,6 +143,9 @@ Namespace SharedLibrary
             End Try
         End Sub
 
+        ''' <summary>
+        ''' Closes and disposes the splash window, marshaling to its UI thread when necessary.
+        ''' </summary>
         Private Shared Sub CloseUpdatingSplash()
             Try
                 If _splash Is Nothing Then Return
@@ -107,7 +177,12 @@ Namespace SharedLibrary
 
 
         ' LOGGING with trimming
-        Private Shared Sub WriteUpdateLog(message As String, Optional ex As Exception = Nothing)
+        ''' <summary>
+        ''' Appends an entry to the updater log under `%AppData%\{AN2}\updater.log` and triggers trimming when needed.
+        ''' </summary>
+        ''' <param name="message">Log message to append.</param>
+        ''' <param name="ex">Optional exception details to include.</param>
+        Public Shared Sub WriteUpdateLog(message As String, Optional ex As Exception = Nothing)
             Try
                 Dim logDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), SharedMethods.AN2)
                 If Not Directory.Exists(logDir) Then Directory.CreateDirectory(logDir)
@@ -154,6 +229,10 @@ Namespace SharedLibrary
             End Try
         End Sub
 
+        ''' <summary>
+        ''' Trims the given log file to retain only the most recent lines, bounded by `LogKeepLines`.
+        ''' </summary>
+        ''' <param name="path">Full path of the log file to trim.</param>
         Private Shared Sub TrimLogFile(path As String)
             Try
                 Dim lines = File.ReadAllLines(path, Encoding.UTF8)
@@ -168,6 +247,11 @@ Namespace SharedLibrary
             End Try
         End Sub
 
+        ''' <summary>
+        ''' Shows a Yes/No prompt on the UI thread (when required) and returns the underlying dialog result.
+        ''' </summary>
+        ''' <param name="prompt">Prompt body text.</param>
+        ''' <param name="caption">Dialog caption.</param>
         Private Shared Function UIInvokePrompt(prompt As String, caption As String) As Integer
             NativeMethods.SetForegroundWindow(HostHandle)
             If MainControl IsNot Nothing AndAlso MainControl.InvokeRequired Then
@@ -179,6 +263,11 @@ Namespace SharedLibrary
             End If
         End Function
 
+        ''' <summary>
+        ''' Shows a message box on the UI thread (when required).
+        ''' </summary>
+        ''' <param name="msg">Message body.</param>
+        ''' <param name="caption">Dialog caption.</param>
         Private Shared Sub UIInvokeMessage(msg As String, caption As String)
             NativeMethods.SetForegroundWindow(HostHandle)
             If MainControl IsNot Nothing AndAlso MainControl.InvokeRequired Then
@@ -188,10 +277,17 @@ Namespace SharedLibrary
             End If
         End Sub
 
+        ''' <summary>
+        ''' Returns whether interactive UI can be shown in the current environment.
+        ''' </summary>
         Private Shared Function CanShowInteractiveUi() As Boolean
             Return Environment.UserInteractive
         End Function
 
+        ''' <summary>
+        ''' Returns the .NET SecurityZone name for a URL, or "Unknown" if it cannot be determined.
+        ''' </summary>
+        ''' <param name="url">URL to evaluate.</param>
         Private Shared Function GetUrlZoneName(url As String) As String
             Try
                 Dim z = System.Security.Policy.Zone.CreateFromUrl(url)
@@ -201,6 +297,10 @@ Namespace SharedLibrary
             End Try
         End Function
 
+        ''' <summary>
+        ''' Determines whether an exception chain indicates a ClickOnce trust-not-granted scenario.
+        ''' </summary>
+        ''' <param name="ex">Exception to examine.</param>
         Private Shared Function IsTrustNotGranted(ex As Exception) As Boolean
             If ex Is Nothing Then Return False
             If ex.[GetType]().FullName.EndsWith("TrustNotGrantedException", StringComparison.OrdinalIgnoreCase) Then Return True
@@ -209,7 +309,14 @@ Namespace SharedLibrary
         End Function
 
 
-        Public Sub CheckAndInstallUpdates(appname As String, LocalPath As String)
+        ''' <summary>
+        ''' Performs a user-initiated update check and, when available, installs the update.
+        ''' Supports ClickOnce network deployments and local update path scenarios.
+        ''' </summary>
+        ''' <param name="appname">Add-in name used to select per-app settings keys (prefix matters: Word/Exce/Outl).</param>
+        ''' <param name="LocalPath">Optional local update root path. If empty and network deployed, ClickOnce is used.</param>
+        ''' <param name="context">Optional shared context used for INI configuration update checks.</param>
+        Public Sub CheckAndInstallUpdates(appname As String, LocalPath As String, Optional context As ISharedContext = Nothing)
             Try
                 Dim currentDate As Date = Date.Now
                 If ApplicationDeployment.IsNetworkDeployed AndAlso String.IsNullOrWhiteSpace(LocalPath) Then
@@ -287,10 +394,32 @@ Namespace SharedLibrary
                         End If
                     End If
                 End If
+
+                ' === INI Configuration Updates (manual check) ===                
+                ''' <summary>
+                ''' When a shared context is provided, attempts an INI configuration update check and shows a message
+                ''' if no updates were applied.
+                ''' </summary>
+                If context IsNot Nothing Then
+                    Try
+                        If MainControl IsNot Nothing AndAlso MainControl.InvokeRequired Then
+                            MainControl.Invoke(Sub() If Not SharedMethods.CheckForIniUpdates(context) Then UIInvokeMessage(
+                                "No configuration updates available or made",
+                                $"{SharedMethods.AN} INI Updater"))
+                        Else
+                            If Not SharedMethods.CheckForIniUpdates(context) Then UIInvokeMessage(
+                                "No configuration updates available or made",
+                                $"{SharedMethods.AN} INI Updater")
+                        End If
+                    Catch iniEx As Exception
+                        WriteUpdateLog("[CheckAndInstallUpdates] INI update check failed", iniEx)
+                    End Try
+                End If
+
             Catch ex As DeploymentException
                 WriteUpdateLog("[CheckAndInstallUpdates] DeploymentException", ex)
                 UIInvokeMessage(
-                    $"Error during update (you may try a manual install via {AppsUrl}): {ex.Message}",
+                    $"Error during update (you may try a manual install via {SharedMethods.AppsUrl}): {ex.Message}",
                     $"{SharedMethods.AN} Updater")
             Catch ex As Exception
                 WriteUpdateLog("[CheckAndInstallUpdates] Unexpected Exception", ex)
@@ -300,12 +429,24 @@ Namespace SharedLibrary
             End Try
         End Sub
 
+        ''' <summary>Cached add-in name used by async handlers and retry logic.</summary>
         Private Shared _appname As String
+
+        ''' <summary>Cached local update path used by periodic checks.</summary>
         Private Shared _localPath As String
+
+        ''' <summary>Cached update check interval in days (special -1 value implies infinite retry mode in this class).</summary>
         Private Shared _checkIntervalInDays As Integer
 
-        ' (Other retry-state methods unchanged)...
+        ''' <summary>Cached shared context used for INI update checks.</summary>
+        Private Shared _context As ISharedContext = Nothing
 
+        ''' <summary>
+        ''' Loads the per-app retry state from `My.Settings`.
+        ''' </summary>
+        ''' <param name="day">Stored retry day.</param>
+        ''' <param name="count">Stored retry count for the day.</param>
+        ''' <param name="shownToday">Whether a pause prompt has already been shown today.</param>
         Private Shared Sub GetRetryStateFromSettings(ByRef day As Date, ByRef count As Integer, ByRef shownToday As Boolean)
             day = Date.MinValue : count = 0 : shownToday = False
             Select Case Left(_appname, 4)
@@ -324,6 +465,12 @@ Namespace SharedLibrary
             End Select
         End Sub
 
+        ''' <summary>
+        ''' Saves the per-app retry state into `My.Settings`.
+        ''' </summary>
+        ''' <param name="day">Retry state day.</param>
+        ''' <param name="count">Retry failures count.</param>
+        ''' <param name="shownToday">Whether the prompt has been shown for the day.</param>
         Private Shared Sub SetRetryStateToSettings(day As Date, count As Integer, shownToday As Boolean)
             Select Case Left(_appname, 4)
                 Case "Word"
@@ -342,6 +489,12 @@ Namespace SharedLibrary
             Try : My.Settings.Save() : Catch : End Try
         End Sub
 
+        ''' <summary>
+        ''' Resets retry counters if the stored day differs from today.
+        ''' </summary>
+        ''' <param name="day">Stored retry day (updated if reset).</param>
+        ''' <param name="count">Stored retry count (updated if reset).</param>
+        ''' <param name="shownToday">Stored prompt flag (updated if reset).</param>
         Private Shared Sub ResetRetryIfNewDay(ByRef day As Date, ByRef count As Integer, ByRef shownToday As Boolean)
             If day.Date <> Date.Today Then
                 day = Date.Today : count = 0 : shownToday = False
@@ -351,6 +504,12 @@ Namespace SharedLibrary
 
         ' Version if multiple prompts per day (every 3 failures)
 
+        ''' <summary>
+        ''' Alternative retry/prompt implementation (currently unused). Records a failure and may prompt the user
+        ''' after reaching the daily threshold, allowing multiple prompts per day based on the comment.
+        ''' </summary>
+        ''' <param name="optionalReason">Optional failure reason to log.</param>
+        ''' <returns>True to indicate the caller should pause update checks; otherwise False.</returns>
         Private Shared Function _RecordCheckFailureAndMaybePrompt(optionalReason As String) As Boolean
             If _checkIntervalInDays = -1 Then
                 Return False ' infinite retry mode
@@ -388,6 +547,12 @@ Namespace SharedLibrary
 
         ' Version if only one prompt per day
 
+        ''' <summary>
+        ''' Records a failed update check attempt and may prompt the user to pause checks after reaching
+        ''' the daily failure threshold.
+        ''' </summary>
+        ''' <param name="optionalReason">Optional reason string for logging.</param>
+        ''' <returns>True to indicate the caller should pause update checks; otherwise False.</returns>
         Private Shared Function RecordCheckFailureAndMaybePrompt(optionalReason As String) As Boolean
             If _checkIntervalInDays = -1 Then
                 ' Infinite retry mode: never pause, never prompt
@@ -412,6 +577,14 @@ Namespace SharedLibrary
             Return False
         End Function
 
+        ''' <summary>
+        ''' Shows a two-button Yes/No style dialog with custom button labels, marshaling to the UI thread when required.
+        ''' </summary>
+        ''' <param name="bodyText">Dialog body text.</param>
+        ''' <param name="button1Text">Text for the first button.</param>
+        ''' <param name="button2Text">Text for the second button.</param>
+        ''' <param name="caption">Dialog caption.</param>
+        ''' <returns>Dialog result as returned by `SharedMethods.ShowCustomYesNoBox`.</returns>
         Private Shared Function UIInvokeYesNo(bodyText As String, button1Text As String, button2Text As String, caption As String) As Integer
             Try
                 If MainControl IsNot Nothing AndAlso MainControl.IsHandleCreated AndAlso MainControl.InvokeRequired Then
@@ -425,10 +598,21 @@ Namespace SharedLibrary
             End Try
         End Function
 
+        ''' <summary>
+        ''' Performs an automatic/periodic update check, honoring the check interval and daily retry state.
+        ''' May run an async ClickOnce check (network deployed) or run a local `.vsto` installer check (local path).
+        ''' </summary>
+        ''' <param name="checkIntervalInDays">
+        ''' Interval in days between checks; 0 disables checks; -1 enables infinite retry mode for failure handling in this class.
+        ''' </param>
+        ''' <param name="appname">Add-in name used to select per-app settings keys (prefix matters: Word/Exce/Outl).</param>
+        ''' <param name="LocalPath">Optional local update root path; if empty and network deployed, ClickOnce is used.</param>
+        ''' <param name="context">Optional shared context used for INI configuration update checks.</param>
         Public Shared Sub PeriodicCheckForUpdates(
-        checkIntervalInDays As Integer,
-        appname As String,
-        LocalPath As String)
+            checkIntervalInDays As Integer,
+            appname As String,
+            LocalPath As String,
+            Optional context As ISharedContext = Nothing)
 
             Dim splashManagedByOnCheck As Boolean = False
 
@@ -437,6 +621,7 @@ Namespace SharedLibrary
                 _appname = appname
                 _localPath = LocalPath
                 _checkIntervalInDays = checkIntervalInDays
+                _context = context
 
                 Dim lastCheck As Date = If(
                 Left(_appname, 4) = "Word", My.Settings.LastUpdateCheckWord,
@@ -499,6 +684,19 @@ Namespace SharedLibrary
                     SetRetryStateToSettings(day, cnt, shown)
                 End If
 
+                ' === INI Configuration Updates (async path) ===
+                If _context IsNot Nothing Then
+                    Try
+                        If MainControl IsNot Nothing AndAlso MainControl.InvokeRequired Then
+                            MainControl.Invoke(Sub() SharedMethods.CheckForIniUpdates(_context))
+                        Else
+                            SharedMethods.CheckForIniUpdates(_context)
+                        End If
+                    Catch iniEx As Exception
+                        WriteUpdateLog("[OnCheck] INI update check failed", iniEx)
+                    End Try
+                End If
+
             Catch dex As DeploymentException
                 WriteUpdateLog("[PeriodicCheck] DeploymentException", dex)
                 Dim pause As Boolean = RecordCheckFailureAndMaybePrompt("DeploymentException")
@@ -516,6 +714,10 @@ Namespace SharedLibrary
             End Try
         End Sub
 
+        ''' <summary>
+        ''' Async callback for ClickOnce update checks started by `PeriodicCheckForUpdates`.
+        ''' Handles update availability, errors, retry tracking, and optional interactive installer fallback.
+        ''' </summary>
         Private Shared Sub OnCheck(sender As Object, e As CheckForUpdateCompletedEventArgs)
             Dim dep = CType(sender, ApplicationDeployment)
             Dim nowDate As Date = Date.Now
@@ -595,6 +797,19 @@ Namespace SharedLibrary
                 Dim day As Date = Date.Today : Dim cnt As Integer = 0 : Dim shown As Boolean = False
                 SetRetryStateToSettings(day, cnt, shown)
 
+                ' === INI Configuration Updates (async network path) ===
+                If _context IsNot Nothing Then
+                    Try
+                        If MainControl IsNot Nothing AndAlso MainControl.InvokeRequired Then
+                            MainControl.Invoke(Sub() SharedMethods.CheckForIniUpdates(_context))
+                        Else
+                            SharedMethods.CheckForIniUpdates(_context)
+                        End If
+                    Catch iniEx As Exception
+                        WriteUpdateLog("[OnCheck] INI update check failed", iniEx)
+                    End Try
+                End If
+
             Catch dex As DeploymentException
                 WriteUpdateLog("[OnCheck] DeploymentException", dex)
                 Dim pause As Boolean = RecordCheckFailureAndMaybePrompt("DeploymentException")
@@ -614,45 +829,80 @@ Namespace SharedLibrary
         End Sub
 
 
+        ''' <summary>
+        ''' Win32 API that permits a specific process to set the foreground window.
+        ''' </summary>
         <DllImport("user32.dll")>
         Private Shared Function AllowSetForegroundWindow(dwProcessId As Integer) As Boolean
         End Function
 
+        ''' <summary>
+        ''' Win32 API to change window show state.
+        ''' </summary>
         <DllImport("user32.dll")>
         Private Shared Function ShowWindow(hWnd As IntPtr, nCmdShow As Integer) As Boolean
         End Function
+
+        ''' <summary>Win32 constant indicating a window should be shown (SW_SHOW).</summary>
         Private Const SW_SHOW As Integer = 5
 
+        ''' <summary>
+        ''' Win32 API to get the current foreground window handle.
+        ''' </summary>
         <DllImport("user32.dll")>
         Private Shared Function GetForegroundWindow() As IntPtr
         End Function
 
+        ''' <summary>
+        ''' Win32 API to get the thread/process id for the owning window.
+        ''' </summary>
         <DllImport("user32.dll")>
         Private Shared Function GetWindowThreadProcessId(hWnd As IntPtr, ByRef lpdwProcessId As Integer) As Integer
         End Function
 
+        ''' <summary>
+        ''' Win32 API to attach/detach input processing between threads (used to satisfy foreground focus restrictions).
+        ''' </summary>
         <DllImport("user32.dll")>
         Private Shared Function AttachThreadInput(idAttach As Integer, idAttachTo As Integer, fAttach As Boolean) As Boolean
         End Function
 
+        ''' <summary>
+        ''' Win32 API to enumerate top-level windows.
+        ''' </summary>
         <DllImport("user32.dll")>
         Private Shared Function EnumWindows(lpEnumFunc As EnumWindowsProc, lParam As IntPtr) As Boolean
         End Function
+
+        ''' <summary>Delegate for `EnumWindows` callback.</summary>
         Private Delegate Function EnumWindowsProc(hWnd As IntPtr, lParam As IntPtr) As Boolean
 
+        ''' <summary>
+        ''' Win32 API that indicates whether a window is visible.
+        ''' </summary>
         <DllImport("user32.dll")>
         Private Shared Function IsWindowVisible(hWnd As IntPtr) As Boolean
         End Function
 
+        ''' <summary>
+        ''' Win32 API to get window text.
+        ''' </summary>
         <DllImport("user32.dll", CharSet:=CharSet.Unicode)>
         Private Shared Function GetWindowText(hWnd As IntPtr, sb As StringBuilder, cch As Integer) As Integer
         End Function
 
+        ''' <summary>
+        ''' Win32 API to get the calling thread id.
+        ''' </summary>
         <DllImport("kernel32.dll")>
         Private Shared Function GetCurrentThreadId() As Integer
         End Function
 
         ' === Helper: enumerate top-level windows for a process ===
+        ''' <summary>
+        ''' Enumerates visible top-level windows belonging to the specified process id.
+        ''' </summary>
+        ''' <param name="procId">Process id.</param>
         Private Shared Function EnumProcessTopLevelWindows(procId As Integer) As List(Of IntPtr)
             Dim list As New List(Of IntPtr)
             EnumWindows(Function(h, p)
@@ -668,6 +918,13 @@ Namespace SharedLibrary
         End Function
 
         ' === Helper: bring process window to foreground with retries ===
+        ''' <summary>
+        ''' Attempts to bring a newly started process window to the foreground, using retries and thread input attach
+        ''' to satisfy foreground lock rules. Writes the result to the update log.
+        ''' </summary>
+        ''' <param name="p">Target process.</param>
+        ''' <param name="logPrefix">Prefix for log entries written by this method.</param>
+        ''' <returns>True if a target window was found and activated; otherwise False.</returns>
         Private Shared Function BringProcessWindowToFront(p As Process, logPrefix As String) As Boolean
             Const totalWaitMs As Integer = 5000
             Const stepMs As Integer = 300
@@ -734,6 +991,11 @@ Namespace SharedLibrary
         End Function
 
 
+        ''' <summary>
+        ''' Runs `VSTOInstaller.exe` to install a `.vsto` from a local path or URL. Attempts a silent install first,
+        ''' and falls back to an interactive install that is brought to the foreground.
+        ''' </summary>
+        ''' <param name="pathOrUrl">Local path or URL to the `.vsto` deployment manifest.</param>
         Private Shared Sub RunVstoInstaller(pathOrUrl As String)
             ' Try to locate VSTOInstaller in both x64 and x86 common locations
             Dim candidates As New List(Of String)
@@ -846,7 +1108,7 @@ Namespace SharedLibrary
                             $"{SharedMethods.AN} Updater")
                     Else
                         UIInvokeMessage(
-                            "The update could not be completed. A required trust confirmation may have been refused or blocked by policy. You can always try a manual install by visiting " & AppsUrl & ".",
+                            "The update could not be completed. A required trust confirmation may have been refused or blocked by policy. You can always try a manual install by visiting " & SharedMethods.AppsUrl & ".",
                             $"{SharedMethods.AN} Updater")
                     End If
                 End Using
@@ -854,7 +1116,7 @@ Namespace SharedLibrary
             Catch ex As Exception
                 WriteUpdateLog("[RunVstoInstaller] interactive failed", ex)
                 UIInvokeMessage(
-                    $"The update could not be completed: {ex.Message}. Please inform your administrator. You can always try a manual install by visiting {AppsUrl}.",
+                    $"The update could not be completed: {ex.Message}. Please inform your administrator. You can always try a manual install by visiting {SharedMethods.AppsUrl}.",
                     $"{SharedMethods.AN} Updater")
             Finally
                 CloseUpdatingSplash()
@@ -862,6 +1124,10 @@ Namespace SharedLibrary
         End Sub
 
 
+        ''' <summary>
+        ''' Persists the last update check timestamp to per-app settings and logs the change.
+        ''' </summary>
+        ''' <param name="timeStamp">Timestamp to persist.</param>
         Private Shared Sub SaveTimestamp(timeStamp As Date)
             Select Case Left(_appname, 4)
                 Case "Word" : My.Settings.LastUpdateCheckWord = timeStamp

@@ -3,7 +3,6 @@
 
 ' =============================================================================
 ' File: TextChunk.vb
-' Part of: Red Ink Shared Library
 ' Purpose: Lightweight data model representing a text segment with position metadata
 '          and optional vector embedding. Fundamental indexing unit for embedding-based
 '          search systems and bag-of-words stores.

@@ -18,6 +18,7 @@
 '    {chunk}, {doc}, {mystyle}, {object}, {multimodel}).
 '  - Model Selection: Supports primary/secondary models with optional alternate model
 '    configuration and multi-model execution.
+'  - Tooling Support: Allows model tooling selection when supported by the model.
 '  - Format Preservation: Configurable formatting retention (character/paragraph level)
 '    with special handling for fields and styles.
 '  - External Content Integration: Supports embedding external files ({doc} trigger),
@@ -44,18 +45,536 @@ Imports System.Diagnostics
 Imports System.Globalization
 Imports System.IO
 Imports System.Text.RegularExpressions
+Imports System.Threading.Tasks
 Imports System.Windows.Forms
 Imports DocumentFormat.OpenXml
+Imports DocumentFormat.OpenXml.Office2010.CustomUI
 Imports DocumentFormat.OpenXml.Presentation
 Imports DocumentFormat.OpenXml.Wordprocessing
+Imports Google.Rpc.Context.AttributeContext.Types
 Imports Microsoft.Office.Interop.PowerPoint
 Imports Microsoft.Office.Interop.Word
 Imports NetOffice.PowerPointApi
+Imports SharedLibrary
 Imports SharedLibrary.SharedLibrary
 Imports SharedLibrary.SharedLibrary.SharedMethods
 Imports SLib = SharedLibrary.SharedLibrary.SharedMethods
 
 Partial Public Class ThisAddIn
+
+
+    ''' <summary>
+    ''' Helper class to track file loading results for the Freestyle external file embedding feature.
+    ''' </summary>
+    Private Class FileLoadingContext
+        Public Property GlobalDocumentCounter As Integer = 0
+        Public Property LoadedFiles As New List(Of Tuple(Of String, Integer))() ' (path, charCount)
+        Public Property FailedFiles As New List(Of String)()
+        Public Property IgnoredFilesPerDir As New Dictionary(Of String, Integer)(StringComparer.OrdinalIgnoreCase)
+
+        ''' <summary>OCR mode: 0=not set, 1=enable for all, 2=ask individually</summary>
+        Public Property DirectoryOCRMode As Integer = 0
+
+        ''' <summary>Tracks the current directory being processed (for including path in output).</summary>
+        Public Property CurrentDirectoryPath As String = ""
+
+        ''' <summary>Total number of files expected to be loaded (for determining if filename should be included).</summary>
+        Public Property ExpectedFileCount As Integer = 0
+
+        ''' <summary>PDFs that heuristics suggest may contain images/scanned content but OCR was not performed.</summary>
+        Public Property PdfsWithPossibleImages As New List(Of String)()
+
+
+        ''' <summary>Maximum files to load from a single directory.</summary>
+        Public Const MaxFilesPerDirectory As Integer = 50
+
+        ''' <summary>Whether to recurse into subdirectories when loading a directory.</summary>
+        Public Const RecurseDirectories As Boolean = False
+
+        ''' <summary>Ask user confirmation if directory has more than this many files.</summary>
+        Public Const ConfirmDirectoryFileCount As Integer = 10
+
+        ''' <summary>Supported file extensions for GetFileContent.</summary>
+        Public Shared ReadOnly SupportedExtensions As String() = {
+        ".txt", ".rtf", ".doc", ".docx", ".pdf", ".pptx", ".ini", ".csv", ".log",
+        ".json", ".xml", ".html", ".htm", ".md", ".vb", ".cs", ".js", ".ts",
+        ".py", ".java", ".cpp", ".c", ".h", ".sql", ".yaml", ".yml"
+    }
+    End Class
+
+    ''' <summary>
+    ''' Checks if a trigger placeholder at a given index is wrapped in XML tags.
+    ''' </summary>
+    ''' <param name="prompt">The prompt string to check.</param>
+    ''' <param name="idx">The index of the trigger in the prompt.</param>
+    ''' <param name="trigger">The trigger text to look for.</param>
+    ''' <returns>True if the trigger is wrapped in XML tags, False otherwise.</returns>
+    Private Function IsWrappedInXml(prompt As String, idx As Integer, trigger As String) As Boolean
+        Dim wrappedPattern As String = "<(?<name>[A-Za-z][\w\-]*)\b[^>]*>\s*" & Regex.Escape(trigger) & "\s*</\k<name>>"
+        Dim matches As MatchCollection = Regex.Matches(prompt, wrappedPattern, RegexOptions.IgnoreCase)
+        For Each m As Match In matches
+            If idx >= m.Index AndAlso idx < m.Index + m.Length Then
+                Return True
+            End If
+        Next
+        Return False
+    End Function
+
+    Private Async Function LoadSingleFileAsync(filePath As String, isWrapped As Boolean, ctx As FileLoadingContext, Optional isFromDirectory As Boolean = False) As Task(Of String)
+        Try
+            Dim doOCR As Boolean = False
+            Dim askUser As Boolean = False
+
+            ' Check if OCR is available at all
+            Dim ocrAvailable As Boolean = SharedMethods.IsOcrAvailable(_context)
+
+            ' Determine OCR behavior based on context and availability
+            If ocrAvailable Then
+                If isFromDirectory Then
+                    If ctx.DirectoryOCRMode = 1 Then
+                        doOCR = True
+                        askUser = False
+                    ElseIf ctx.DirectoryOCRMode = 2 Then
+                        doOCR = True
+                        askUser = True
+                    Else
+                        doOCR = True
+                        askUser = True
+                    End If
+                Else
+                    doOCR = True
+                    askUser = True
+                End If
+            Else
+                doOCR = False
+                askUser = False
+            End If
+
+            ' Load file content with determined OCR settings
+            Dim fileResult = Await GetFileContentEx(
+                optionalFilePath:=filePath,
+                Silent:=True,
+                DoOCR:=doOCR,
+                AskUser:=askUser
+            )
+
+            ' Track PDFs that may have incomplete content
+            If fileResult.PdfMayBeIncomplete Then
+                ctx.PdfsWithPossibleImages.Add(filePath)
+            End If
+
+            If String.IsNullOrWhiteSpace(fileResult.Content) Then
+                ctx.FailedFiles.Add(filePath)
+                Return ""
+            End If
+
+            ctx.GlobalDocumentCounter += 1
+            Dim docNum As Integer = ctx.GlobalDocumentCounter
+            ctx.LoadedFiles.Add(Tuple.Create(filePath, fileResult.Content.Length))
+
+            If isWrapped Then
+                Return fileResult.Content
+            Else
+                Dim includeFileInfo As Boolean = (ctx.ExpectedFileCount > 1) OrElse isFromDirectory
+
+                Dim openTag As String
+                Dim closeTag As String = "</document" & docNum.ToString() & ">"
+
+                If includeFileInfo Then
+                    Dim fileName As String = Path.GetFileName(filePath)
+                    If isFromDirectory AndAlso Not String.IsNullOrEmpty(ctx.CurrentDirectoryPath) Then
+                        openTag = "<document" & docNum.ToString() & " directory=""" & ctx.CurrentDirectoryPath & """ filename=""" & fileName & """>"
+                    Else
+                        openTag = "<document" & docNum.ToString() & " filename=""" & fileName & """>"
+                    End If
+                Else
+                    openTag = "<document" & docNum.ToString() & ">"
+                End If
+
+                Return openTag & fileResult.Content & closeTag
+            End If
+        Catch ex As Exception
+            ctx.FailedFiles.Add(filePath)
+            Return ""
+        End Try
+    End Function
+
+
+    ''' <summary>
+    ''' Loads all supported files from a directory and returns their combined content.
+    ''' Prompts for OCR only when there are multiple PDF files in the directory.
+    ''' </summary>
+    ''' <param name="dirPath">The directory path to load files from.</param>
+    ''' <param name="isWrapped">If True, the directory trigger was already wrapped in XML (not used for individual files).</param>
+    ''' <param name="ctx">The file loading context for tracking state.</param>
+    ''' <returns>Combined content of all files, or "ABORT" if user cancelled, or empty string on error.</returns>
+    Private Async Function LoadDirectoryFilesAsync(dirPath As String, isWrapped As Boolean, ctx As FileLoadingContext) As Task(Of String)
+        Try
+            If Not Directory.Exists(dirPath) Then
+                ctx.FailedFiles.Add(dirPath)
+                Return ""
+            End If
+
+            Dim searchOption As SearchOption = If(FileLoadingContext.RecurseDirectories, SearchOption.AllDirectories, SearchOption.TopDirectoryOnly)
+            Dim allFiles As String() = Directory.GetFiles(dirPath, "*.*", searchOption)
+
+            ' Filter to supported extensions
+            Dim supportedFiles As New List(Of String)()
+            Dim ignoredCount As Integer = 0
+
+            For Each f In allFiles
+                Dim ext As String = Path.GetExtension(f).ToLowerInvariant()
+                If FileLoadingContext.SupportedExtensions.Contains(ext) Then
+                    supportedFiles.Add(f)
+                Else
+                    ignoredCount += 1
+                End If
+            Next
+
+            If ignoredCount > 0 Then
+                ctx.IgnoredFilesPerDir(dirPath) = ignoredCount
+            End If
+
+            ' Check if too many files
+            If supportedFiles.Count > FileLoadingContext.MaxFilesPerDirectory Then
+                Dim truncateAnswer As Integer = ShowCustomYesNoBox(
+                $"The directory '{dirPath}' contains {supportedFiles.Count} supported files, but the maximum is {FileLoadingContext.MaxFilesPerDirectory}." & vbCrLf & vbCrLf &
+                $"Only the first {FileLoadingContext.MaxFilesPerDirectory} files will be loaded. Continue?",
+                "Yes, continue", "No, abort")
+                If truncateAnswer <> 1 Then
+                    Return "ABORT"
+                End If
+                supportedFiles = supportedFiles.Take(FileLoadingContext.MaxFilesPerDirectory).ToList()
+            ElseIf supportedFiles.Count > FileLoadingContext.ConfirmDirectoryFileCount Then
+                Dim confirmAnswer As Integer = ShowCustomYesNoBox(
+                $"The directory '{dirPath}' contains {supportedFiles.Count} files to load. Continue?",
+                "Yes, continue", "No, abort")
+                If confirmAnswer <> 1 Then
+                    Return "ABORT"
+                End If
+            End If
+
+            If supportedFiles.Count = 0 Then
+                ShowCustomMessageBox($"No supported files found in directory '{dirPath}'.")
+                Return ""
+            End If
+
+            ' Count PDF files in the directory
+            Dim pdfFiles As List(Of String) = supportedFiles.Where(Function(f) Path.GetExtension(f).Equals(".pdf", StringComparison.OrdinalIgnoreCase)).ToList()
+            Dim pdfCount As Integer = pdfFiles.Count
+
+            ' Reset directory OCR mode for this directory
+            ctx.DirectoryOCRMode = 0
+
+            ' Only ask about OCR if there are multiple PDF files in the directory AND OCR is available
+            If pdfCount > 1 AndAlso SharedMethods.IsOcrAvailable(_context) Then
+                Dim ocrChoice As Integer = ShowCustomYesNoBox(
+                    $"The directory '{dirPath}' contains {pdfCount} PDF files." & vbCrLf & vbCrLf &
+                    "Some PDFs may require OCR (optical character recognition) to extract text from scanned documents or images." & vbCrLf & vbCrLf &
+                    "How would you like to handle OCR for these PDF files?",
+                    "Enable OCR for all PDFs",
+                    "Choose individually for each PDF",
+                    "Close this window to abort")
+
+                If ocrChoice = 0 Then
+                    ' User closed the dialog - abort
+                    Return "ABORT"
+                ElseIf ocrChoice = 1 Then
+                    ' Enable OCR for all without asking
+                    ctx.DirectoryOCRMode = 1
+                ElseIf ocrChoice = 2 Then
+                    ' Ask individually for each PDF
+                    ctx.DirectoryOCRMode = 2
+                End If
+            End If
+            ' If pdfCount <= 1 or OCR not available, we don't set DirectoryOCRMode, 
+            ' and individual files will use AskUser=True (which will be silently skipped if OCR unavailable)
+
+            ' Set the current directory path for inclusion in document tags
+            ctx.CurrentDirectoryPath = dirPath
+
+            ' Update expected file count to include these directory files
+            ctx.ExpectedFileCount += supportedFiles.Count
+
+            ' Load all files - each file gets its own document wrapper with incrementing counter
+            Dim resultBuilder As New System.Text.StringBuilder()
+            For Each filePath In supportedFiles
+                ' Always wrap individual files from directory with document tags
+                ' Pass isFromDirectory=True to use directory OCR mode for PDFs
+                Dim fileContent As String = Await LoadSingleFileAsync(filePath, False, ctx, isFromDirectory:=True)
+                If Not String.IsNullOrWhiteSpace(fileContent) Then
+                    resultBuilder.Append(fileContent)
+                End If
+            Next
+
+            ' Clear the current directory path after processing
+            ctx.CurrentDirectoryPath = ""
+
+            Return resultBuilder.ToString()
+        Catch ex As Exception
+            ctx.FailedFiles.Add(dirPath)
+            Return ""
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Processes all external file/directory triggers in the prompt ({doc}, {dir}, and fixed paths).
+    ''' Processes triggers in positional order to maintain correct document numbering.
+    ''' </summary>
+    ''' <param name="prompt">The prompt to process.</param>
+    ''' <returns>A tuple containing: (success flag, modified prompt). If success is False, the operation should abort.</returns>
+    Private Async Function ProcessExternalFileTriggers(prompt As String) As Task(Of (Success As Boolean, ModifiedPrompt As String))
+        ' Check if any file triggers are present
+        Dim hasExtTriggers As Boolean = prompt.IndexOf(ExtTrigger, StringComparison.OrdinalIgnoreCase) >= 0
+        Dim hasDirTriggers As Boolean = prompt.IndexOf(ExtDirTrigger, StringComparison.OrdinalIgnoreCase) >= 0
+        Dim hasFixedPaths As Boolean = False
+
+        ' Prepare fixed path pattern
+        Dim fixedPrefix As String = ""
+        Dim fixedSuffix As String = ""
+        Dim patternFixed As String = ""
+
+        If Not String.IsNullOrWhiteSpace(ExtTriggerFixed) AndAlso
+       ExtTriggerFixed.IndexOf("[path]", StringComparison.OrdinalIgnoreCase) >= 0 Then
+            Dim pathTokenIndex As Integer = ExtTriggerFixed.IndexOf("[path]", StringComparison.OrdinalIgnoreCase)
+            fixedPrefix = ExtTriggerFixed.Substring(0, pathTokenIndex)
+            fixedSuffix = ExtTriggerFixed.Substring(pathTokenIndex + "[path]".Length)
+            If Not (String.IsNullOrEmpty(fixedPrefix) AndAlso String.IsNullOrEmpty(fixedSuffix)) Then
+                patternFixed = Regex.Escape(fixedPrefix) & "(?<path>.*?)" & Regex.Escape(fixedSuffix)
+                hasFixedPaths = Regex.IsMatch(prompt, patternFixed, RegexOptions.IgnoreCase)
+            End If
+        End If
+
+        ' No triggers present - nothing to do
+        If Not hasExtTriggers AndAlso Not hasDirTriggers AndAlso Not hasFixedPaths Then
+            Return (True, prompt)
+        End If
+
+        ' Create context for tracking
+        Dim ctx As New FileLoadingContext()
+
+        ' Count total expected files/triggers to determine if filenames should be included
+        ' This is an estimate - actual count may differ after user selections
+        Dim extTriggerCount As Integer = Regex.Matches(prompt, Regex.Escape(ExtTrigger), RegexOptions.IgnoreCase).Count
+        Dim dirTriggerCount As Integer = Regex.Matches(prompt, Regex.Escape(ExtDirTrigger), RegexOptions.IgnoreCase).Count
+        Dim fixedPathCount As Integer = 0
+        If Not String.IsNullOrEmpty(patternFixed) Then
+            fixedPathCount = Regex.Matches(prompt, patternFixed, RegexOptions.IgnoreCase).Count
+        End If
+        ctx.ExpectedFileCount = extTriggerCount + fixedPathCount
+        ' Note: dirTriggerCount files are added in LoadDirectoryFilesAsync
+
+        ' NOTE: OCR prompt is handled per-directory when multiple PDFs are found,
+        ' or per-file with AskUser=True for individual files/single PDFs
+
+        ' === Process all triggers in positional order ===
+        ' We need to find the first trigger of any type, process it, then repeat
+        ' This ensures document numbering follows the order in the prompt
+
+        Dim continueProcessing As Boolean = True
+        While continueProcessing
+            ' Find position of each trigger type
+            Dim extIdx As Integer = prompt.IndexOf(ExtTrigger, StringComparison.OrdinalIgnoreCase)
+            Dim dirIdx As Integer = prompt.IndexOf(ExtDirTrigger, StringComparison.OrdinalIgnoreCase)
+            Dim fixedIdx As Integer = -1
+            Dim fixedMatch As Match = Nothing
+
+            If Not String.IsNullOrEmpty(patternFixed) Then
+                fixedMatch = Regex.Match(prompt, patternFixed, RegexOptions.IgnoreCase Or RegexOptions.Singleline)
+                If fixedMatch.Success Then
+                    ' Check if it looks like a path
+                    Dim candidatePath As String = If(fixedMatch.Groups("path").Value, "").Trim()
+                    ' Remove quotes if present
+                    If (candidatePath.Length >= 2 AndAlso candidatePath.StartsWith("""") AndAlso candidatePath.EndsWith("""")) OrElse
+                   (candidatePath.Length >= 2 AndAlso candidatePath.StartsWith("'") AndAlso candidatePath.EndsWith("'")) Then
+                        candidatePath = candidatePath.Substring(1, candidatePath.Length - 2).Trim()
+                    End If
+                    Dim looksLikePath As Boolean = candidatePath.Contains("\") OrElse candidatePath.Contains("/") OrElse candidatePath.Contains(":")
+                    If looksLikePath Then
+                        fixedIdx = fixedMatch.Index
+                    Else
+                        fixedMatch = Nothing ' Not a path, ignore this match
+                    End If
+                End If
+            End If
+
+            ' Determine which trigger comes first
+            Dim minIdx As Integer = Integer.MaxValue
+            Dim triggerType As String = ""
+
+            If extIdx >= 0 AndAlso extIdx < minIdx Then
+                minIdx = extIdx
+                triggerType = "ext"
+            End If
+            If dirIdx >= 0 AndAlso dirIdx < minIdx Then
+                minIdx = dirIdx
+                triggerType = "dir"
+            End If
+            If fixedIdx >= 0 AndAlso fixedIdx < minIdx Then
+                minIdx = fixedIdx
+                triggerType = "fixed"
+            End If
+
+            ' No more triggers found
+            If triggerType = "" Then
+                continueProcessing = False
+                Continue While
+            End If
+
+            ' Process the first trigger found
+            Select Case triggerType
+                Case "ext"
+                    ' Process {doc} trigger - individual file, use OCR with AskUser=True
+                    Globals.ThisAddIn.DragDropFormLabel = "Select a file to include"
+                    Dim selectedFile As String = ""
+
+                    Using frm As New DragDropForm(DragDropMode.FileOnly)
+                        If frm.ShowDialog() = DialogResult.OK Then
+                            selectedFile = frm.SelectedFilePath
+                        End If
+                    End Using
+
+                    Dim replacementText As String = ""
+
+                    If Not String.IsNullOrWhiteSpace(selectedFile) Then
+                        Dim isWrapped As Boolean = IsWrappedInXml(prompt, extIdx, ExtTrigger)
+                        ' Individual file - isFromDirectory=False means OCR with AskUser=True
+                        replacementText = Await LoadSingleFileAsync(selectedFile, isWrapped, ctx, isFromDirectory:=False)
+                    Else
+                        Dim answer As Integer = ShowCustomYesNoBox(
+                        "No file selected. Do you want to continue or abort?",
+                        "Continue", "Abort")
+                        If answer <> 1 Then Return (False, prompt)
+                    End If
+
+                    prompt = prompt.Substring(0, extIdx) & replacementText & prompt.Substring(extIdx + ExtTrigger.Length)
+
+                Case "dir"
+                    ' Process {dir} trigger - directory processing with OCR prompt for multiple PDFs
+                    Globals.ThisAddIn.DragDropFormLabel = "Select a directory to include"
+                    Dim selectedDir As String = ""
+
+                    Using frm As New DragDropForm(DragDropMode.DirectoryOnly)
+                        If frm.ShowDialog() = DialogResult.OK Then
+                            selectedDir = frm.SelectedFilePath
+                        End If
+                    End Using
+
+                    Dim replacementText As String = ""
+
+                    If Not String.IsNullOrWhiteSpace(selectedDir) Then
+                        Dim isWrapped As Boolean = IsWrappedInXml(prompt, dirIdx, ExtDirTrigger)
+                        replacementText = Await LoadDirectoryFilesAsync(selectedDir, isWrapped, ctx)
+
+                        If replacementText = "ABORT" Then
+                            Return (False, prompt)
+                        End If
+                    Else
+                        Dim answer As Integer = ShowCustomYesNoBox(
+                        "No directory selected. Do you want to continue or abort?",
+                        "Continue", "Abort")
+                        If answer <> 1 Then Return (False, prompt)
+                    End If
+
+                    prompt = prompt.Substring(0, dirIdx) & replacementText & prompt.Substring(dirIdx + ExtDirTrigger.Length)
+
+                Case "fixed"
+                    ' Process fixed path trigger
+                    Dim tokenText As String = fixedMatch.Value
+                    Dim candidatePath As String = If(fixedMatch.Groups("path").Value, "").Trim()
+
+                    ' Remove quotes if present
+                    If (candidatePath.Length >= 2 AndAlso candidatePath.StartsWith("""") AndAlso candidatePath.EndsWith("""")) OrElse
+                   (candidatePath.Length >= 2 AndAlso candidatePath.StartsWith("'") AndAlso candidatePath.EndsWith("'")) Then
+                        candidatePath = candidatePath.Substring(1, candidatePath.Length - 2).Trim()
+                    End If
+
+                    ' Expand environment variables
+                    Dim expandedPath As String = SLib.ExpandEnvironmentVariables(candidatePath)
+                    If Not String.IsNullOrWhiteSpace(expandedPath) Then
+                        candidatePath = expandedPath
+                    End If
+
+                    Dim replacementText As String = ""
+
+                    ' Check if it's wrapped in XML
+                    Dim wrappedPatternTemplate As String = "<(?<name>[A-Za-z][\w\-]*)\b[^>]*>[^<]*" & Regex.Escape(tokenText) & "[^<]*</\k<name>>"
+                    Dim isWrapped As Boolean = Regex.IsMatch(prompt, wrappedPatternTemplate, RegexOptions.IgnoreCase Or RegexOptions.Singleline)
+
+                    ' Determine if it's a file or directory
+                    If File.Exists(candidatePath) Then
+                        ' Individual file - isFromDirectory=False means OCR with AskUser=True
+                        replacementText = Await LoadSingleFileAsync(candidatePath, isWrapped, ctx, isFromDirectory:=False)
+                    ElseIf Directory.Exists(candidatePath) Then
+                        ' Directory - will prompt for OCR if multiple PDFs found
+                        replacementText = Await LoadDirectoryFilesAsync(candidatePath, isWrapped, ctx)
+                        If replacementText = "ABORT" Then
+                            Return (False, prompt)
+                        End If
+                    Else
+                        ctx.FailedFiles.Add(candidatePath)
+                        replacementText = ""
+                    End If
+
+                    prompt = prompt.Substring(0, fixedMatch.Index) & replacementText & prompt.Substring(fixedMatch.Index + fixedMatch.Length)
+            End Select
+        End While
+
+        ' === Show summary and confirm before proceeding ===
+        If ctx.LoadedFiles.Count > 0 OrElse ctx.FailedFiles.Count > 0 OrElse ctx.IgnoredFilesPerDir.Count > 0 OrElse ctx.PdfsWithPossibleImages.Count > 0 Then
+            Dim summary As New System.Text.StringBuilder()
+            summary.AppendLine("File inclusion summary:")
+            summary.AppendLine("")
+
+            If ctx.LoadedFiles.Count > 0 Then
+                summary.AppendLine($"Successfully loaded ({ctx.LoadedFiles.Count} files):")
+                Dim totalChars As Integer = 0
+                For Each item In ctx.LoadedFiles
+                    summary.AppendLine($"  • {item.Item1} ({item.Item2:N0} chars)")
+                    totalChars += item.Item2
+                Next
+                summary.AppendLine($"  Total: {totalChars:N0} characters")
+                summary.AppendLine("")
+            End If
+
+            If ctx.PdfsWithPossibleImages.Count > 0 Then
+                summary.AppendLine($"⚠ PDFs that may contain images/scans ({ctx.PdfsWithPossibleImages.Count} file(s)):")
+                For Each f In ctx.PdfsWithPossibleImages
+                    summary.AppendLine($"  • {Path.GetFileName(f)}")
+                Next
+                summary.AppendLine("  (Text extraction may be incomplete - OCR was not available or not performed)")
+                summary.AppendLine("")
+            End If
+
+            If ctx.FailedFiles.Count > 0 Then
+                summary.AppendLine($"Failed to load ({ctx.FailedFiles.Count} items):")
+                For Each f In ctx.FailedFiles
+                    summary.AppendLine($"  • {f}")
+                Next
+                summary.AppendLine("")
+            End If
+
+            ' ... rest of summary ...
+
+            If ctx.IgnoredFilesPerDir.Count > 0 Then
+                summary.AppendLine("Ignored unsupported files:")
+                For Each kvp In ctx.IgnoredFilesPerDir
+                    summary.AppendLine($"  • {kvp.Key}: {kvp.Value} file(s)")
+                Next
+                summary.AppendLine("")
+            End If
+
+            Dim proceedAnswer As Integer = ShowCustomYesNoBox(
+            summary.ToString().TrimEnd() & vbCrLf & vbCrLf & "Do you want to proceed with these files?",
+            "Proceed", "Abort")
+
+            If proceedAnswer <> 1 Then
+                Return (False, prompt)
+            End If
+        End If
+
+        Return (True, prompt)
+    End Function
 
     ''' <summary>
     ''' Stores the model configuration from the last freestyle command using alternate model.
@@ -211,6 +730,7 @@ Partial Public Class ThisAddIn
             Dim DoMultiModel As Boolean = True
             Dim DoBubblesExtract As Boolean = False
             Dim DoPushback As Boolean = False
+            Dim DoFiles As Boolean = False
 
             ' Build instruction strings for user guidance
             Dim MarkupInstruct As String = $"start With '{MarkupPrefixAll}' for markups"
@@ -220,7 +740,7 @@ Partial Public Class ThisAddIn
             Dim SlidesInstruct As String = $"with '{SlidesPrefix}' for adding to a Powerpoint file"
             Dim ClipboardInstruct As String = $"with '{ClipboardPrefix}', '{NewdocPrefix}' or '{PanePrefix}' for separate output"
             Dim PromptLibInstruct As String = If(INI_PromptLib, " or press 'OK' for the prompt library", "")
-            Dim ExtInstruct As String = $"; include '{ExtTrigger}' (multiple times) for text of (a) file(s) (txt, docx, pdf) or '{AddDocTrigger}' for an open Word doc"
+            Dim ExtInstruct As String = $"; include '{ExtTrigger}' or '{ExtTriggerFixed}' (multiple times) for including the text of (a) file(s) (txt, docx, pdf), {ExtDirTrigger} for a directory of text files, or '{AddDocTrigger}' for an open Word doc"
             Dim TPMarkupInstruct As String = $"; add '{TPMarkupTriggerInstruct}' if revisions [of user] should be pointed out to the LLM"
             Dim NoFormatInstruct As String = $"; add '{NoFormatTrigger2}'/'{KFTrigger2}'/'{KPFTrigger2}/{SameAsReplaceTrigger}' for overriding formatting defaults"
             Dim AllInstruct As String = $"; add '{AllTrigger}' to select all"
@@ -228,10 +748,12 @@ Partial Public Class ThisAddIn
             Dim LibInstruct As String = $"; add '{LibTrigger}' for library search"
             Dim NetInstruct As String = $"; add '{NetTrigger}' for internet search"
             Dim PureInstruct As String = $"; use '{PurePrefix}' for direct prompting"
+            Dim FileInstruct As String = $"; use '{FilePrefix}' for modifying file(s)"
             Dim ChunkInstruct As String = $"; add '{ChunkTrigger}' for iterating through the text"
             Dim BubblesExtractInstruct As String = $"; add '{BubblesExtractTrigger}' for including bubble comments"
             Dim ObjectInstruct As String = $"; add '{ObjectTrigger}'/'{ObjectTrigger2}' for adding a file object"
             Dim MultiModelInstruct As String = $"; add '{MultiModelTrigger}' for multiple models"
+            Dim ToolSelectionInstruct As String = $"; add '{ToolSelectionTrigger}' to permit {ToolFriendlyName.ToLower} selection"
             Dim LastPromptInstruct As String = If(String.IsNullOrWhiteSpace(My.Settings.LastPrompt), "", "; Ctrl-P for your last prompt")
             Dim FileObject As String = ""
             Dim SlideDeck As String = ""
@@ -244,6 +766,14 @@ Partial Public Class ThisAddIn
 
             ' Check if no text is selected (insertion point only)
             If selection.Type = WdSelectionType.wdSelectionIP Then NoText = True
+
+            ' Check if the selected model supports tooling (can call tools)
+            Dim modelSupportsTool As Boolean = False
+            If UseSecondAPI Then
+                ' Check via SharedMethods - based on APICall_ToolInstructions
+                modelSupportsTool = Not String.IsNullOrWhiteSpace(INI_APICall_ToolInstructions_2) OrElse
+                                    SharedMethods.ModelSupportsTooling(LastFreestyleModelConfig)
+            End If
 
             ' Build additional instruction text based on configuration and selection state
             Dim AddOnInstruct As String = AllInstruct
@@ -271,6 +801,10 @@ Partial Public Class ThisAddIn
                 If Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
                     AddOnInstruct += MultiModelInstruct.Replace("; add", ", ")
                 End If
+                If Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) And modelSupportsTool Then
+                    AddOnInstruct += ToolSelectionInstruct.Replace("; add", ", ")
+                End If
+
             Else
                 If Not String.IsNullOrWhiteSpace(INI_APICall_Object) Then
                     AddOnInstruct += ObjectInstruct.Replace("; add", ",")
@@ -305,7 +839,7 @@ Partial Public Class ThisAddIn
                             System.Tuple.Create("OK, use window", $"Use this to automatically insert '{ClipboardPrefix}' as a prefix.", ClipboardPrefix),
                             System.Tuple.Create("OK, use pane", $"Use this to automatically insert '{PanePrefix}' as a prefix.", PanePrefix)
                         }
-                    OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute ({ClipboardInstruct} or {SlidesInstruct}){PromptLibInstruct}{ExtInstruct}{AddOnInstruct}{PureInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle (using " & If(UseSecondAPI, INI_Model_2, INI_Model) & ")", False, "", My.Settings.LastPrompt, OptionalButtons).Trim()
+                    OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute ({ClipboardInstruct} or {SlidesInstruct}){PromptLibInstruct}{ExtInstruct}{AddOnInstruct}{PureInstruct}{FileInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle (using " & If(UseSecondAPI, INI_Model_2, INI_Model) & ")", False, "", My.Settings.LastPrompt, OptionalButtons).Trim()
                 End If
             Else
                 OtherPrompt = LastPrompt
@@ -367,9 +901,117 @@ Partial Public Class ThisAddIn
 
             ' === Special utility commands (can execute without text selection) ===
 
+            ' --- Help picker: show all short commands and let user choose one ---
+            If String.Equals(OtherPrompt.Trim(), "help", StringComparison.OrdinalIgnoreCase) Or String.Equals(OtherPrompt.Trim(), "?", StringComparison.OrdinalIgnoreCase) Then
+
+                Dim items As New List(Of SLib.SelectionItem)()
+                Dim idToCommand As New Dictionary(Of Integer, String)()
+
+                Dim id As Integer = 1
+                Dim AddItem =
+                    Sub(cmd As String, desc As String)
+                        items.Add(New SLib.SelectionItem($"{cmd}: {desc}", id))
+                        idToCommand(id) = cmd
+                        id += 1
+                    End Sub
+
+                ' GENERAL
+                AddItem("domain", "Show the current domain and any configured domain restrictions.")
+                AddItem("model", "Show the primary model, timeout, and (if set) max output token length.")
+                AddItem("terms", "Insert configured usage restrictions/permissions into the document.")
+                AddItem("version", "Show the installed Red Ink version.")
+                AddItem("switch", "Temporarily swap primary and secondary models.")
+                AddItem("clientname", "Copy and show this PC's client identifier (used for UpdateClients).")
+
+                ' CONFIG / MENU
+                AddItem("settings", "Open the settings dialog.")
+                AddItem("reload", "Reload the configuration from disk and rebuild menus.")
+                AddItem("reset", "Reset local configuration to defaults and rebuild menus.")
+                AddItem("cleanmenu", "Remove old context menus and rebuild them.")
+
+                ' INI UPDATE / SIGNING
+                AddItem("iniupdate", "Check for and apply configuration updates.")
+                AddItem("iniupdateignored", "Open the ignore list for configuration updates.")
+                AddItem("iniupdateignore", "Open the ignore list for configuration updates.")
+                AddItem("iniload", "Import/apply configuration via the configuration import workflow.")
+                AddItem("inirollback", "Roll back the last imported configuration change (creates a backup).")
+                AddItem("iniupdatekeys", "Open signature management (sign/validate configs, manage keys).")
+                AddItem("signtool", "Open signature management (sign/validate configs, manage keys).")
+                AddItem("iniupdatebatch", "Open batch signing.")
+                AddItem("signbatch", "Open batch signing.")
+
+                ' PROMPTS / LOGS
+                AddItem("clearlastprompt", "Clear the stored last Freestyle prompt and repeat state.")
+                AddItem("promptlog", "Show/edit the cached Freestyle prompt log.")
+                AddItem("logstat", $"Compile and show {AN} usage startistics based on collected logs.")
+
+                ' MYSTYLE
+                AddItem("definemystyle", "Create/update your MyStyle prompts.")
+                AddItem("editmystyle", "Open the MyStyle prompt file in an editor.")
+
+                ' SECURITY / REGISTRY (selection required)
+                AddItem("encode", "Encode the selected text (e.g., API key) and copy it to the clipboard.")
+                AddItem("decode", "Decode the selected encoded text and copy it to the clipboard.")
+                AddItem("inipath", "Save the selected text as the INI path in the registry.")
+                AddItem("codebasis", "Save the selected text as the CodeBasis value in the registry.")
+
+                ' JSON / TEMPLATES (selection required)
+                AddItem("generateresponsetemplate", "Generate a JSON response template from selected JSON + description.")
+                AddItem("generateresponsekey", "Generate a JSON response key from selected JSON + description.")
+
+                ' CLIPBOARD / INSERTION
+                AddItem("insertclipboard", "Insert clipboard content at the cursor position.")
+                AddItem("insertclip", "Insert clipboard content at the cursor position.")
+
+                ' TOOLS / SOURCES
+                AddItem("setsources", "Select sources/tools available for tooling-capable models (session scope).")
+                AddItem("loadurl", "Retrieve the text of a particular URL given.")
+
+                ' PRIVACY / TRANSFORMS
+                AddItem("anonymize", "Anonymize/redact the current selection (no LLM call).")
+                AddItem("convertmarkdown", "Convert Markdown in the selected text to Word formatting.")
+
+                ' AUDIO / SPEECH
+                AddItem("speech", "Start speech transcription (Transcriptor).")
+                AddItem("read", "Create audio (TTS) from the selected text.")
+                AddItem("readlocal", "Read the selected text using local TTS (no cloud call).")
+                AddItem("voices", "Select a single cloud TTS voice.")
+                AddItem("voices2", "Select multiple cloud TTS voices.")
+                AddItem("voiceslocal", "Select the local TTS voice.")
+                AddItem("createpodcast", "Create a podcast from the selected text.")
+                AddItem("readpodcast", "Play/read a podcast based on the current selection.")
+
+                ' DOCUMENT / CLAUSES
+                AddItem("doccheck", "Run the document check.")
+                AddItem("learndocstyle", "Extract paragraph styles (learn document style).")
+                AddItem("applydocstyle", "Apply a style template.")
+                AddItem("findclause", "Search for a clause in the clause library/database.")
+                AddItem("addclause", "Add a clause to the clause library/database.")
+
+                ' WEB AGENT
+                AddItem("webagentcreator", "Create/modify web agent scripts.")
+                AddItem("webagent", "Run the web agent (requires configured script paths).")
+
+                ' ANALYSIS
+                AddItem("findhiddenprompts", "Scan the document for hidden prompts.")
+
+                Dim chosen As Integer = SLib.SelectValue(items,
+                            1,
+                            "Select a Freestyle short command (Esc to cancel):",
+                            $"{AN} Freestyle - Help"
+                        )
+
+                If chosen <= 0 OrElse Not idToCommand.ContainsKey(chosen) Then
+                    Return
+                End If
+
+                OtherPrompt = idToCommand(chosen)
+                ' Continue normal execution: the short-command checks below will now match.
+            End If
+
             ' Display domain configuration information
             If String.Equals(OtherPrompt.Trim(), "domain", StringComparison.OrdinalIgnoreCase) Then
-                ShowCustomMessageBox($"{AN} is running in the domain '{GetDomain()}' and configured to run in {If(String.IsNullOrEmpty(SLib.alloweddomains), "any domain ('alloweddomains' has not been set).", "'" & SLib.alloweddomains & "'.")}", "")
+                ShowCustomMessageBox($"{AN} is running in the domain '{GetDomain()}' and configured to run in {If(String.IsNullOrEmpty(SLib.allowedDomains), "any domain ('alloweddomains' has not been set).", "'" & SLib.allowedDomains & "'.")}", "")
                 Return
             End If
 
@@ -450,6 +1092,44 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
+            ' Load the content of an URL                                 
+            If String.Equals(OtherPrompt.Trim(), "loadurl", StringComparison.OrdinalIgnoreCase) Then
+                Dim url As String = SLib.ShowCustomInputBox("Please enter the URL to retrieve the content from:", $"{AN} - Load URL Content", True, "https://")
+                If String.IsNullOrWhiteSpace(url) OrElse url.ToLower() = "esc" Then Return
+
+                InfoBox.ShowInfoBox($"Retrieving content from {url.Trim()} ...")
+
+                ' Run WebView2 on background and wait synchronously to stay on UI thread
+                Dim content As String = ""
+                Dim webViewTask As Task(Of String) = RetrieveWebsiteContent_WebView2(url.Trim(), 0)
+
+                ' Wait for completion while pumping messages to keep UI responsive
+                While Not webViewTask.IsCompleted
+                    System.Windows.Forms.Application.DoEvents()
+                    System.Threading.Thread.Sleep(50)
+                End While
+
+                ' Get the result (we're still on the original UI thread)
+                If webViewTask.Status = TaskStatus.RanToCompletion Then
+                    content = webViewTask.Result
+                End If
+
+                InfoBox.ShowInfoBox("")
+
+                If String.IsNullOrWhiteSpace(content) Then
+                    ShowCustomMessageBox("Could not retrieve content from the specified URL.")
+                    Return
+                End If
+
+                Debug.WriteLine($"[loadurl] Inserting {content.Length} characters into document")
+
+                ' We're on the UI thread - safe to access Word objects
+                selection.Range.Collapse(Direction:=Word.WdCollapseDirection.wdCollapseEnd)
+                selection.InsertAfter(vbCrLf & vbCrLf & content)
+
+                Return
+            End If
+
             ' Test functionality using redinktest.txt from desktop
             If OtherPrompt.StartsWith("redinktest", StringComparison.OrdinalIgnoreCase) Then
 
@@ -508,6 +1188,84 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
+            ' Get computername (e.g., for UpdateClients parameter)
+            If String.Equals(OtherPrompt.Trim(), "clientname", StringComparison.OrdinalIgnoreCase) Then
+                SLib.PutInClipboard(GetCurrentClientIdentifier())
+                ShowCustomMessageBox("Your client name is '" & GetCurrentClientIdentifier() & "' (also in the clipboard).", AN)
+                Return
+            End If
+
+
+            ' Signature Management for Update INI Key Functionality
+            If String.Equals(OtherPrompt.Trim(), "iniupdatekeys", StringComparison.OrdinalIgnoreCase) OrElse String.Equals(OtherPrompt.Trim(), "signtool", StringComparison.OrdinalIgnoreCase) Then
+                ShowSignatureManagementDialog()
+                Return
+            End If
+
+            ' Batch Signing for Update INI Key Functionality
+            If String.Equals(OtherPrompt.Trim(), "iniupdatebatch", StringComparison.OrdinalIgnoreCase) OrElse String.Equals(OtherPrompt.Trim(), "signbatch", StringComparison.OrdinalIgnoreCase) Then
+                ShowBatchSigningDialog()
+                Return
+            End If
+
+            ' Signature Management for Update INI Key Functionality
+            If String.Equals(OtherPrompt.Trim(), "iniupdateignored", StringComparison.OrdinalIgnoreCase) OrElse String.Equals(OtherPrompt.Trim(), "iniupdateignore", StringComparison.OrdinalIgnoreCase) Then
+                ShowIgnoredParametersDialog()
+                Return
+            End If
+
+            ' Signature Management for importing INI keys            
+            If String.Equals(OtherPrompt.Trim(), "iniload", StringComparison.OrdinalIgnoreCase) Or String.Equals(OtherPrompt.Trim(), "iniupdateignore", StringComparison.OrdinalIgnoreCase) Then
+
+                If IniImportManager.RunImportFromVariableConfigurationWindow(_context, Nothing) Then
+                    Dim answer = ShowCustomYesNoBox("Your main configuration settings have changed. You need to reload them for them to become active. Proceed?", "Yes, reload", "No, load later")
+                    If answer = 1 Then
+                        ' Mark config as not loaded so InitializeConfig will re-read from disk
+                        _context.INIloaded = False
+                        ' Reload configuration from disk into memory
+                        InitializeConfig(False, True)
+                        ' Refresh the UI with the newly loaded values
+                        _context.MenusAdded = False
+                    End If
+                End If
+                Return
+            End If
+
+
+            ' Signature Management for importing INI keys
+            If String.Equals(OtherPrompt.Trim(), "inirollback", StringComparison.OrdinalIgnoreCase) Or String.Equals(OtherPrompt.Trim(), "iniupdateignore", StringComparison.OrdinalIgnoreCase) Then
+
+                If ShowCustomYesNoBox($"Do you really want to roll back you last configuration file change? A new backup will be created", "Yes, rollback", "No") = 1 Then
+                    If IniImportManager.TryRollbackLastBackup(_context, Nothing) Then
+                        Dim answer = ShowCustomYesNoBox("Your main configuration settings have changed. You need to reload them for them to become active. Proceed?", "Yes, reload", "No, load later")
+                        If answer = 1 Then
+                            ' Mark config as not loaded so InitializeConfig will re-read from disk
+                            _context.INIloaded = False
+                            ' Reload configuration from disk into memory
+                            InitializeConfig(False, True)
+                            ' Refresh the UI with the newly loaded values
+                            _context.MenusAdded = False
+                        End If
+                    End If
+                    Return
+                Else
+                    Return
+                End If
+            End If
+
+
+            ' Check for INI updates and apply if available
+            If String.Equals(OtherPrompt.Trim(), "iniupdate", StringComparison.OrdinalIgnoreCase) Then
+                Dim answer As Boolean = CheckForIniUpdates(_context)
+                If answer Then
+                    ShowCustomMessageBox("Updates to the .ini file(s) have been applied.")
+                Else
+                    ShowCustomMessageBox("No updates were applied. Either no updates were found or you chose not to apply them.")
+                End If
+                Return
+            End If
+
+
             ' Reset local configuration to defaults (with confirmation)
             If String.Equals(OtherPrompt.Trim(), "reset", StringComparison.OrdinalIgnoreCase) Then
                 If ShowCustomYesNoBox($"Do you really want to reset your local configuration file and settings (if any) by removing non-mandatory entries? The current configuration file '{AN2}.ini' will NOT be saved to a '.bak' file. If you only want to reload the configuration settings for giving up any temporary changes, use 'reload' instead.", "Yes", "No") = 1 Then
@@ -517,6 +1275,12 @@ Partial Public Class ThisAddIn
                     AddContextMenu()
                     ShowCustomMessageBox($"Following the reset, the configuration file '{AN2}.ini' has been be reloaded.")
                 End If
+                Return
+            End If
+
+            ' Reset local configuration to defaults (with confirmation)
+            If String.Equals(OtherPrompt.Trim(), "logstat", StringComparison.OrdinalIgnoreCase) Then
+                SharedLogger.AnalyzeLogs(_context)
                 Return
             End If
 
@@ -610,6 +1374,19 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
+            ' Run learn doc style
+            If OtherPrompt.StartsWith("learndocstyle", StringComparison.OrdinalIgnoreCase) Then
+                ExtractParagraphStylesToJson()
+                Return
+            End If
+
+            ' Run apply doc style
+            If OtherPrompt.StartsWith("applydocstyle", StringComparison.OrdinalIgnoreCase) Then
+                ApplyStyleTemplate()
+                Return
+            End If
+
+
             ' Find clause in library/database
             If OtherPrompt.StartsWith("findclause", StringComparison.OrdinalIgnoreCase) Then
                 FindClause()
@@ -662,6 +1439,13 @@ Partial Public Class ThisAddIn
             ' Show settings dialog
             If String.Equals(OtherPrompt.Trim(), "settings", StringComparison.OrdinalIgnoreCase) Then
                 ShowSettings()
+                Return
+            End If
+
+            ' Select tools
+            If String.Equals(OtherPrompt.Trim(), "set" & ToolFriendlyName.ToLower, StringComparison.OrdinalIgnoreCase) Then
+                Dim selectedToolsForSessionTemp As List(Of ModelConfig) = Nothing
+                selectedToolsForSessionTemp = SelectToolsForSession(True)
                 Return
             End If
 
@@ -885,6 +1669,12 @@ Partial Public Class ThisAddIn
                 DoPushback = True
                 DoChunks = False
                 DoBubblesExtract = True
+            ElseIf OtherPrompt.StartsWith(FilePrefix, StringComparison.OrdinalIgnoreCase) Then
+                OtherPrompt = OtherPrompt.Substring(FilePrefix.Length).Trim()
+                DoFiles = True
+            ElseIf OtherPrompt.StartsWith(FilePrefix2, StringComparison.OrdinalIgnoreCase) Then
+                OtherPrompt = OtherPrompt.Substring(FilePrefix2.Length).Trim()
+                DoFiles = True
             End If
 
             ' {net} trigger: Enable internet search
@@ -893,11 +1683,37 @@ Partial Public Class ThisAddIn
                 DoNet = True
             End If
 
+            ' === TOOLING TRIGGER HANDLING ===
+
+            ' Check if user wants to (re)select tools
+            Dim DoToolSelection As Boolean = False
+            If OtherPrompt.IndexOf(ToolSelectionTrigger, StringComparison.OrdinalIgnoreCase) >= 0 And Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
+                If modelSupportsTool Then
+                    OtherPrompt = OtherPrompt.Replace(ToolSelectionTrigger, "").Trim()
+                    DoToolSelection = True
+                End If
+            End If
+
+            ' If model supports tooling, handle tool selection
+            Dim selectedToolsForSession As List(Of ModelConfig) = Nothing
+            If modelSupportsTool AndAlso Not DoFiles Then
+                selectedToolsForSession = SelectToolsForSession(DoToolSelection, ToolFriendlyName)
+                If selectedToolsForSession Is Nothing Then
+                    ' User cancelled tool selection
+                    If originalConfigLoaded Then
+                        RestoreDefaults(_context, originalConfig)
+                        originalConfigLoaded = False
+                    End If
+                    Return
+                End If
+            End If
+
+
             ' === Multi-model selection ===
 
             ' {multimodel} trigger: Prompt for multiple model selection
             SelectedAlternateModels = Nothing
-            If UseSecondAPI AndAlso Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) AndAlso OtherPrompt.IndexOf(MultiModelTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
+            If UseSecondAPI AndAlso Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) AndAlso OtherPrompt.IndexOf(MultiModelTrigger, StringComparison.OrdinalIgnoreCase) >= 0 AndAlso Not DoFiles Then
                 If Not DoMarkup AndAlso Not DoBubbles AndAlso Not DoPushback AndAlso Not DoSlides Then
                     If Not ShowMultipleModelSelection(_context, INI_AlternateModelPath) OrElse SelectedAlternateModels Is Nothing OrElse SelectedAlternateModels.Count = 0 Then
                         Return
@@ -911,7 +1727,7 @@ Partial Public Class ThisAddIn
             ' === MyStyle prompt integration ===
 
             ' {mystyle} trigger: Select and apply personal style prompt
-            If Not String.IsNullOrWhiteSpace(INI_MyStylePath) And OtherPrompt.IndexOf(MyStyleTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
+            If Not String.IsNullOrWhiteSpace(INI_MyStylePath) AndAlso OtherPrompt.IndexOf(MyStyleTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
                 Dim StylePath As String = ExpandEnvironmentVariables(INI_MyStylePath)
                 If Not IO.File.Exists(StylePath) Then
                     ShowCustomMessageBox("No MyStyle prompt file has been found. You may have to first create a MyStyle prompt. Go to 'Analyze' and use 'Define MyStyle' to do so - will abort.")
@@ -927,7 +1743,7 @@ Partial Public Class ThisAddIn
             ' === Additional document integration ===
 
             ' {adddoc} trigger: Gather content from other open Word documents
-            If Not String.IsNullOrEmpty(OtherPrompt) And OtherPrompt.IndexOf(AddDocTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
+            If Not String.IsNullOrEmpty(OtherPrompt) AndAlso OtherPrompt.IndexOf(AddDocTrigger, StringComparison.OrdinalIgnoreCase) >= 0 AndAlso Not Dofiles Then
 
                 InsertDocs = GatherSelectedDocuments()
                 Debug.WriteLine($"GatherSelectedDocs returned: {Left(InsertDocs, 3000)}")
@@ -944,81 +1760,20 @@ Partial Public Class ThisAddIn
                 OtherPrompt = Regex.Replace(OtherPrompt, Regex.Escape(AddDocTrigger), "", RegexOptions.IgnoreCase)
             End If
 
-            ' === External file embedding ({doc} trigger) ===
 
-            ' Handle single or multiple {doc} placeholders
-            If Not String.IsNullOrEmpty(OtherPrompt) AndAlso OtherPrompt.IndexOf(ExtTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
-                Dim totalOccurrences As Integer =
-                Regex.Matches(OtherPrompt, Regex.Escape(ExtTrigger), RegexOptions.IgnoreCase).Count
+            ' === External file/directory embedding ===
 
-                ' Pattern detects if placeholder is wrapped in XML tags: <tag>{doc}</tag>
-                Dim wrappedPattern As String =
-                "<(?<name>[A-Za-z][\w\-]*)\b[^>]*>\s*" & Regex.Escape(ExtTrigger) & "\s*</\k<name>>"
-
-                If totalOccurrences = 1 Then
-                    ' Single occurrence: prompt once for file
-                    DragDropFormLabel = ""
-                    DragDropFormFilter = ""
-                    doc = Await GetFileContent(Nothing, False, Not String.IsNullOrWhiteSpace(INI_APICall_Object))
-                    If String.IsNullOrWhiteSpace(doc) Then
-                        ShowCustomMessageBox("The file you have selected is empty or not supported - will abort.")
-                        Return
-                    End If
-
-                    Dim isWrapped As Boolean = Regex.IsMatch(OtherPrompt, wrappedPattern, RegexOptions.IgnoreCase)
-                    Dim replacementText As String = If(isWrapped, doc, $"<document>{doc}</document>")
-
-                    OtherPrompt = Regex.Replace(OtherPrompt, Regex.Escape(ExtTrigger), replacementText, RegexOptions.IgnoreCase)
-                    ShowCustomMessageBox($"This file will be included in your prompt where you have referred to {ExtTrigger}: " & vbCrLf & vbCrLf & doc)
-
-                Else
-                    ' Multiple occurrences: prompt separately for each
-                    For occurrence As Integer = 1 To totalOccurrences
-                        Dim idx As Integer = OtherPrompt.IndexOf(ExtTrigger, StringComparison.OrdinalIgnoreCase)
-                        If idx < 0 Then Exit For
-
-                        DragDropFormLabel = ""
-                        DragDropFormFilter = ""
-                        doc = Await GetFileContent(Nothing, False, Not String.IsNullOrWhiteSpace(INI_APICall_Object))
-                        If String.IsNullOrWhiteSpace(doc) Then
-                            Dim answer As Integer = ShowCustomYesNoBox($"The file you selected for occurrence #{occurrence} is empty, not supported or you cancelled the upload. Do you want to continue or abort?", "Continue", "Abort")
-                            If answer = 2 Then Return
-                        End If
-
-                        Dim replacementText As String = ""
-
-                        If Not String.IsNullOrEmpty(doc) Then
-                            ' Check if this specific occurrence is wrapped
-                            Dim isWrappedThis As Boolean = False
-                            Dim mcol As MatchCollection = Regex.Matches(OtherPrompt, wrappedPattern, RegexOptions.IgnoreCase)
-                            For Each m As Match In mcol
-                                If idx >= m.Index AndAlso idx < m.Index + m.Length Then
-                                    isWrappedThis = True
-                                    Exit For
-                                End If
-                            Next
-
-                            ' Use existing wrapper or add numbered document tag
-                            replacementText = If(isWrappedThis, doc, $"<document{occurrence}>{doc}</document{occurrence}>")
-
-                        End If
-
-                        ' Replace first remaining occurrence only
-                        OtherPrompt = OtherPrompt.Substring(0, idx) &
-                                  replacementText &
-                                  OtherPrompt.Substring(idx + ExtTrigger.Length)
-
-                        If Not String.IsNullOrWhiteSpace(doc) Then
-                            ShowCustomMessageBox($"This file will be included at occurrence #{occurrence} (of {totalOccurrences}) where you used {ExtTrigger}:" &
-                                         vbCrLf & vbCrLf & doc)
-                        End If
-                    Next
+            ' Handles {doc}, {dir}, and {path} triggers with unified document numbering
+            If Not DoFiles Then
+                Dim fileResult = Await ProcessExternalFileTriggers(OtherPrompt)
+                If Not fileResult.Success Then
+                    Return
                 End If
+                OtherPrompt = fileResult.ModifiedPrompt
             End If
-
             ' === File object selection (for LLM APIs that support file attachments) ===
 
-            If DoFileObject Then
+            If DoFileObject And Not Dofiles Then
                 If DoFileObjectClip Then
                     ' Use clipboard content as file object
                     FileObject = "clipboard"
@@ -1135,7 +1890,7 @@ Partial Public Class ThisAddIn
             ' === User confirmation for processing without text selection ===
 
             ' Prompt user to process full document when bubbles or chunks mode is active but no text selected
-            If NoText AndAlso (DoBubbles Or DoChunks) Then
+            If NoText AndAlso (DoBubbles Or DoChunks) AndAlso DoFiles Then
                 Dim FullDocument As Integer = ShowCustomYesNoBox("You have not selected text. Ask the LLM to comment on the full document?", "Yes", "No, abort")
                 If FullDocument = 1 Then
                     Dim document As Word.Document = application.ActiveDocument
@@ -1147,7 +1902,7 @@ Partial Public Class ThisAddIn
             End If
 
             ' Prompt user to process full document when markup mode is active but no text selected
-            If NoText AndAlso DoMarkup Then
+            If NoText AndAlso DoMarkup AndAlso Not Dofiles Then
                 Dim FullDocument As Integer = ShowCustomYesNoBox("You have not selected text. Do the markup on the full document?", "Yes", "No, abort")
                 If FullDocument = 1 Then
                     Dim document As Word.Document = application.ActiveDocument
@@ -1159,7 +1914,7 @@ Partial Public Class ThisAddIn
             End If
 
             ' Confirm markup placement when configuration specifies append mode
-            If Not DoInplace AndAlso DoMarkup Then
+            If Not DoInplace AndAlso DoMarkup AndAlso Not Dofiles Then
                 Dim AppendMarkup As Integer = ShowCustomYesNoBox("You have asked for a markup to be created, but according to the configuration, it will not replace your current selection but added to it at the end. Is this really what you want?", "Yes, add markup ", "No, replace text with markup")
                 If AppendMarkup = 0 Then
                     Return
@@ -1171,10 +1926,22 @@ Partial Public Class ThisAddIn
 
             ' === System prompt construction based on selected mode ===
 
+            If DoFiles Then
+                Try
+                    CorrectWordDocuments(SP_Freestyle_Document, "_freestyle", UseSecondAPI)
+                Catch ex As System.Exception
+                    ' Handle any unexpected errors during freestyle execution
+                    ShowCustomMessageBox("Error in Freestyle ('File:'): " & ex.Message, "Error")
+                End Try
+                Return
+            End If
+
             ' Handle pure prefix mode: use prompt directly as system prompt without additional processing
             If OtherPrompt.StartsWith(PurePrefix, StringComparison.OrdinalIgnoreCase) Then
                 OtherPrompt = OtherPrompt.Substring(PurePrefix.Length).Replace("(a file object follows)", "").Replace("(a clipboard object follows)", "").Trim()
                 SysPrompt = OtherPrompt
+                DoClipboard = True
+                DoChunks = False
             Else
                 ' Construct system prompt based on selected feature mode
                 If DoLib Then
@@ -1213,8 +1980,8 @@ Partial Public Class ThisAddIn
 
             ' === Execute LLM processing with configured parameters ===
 
-            ' Invoke ProcessSelectedText with all configured options
-            Dim result As String = Await ProcessSelectedText(InterpolateAtRuntime(SysPrompt), True, DoKeepFormat, DoKeepParaFormat, DoInplace, DoMarkup, MarkupMethod, DoClipboard, DoBubbles, False, UseSecondAPI, KeepFormatCap, DoTPMarkup, TPMarkupName, False, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, InsertDocs <> "", DoMyStyle, DoBubblesExtract, DoPushback)
+            ' Invoke ProcessSelectedText with all configured options            
+            Dim result As String = Await ProcessSelectedText(InterpolateAtRuntime(SysPrompt), True, DoKeepFormat, DoKeepParaFormat, DoInplace, DoMarkup, MarkupMethod, DoClipboard, DoBubbles, False, UseSecondAPI, KeepFormatCap, DoTPMarkup, TPMarkupName, False, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, InsertDocs <> "", DoMyStyle, DoBubblesExtract, DoPushback, selectedToolsForSession)
 
             ' Restore original model configuration if alternate model was used
             If UseSecondAPI And originalConfigLoaded Then
@@ -1224,7 +1991,7 @@ Partial Public Class ThisAddIn
 
         Catch ex As System.Exception
             ' Handle any unexpected errors during freestyle execution
-            MessageBox.Show("Error in Freestyle: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            ShowCustomMessageBox("Error in Freestyle: " & ex.Message)
         End Try
     End Sub
 

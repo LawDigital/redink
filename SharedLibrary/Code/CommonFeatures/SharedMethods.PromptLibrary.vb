@@ -1,6 +1,33 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
+' =============================================================================
+' File: SharedMethods.PromptLibrary.vb
+' Purpose: Loads prompt library entries from one or two text files and provides
+'          a WinForms UI to select a prompt with preview and output-format options.
+'
+' Prompt Library File Format (line-based):
+'  - Empty lines are ignored.
+'  - Comment lines starting with ";" are ignored.
+'  - Each entry is "Title|Prompt". The prompt may contain additional "|" characters;
+'    everything after the first "|" is treated as part of the prompt.
+'
+' Behavior:
+'  - Paths are resolved via ExpandEnvironmentVariables.
+'  - Dual-source mode: loads local and central files independently, combines them
+'    with local entries first, and optionally appends a title suffix (e.g. " (local)").
+'  - Edit workflow: the user can open an editor for the local file (if configured),
+'    otherwise the central file, and the lists are reloaded afterwards.
+'  - Selection UI: shows titles and a prompt preview; Enter confirms the current selection.
+'  - Output options: mutually exclusive checkboxes for markup / bubbles / window output.
+'  - Context sync: best-effort copy of the combined titles and prompts into ISharedContext.
+'
+' Return Values:
+'  - ShowPromptSelector / oldShowPromptSelector return a tuple:
+'      (SelectedPrompt, MarkupSelected, BubblesSelected, WindowSelected)
+'    or ("", False, False, False) if canceled or no valid selection exists.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 Imports SharedLibrary.SharedLibrary.SharedContext
@@ -9,6 +36,18 @@ Namespace SharedLibrary
 
     Partial Public Class SharedMethods
 
+        ''' <summary>
+        ''' Shows a prompt selection dialog that loads prompts from an optional local file and a central file,
+        ''' displays a title list with prompt preview, and returns the selected prompt and output options.
+        ''' </summary>
+        ''' <param name="filePath">Central prompt library file path (environment variables are expanded).</param>
+        ''' <param name="filepathlocal">Optional local prompt library file path (environment variables are expanded).</param>
+        ''' <param name="enableMarkup">If <c>True</c>, the markup checkbox is enabled; if passed as <c>Nothing</c>, it is hidden and forced <c>False</c>.</param>
+        ''' <param name="enableBubbles">If <c>True</c>, the bubbles checkbox is enabled; if passed as <c>Nothing</c>, it is hidden and forced <c>False</c>.</param>
+        ''' <param name="Context">Optional context to receive the combined prompt titles and prompt texts (best-effort).</param>
+        ''' <returns>
+        ''' (SelectedPrompt, MarkupSelected, BubblesSelected, WindowSelected), or ("", False, False, False) if canceled or no prompts exist.
+        ''' </returns>
         Public Shared Function ShowPromptSelector(filePath As String, filepathlocal As String, enableMarkup As Boolean, enableBubbles As Boolean, Context As ISharedContext) As (String, Boolean, Boolean, Boolean)
 
             Dim centralPath As String = ExpandEnvironmentVariables(filePath)
@@ -46,17 +85,19 @@ Namespace SharedLibrary
                     Context.PromptLibrary.AddRange(combinedPrompts)
                 End If
             Catch
-                ' best-effort only
+                ' Best-effort only
             End Try
 
             Dim NoBubbles As Boolean = False
             Dim NoMarkup As Boolean = False
 
+            ' If enableMarkup is not used; comparing to Nothing treats Nothing as False.
             If enableMarkup = Nothing Then
                 NoMarkup = True
                 enableMarkup = False
             End If
 
+            ' If enableBubbles is not used; comparing to Nothing treats Nothing as False.
             If enableBubbles = Nothing Then
                 NoBubbles = True
                 enableBubbles = False
@@ -81,7 +122,7 @@ Namespace SharedLibrary
                 }
             settingsForm.MinimumSize = New System.Drawing.Size(900, 650)
 
-            Dim bmp As New System.Drawing.Bitmap(My.Resources.Red_Ink_Logo)
+            Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
             settingsForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
 
             Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
@@ -124,6 +165,7 @@ Namespace SharedLibrary
                 promptTextBox.Text = combinedPrompts(0).Replace("\n", vbCrLf)
             End If
 
+            ' Updates the preview on selection changes.
             AddHandler titleListBox.SelectedIndexChanged,
                 Sub()
                     Dim selectedIndex = titleListBox.SelectedIndex
@@ -133,6 +175,7 @@ Namespace SharedLibrary
                     End If
                 End Sub
 
+            ' Confirms the dialog on Enter.
             AddHandler titleListBox.KeyDown,
                 Sub(sender As Object, e As System.Windows.Forms.KeyEventArgs)
                     If e.KeyCode = System.Windows.Forms.Keys.Enter Then
@@ -179,6 +222,7 @@ Namespace SharedLibrary
             checkboxPanel.Controls.Add(clipboardCheckbox)
             checkboxPanel.Controls.Add(bubblesCheckbox)
 
+            ' Applies MaximumSize to trigger line wrapping based on the left grid cell width.
             Dim ApplyCheckboxWrap As System.Action =
                 Sub()
                     Dim cellWidthLeft As Integer = CInt((layout.ClientSize.Width - layout.Padding.Horizontal) * layout.ColumnStyles(0).Width / 100.0F) - 20
@@ -211,6 +255,7 @@ Namespace SharedLibrary
             }
             layout.Controls.Add(filePathLabel, 1, 1)
 
+            ' Applies MaximumSize to trigger line wrapping based on the right grid cell width.
             Dim ApplyFilePathWrap As System.Action =
                 Sub()
                     Dim cellWidthRight As Integer = CInt((layout.ClientSize.Width - layout.Padding.Horizontal) * layout.ColumnStyles(1).Width / 100.0F) - 20
@@ -283,6 +328,7 @@ Namespace SharedLibrary
                             Context.PromptLibrary.AddRange(combinedPrompts)
                         End If
                     Catch
+                        ' Best-effort only
                     End Try
 
                     titleListBox.Items.Clear()
@@ -320,6 +366,14 @@ Namespace SharedLibrary
 
         ' Helper: read prompts from a single file into provided lists; ignore missing files silently.
         ' If titleSuffix is provided (e.g., " (local)"), it is appended to every title from this file.
+        ''' <summary>
+        ''' Loads prompts from a single file into the provided title and prompt lists.
+        ''' Missing/non-existing files are ignored and errors are swallowed.
+        ''' </summary>
+        ''' <param name="filePath">Prompt library file path (environment variables are expanded).</param>
+        ''' <param name="titles">Destination list for prompt titles.</param>
+        ''' <param name="prompts">Destination list for prompt texts.</param>
+        ''' <param name="titleSuffix">Optional suffix appended to each title loaded from this file.</param>
         Private Shared Sub LoadPromptsIntoLists(filePath As String,
                                                titles As List(Of String),
                                                prompts As List(Of String),
@@ -356,6 +410,17 @@ Namespace SharedLibrary
         End Sub
 
 
+        ''' <summary>
+        ''' Legacy prompt selector that loads prompts from a single file via LoadPrompts and uses Context for storage.
+        ''' </summary>
+        ''' <param name="filePath">Prompt library file path (environment variables are expanded).</param>
+        ''' <param name="filepathlocal">Unused in this legacy implementation.</param>
+        ''' <param name="enableMarkup">If <c>True</c>, the markup checkbox is enabled; if passed as <c>Nothing</c>, it is hidden and forced <c>False</c>.</param>
+        ''' <param name="enableBubbles">If <c>True</c>, the bubbles checkbox is enabled; if passed as <c>Nothing</c>, it is hidden and forced <c>False</c>.</param>
+        ''' <param name="Context">Context receiving prompt titles and prompts loaded from the file.</param>
+        ''' <returns>
+        ''' (SelectedPrompt, MarkupSelected, BubblesSelected, WindowSelected), or ("", False, False, False) if canceled or no valid selection exists.
+        ''' </returns>
         Public Shared Function oldShowPromptSelector(filePath As String, filepathlocal As String, enableMarkup As Boolean, enableBubbles As Boolean, Context As ISharedContext) As (String, Boolean, Boolean, Boolean)
 
             filePath = ExpandEnvironmentVariables(filePath)
@@ -364,11 +429,13 @@ Namespace SharedLibrary
             Dim NoBubbles As Boolean = False
             Dim NoMarkup As Boolean = False
 
+            ' NOTE: enableMarkup / enableBubbles are Boolean. Comparing to Nothing treats Nothing as False.
             If enableMarkup = Nothing Then
                 NoMarkup = True
                 enableMarkup = False
             End If
 
+            ' NOTE: enableMarkup / enableBubbles are Boolean. Comparing to Nothing treats Nothing as False.
             If enableBubbles = Nothing Then
                 NoBubbles = True
                 enableBubbles = False
@@ -390,7 +457,7 @@ Namespace SharedLibrary
                 }
             settingsForm.MinimumSize = New System.Drawing.Size(900, 650)
 
-            Dim bmp As New System.Drawing.Bitmap(My.Resources.Red_Ink_Logo)
+            Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
             settingsForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
 
             Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
@@ -433,6 +500,7 @@ Namespace SharedLibrary
                 promptTextBox.Text = Context.PromptLibrary(0).Replace("\n", vbCrLf)
             End If
 
+            ' Updates the preview on selection changes.
             AddHandler titleListBox.SelectedIndexChanged,
         Sub()
             Dim selectedIndex = titleListBox.SelectedIndex
@@ -442,6 +510,7 @@ Namespace SharedLibrary
             End If
         End Sub
 
+            ' Confirms the dialog on Enter.
             AddHandler titleListBox.KeyDown,
         Sub(sender As Object, e As System.Windows.Forms.KeyEventArgs)
             If e.KeyCode = System.Windows.Forms.Keys.Enter Then
@@ -488,6 +557,7 @@ Namespace SharedLibrary
             checkboxPanel.Controls.Add(clipboardCheckbox)
             checkboxPanel.Controls.Add(bubblesCheckbox)
 
+            ' Applies MaximumSize to trigger line wrapping based on the left grid cell width.
             Dim ApplyCheckboxWrap As System.Action =
         Sub()
             Dim cellWidthLeft As Integer = CInt((layout.ClientSize.Width - layout.Padding.Horizontal) * layout.ColumnStyles(0).Width / 100.0F) - 20
@@ -513,6 +583,7 @@ Namespace SharedLibrary
     }
             layout.Controls.Add(filePathLabel, 1, 1)
 
+            ' Applies MaximumSize to trigger line wrapping based on the right grid cell width.
             Dim ApplyFilePathWrap As System.Action =
         Sub()
             Dim cellWidthRight As Integer = CInt((layout.ClientSize.Width - layout.Padding.Horizontal) * layout.ColumnStyles(1).Width / 100.0F) - 20
@@ -602,6 +673,14 @@ Namespace SharedLibrary
         End Function
 
 
+        ''' <summary>
+        ''' Loads prompts from a prompt library file into the provided context.
+        ''' </summary>
+        ''' <param name="filePath">Prompt library file path (environment variables are expanded).</param>
+        ''' <param name="context">Destination context holding prompt titles and prompt texts.</param>
+        ''' <returns>
+        ''' 0 on success; 1 if missing file; 2 on format-related exception; 3 if no prompts were found; 99 on unexpected errors.
+        ''' </returns>
         Public Shared Function LoadPrompts(filePath As String, context As ISharedContext) As Integer
 
             ' Initialize the return code to 0 (no error)
@@ -669,6 +748,13 @@ Namespace SharedLibrary
         ' Call example from your existing Sub:
         ' ExtractAndStorePromptFromAnalysis(analysis, INI_MyStylePath)
 
+        ''' <summary>
+        ''' Extracts [Title = ...] and [Prompt = ...] markers from the provided text, sanitizes them,
+        ''' and appends a new "Prefix|Title|Prompt" line to the specified MyStyle prompt file.
+        ''' </summary>
+        ''' <param name="analysis">Source text containing markers.</param>
+        ''' <param name="MyStylePath">Target MyStyle prompt file path.</param>
+        ''' <param name="Prefix">Prefix to prepend (defaults to "All" if blank).</param>
         Public Shared Sub ExtractAndStorePromptFromAnalysis(ByVal analysis As System.String, ByVal MyStylePath As System.String, ByVal Prefix As String)
             Try
                 ' Basic input validation
@@ -709,7 +795,7 @@ Namespace SharedLibrary
 
                 If String.IsNullOrWhiteSpace(Prefix) Then Prefix = "All"
 
-                ' Append the new entry: Title|Prompt
+                ' Append the new entry: Prefix|Title|Prompt
                 Dim line As System.String = System.Environment.NewLine & Prefix & "|" & title & "|" & prompt & System.Environment.NewLine
                 System.IO.File.AppendAllText(MyStylePath, line, New System.Text.UTF8Encoding(False))
 
@@ -726,6 +812,9 @@ Namespace SharedLibrary
         ''' Returns the value for [Title = ...] or [Prompt = ...] allowing nested brackets in the value.
         ''' Falls back to unbracketed "Title = ..." / "Prompt = ..." (end of line).
         ''' </summary>
+        ''' <param name="analysis">Source text to search.</param>
+        ''' <param name="markerName">Marker name (e.g., "Title" or "Prompt").</param>
+        ''' <returns>The extracted value, or <c>Nothing</c> if not found.</returns>
         Private Shared Function TryGetMarkerValue(ByVal analysis As System.String, ByVal markerName As System.String) As System.String
             ' 1) Prefer bracketed form with balanced square brackets: [Marker = value-with-[nested]-brackets]
             Dim bracketed As System.String = TryGetBracketedMarkerValue(analysis, markerName)
@@ -756,12 +845,14 @@ Namespace SharedLibrary
         End Function
 
         ''' <summary>
-        ''' Finds the LAST occurrence of a bracketed marker like:
-        '''   [Marker = some text possibly containing [brackets], (parentheses), {braces}, <angles>]
-        ''' and returns the value portion ("some text ... <angles>") while correctly
-        ''' balancing the OUTER square brackets so ']' inside the value doesn't terminate early.
+        ''' Finds the last occurrence of a bracketed marker like:
+        ''' [Marker = value]
+        ''' and returns the value portion while balancing outer square brackets.
         ''' Matching of the marker name is case-insensitive.
         ''' </summary>
+        ''' <param name="analysis">Source text to search.</param>
+        ''' <param name="markerName">Marker name (e.g., "Title" or "Prompt").</param>
+        ''' <returns>The extracted value, or <c>Nothing</c> if not found or malformed.</returns>
         Private Shared Function TryGetBracketedMarkerValue(ByVal analysis As System.String, ByVal markerName As System.String) As System.String
             If analysis Is Nothing OrElse analysis.Length = 0 Then
                 Return Nothing
@@ -821,6 +912,8 @@ Namespace SharedLibrary
         ''' - Replaces "|" with "¦" (broken bar) to avoid delimiter collision
         ''' - Trims surrounding whitespace
         ''' </summary>
+        ''' <param name="input">Input to sanitize.</param>
+        ''' <returns>Sanitized single-line string.</returns>
         Private Shared Function SanitizeForSingleLine(ByVal input As System.String) As System.String
             If input Is Nothing Then
                 Return System.String.Empty

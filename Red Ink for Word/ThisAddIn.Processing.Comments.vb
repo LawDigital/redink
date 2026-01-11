@@ -16,6 +16,8 @@
 '     them as XML, including pseudo-stable identifiers.
 '   - Formatting Utilities: Converts Markdown/HTML to the limited formatting
 '     that Word comment balloons accept, including sanitization and fallbacks.
+'   - UI Safety: Temporarily disables the Word window and turns off ScreenUpdating to reduce flicker and prevent Selection drift.
+'   - Reply Fallback: Uses threaded replies when supported; otherwise appends the reply into the original comment text.
 '   - Helpers: Provide safe position calculations, XML escaping, hashing, and
 '     ID token parsing to keep interactions deterministic and auditable.
 ' =============================================================================
@@ -25,6 +27,7 @@ Option Strict Off
 
 Imports System.Data
 Imports System.Diagnostics
+Imports System.Threading.Tasks
 Imports System.Windows.Forms
 Imports DocumentFormat.OpenXml
 Imports DocumentFormat.OpenXml.Wordprocessing
@@ -47,14 +50,17 @@ Partial Public Class ThisAddIn
     ''' <param name="Selection">Text selection that scopes the search anchors.</param>
     ''' <param name="DoSilent">When true, suppresses UI notifications.</param>
     ''' <param name="Prefix">Optional prefix prepended to every comment body.</param>
-    ''' <remarks>Errors (missing text, wrong format) are collected and optionally inserted as a summary comment at the tail of the selection.</remarks>
+    ''' <remarks>
+    ''' Errors (missing text, wrong format) are collected and optionally inserted as a summary comment at the tail of the selection.
+    ''' When Markdown formatting is enabled, balloons are temporarily shown to allow Word to accept formatted insertion.
+    ''' </remarks>
     Public Sub SetBubbles(LLMResult As System.String, Selection As Microsoft.Office.Interop.Word.Selection, DoSilent As System.Boolean, Optional Prefix As String = "")
 
         Dim responseItems() As System.String = LLMResult.Split(New System.String() {"§§§"}, System.StringSplitOptions.RemoveEmptyEntries)
         Dim wrongformatresponse As New System.Collections.Generic.List(Of System.String)
         Dim notfoundresponse As New System.Collections.Generic.List(Of System.String)
 
-        ' Stable doc reference
+        ' Stable document reference
         Dim docRef As Microsoft.Office.Interop.Word.Document = Nothing
         Try
             If Selection IsNot Nothing AndAlso Selection.Range IsNot Nothing Then
@@ -120,7 +126,7 @@ Partial Public Class ThisAddIn
                     winWasEnabled = True
                 End Try
                 Try
-                    ' HARD LOCK: disable Word window so clicks can’t move Selection
+                    ' Disable the Word window so clicks cannot move the live Selection while ranges are being created
                     EnableWindow(hwnd, False)
                 Catch ex As System.Exception
                 End Try
@@ -203,7 +209,7 @@ Partial Public Class ThisAddIn
                                                     commentText = $"{AN5}{Prefix}: " & commentText
                                                 End If
                                                 Dim cRng As Microsoft.Office.Interop.Word.Range = cmt.Range
-                                                ' Ensure balloons visible during paste into comment text:
+                                                ' Ensure balloons visible during formatted insertion into the comment story
                                                 Dim prevShow As System.Boolean = win.View.ShowRevisionsAndComments
                                                 Try
                                                     win.View.ShowRevisionsAndComments = True
@@ -346,7 +352,7 @@ Partial Public Class ThisAddIn
             Exit Sub
         End If
 
-        ' Stable doc reference
+        ' Resolve active Word objects (application/document/window)
         Dim app As Microsoft.Office.Interop.Word.Application = Nothing
         Dim docRef As Microsoft.Office.Interop.Word.Document = Nothing
         Dim win As Microsoft.Office.Interop.Word.Window = Nothing
@@ -559,6 +565,9 @@ Partial Public Class ThisAddIn
     ''' <param name="wordId">Outputs the parsed Word comment index when present.</param>
     ''' <param name="pseudoHash">Outputs the parsed pseudo hash identifier when present.</param>
     ''' <returns><c>True</c> when at least one identifier was resolved; otherwise <c>False</c>.</returns>
+    ''' <remarks>
+    ''' The single-token fallback treats a pure numeric token as a Word comment index and treats a token of length >= 6 as a pseudo hash.
+    ''' </remarks>
     Private Function TryParseCommentIdToken(ByVal raw As String,
                                               ByRef wordId As System.Nullable(Of Integer),
                                               ByRef pseudoHash As String) As Boolean
@@ -592,7 +601,14 @@ Partial Public Class ThisAddIn
         If wordId.HasValue OrElse Not String.IsNullOrWhiteSpace(pseudoHash) Then Return True
 
         ' 3) single-token fallback
-        Dim onlyDigits As Boolean = s.All(Function(ch) Char.IsDigit(ch))
+        Dim onlyDigits As Boolean = True
+        For Each ch As Char In s
+            If Not Char.IsDigit(ch) Then
+                onlyDigits = False
+                Exit For
+            End If
+        Next
+
         If onlyDigits Then
             Dim idVal As Integer
             If Integer.TryParse(s, idVal) Then wordId = idVal
@@ -633,22 +649,17 @@ Partial Public Class ThisAddIn
             Dim hdoc As New HtmlAgilityPack.HtmlDocument()
             hdoc.LoadHtml(If(html, String.Empty))
 
-
             ' Comments in modern Word only allow a small subset of formatting.
             RemoveNodesIfPresent(hdoc, "//script|//style|//img")
             FlattenTables(hdoc)              ' turn tables into plain text block(s)
             RemoveTrailingParagraph(hdoc)       ' cosmetic trim
-
-            Dim finalHtml As String = hdoc.DocumentNode.OuterHtml
 
             ParseHtmlNode(hdoc.DocumentNode, rg)
 
         Catch
             ' Last-resort fallback: plain text
             Dim fallback As String = SafePlainFromMarkdownOrHtml(src)
-
             rg.Text = fallback
-
         End Try
     End Sub
 
@@ -672,14 +683,24 @@ Partial Public Class ThisAddIn
     Private Shared Sub FlattenTables(hdoc As HtmlAgilityPack.HtmlDocument)
         Dim tables = hdoc.DocumentNode.SelectNodes("//table")
         If tables Is Nothing Then Return
+
         For Each t In tables
             Dim lines As New List(Of String)
-            For Each tr In t.SelectNodes(".//tr")
+
+            Dim rows = t.SelectNodes(".//tr")
+            If rows Is Nothing Then
+                ' No rows found; remove the table to avoid leaving unsupported markup behind
+                t.Remove()
+                Continue For
+            End If
+
+            For Each tr In rows
                 Dim cells = tr.SelectNodes("./th|./td")
                 If cells Is Nothing Then Continue For
                 Dim vals = cells.Select(Function(c) HtmlAgilityPack.HtmlEntity.DeEntitize(c.InnerText).Trim())
                 lines.Add(String.Join(vbTab, vals))
             Next
+
             Dim repl = hdoc.CreateTextNode(String.Join(vbCrLf, lines))
             t.ParentNode.ReplaceChild(repl, t)
         Next
@@ -979,7 +1000,7 @@ Partial Public Class ThisAddIn
                 Try : referencedText = If(c.Scope.Text, System.String.Empty) : Catch : End Try
                 Try : commentIndex = c.Index : Catch : End Try
 
-                ' Pseudo-stable ID based on contents (position independent)
+                ' Pseudo-stable ID derived from comment metadata/content (position independent; changes if those inputs change)
                 Dim idMaterial As System.String = author & "|" & initials & "|" & dateStr & "|" & referencedText & "|" & text
                 Dim stableId As System.String = ComputeSha256Hex(idMaterial)
 
@@ -1059,23 +1080,23 @@ Partial Public Class ThisAddIn
                 app = Globals.ThisAddIn.Application
             End Try
         Catch ex As System.Exception
-            Debug.WriteLine("ReplyToComment: Unable to access Word Application instance.")
+            Debug.WriteLine("ReplyToWordComment: Unable to access Word Application instance.")
             Return False
         End Try
 
         Try
             doc = app.ActiveDocument
         Catch ex As System.Exception
-            Debug.WriteLine("ReplyToComment: No active document found.")
+            Debug.WriteLine("ReplyToWordComment: No active document found.")
             Return False
         End Try
         If doc Is Nothing Then
-            ShowCustomMessageBox("ReplyToComment: No active document found.")
+            ShowCustomMessageBox("ReplyToWordComment: No active document found.")
             Return False
         End If
 
         If System.String.IsNullOrEmpty(replyText) Then
-            Debug.WriteLine("Reply text is empty.")
+            Debug.WriteLine("ReplyToWordComment: Reply text is empty.")
             Return False
         End If
 
@@ -1117,7 +1138,7 @@ Partial Public Class ThisAddIn
         End If
 
         If target Is Nothing Then
-            Debug.WriteLine("ReplyToComment: Target comment not found by Word-ID or pseudo hash id.")
+            Debug.WriteLine("ReplyToWordComment: Target comment not found by Word-ID or pseudo hash id.")
             Return False
         End If
 
@@ -1164,7 +1185,7 @@ Partial Public Class ThisAddIn
             End If
             Return True
         Catch ex As System.Exception
-            ShowCustomMessageBox($"ReplyToComment failed to add the reply: {ex.Message}")
+            ShowCustomMessageBox($"ReplyToWordComment failed to add the reply: {ex.Message}")
             Return False
         End Try
     End Function
@@ -1174,7 +1195,6 @@ Partial Public Class ThisAddIn
     ''' </summary>
     ''' <param name="s">Input value that may contain reserved XML characters.</param>
     ''' <returns>Escaped string (empty when input is <c>Nothing</c>).</returns>
-
     Private Shared Function xmlEscapeSafe(ByVal s As System.String) As System.String
         If s Is Nothing Then Return System.String.Empty
         Dim r As System.String = s.Replace("&", "&amp;").
@@ -1190,7 +1210,6 @@ Partial Public Class ThisAddIn
     ''' </summary>
     ''' <param name="input">String used to derive a pseudo-stable identifier.</param>
     ''' <returns>Lowercase hexadecimal digest.</returns>
-
     Private Shared Function ComputeSha256Hex(ByVal input As System.String) As System.String
         If input Is Nothing Then input = System.String.Empty
         Dim bytes As System.Byte() = System.Text.Encoding.UTF8.GetBytes(input)
@@ -1203,5 +1222,219 @@ Partial Public Class ThisAddIn
             Return sbHex.ToString()
         End Using
     End Function
+
+    ''' <summary>
+    ''' Processes either the selected text inside the active comment bubble or (when there is no meaningful selection) the entire comment text,
+    ''' by sending it to the LLM and writing the formatted result back into the comment story.
+    ''' </summary>
+    ''' <param name="sysCommand">System prompt used for the LLM call.</param>
+    ''' <param name="checkMaxToken">When true, performs a token estimate and shows a warning if output limits may be exceeded.</param>
+    ''' <param name="bubbleSelection">Range that represents the current selection inside a comment story; may be <c>Nothing</c>.</param>
+    ''' <param name="UseSecondAPI">When true, routes the LLM call to the configured secondary API.</param>
+    ''' <param name="SelectionMandatory">When true, shows an error if the resolved input text is empty.</param>
+    ''' <param name="FileObject">Optional file object parameter forwarded to the LLM call.</param>
+    ''' <returns>Always returns an empty string; errors are reported via message boxes.</returns>
+    Private Async Function ProcessSelectedTextInActiveCommentBubble(
+    ByVal sysCommand As String,
+    ByVal checkMaxToken As Boolean,
+    ByVal bubbleSelection As Word.Range,
+    ByVal UseSecondAPI As Boolean,
+    ByVal SelectionMandatory As Boolean,
+    Optional ByVal FileObject As String = ""
+) As Task(Of String)
+
+        Try
+            Dim app As Word.Application = Globals.ThisAddIn.Application
+            If app Is Nothing Then Return ""
+
+            If bubbleSelection Is Nothing Then
+                ' Fallback: try to grab current selection, but do not depend on it
+                Try
+                    bubbleSelection = app.Selection.Range.Duplicate
+                Catch
+                    bubbleSelection = Nothing
+                End Try
+            End If
+
+            If bubbleSelection Is Nothing Then
+                ShowCustomMessageBox("No comment range available.")
+                Return ""
+            End If
+
+            Dim doc As Word.Document = bubbleSelection.Document
+            If doc Is Nothing Then Return ""
+
+            ' 1) Resolve owning comment
+            Dim activeComment As Word.Comment = Nothing
+            For Each c As Word.Comment In doc.Comments
+                If bubbleSelection.Start >= c.Range.Start AndAlso bubbleSelection.End <= c.Range.End Then
+                    activeComment = c
+                    Exit For
+                End If
+            Next
+
+            If activeComment Is Nothing Then
+                ShowCustomMessageBox("Cursor is in comment story, but no owning comment could be resolved.")
+                Return ""
+            End If
+
+            ' 2) Decide whether the user actually has a meaningful selection
+            Dim hasRealSelection As Boolean = False
+            Try
+                hasRealSelection = (bubbleSelection.Start < bubbleSelection.End AndAlso
+                                Not String.IsNullOrWhiteSpace(SafeRangeText(bubbleSelection)))
+            Catch
+                hasRealSelection = False
+            End Try
+
+            ' 3) Pick inputRange: selection if meaningful, else the whole comment
+            Dim inputRange As Word.Range = If(hasRealSelection, bubbleSelection.Duplicate, activeComment.Range.Duplicate)
+
+            ' Best-effort: exclude the trailing end-of-comment marker / paragraph mark
+            Try
+                If inputRange.End > inputRange.Start Then inputRange.End -= 1
+            Catch
+            End Try
+
+            Dim inputText As String = SafeRangeText(inputRange)
+            If String.IsNullOrWhiteSpace(inputText) Then
+                ' Only complain if the comment is empty; otherwise SelectionMandatory does not apply here
+                If SelectionMandatory Then
+                    ShowCustomMessageBox("The comment contains no text to process.")
+                End If
+                Return ""
+            End If
+
+            ' 4) Optional token warning
+            If checkMaxToken Then
+                Dim maxTok As Integer = If(UseSecondAPI, INI_MaxOutputToken_2, INI_MaxOutputToken)
+                If maxTok > 0 Then
+                    Dim est As Integer = EstimateTokenCount(inputText)
+                    If est > maxTok Then
+                        ShowCustomMessageBox($"Your comment text may exceed the model output limits ({maxTok} tokens).")
+                    End If
+                End If
+            End If
+
+            ' 5) Call LLM
+            Dim llmResult As String =
+            Await LLM(
+                promptSystem:=sysCommand,
+                promptUser:="<TEXTTOPROCESS>" & inputText & "</TEXTTOPROCESS>",
+                Model:="",
+                Temperature:="",
+                Timeout:=0,
+                UseSecondAPI:=UseSecondAPI,
+                Hidesplash:=False,
+                AddUserPrompt:=OtherPrompt,
+                FileObject:=FileObject
+            )
+
+            llmResult = llmResult.Replace("<TEXTTOPROCESS>", "").Replace("</TEXTTOPROCESS>", "")
+
+            If Not String.IsNullOrEmpty(llmResult) Then
+                llmResult = Await PostCorrection(llmResult, UseSecondAPI)
+            End If
+
+            If String.IsNullOrWhiteSpace(llmResult) Then
+                ShowCustomMessageBox("The LLM did not return any content to process.")
+                Return ""
+            End If
+
+            ' 6) Write back: selection or whole comment
+            Dim targetRange As Word.Range = If(hasRealSelection, bubbleSelection.Duplicate, activeComment.Range.Duplicate)
+
+            Try
+                If targetRange.End > targetRange.Start Then targetRange.End -= 1
+            Catch
+            End Try
+
+            ' Capture "before" snapshot (for post-condition)
+            Dim beforeText As String = ""
+            Try
+                beforeText = activeComment.Range.Text
+            Catch
+            End Try
+
+            ' Do the write
+            Try
+                targetRange.Text = ""
+            Catch
+            End Try
+
+            InsertMarkdownToComment(targetRange, llmResult)
+
+            AbortCommentEditingBestEffort(app)
+
+            ' Force UI refresh (this is what makes the change show up if the user was editing)
+            ForceCommentUiRefresh(app, activeComment)
+
+            ' Post-condition: if comment still looks unchanged, instruct user
+            Dim afterText As String = ""
+            Try
+                afterText = activeComment.Range.Text
+            Catch
+            End Try
+
+            If String.Equals(beforeText, afterText, StringComparison.Ordinal) OrElse
+   String.IsNullOrWhiteSpace(afterText) Then
+                ShowCustomMessageBox("Word is currently editing this comment. Please submit/close the comment editor (Esc/click outside), then retry.")
+                Return ""
+            End If
+
+            Return ""
+
+        Catch ex As Exception
+            Debug.WriteLine($"ProcessSelectedTextInActiveCommentBubble error: {ex.Message}{vbCrLf}{ex.StackTrace}")
+            ShowCustomMessageBox($"Error processing comment bubble: {ex.Message}")
+            Return ""
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Attempts to end the active comment editing UI state by sending key strokes.
+    ''' </summary>
+    ''' <param name="app">The active Word application instance.</param>
+    ''' <remarks>
+    ''' This is best-effort UI automation and depends on focus being within the comment editor UI.
+    ''' </remarks>
+    Private Shared Sub AbortCommentEditingBestEffort(ByVal app As Word.Application)
+        If app Is Nothing Then Exit Sub
+
+        Try
+            ' Best-effort: submit/close the current comment editor.
+            ' Observed sequence: TAB, TAB, ENTER.
+            System.Windows.Forms.SendKeys.SendWait("{TAB}")
+            System.Windows.Forms.SendKeys.SendWait("{TAB}")
+            System.Windows.Forms.SendKeys.SendWait("{ENTER}")
+            System.Windows.Forms.Application.DoEvents()
+        Catch
+            ' ignore (UI automation is inherently brittle)
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Forces a best-effort UI refresh for a comment by selecting the comment anchor in the main text story.
+    ''' </summary>
+    ''' <param name="app">The active Word application instance.</param>
+    ''' <param name="c">The comment whose anchor should be selected.</param>
+    Private Shared Sub ForceCommentUiRefresh(ByVal app As Word.Application, ByVal c As Word.Comment)
+        If app Is Nothing OrElse c Is Nothing Then Exit Sub
+
+        Try
+            ' Jump to the comment anchor in the main text story
+            c.Scope.Select()
+            app.Selection.Collapse(Word.WdCollapseDirection.wdCollapseStart)
+
+            ' Let Word pump UI messages
+            System.Windows.Forms.Application.DoEvents()
+
+            ' Optional: jump back to comment range (not strictly needed)
+            ' c.Range.Select()
+        Catch
+            ' Best-effort only
+        End Try
+    End Sub
+
 
 End Class

@@ -431,6 +431,30 @@ Namespace My
                 Me("LicenseWarningStartCount") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property IgnoredUpdates_RedInk() As String
+            Get
+                Return CType(Me("IgnoredUpdates_RedInk"),String)
+            End Get
+            Set
+                Me("IgnoredUpdates_RedInk") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property IgnoredUpdates_Custom() As String
+            Get
+                Return CType(Me("IgnoredUpdates_Custom"),String)
+            End Get
+            Set
+                Me("IgnoredUpdates_Custom") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

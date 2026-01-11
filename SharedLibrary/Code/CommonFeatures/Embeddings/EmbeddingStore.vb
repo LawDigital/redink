@@ -3,7 +3,6 @@
 
 ' =============================================================================
 ' File: EmbeddingStore.vb
-' Part of: Red Ink Shared Library
 ' Purpose: ONNX-based neural embedding store for semantic similarity search.
 '          Loads Sentence-Transformer models (e.g., all-MiniLM-L6-v2) to compute
 '          dense vector embeddings and perform cosine similarity ranking.

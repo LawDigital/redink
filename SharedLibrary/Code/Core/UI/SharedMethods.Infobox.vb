@@ -1,6 +1,18 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
+' =============================================================================
+' File: SharedMethods.Infobox.vb
+' Purpose:
+'   Provides a lightweight, borderless, top-most WinForms popup for displaying
+'   short informational text to the user.
+'
+' Architecture:
+'   - `SharedMethods.InfoBox.ShowInfoBox` ensures only one instance is shown at a time.
+'   - The popup displays `My.Resources.Red_Ink_Logo` plus a text label.
+'   - If `duration > 0`, a WinForms timer closes the popup after `duration` seconds.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 
@@ -10,15 +22,33 @@ Imports System.Windows.Forms
 Namespace SharedLibrary
     Partial Public Class SharedMethods
 
-
+        ''' <summary>
+        ''' Hosts helper UI functionality for displaying a transient informational popup.
+        ''' </summary>
         Public Class InfoBox
 
             Inherits Form
 
+            ''' <summary>
+            ''' Tracks the currently displayed InfoBox instance so that only one is shown at a time.
+            ''' </summary>
             Private Shared InfoBox As InfoBox
+
+            ''' <summary>
+            ''' Optional timer used to close the form automatically after a configured duration.
+            ''' </summary>
             Private timer As System.Windows.Forms.Timer
+
+            ''' <summary>
+            ''' Label displaying the info text.
+            ''' </summary>
             Private label As System.Windows.Forms.Label
 
+            ''' <summary>
+            ''' Initializes a new instance of the InfoBox form.
+            ''' </summary>
+            ''' <param name="text">Text to display in the popup.</param>
+            ''' <param name="duration">Duration in seconds. If 0, the popup remains open until closed.</param>
             Private Sub New(ByVal text As String, ByVal duration As Integer)
                 ' Set form properties
                 Me.Text = ""
@@ -28,7 +58,7 @@ Namespace SharedLibrary
                 Me.TopMost = True
 
                 ' Create and add the App logo PictureBox
-                Dim bmp As New Bitmap(My.Resources.Red_Ink_Logo)
+                Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
                 Dim iconPictureBox As New PictureBox()
                 iconPictureBox.Image = bmp
                 iconPictureBox.SizeMode = PictureBoxSizeMode.Zoom
@@ -56,7 +86,6 @@ Namespace SharedLibrary
                 label.Location = New System.Drawing.Point(contentRight, 10)
                 Me.Controls.Add(label)
 
-
                 ' Initialize and start timer if duration > 0
                 If duration > 0 Then
                     timer = New System.Windows.Forms.Timer()
@@ -66,6 +95,11 @@ Namespace SharedLibrary
                 End If
             End Sub
 
+            ''' <summary>
+            ''' Sets the label text and truncates to fit within the label's maximum size, adding an ellipsis marker.
+            ''' </summary>
+            ''' <param name="lbl">Target label.</param>
+            ''' <param name="text">Text to measure and potentially truncate.</param>
             Private Sub SetWrappedText(lbl As System.Windows.Forms.Label, text As String)
                 ' Set the wrapped text in the label
                 lbl.Text = text
@@ -87,11 +121,20 @@ Namespace SharedLibrary
                 End Using
             End Sub
 
-
+            ''' <summary>
+            ''' Handles the timer tick by closing the InfoBox.
+            ''' </summary>
+            ''' <param name="sender">Timer instance.</param>
+            ''' <param name="e">Event arguments.</param>
             Private Sub Timer_Tick(ByVal sender As Object, ByVal e As EventArgs)
                 Me.Close()
             End Sub
 
+            ''' <summary>
+            ''' Shows an InfoBox containing the provided text, optionally auto-closing after a number of seconds.
+            ''' </summary>
+            ''' <param name="text">Text to display. If null or empty, no form is shown.</param>
+            ''' <param name="duration">Duration in seconds to keep the box open. If 0, it stays open.</param>
             Public Shared Sub ShowInfoBox(ByVal text As String, Optional ByVal duration As Integer = 0)
                 ' Close current InfoBox if open
                 If InfoBox IsNot Nothing Then

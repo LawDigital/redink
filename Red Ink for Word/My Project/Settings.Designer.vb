@@ -700,6 +700,354 @@ Namespace My
                 Me("DiscussLastChatHtml") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property DocStyle_TrackChanges() As Boolean
+            Get
+                Return CType(Me("DocStyle_TrackChanges"),Boolean)
+            End Get
+            Set
+                Me("DocStyle_TrackChanges") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("True")>  _
+        Public Property DocStyle_ApplyStyleDefinitions() As Boolean
+            Get
+                Return CType(Me("DocStyle_ApplyStyleDefinitions"),Boolean)
+            End Get
+            Set
+                Me("DocStyle_ApplyStyleDefinitions") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property DocStyle_PreviewMode() As Boolean
+            Get
+                Return CType(Me("DocStyle_PreviewMode"),Boolean)
+            End Get
+            Set
+                Me("DocStyle_PreviewMode") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("70")>  _
+        Public Property DocStyle_ConfidenceThreshold() As Integer
+            Get
+                Return CType(Me("DocStyle_ConfidenceThreshold"),Integer)
+            End Get
+            Set
+                Me("DocStyle_ConfidenceThreshold") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property DocStyle_UseConfidenceThreshold() As Boolean
+            Get
+                Return CType(Me("DocStyle_UseConfidenceThreshold"),Boolean)
+            End Get
+            Set
+                Me("DocStyle_UseConfidenceThreshold") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property DocStyle_ProcessTables() As Boolean
+            Get
+                Return CType(Me("DocStyle_ProcessTables"),Boolean)
+            End Get
+            Set
+                Me("DocStyle_ProcessTables") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("1")>  _
+        Public Property DocStyle_ParagraphsPerCall() As Integer
+            Get
+                Return CType(Me("DocStyle_ParagraphsPerCall"),Integer)
+            End Get
+            Set
+                Me("DocStyle_ParagraphsPerCall") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("True")>  _
+        Public Property DocStyle_FastModeStylesOnly() As Boolean
+            Get
+                Return CType(Me("DocStyle_FastModeStylesOnly"),Boolean)
+            End Get
+            Set
+                Me("DocStyle_FastModeStylesOnly") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property DocStyle_ShowReport() As Boolean
+            Get
+                Return CType(Me("DocStyle_ShowReport"),Boolean)
+            End Get
+            Set
+                Me("DocStyle_ShowReport") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property DocStyle_DocumentContext() As String
+            Get
+                Return CType(Me("DocStyle_DocumentContext"),String)
+            End Get
+            Set
+                Me("DocStyle_DocumentContext") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property DocStyle_UseSecondaryModel() As Boolean
+            Get
+                Return CType(Me("DocStyle_UseSecondaryModel"),Boolean)
+            End Get
+            Set
+                Me("DocStyle_UseSecondaryModel") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("2")>  _
+        Public Property DocStyle_ListNumberingReset() As Integer
+            Get
+                Return CType(Me("DocStyle_ListNumberingReset"),Integer)
+            End Get
+            Set
+                Me("DocStyle_ListNumberingReset") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("4")>  _
+        Public Property DocStyle_RuleHeadingOutlineLevelMax() As Integer
+            Get
+                Return CType(Me("DocStyle_RuleHeadingOutlineLevelMax"),Integer)
+            End Get
+            Set
+                Me("DocStyle_RuleHeadingOutlineLevelMax") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property DocStyle_LastStyleTemplateDisplay() As String
+            Get
+                Return CType(Me("DocStyle_LastStyleTemplateDisplay"),String)
+            End Get
+            Set
+                Me("DocStyle_LastStyleTemplateDisplay") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property DocStyle_RestoreInlineFormatting() As Boolean
+            Get
+                Return CType(Me("DocStyle_RestoreInlineFormatting"),Boolean)
+            End Get
+            Set
+                Me("DocStyle_RestoreInlineFormatting") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property SelectedToolNames() As String
+            Get
+                Return CType(Me("SelectedToolNames"),String)
+            End Get
+            Set
+                Me("SelectedToolNames") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property ChatEnableTooling() As Boolean
+            Get
+                Return CType(Me("ChatEnableTooling"),Boolean)
+            End Get
+            Set
+                Me("ChatEnableTooling") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property DiscussPersistKnowledge() As Boolean
+            Get
+                Return CType(Me("DiscussPersistKnowledge"),Boolean)
+            End Get
+            Set
+                Me("DiscussPersistKnowledge") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property DiscussSelectedMission() As String
+            Get
+                Return CType(Me("DiscussSelectedMission"),String)
+            End Get
+            Set
+                Me("DiscussSelectedMission") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property AutoRespondBreakOff() As String
+            Get
+                Return CType(Me("AutoRespondBreakOff"),String)
+            End Get
+            Set
+                Me("AutoRespondBreakOff") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("5")>  _
+        Public Property AutoRespondMaxRounds() As Integer
+            Get
+                Return CType(Me("AutoRespondMaxRounds"),Integer)
+            End Get
+            Set
+                Me("AutoRespondMaxRounds") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property AutoRespondMission() As String
+            Get
+                Return CType(Me("AutoRespondMission"),String)
+            End Get
+            Set
+                Me("AutoRespondMission") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property AutoRespondPersona() As String
+            Get
+                Return CType(Me("AutoRespondPersona"),String)
+            End Get
+            Set
+                Me("AutoRespondPersona") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property SortOutMainMission() As String
+            Get
+                Return CType(Me("SortOutMainMission"),String)
+            End Get
+            Set
+                Me("SortOutMainMission") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property SortOutResponderMission() As String
+            Get
+                Return CType(Me("SortOutResponderMission"),String)
+            End Get
+            Set
+                Me("SortOutResponderMission") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property SortOutMaxRounds() As Integer
+            Get
+                Return CType(Me("SortOutMaxRounds"),Integer)
+            End Get
+            Set
+                Me("SortOutMaxRounds") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property SortOutMainMissionManual() As String
+            Get
+                Return CType(Me("SortOutMainMissionManual"),String)
+            End Get
+            Set
+                Me("SortOutMainMissionManual") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property SortOutResponderMissionManual() As String
+            Get
+                Return CType(Me("SortOutResponderMissionManual"),String)
+            End Get
+            Set
+                Me("SortOutResponderMissionManual") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property DiscussEnableTooling() As Boolean
+            Get
+                Return CType(Me("DiscussEnableTooling"),Boolean)
+            End Get
+            Set
+                Me("DiscussEnableTooling") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

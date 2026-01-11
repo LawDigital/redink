@@ -61,7 +61,7 @@ Imports SharedLibrary.SharedLibrary.SharedContext
 
 Partial Public Class ThisAddIn
 
-    Private Shared _context As ISharedContext = New SharedContext()
+    Public Shared _context As ISharedContext = New SharedContext()
 
     Public Shared Property INI_APIKey As String
         Get
@@ -216,6 +216,23 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_Ignore As Boolean
+        Get
+            Return _context.INI_Ignore
+        End Get
+        Set(value As Boolean)
+            _context.INI_Ignore = value
+        End Set
+    End Property
+
+    Public Shared Property INI_Location As String
+        Get
+            Return _context.INI_Location
+        End Get
+        Set(value As String)
+            _context.INI_Location = value
+        End Set
+    End Property
     Public Shared Property INI_NoDash As Boolean
         Get
             Return _context.INI_NoDash
@@ -681,12 +698,31 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+
+    Public Shared Property SP_Translate_Document As String
+        Get
+            Return _context.SP_Translate_Document
+        End Get
+        Set(value As String)
+            _context.SP_Translate_Document = value
+        End Set
+    End Property
+
     Public Shared Property SP_Correct As String
         Get
             Return _context.SP_Correct
         End Get
         Set(value As String)
             _context.SP_Correct = value
+        End Set
+    End Property
+
+    Public Shared Property SP_Correct_Document As String
+        Get
+            Return _context.SP_Correct_Document
+        End Get
+        Set(value As String)
+            _context.SP_Correct_Document = value
         End Set
     End Property
 
@@ -725,6 +761,25 @@ Partial Public Class ThisAddIn
             _context.SP_FindClause_Clean = value
         End Set
     End Property
+
+    Public Shared Property SP_ApplyDocStyle As String
+        Get
+            Return _context.SP_ApplyDocStyle
+        End Get
+        Set(value As String)
+            _context.SP_ApplyDocStyle = value
+        End Set
+    End Property
+
+    Public Shared Property SP_ApplyDocStyle_NumberingHint As String
+        Get
+            Return _context.SP_ApplyDocStyle_NumberingHint
+        End Get
+        Set(value As String)
+            _context.SP_ApplyDocStyle_NumberingHint = value
+        End Set
+    End Property
+
 
     Public Shared Property SP_DocCheck_Clause As String
         Get
@@ -936,6 +991,16 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_Freestyle_Document As String
+        Get
+            Return _context.SP_Freestyle_Document
+        End Get
+        Set(value As String)
+            _context.SP_Freestyle_Document = value
+        End Set
+    End Property
+
+
     Public Shared Property SP_SwitchParty As String
         Get
             Return _context.SP_SwitchParty
@@ -1047,6 +1112,16 @@ Partial Public Class ThisAddIn
             _context.SP_ParseFile = value
         End Set
     End Property
+
+    Public Shared Property SP_Ignore As String
+        Get
+            Return _context.SP_Ignore
+        End Get
+        Set(value As String)
+            _context.SP_Ignore = value
+        End Set
+    End Property
+
     Public Shared Property SP_WriteNeatly As String
         Get
             Return _context.SP_WriteNeatly
@@ -1129,6 +1204,16 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_Add_Tooling As String
+        Get
+            Return _context.SP_Add_Tooling
+        End Get
+        Set(value As String)
+            _context.SP_Add_Tooling = value
+        End Set
+    End Property
+
+
     Public Shared Property SP_BubblesExcel As String
         Get
             Return _context.SP_BubblesExcel
@@ -1183,6 +1268,25 @@ Partial Public Class ThisAddIn
             _context.SP_HelpMe = value
         End Set
     End Property
+
+    Public Shared Property SP_DiscussThis_SortOut As String
+        Get
+            Return _context.SP_DiscussThis_SortOut
+        End Get
+        Set(value As String)
+            _context.SP_DiscussThis_SortOut = value
+        End Set
+    End Property
+
+    Public Shared Property SP_DiscussThis_SumUp As String
+        Get
+            Return _context.SP_DiscussThis_SumUp
+        End Get
+        Set(value As String)
+            _context.SP_DiscussThis_SumUp = value
+        End Set
+    End Property
+
 
     Public Shared Property SP_Add_ChatWord_Commands As String
         Get
@@ -1527,6 +1631,15 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_NoLocalConfig As Boolean
+        Get
+            Return _context.INI_NoLocalConfig
+        End Get
+        Set(value As Boolean)
+            _context.INI_NoLocalConfig = value
+        End Set
+    End Property
+
     Public Shared Property INI_UpdateCheckInterval As Integer
         Get
             Return _context.INI_UpdateCheckInterval
@@ -1761,6 +1874,24 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_DocStylePath As String
+        Get
+            Return _context.INI_DocStylePath
+        End Get
+        Set(value As String)
+            _context.INI_DocStylePath = value
+        End Set
+    End Property
+
+    Public Shared Property INI_DocStylePathLocal As String
+        Get
+            Return _context.INI_DocStylePathLocal
+        End Get
+        Set(value As String)
+            _context.INI_DocStylePathLocal = value
+        End Set
+    End Property
+
     Public Shared Property INI_PromptLibPath_Transcript As String
         Get
             Return _context.INI_PromptLibPath_Transcript
@@ -1856,6 +1987,235 @@ Partial Public Class ThisAddIn
         End Get
         Set(value As String)
             _context.SP_Add_MergePrompt = value
+        End Set
+    End Property
+
+    Public Shared Property INI_UpdateIniClients As String
+        Get
+            Return _context.INI_UpdateIniClients
+        End Get
+        Set(value As String)
+            _context.INI_UpdateIniClients = value
+        End Set
+    End Property
+
+    Public Shared Property INI_UpdateIniSilentMode As Integer
+        Get
+            Return _context.INI_UpdateIniSilentMode
+        End Get
+        Set(value As Integer)
+            _context.INI_UpdateIniSilentMode = value
+        End Set
+    End Property
+
+    Public Shared Property INI_UpdateIniSilentLog As Boolean
+        Get
+            Return _context.INI_UpdateIniSilentLog
+        End Get
+        Set(value As Boolean)
+            _context.INI_UpdateIniSilentLog = value
+        End Set
+    End Property
+
+    Public Shared Property INI_UpdateIni As Boolean
+        Get
+            Return _context.INI_UpdateIni
+        End Get
+        Set(value As Boolean)
+            _context.INI_UpdateIni = value
+        End Set
+    End Property
+
+    Public Shared Property INI_UpdateIniAllowRemote As Boolean
+        Get
+            Return _context.INI_UpdateIniAllowRemote
+        End Get
+        Set(value As Boolean)
+            _context.INI_UpdateIniAllowRemote = value
+        End Set
+    End Property
+
+    Public Shared Property INI_UpdateIniNoSignature As Boolean
+        Get
+            Return _context.INI_UpdateIniNoSignature
+        End Get
+        Set(value As Boolean)
+            _context.INI_UpdateIniNoSignature = value
+        End Set
+    End Property
+
+    Public Shared Property INI_UpdateSource As String
+        Get
+            Return _context.INI_UpdateSource
+        End Get
+        Set(value As String)
+            _context.INI_UpdateSource = value
+        End Set
+    End Property
+
+    Public Shared Property INI_UpdateIniIgnoreOverride As String
+        Get
+            Return _context.INI_UpdateIniIgnoreOverride
+        End Get
+        Set(value As String)
+            _context.INI_UpdateIniIgnoreOverride = value
+        End Set
+    End Property
+
+    Public Shared Property Ignore As String
+        Get
+            Return _context.Ignore
+        End Get
+        Set(value As String)
+            _context.Ignore = value
+        End Set
+    End Property
+
+    Public Shared Property Location As String
+        Get
+            Return _context.Location
+        End Get
+        Set(value As String)
+            _context.Location = value
+        End Set
+    End Property
+
+    Public Shared Property INI_NoHelperDownload As Boolean
+        Get
+            Return _context.INI_NoHelperDownload
+        End Get
+        Set(value As Boolean)
+            _context.INI_NoHelperDownload = value
+        End Set
+    End Property
+
+    ' Tooling / tool-call settings 
+
+    Public Shared Property INI_ToolingLogWindow As Boolean
+        Get
+            Return _context.INI_ToolingLogWindow
+        End Get
+        Set(value As Boolean)
+            _context.INI_ToolingLogWindow = value
+        End Set
+    End Property
+
+    Public Shared Property INI_ToolingDryRun As Boolean
+        Get
+            Return _context.INI_ToolingDryRun
+        End Get
+        Set(value As Boolean)
+            _context.INI_ToolingDryRun = value
+        End Set
+    End Property
+
+    Public Shared Property INI_ToolingMaximumIterations As Integer
+        Get
+            Return _context.INI_ToolingMaximumIterations
+        End Get
+        Set(value As Integer)
+            _context.INI_ToolingMaximumIterations = value
+        End Set
+    End Property
+
+    Public Shared Property INI_APICall_ToolInstructions_2 As String
+        Get
+            Return _context.INI_APICall_ToolInstructions_2
+        End Get
+        Set(value As String)
+            _context.INI_APICall_ToolInstructions_2 = value
+        End Set
+    End Property
+
+    Public Shared Property INI_APICall_ToolInstructions_Template_2 As String
+        Get
+            Return _context.INI_APICall_ToolInstructions_Template_2
+        End Get
+        Set(value As String)
+            _context.INI_APICall_ToolInstructions_Template_2 = value
+        End Set
+    End Property
+
+    Public Shared Property INI_APICall_ToolResponses_2 As String
+        Get
+            Return _context.INI_APICall_ToolResponses_2
+        End Get
+        Set(value As String)
+            _context.INI_APICall_ToolResponses_2 = value
+        End Set
+    End Property
+
+    Public Shared Property INI_APICall_ToolResponses_Template_2 As String
+        Get
+            Return _context.INI_APICall_ToolResponses_Template_2
+        End Get
+        Set(value As String)
+            _context.INI_APICall_ToolResponses_Template_2 = value
+        End Set
+    End Property
+
+    Public Shared Property INI_APICall_ToolCallPart_Template_2 As String
+        Get
+            Return _context.INI_APICall_ToolCallPart_Template_2
+        End Get
+        Set(value As String)
+            _context.INI_APICall_ToolCallPart_Template_2 = value
+        End Set
+    End Property
+
+    Public Shared Property INI_ToolCallDetectionPattern_2 As String
+        Get
+            Return _context.INI_ToolCallDetectionPattern_2
+        End Get
+        Set(value As String)
+            _context.INI_ToolCallDetectionPattern_2 = value
+        End Set
+    End Property
+
+    Public Shared Property INI_ToolCallExtractionMap_2 As String
+        Get
+            Return _context.INI_ToolCallExtractionMap_2
+        End Get
+        Set(value As String)
+            _context.INI_ToolCallExtractionMap_2 = value
+        End Set
+    End Property
+
+    Public Shared Property INI_BrandingName As String
+        Get
+            Return _context.INI_BrandingName
+        End Get
+        Set(value As String)
+            _context.INI_BrandingName = value
+        End Set
+    End Property
+
+
+    Public Shared Property INI_LogoPath As String
+        Get
+            Return _context.INI_LogoPath
+        End Get
+        Set(value As String)
+            _context.INI_LogoPath = value
+        End Set
+    End Property
+
+
+    Public Shared Property INI_LogoPathMedium As String
+        Get
+            Return _context.INI_LogoPathMedium
+        End Get
+        Set(value As String)
+            _context.INI_LogoPathMedium = value
+        End Set
+    End Property
+
+    Public Shared Property INI_LogoPathLarge As String
+        Get
+            Return _context.INI_LogoPathLarge
+        End Get
+        Set(value As String)
+            _context.INI_LogoPathLarge = value
         End Set
     End Property
 

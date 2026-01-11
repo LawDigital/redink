@@ -1,0 +1,274 @@
+{
+    "meta": {        
+        "user_agent": "RedInk-WebAgent/1.0",
+        "_user_agent_alt": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (use this if bot detection is an issue)",
+        "default_timeout_ms": 60000
+    },
+    "env": {
+        "base_url": "https://html.duckduckgo.com",
+        "variables": {
+            "debug": false,
+            "debug_to_logwindow": false,
+            "search_query": "{parameter1 = Search term; string; Biggest Cities Switzerland}",
+            "context_filter": "{parameter2 = Context filter; string; Winterthur}",
+            "hits_to_screen": "{parameter3 = Number of hits to be screened; integer; 25; 10-200}",
+            "results_md": "",
+            "all_results": [],
+            "current_page": 0,
+            "total_screened": 0,
+            "next_page_url": "",
+            "stop_pagination": false,
+            "fetch_failed": false
+        }
+    },
+    "steps": [
+        {
+            "id": "init_url",
+            "command": "set_var",
+            "params": {
+                "name": "next_page_url",
+                "value": "https://html.duckduckgo.com/html/?q={{search_query}}"
+            }
+        },
+        {
+            "id": "pagination_loop",
+            "command": "while",
+            "params": {
+                "condition": "{{total_screened}} < {{hits_to_screen}} && {{stop_pagination}} == false",
+                "max_iterations": 10,
+                "steps": [
+                    {
+                        "id": "fetch_page",
+                        "command": "open_url",
+                        "params": {
+                            "url": "{{next_page_url}}",
+                            "return_body": true
+                        },
+                        "retry": {
+                            "max": 2,
+                            "delay_ms": 2000,
+                            "backoff": 2
+                        },
+                        "assign": {
+                            "var": "page_content"
+                        }
+                    },
+                    {
+                        "id": "extract_results",
+                        "command": "llm_analyze",
+                        "params": {
+                            "system": "Extract search results from DuckDuckGo HTML. Return JSON:\n{\"results\":[{\"title\":\"...\",\"url\":\"...\",\"snippet\":\"...\"}],\"next_s\":\"value of hidden input 's' for next page, or null if no more pages\"}\n\nLook for results in divs with class 'result'. Skip ads. Max 30 results.",
+                            "user": "{{page_content.body}}",
+                            "require_key": "results",
+                            "require_array_key": "results",
+                            "temperature": 0,
+                            "retry_on_invalid": true
+                        },
+                        "retry": {
+                            "max": 2,
+                            "delay_ms": 2000,
+                            "backoff": 2
+                        },
+                        "assign": {
+                            "var": "page_data"
+                        }
+                    },
+                    {
+                        "id": "build_next_url",
+                        "command": "if",
+                        "params": {
+                            "condition": "exists {{page_data.next_s}}",
+                            "steps": [
+                                {
+                                    "id": "set_next",
+                                    "command": "set_var",
+                                    "params": {
+                                        "name": "next_page_url",
+                                        "value": "https://html.duckduckgo.com/html/?q={{search_query}}&s={{page_data.next_s}}"
+                                    }
+                                }
+                            ],
+                            "else_steps": [
+                                {
+                                    "id": "no_more_pages",
+                                    "command": "set_var",
+                                    "params": {
+                                        "name": "stop_pagination",
+                                        "value": true
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    {
+                        "id": "screen_results",
+                        "command": "foreach",
+                        "params": {
+                            "list": "page_data.results",
+                            "item_var": "r",
+                            "max_items": 30,
+                            "continue_on_error": true,
+                            "break_if_var_true": "stop_pagination",
+                            "steps": [
+                                {
+                                    "id": "increment_screened",
+                                    "command": "increment",
+                                    "params": {
+                                        "var": "total_screened",
+                                        "by": 1
+                                    }
+                                },
+                                {
+                                    "id": "check_limit",
+                                    "command": "if",
+                                    "params": {
+                                        "condition": "{{total_screened}} >= {{hits_to_screen}}",
+                                        "steps": [
+                                            {
+                                                "id": "stop_inner",
+                                                "command": "set_var",
+                                                "params": {
+                                                    "name": "stop_pagination",
+                                                    "value": true
+                                                }
+                                            }
+                                        ]
+                                    }
+                                },
+                                {
+                                    "id": "reset_fetch_failed",
+                                    "command": "set_var",
+                                    "params": {
+                                        "name": "fetch_failed",
+                                        "value": false
+                                    }
+                                },
+                                {
+                                    "id": "fetch_result_page",
+                                    "command": "open_url",
+                                    "guard": {
+                                        "if": "{{stop_pagination}} == false"
+                                    },
+                                    "params": {
+                                        "url": "{{r.url}}",
+                                        "return_body": true,
+                                        "timeout_ms": 30000
+                                    },
+                                    "retry": {
+                                        "max": 1,
+                                        "delay_ms": 1000
+                                    },
+                                    "on_error": {
+                                        "action": "continue"
+                                    },
+                                    "assign": {
+                                        "var": "result_page"
+                                    }
+                                },
+                                {
+                                    "id": "check_fetch_success",
+                                    "command": "if",
+                                    "params": {
+                                        "condition": "exists {{result_page.body}}",
+                                        "steps": [
+                                            {
+                                                "id": "relevance_check_full_page",
+                                                "command": "llm_analyze",
+                                                "guard": {
+                                                    "if": "{{stop_pagination}} == false"
+                                                },
+                                                "params": {
+                                                    "system": "Analyze the full webpage content to determine if this page is relevant to the given context/keywords.\n\nFocus on:\n- The main content of the page (not navigation/headers/footers)\n- Professional background, expertise, or services mentioned\n- Any biographical or professional information\n\nReturn JSON: {\"relevant\":true,\"reason\":\"brief explanation of why relevant\"} or {\"relevant\":false,\"reason\":\"brief explanation of why not relevant\"}",
+                                                    "user": "URL: {{r.url}}\nTitle: {{r.title}}\n\nContext keywords to match: {{context_filter}}\n\n=== FULL PAGE CONTENT ===\n{{result_page.body}}",
+                                                    "require_key": "relevant",
+                                                    "temperature": 0,
+                                                    "retry_on_invalid": true,
+                                                    "timeoutMs": 90000
+                                                },
+                                                "retry": {
+                                                    "max": 1,
+                                                    "delay_ms": 2000
+                                                },
+                                                "assign": {
+                                                    "var": "relevance"
+                                                }
+                                            }
+                                        ],
+                                        "else_steps": [
+                                            {
+                                                "id": "fallback_snippet_check",
+                                                "command": "llm_analyze",
+                                                "guard": {
+                                                    "if": "{{stop_pagination}} == false"
+                                                },
+                                                "params": {
+                                                    "system": "The full page could not be fetched. Analyze based on the snippet only.\nReturn JSON: {\"relevant\":true,\"reason\":\"...\"} or {\"relevant\":false,\"reason\":\"...\"}",
+                                                    "user": "Title: {{r.title}}\nURL: {{r.url}}\nSnippet: {{r.snippet}}\n\nContext: {{context_filter}}",
+                                                    "require_key": "relevant",
+                                                    "temperature": 0
+                                                },
+                                                "assign": {
+                                                    "var": "relevance"
+                                                }
+                                            }
+                                        ]
+                                    }
+                                },
+                                {
+                                    "id": "add_if_relevant",
+                                    "command": "if",
+                                    "params": {
+                                        "condition": "{{relevance.relevant}} == true || {{relevance.relevant}} == \"True\" || {{relevance.relevant}} == \"true\"",
+                                        "steps": [
+                                            {
+                                                "id": "append_result",
+                                                "command": "set_var",
+                                                "params": {
+                                                    "name": "results_md",
+                                                    "value": "{{results_md}}\n\n---\n\n### {{r.title}}\n- **URL:** {{r.url}}\n- **Reason:** {{relevance.reason}}"
+                                                }
+                                            },
+                                            {
+                                                "id": "store_result",
+                                                "command": "array_push",
+                                                "params": {
+                                                    "array": "all_results",
+                                                    "item": {
+                                                        "title": "{{r.title}}",
+                                                        "url": "{{r.url}}",
+                                                        "reason": "{{relevance.reason}}"
+                                                    }
+                                                }
+                                            }
+                                        ]
+                                    }
+                                },
+                                {
+                                    "id": "delay_between_results",
+                                    "command": "wait",
+                                    "params": {
+                                        "ms": 500
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    {
+                        "id": "wait_between_pages",
+                        "command": "wait",
+                        "params": {
+                            "ms": 1500
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            "id": "report",
+            "command": "render_report",
+            "params": {
+                "template": "# DuckDuckGo Search Results\n\n**Query:** {{search_query}}\n\n**Context Filter:** {{context_filter}}\n\n**Total Screened:** {{total_screened}} results\n\n---\n\n## Relevant Matches\n\n{{results_md}}\n\n---\n\n*Search completed after screening {{total_screened}} results with full page analysis.*"
+            }
+        }
+    ]
+}

@@ -3,7 +3,6 @@
 
 ' =============================================================================
 ' File: EmbeddingStore_BagofWords.vb
-' Part of: Red Ink Shared Library
 ' Purpose: Lightweight, offline embedding and similarity search using classical 
 '          bag-of-words vectorization with term frequency (TF) and cosine similarity.
 '          Serves as a fallback when neural embeddings are unavailable.

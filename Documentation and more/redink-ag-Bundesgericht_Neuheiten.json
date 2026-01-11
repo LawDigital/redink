@@ -5,7 +5,7 @@
   },
   "env": {
     "variables": {
-      "threshold_date": "{parameter1 = Publishing date; string; >= 07.10.2025}",
+      "threshold_date": "{parameter1 = Publishing date; string; >= 31.12.2025}",
       "summary_list": "",
       "summary_array": [],
       "debug": false

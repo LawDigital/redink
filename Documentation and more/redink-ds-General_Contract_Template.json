@@ -1,0 +1,3773 @@
+﻿{
+  "templateName": "General Contract Template",
+  "description": "Style template for intelligent document formatting. Each user style in 'userStyles' includes a 'whenToApply' field describing the situations where that style should be applied. The 'wdStyleDefinitions' section contains Word style definitions that can optionally be created/updated in target documents.",
+  "documentInfo": {
+    "extractedFrom": "Contract Template - II.docx",
+    "extractionDate": "2025-12-25 16:02:48",
+    "totalUserStyles": 16,
+    "totalWdStyles": 13
+  },
+  "userStyles": [
+    {
+      "userStyleIndex": 1,
+      "userStyleName": "MAIN TITLE",
+      "whenToApply": "APPLY TO THE MAIN DOCUMENT TITLE AT THE VERY TOP. USUALLY CENTERED, BOLD, LARGER FONT. EXAMPLES: 'ASSET PURCHASE AGREEMENT', 'EMPLOYMENT CONTRACT', 'NON-DISCLOSURE AGREEMENT'. APPEARS ONLY ONCE AT DOCUMENT START.",
+      "wdStyleName": "Überschrift 1",
+      "wdStyleBuiltIn": true,
+      "isInTableCell": false,
+      "paragraphFormatting": {
+        "alignment": "wdAlignParagraphLeft",
+        "leftIndent": 42.55,
+        "rightIndent": 0.0,
+        "firstLineIndent": 0.0,
+        "spaceBefore": 18.0,
+        "spaceAfter": 6.0,
+        "spaceBeforeAuto": 0,
+        "spaceAfterAuto": 0,
+        "lineSpacing": 14.5,
+        "lineSpacingRule": "wdLineSpaceAtLeast",
+        "keepTogether": 0,
+        "keepWithNext": -1,
+        "pageBreakBefore": 0,
+        "widowControl": -1,
+        "outlineLevel": "wdOutlineLevel1",
+        "hyphenation": -1,
+        "readingOrder": "wdReadingOrderLtr"
+      },
+      "fontFormatting": {
+        "fontName": "Verdana",
+        "fontSize": 10.0,
+        "bold": true,
+        "italic": false,
+        "underline": "wdUnderlineNone",
+        "underlineColor": "wdColorAutomatic",
+        "underlineColorRGB": "auto",
+        "strikeThrough": false,
+        "doubleStrikeThrough": false,
+        "subscript": false,
+        "superscript": false,
+        "color": "wdColorAutomatic",
+        "colorRGB": "auto",
+        "highlightColor": "wdNoHighlight",
+        "allCaps": true,
+        "smallCaps": false,
+        "scaling": 100,
+        "spacing": 0.0,
+        "position": 0,
+        "kerning": 14.0
+      },
+      "listFormatting": {
+        "hasList": false,
+        "listType": "none"
+      },
+      "tabStops": [
+        {
+          "pos": 70.9,
+          "align": "Left"
+        },
+        {
+          "pos": 99.25,
+          "align": "Left"
+        },
+        {
+          "pos": 127.6,
+          "align": "Left"
+        },
+        {
+          "pos": 155.95,
+          "align": "Left"
+        },
+        {
+          "pos": 177.25,
+          "align": "Left"
+        },
+        {
+          "pos": 212.7,
+          "align": "Left"
+        },
+        {
+          "pos": 248.15,
+          "align": "Left"
+        },
+        {
+          "pos": 283.6,
+          "align": "Left"
+        },
+        {
+          "pos": 319.05,
+          "align": "Left"
+        },
+        {
+          "pos": 354.5,
+          "align": "Left"
+        },
+        {
+          "pos": 389.95,
+          "align": "Left"
+        },
+        {
+          "pos": 425.4,
+          "align": "Left"
+        },
+        {
+          "pos": 460.85,
+          "align": "Left"
+        },
+        {
+          "pos": 496.3,
+          "align": "Left"
+        },
+        {
+          "pos": 531.75,
+          "align": "Left"
+        },
+        {
+          "pos": 567.2,
+          "align": "Left"
+        }
+      ]
+    },
+    {
+      "userStyleIndex": 2,
+      "userStyleName": "HEADING LEVEL 1",
+      "whenToApply": "APPLY TO MAJOR SECTION HEADINGS THAT DIVIDE THE DOCUMENT INTO ARTICLES OR MAIN PARTS. USUALLY ALL CAPS OR BOLD, OFTEN PRECEDED BY 'ARTICLE', 'SECTION', OR ROMAN NUMERALS. EXAMPLES: 'ARTICLE I - DEFINITIONS', 'ARTICLE II. PURCHASE AND SALE', 'SECTION 5. CONFIDENTIALITY'. THESE CREATE THE PRIMARY DOCUMENT STRUCTURE.",
+      "wdStyleName": "Überschrift 1",
+      "wdStyleBuiltIn": true,
+      "isInTableCell": false,
+      "paragraphFormatting": {
+        "alignment": "wdAlignParagraphLeft",
+        "leftIndent": 42.55,
+        "rightIndent": 0.0,
+        "firstLineIndent": -42.55,
+        "spaceBefore": 18.0,
+        "spaceAfter": 6.0,
+        "spaceBeforeAuto": 0,
+        "spaceAfterAuto": 0,
+        "lineSpacing": 14.5,
+        "lineSpacingRule": "wdLineSpaceAtLeast",
+        "keepTogether": 0,
+        "keepWithNext": -1,
+        "pageBreakBefore": 0,
+        "widowControl": -1,
+        "outlineLevel": "wdOutlineLevel1",
+        "hyphenation": -1,
+        "readingOrder": "wdReadingOrderLtr"
+      },
+      "fontFormatting": {
+        "fontName": "Verdana",
+        "fontSize": 10.0,
+        "bold": true,
+        "italic": false,
+        "underline": "wdUnderlineNone",
+        "underlineColor": "wdColorAutomatic",
+        "underlineColorRGB": "auto",
+        "strikeThrough": false,
+        "doubleStrikeThrough": false,
+        "subscript": false,
+        "superscript": false,
+        "color": "wdColorAutomatic",
+        "colorRGB": "auto",
+        "highlightColor": "wdNoHighlight",
+        "allCaps": true,
+        "smallCaps": false,
+        "scaling": 100,
+        "spacing": 0.0,
+        "position": 0,
+        "kerning": 14.0
+      },
+      "listFormatting": {
+        "hasList": true,
+        "listType": "wdListOutlineNumbering",
+        "listLevelNumber": 1,
+        "listString": "I.",
+        "listTemplateOutlineNumbered": true,
+        "currentLevelFormat": {
+          "numberFormat": "%1.",
+          "numberStyle": "wdListNumberStyleUppercaseRoman",
+          "textPosition": 42.55,
+          "tabPosition": 42.55,
+          "numberPosition": 0.0,
+          "alignment": "wdListLevelAlignLeft",
+          "startAt": 1
+        }
+      },
+      "tabStops": [
+        {
+          "pos": 42.55,
+          "align": "List"
+        },
+        {
+          "pos": 70.9,
+          "align": "Left"
+        },
+        {
+          "pos": 99.25,
+          "align": "Left"
+        },
+        {
+          "pos": 127.6,
+          "align": "Left"
+        },
+        {
+          "pos": 155.95,
+          "align": "Left"
+        },
+        {
+          "pos": 177.25,
+          "align": "Left"
+        },
+        {
+          "pos": 212.7,
+          "align": "Left"
+        },
+        {
+          "pos": 248.15,
+          "align": "Left"
+        },
+        {
+          "pos": 283.6,
+          "align": "Left"
+        },
+        {
+          "pos": 319.05,
+          "align": "Left"
+        },
+        {
+          "pos": 354.5,
+          "align": "Left"
+        },
+        {
+          "pos": 389.95,
+          "align": "Left"
+        },
+        {
+          "pos": 425.4,
+          "align": "Left"
+        },
+        {
+          "pos": 460.85,
+          "align": "Left"
+        },
+        {
+          "pos": 496.3,
+          "align": "Left"
+        },
+        {
+          "pos": 531.75,
+          "align": "Left"
+        },
+        {
+          "pos": 567.2,
+          "align": "Left"
+        }
+      ]
+    },
+    {
+      "userStyleIndex": 3,
+      "userStyleName": "Heading Level 2",
+      "whenToApply": "Apply to subsection headings within articles. Usually bold or underlined, numbered with decimals (1.1, 2.3) or letters. Located between ArticleHeading and body text. Examples: '2.1 Purchase Price', '3.2 Payment Terms', '(a) Delivery Schedule'. Creates secondary structure level.",
+      "wdStyleName": "Überschrift 2",
+      "wdStyleBuiltIn": true,
+      "isInTableCell": false,
+      "paragraphFormatting": {
+        "alignment": "wdAlignParagraphLeft",
+        "leftIndent": 42.55,
+        "rightIndent": 0.0,
+        "firstLineIndent": -42.55,
+        "spaceBefore": 6.0,
+        "spaceAfter": 6.0,
+        "spaceBeforeAuto": 0,
+        "spaceAfterAuto": 0,
+        "lineSpacing": 14.5,
+        "lineSpacingRule": "wdLineSpaceAtLeast",
+        "keepTogether": 0,
+        "keepWithNext": -1,
+        "pageBreakBefore": 0,
+        "widowControl": -1,
+        "outlineLevel": "wdOutlineLevel2",
+        "hyphenation": -1,
+        "readingOrder": "wdReadingOrderLtr"
+      },
+      "fontFormatting": {
+        "fontName": "Verdana",
+        "fontSize": 10.0,
+        "bold": true,
+        "italic": false,
+        "underline": "wdUnderlineNone",
+        "underlineColor": "wdColorAutomatic",
+        "underlineColorRGB": "auto",
+        "strikeThrough": false,
+        "doubleStrikeThrough": false,
+        "subscript": false,
+        "superscript": false,
+        "color": "wdColorAutomatic",
+        "colorRGB": "auto",
+        "highlightColor": "wdNoHighlight",
+        "allCaps": false,
+        "smallCaps": false,
+        "scaling": 100,
+        "spacing": 0.0,
+        "position": 0,
+        "kerning": 0.0
+      },
+      "listFormatting": {
+        "hasList": true,
+        "listType": "wdListOutlineNumbering",
+        "listLevelNumber": 2,
+        "listString": "A.",
+        "listTemplateOutlineNumbered": true,
+        "currentLevelFormat": {
+          "numberFormat": "%2.",
+          "numberStyle": "wdListNumberStyleUppercaseLetter",
+          "textPosition": 42.55,
+          "tabPosition": 42.55,
+          "numberPosition": 0.0,
+          "alignment": "wdListLevelAlignLeft",
+          "startAt": 1
+        }
+      },
+      "tabStops": [
+        {
+          "pos": 42.55,
+          "align": "List"
+        },
+        {
+          "pos": 70.9,
+          "align": "Left"
+        },
+        {
+          "pos": 99.25,
+          "align": "Left"
+        },
+        {
+          "pos": 127.6,
+          "align": "Left"
+        },
+        {
+          "pos": 155.95,
+          "align": "Left"
+        },
+        {
+          "pos": 177.25,
+          "align": "Left"
+        },
+        {
+          "pos": 212.7,
+          "align": "Left"
+        },
+        {
+          "pos": 248.15,
+          "align": "Left"
+        },
+        {
+          "pos": 283.6,
+          "align": "Left"
+        },
+        {
+          "pos": 319.05,
+          "align": "Left"
+        },
+        {
+          "pos": 354.5,
+          "align": "Left"
+        },
+        {
+          "pos": 389.95,
+          "align": "Left"
+        },
+        {
+          "pos": 425.4,
+          "align": "Left"
+        },
+        {
+          "pos": 460.85,
+          "align": "Left"
+        },
+        {
+          "pos": 496.3,
+          "align": "Left"
+        },
+        {
+          "pos": 531.75,
+          "align": "Left"
+        },
+        {
+          "pos": 567.2,
+          "align": "Left"
+        }
+      ]
+    },
+    {
+      "userStyleIndex": 4,
+      "userStyleName": "Heading Level 3",
+      "whenToApply": "Apply to third-level headings within clauses. Often uses letters (a), (b) or roman numerals (i), (ii) with bold or italic text. Examples: '(a) Initial Payment', '(i) First Installment'. Nested under ClauseHeading.",
+      "wdStyleName": "Überschrift 3",
+      "wdStyleBuiltIn": true,
+      "isInTableCell": false,
+      "paragraphFormatting": {
+        "alignment": "wdAlignParagraphLeft",
+        "leftIndent": 42.55,
+        "rightIndent": 0.0,
+        "firstLineIndent": -42.55,
+        "spaceBefore": 6.0,
+        "spaceAfter": 6.0,
+        "spaceBeforeAuto": 0,
+        "spaceAfterAuto": 0,
+        "lineSpacing": 14.5,
+        "lineSpacingRule": "wdLineSpaceAtLeast",
+        "keepTogether": 0,
+        "keepWithNext": -1,
+        "pageBreakBefore": 0,
+        "widowControl": -1,
+        "outlineLevel": "wdOutlineLevel3",
+        "hyphenation": -1,
+        "readingOrder": "wdReadingOrderLtr"
+      },
+      "fontFormatting": {
+        "fontName": "Verdana",
+        "fontSize": 10.0,
+        "bold": false,
+        "italic": false,
+        "underline": "wdUnderlineNone",
+        "underlineColor": "wdColorAutomatic",
+        "underlineColorRGB": "auto",
+        "strikeThrough": false,
+        "doubleStrikeThrough": false,
+        "subscript": false,
+        "superscript": false,
+        "color": "wdColorAutomatic",
+        "colorRGB": "auto",
+        "highlightColor": "wdNoHighlight",
+        "allCaps": false,
+        "smallCaps": false,
+        "scaling": 100,
+        "spacing": 0.0,
+        "position": 0,
+        "kerning": 0.0
+      },
+      "listFormatting": {
+        "hasList": true,
+        "listType": "wdListOutlineNumbering",
+        "listLevelNumber": 3,
+        "listString": "1.",
+        "listTemplateOutlineNumbered": true,
+        "currentLevelFormat": {
+          "numberFormat": "%3.",
+          "numberStyle": "wdListNumberStyleArabic",
+          "textPosition": 42.55,
+          "tabPosition": 42.55,
+          "numberPosition": 0.0,
+          "alignment": "wdListLevelAlignLeft",
+          "startAt": 1
+        }
+      },
+      "tabStops": [
+        {
+          "pos": 42.55,
+          "align": "List"
+        },
+        {
+          "pos": 70.9,
+          "align": "Left"
+        },
+        {
+          "pos": 99.25,
+          "align": "Left"
+        },
+        {
+          "pos": 127.6,
+          "align": "Left"
+        },
+        {
+          "pos": 155.95,
+          "align": "Left"
+        },
+        {
+          "pos": 177.25,
+          "align": "Left"
+        },
+        {
+          "pos": 212.7,
+          "align": "Left"
+        },
+        {
+          "pos": 248.15,
+          "align": "Left"
+        },
+        {
+          "pos": 283.6,
+          "align": "Left"
+        },
+        {
+          "pos": 319.05,
+          "align": "Left"
+        },
+        {
+          "pos": 354.5,
+          "align": "Left"
+        },
+        {
+          "pos": 389.95,
+          "align": "Left"
+        },
+        {
+          "pos": 425.4,
+          "align": "Left"
+        },
+        {
+          "pos": 460.85,
+          "align": "Left"
+        },
+        {
+          "pos": 496.3,
+          "align": "Left"
+        },
+        {
+          "pos": 531.75,
+          "align": "Left"
+        },
+        {
+          "pos": 567.2,
+          "align": "Left"
+        }
+      ]
+    },
+    {
+      "userStyleIndex": 5,
+      "userStyleName": "BodyText",
+      "whenToApply": "Apply to regular paragraph text forming the main contract content. Standard prose without special formatting, numbers, or bullets. Contains the actual terms, conditions, and legal language. Most common style in document. NOT for headings, lists, definitions, or signature blocks.",
+      "wdStyleName": "Normal 1",
+      "wdStyleBuiltIn": false,
+      "isInTableCell": false,
+      "paragraphFormatting": {
+        "alignment": "wdAlignParagraphJustify",
+        "leftIndent": 42.55,
+        "rightIndent": 0.0,
+        "firstLineIndent": 0.0,
+        "spaceBefore": 6.0,
+        "spaceAfter": 6.0,
+        "spaceBeforeAuto": 0,
+        "spaceAfterAuto": 0,
+        "lineSpacing": 14.5,
+        "lineSpacingRule": "wdLineSpaceAtLeast",
+        "keepTogether": 0,
+        "keepWithNext": 0,
+        "pageBreakBefore": 0,
+        "widowControl": -1,
+        "outlineLevel": "wdOutlineLevelBodyText",
+        "hyphenation": -1,
+        "readingOrder": "wdReadingOrderLtr"
+      },
+      "fontFormatting": {
+        "fontName": "Verdana",
+        "fontSize": 10.0,
+        "bold": false,
+        "italic": false,
+        "underline": "wdUnderlineNone",
+        "underlineColor": "wdColorAutomatic",
+        "underlineColorRGB": "auto",
+        "strikeThrough": false,
+        "doubleStrikeThrough": false,
+        "subscript": false,
+        "superscript": false,
+        "color": "wdColorAutomatic",
+        "colorRGB": "auto",
+        "highlightColor": "wdNoHighlight",
+        "allCaps": false,
+        "smallCaps": false,
+        "scaling": 100,
+        "spacing": 0.0,
+        "position": 0,
+        "kerning": 0.0
+      },
+      "listFormatting": {
+        "hasList": false,
+        "listType": "none"
+      },
+      "tabStops": [
+        {
+          "pos": 42.55,
+          "align": "Left"
+        },
+        {
+          "pos": 70.9,
+          "align": "Left"
+        },
+        {
+          "pos": 99.25,
+          "align": "Left"
+        },
+        {
+          "pos": 127.6,
+          "align": "Left"
+        },
+        {
+          "pos": 155.95,
+          "align": "Left"
+        },
+        {
+          "pos": 177.25,
+          "align": "Left"
+        },
+        {
+          "pos": 212.7,
+          "align": "Left"
+        },
+        {
+          "pos": 248.15,
+          "align": "Left"
+        },
+        {
+          "pos": 283.6,
+          "align": "Left"
+        },
+        {
+          "pos": 319.05,
+          "align": "Left"
+        },
+        {
+          "pos": 354.5,
+          "align": "Left"
+        },
+        {
+          "pos": 389.95,
+          "align": "Left"
+        },
+        {
+          "pos": 425.4,
+          "align": "Left"
+        },
+        {
+          "pos": 460.85,
+          "align": "Left"
+        },
+        {
+          "pos": 496.3,
+          "align": "Left"
+        },
+        {
+          "pos": 531.75,
+          "align": "Left"
+        },
+        {
+          "pos": 567.2,
+          "align": "Left"
+        }
+      ]
+    },
+    {
+      "userStyleIndex": 6,
+      "userStyleName": "BodyText Indented",
+      "whenToApply": "Apply to body text paragraphs that are intentionally indented from the left margin, often for sub-provisions or continuation of numbered items. Same as BodyText but with left indentation. Use when source paragraph has leftIndent > 0 but is not a list item.",
+      "wdStyleName": "Normal 2",
+      "wdStyleBuiltIn": false,
+      "isInTableCell": false,
+      "paragraphFormatting": {
+        "alignment": "wdAlignParagraphJustify",
+        "leftIndent": 70.9,
+        "rightIndent": 0.0,
+        "firstLineIndent": 0.0,
+        "spaceBefore": 6.0,
+        "spaceAfter": 6.0,
+        "spaceBeforeAuto": 0,
+        "spaceAfterAuto": 0,
+        "lineSpacing": 14.5,
+        "lineSpacingRule": "wdLineSpaceAtLeast",
+        "keepTogether": 0,
+        "keepWithNext": 0,
+        "pageBreakBefore": 0,
+        "widowControl": -1,
+        "outlineLevel": "wdOutlineLevelBodyText",
+        "hyphenation": -1,
+        "readingOrder": "wdReadingOrderLtr"
+      },
+      "fontFormatting": {
+        "fontName": "Verdana",
+        "fontSize": 10.0,
+        "bold": false,
+        "italic": false,
+        "underline": "wdUnderlineNone",
+        "underlineColor": "wdColorAutomatic",
+        "underlineColorRGB": "auto",
+        "strikeThrough": false,
+        "doubleStrikeThrough": false,
+        "subscript": false,
+        "superscript": false,
+        "color": "wdColorAutomatic",
+        "colorRGB": "auto",
+        "highlightColor": "wdNoHighlight",
+        "allCaps": false,
+        "smallCaps": false,
+        "scaling": 100,
+        "spacing": 0.0,
+        "position": 0,
+        "kerning": 0.0
+      },
+      "listFormatting": {
+        "hasList": false,
+        "listType": "none"
+      },
+      "tabStops": [
+        {
+          "pos": 42.55,
+          "align": "Left"
+        },
+        {
+          "pos": 70.9,
+          "align": "Left"
+        },
+        {
+          "pos": 99.25,
+          "align": "Left"
+        },
+        {
+          "pos": 127.6,
+          "align": "Left"
+        },
+        {
+          "pos": 155.95,
+          "align": "Left"
+        },
+        {
+          "pos": 177.25,
+          "align": "Left"
+        },
+        {
+          "pos": 212.7,
+          "align": "Left"
+        },
+        {
+          "pos": 248.15,
+          "align": "Left"
+        },
+        {
+          "pos": 283.6,
+          "align": "Left"
+        },
+        {
+          "pos": 319.05,
+          "align": "Left"
+        },
+        {
+          "pos": 354.5,
+          "align": "Left"
+        },
+        {
+          "pos": 389.95,
+          "align": "Left"
+        },
+        {
+          "pos": 425.4,
+          "align": "Left"
+        },
+        {
+          "pos": 460.85,
+          "align": "Left"
+        },
+        {
+          "pos": 496.3,
+          "align": "Left"
+        },
+        {
+          "pos": 531.75,
+          "align": "Left"
+        },
+        {
+          "pos": 567.2,
+          "align": "Left"
+        }
+      ]
+    },
+    {
+      "userStyleIndex": 7,
+      "userStyleName": "Numbered List Item",
+      "whenToApply": "Apply to paragraphs that are part of a numbered sequence using (1), (2), (3) or 1., 2., 3. or (a), (b), (c) patterns. Check listFormatting.hasList=true with SimpleNumbering or ListNumOnly types. Used for enumerated obligations, conditions, or requirements.",
+      "wdStyleName": "Buchstabiert1",
+      "wdStyleBuiltIn": false,
+      "isInTableCell": false,
+      "paragraphFormatting": {
+        "alignment": "wdAlignParagraphJustify",
+        "leftIndent": 70.9,
+        "rightIndent": 0.0,
+        "firstLineIndent": -28.35,
+        "spaceBefore": 6.0,
+        "spaceAfter": 6.0,
+        "spaceBeforeAuto": 0,
+        "spaceAfterAuto": 0,
+        "lineSpacing": 14.5,
+        "lineSpacingRule": "wdLineSpaceAtLeast",
+        "keepTogether": -1,
+        "keepWithNext": -1,
+        "pageBreakBefore": 0,
+        "widowControl": -1,
+        "outlineLevel": "wdOutlineLevel9",
+        "hyphenation": -1,
+        "readingOrder": "wdReadingOrderLtr"
+      },
+      "fontFormatting": {
+        "fontName": "Verdana",
+        "fontSize": 10.0,
+        "bold": false,
+        "italic": false,
+        "underline": "wdUnderlineNone",
+        "underlineColor": "wdColorAutomatic",
+        "underlineColorRGB": "auto",
+        "strikeThrough": false,
+        "doubleStrikeThrough": false,
+        "subscript": false,
+        "superscript": false,
+        "color": "wdColorAutomatic",
+        "colorRGB": "auto",
+        "highlightColor": "wdNoHighlight",
+        "allCaps": false,
+        "smallCaps": false,
+        "scaling": 100,
+        "spacing": 0.0,
+        "position": 0,
+        "kerning": 0.0
+      },
+      "listFormatting": {
+        "hasList": true,
+        "listType": "wdListOutlineNumbering",
+        "listLevelNumber": 9,
+        "listString": "a)",
+        "listTemplateOutlineNumbered": true,
+        "currentLevelFormat": {
+          "numberFormat": "%9)",
+          "numberStyle": "wdListNumberStyleLowercaseLetter",
+          "textPosition": 70.9,
+          "tabPosition": 70.9,
+          "numberPosition": 42.55,
+          "alignment": "wdListLevelAlignLeft",
+          "startAt": 1
+        }
+      },
+      "tabStops": [
+        {
+          "pos": 70.9,
+          "align": "List"
+        },
+        {
+          "pos": 99.25,
+          "align": "Left"
+        },
+        {
+          "pos": 127.6,
+          "align": "Left"
+        },
+        {
+          "pos": 155.95,
+          "align": "Left"
+        },
+        {
+          "pos": 177.25,
+          "align": "Left"
+        },
+        {
+          "pos": 212.7,
+          "align": "Left"
+        },
+        {
+          "pos": 248.15,
+          "align": "Left"
+        },
+        {
+          "pos": 283.6,
+          "align": "Left"
+        },
+        {
+          "pos": 319.05,
+          "align": "Left"
+        },
+        {
+          "pos": 354.5,
+          "align": "Left"
+        },
+        {
+          "pos": 389.95,
+          "align": "Left"
+        },
+        {
+          "pos": 425.4,
+          "align": "Left"
+        },
+        {
+          "pos": 460.85,
+          "align": "Left"
+        },
+        {
+          "pos": 496.3,
+          "align": "Left"
+        },
+        {
+          "pos": 531.75,
+          "align": "Left"
+        },
+        {
+          "pos": 567.2,
+          "align": "Left"
+        }
+      ]
+    },
+    {
+      "userStyleIndex": 8,
+      "userStyleName": "Numbered List Item Indented",
+      "whenToApply": "Apply to paragraphs that are part of a numbered sequence using (1), (2), (3) or 1., 2., 3. or (a), (b), (c) patterns and should be one level below because they are sub-sections of a bulleted or numbered list. Check listFormatting.hasList=true with SimpleNumbering or ListNumOnly types. Used for enumerated obligations, conditions, or requirements.",
+      "wdStyleName": "Buchstabiert2",
+      "wdStyleBuiltIn": false,
+      "isInTableCell": false,
+      "paragraphFormatting": {
+        "alignment": "wdAlignParagraphJustify",
+        "leftIndent": 99.25,
+        "rightIndent": 0.0,
+        "firstLineIndent": -28.35,
+        "spaceBefore": 6.0,
+        "spaceAfter": 6.0,
+        "spaceBeforeAuto": 0,
+        "spaceAfterAuto": 0,
+        "lineSpacing": 14.5,
+        "lineSpacingRule": "wdLineSpaceAtLeast",
+        "keepTogether": -1,
+        "keepWithNext": -1,
+        "pageBreakBefore": 0,
+        "widowControl": -1,
+        "outlineLevel": "wdOutlineLevel9",
+        "hyphenation": -1,
+        "readingOrder": "wdReadingOrderLtr"
+      },
+      "fontFormatting": {
+        "fontName": "Verdana",
+        "fontSize": 10.0,
+        "bold": false,
+        "italic": false,
+        "underline": "wdUnderlineNone",
+        "underlineColor": "wdColorAutomatic",
+        "underlineColorRGB": "auto",
+        "strikeThrough": false,
+        "doubleStrikeThrough": false,
+        "subscript": false,
+        "superscript": false,
+        "color": "wdColorAutomatic",
+        "colorRGB": "auto",
+        "highlightColor": "wdNoHighlight",
+        "allCaps": false,
+        "smallCaps": false,
+        "scaling": 100,
+        "spacing": 0.0,
+        "position": 0,
+        "kerning": 0.0
+      },
+      "listFormatting": {
+        "hasList": true,
+        "listType": "wdListSimpleNumbering",
+        "listLevelNumber": 1,
+        "listString": "i.",
+        "listTemplateOutlineNumbered": true,
+        "currentLevelFormat": {
+          "numberFormat": "%1.",
+          "numberStyle": "wdListNumberStyleLowercaseRoman",
+          "textPosition": 106.9,
+          "tabPosition": 9999999.0,
+          "numberPosition": 88.9,
+          "alignment": "wdListLevelAlignLeft",
+          "startAt": 1
+        }
+      },
+      "tabStops": [
+        {
+          "pos": 99.25,
+          "align": "Left"
+        },
+        {
+          "pos": 127.6,
+          "align": "Left"
+        },
+        {
+          "pos": 155.95,
+          "align": "Left"
+        },
+        {
+          "pos": 177.25,
+          "align": "Left"
+        },
+        {
+          "pos": 212.7,
+          "align": "Left"
+        },
+        {
+          "pos": 248.15,
+          "align": "Left"
+        },
+        {
+          "pos": 283.6,
+          "align": "Left"
+        },
+        {
+          "pos": 319.05,
+          "align": "Left"
+        },
+        {
+          "pos": 354.5,
+          "align": "Left"
+        },
+        {
+          "pos": 389.95,
+          "align": "Left"
+        },
+        {
+          "pos": 425.4,
+          "align": "Left"
+        },
+        {
+          "pos": 460.85,
+          "align": "Left"
+        },
+        {
+          "pos": 496.3,
+          "align": "Left"
+        },
+        {
+          "pos": 531.75,
+          "align": "Left"
+        },
+        {
+          "pos": 567.2,
+          "align": "Left"
+        }
+      ]
+    },
+    {
+      "userStyleIndex": 9,
+      "userStyleName": "Bullete List Item",
+      "whenToApply": "Apply to paragraphs with bullet points (•, -, ○). Check listFormatting.hasList=true with Bullet type. Used for non-sequential lists of items, features, or conditions where order doesn't matter.",
+      "wdStyleName": "Punktiert 1",
+      "wdStyleBuiltIn": false,
+      "isInTableCell": false,
+      "paragraphFormatting": {
+        "alignment": "wdAlignParagraphJustify",
+        "leftIndent": 70.9,
+        "rightIndent": 0.0,
+        "firstLineIndent": -28.35,
+        "spaceBefore": 6.0,
+        "spaceAfter": 6.0,
+        "spaceBeforeAuto": 0,
+        "spaceAfterAuto": 0,
+        "lineSpacing": 14.5,
+        "lineSpacingRule": "wdLineSpaceAtLeast",
+        "keepTogether": 0,
+        "keepWithNext": 0,
+        "pageBreakBefore": 0,
+        "widowControl": -1,
+        "outlineLevel": "wdOutlineLevelBodyText",
+        "hyphenation": -1,
+        "readingOrder": "wdReadingOrderLtr"
+      },
+      "fontFormatting": {
+        "fontName": "",
+        "fontSize": 10.0,
+        "bold": false,
+        "italic": false,
+        "underline": "wdUnderlineNone",
+        "underlineColor": "wdColorAutomatic",
+        "underlineColorRGB": "auto",
+        "strikeThrough": false,
+        "doubleStrikeThrough": false,
+        "subscript": false,
+        "superscript": false,
+        "color": "wdColorAutomatic",
+        "colorRGB": "auto",
+        "highlightColor": "wdNoHighlight",
+        "allCaps": false,
+        "smallCaps": false,
+        "scaling": 100,
+        "spacing": 0.0,
+        "position": 0,
+        "kerning": 0.0
+      },
+      "listFormatting": {
+        "hasList": true,
+        "listType": "wdListBullet",
+        "listLevelNumber": 1,
+        "listString": "",
+        "listTemplateOutlineNumbered": false,
+        "currentLevelFormat": {
+          "numberFormat": "",
+          "numberStyle": "wdListNumberStyleBullet",
+          "textPosition": 70.9,
+          "tabPosition": 70.9,
+          "numberPosition": 42.55,
+          "alignment": "wdListLevelAlignLeft",
+          "startAt": 1
+        }
+      },
+      "tabStops": [
+        {
+          "pos": 42.55,
+          "align": "Left"
+        },
+        {
+          "pos": 70.9,
+          "align": "Left"
+        },
+        {
+          "pos": 99.25,
+          "align": "Left"
+        },
+        {
+          "pos": 127.6,
+          "align": "Left"
+        },
+        {
+          "pos": 155.95,
+          "align": "Left"
+        },
+        {
+          "pos": 177.25,
+          "align": "Left"
+        },
+        {
+          "pos": 212.7,
+          "align": "Left"
+        },
+        {
+          "pos": 248.15,
+          "align": "Left"
+        },
+        {
+          "pos": 283.6,
+          "align": "Left"
+        },
+        {
+          "pos": 319.05,
+          "align": "Left"
+        },
+        {
+          "pos": 354.5,
+          "align": "Left"
+        },
+        {
+          "pos": 389.95,
+          "align": "Left"
+        },
+        {
+          "pos": 425.4,
+          "align": "Left"
+        },
+        {
+          "pos": 460.85,
+          "align": "Left"
+        },
+        {
+          "pos": 496.3,
+          "align": "Left"
+        },
+        {
+          "pos": 531.75,
+          "align": "Left"
+        },
+        {
+          "pos": 567.2,
+          "align": "Left"
+        }
+      ]
+    },
+    {
+      "userStyleIndex": 10,
+      "userStyleName": "Bullet List Item Indented",
+      "whenToApply": "Apply to paragraphs with bullet points (•, -, ○) and should be one level below because they are sub-sections of a bulleted or numbered list. Check listFormatting.hasList=true with Bullet type. Used for non-sequential lists of items, features, or conditions where order doesn't matter.",
+      "wdStyleName": "Punktiert 2",
+      "wdStyleBuiltIn": false,
+      "isInTableCell": false,
+      "paragraphFormatting": {
+        "alignment": "wdAlignParagraphJustify",
+        "leftIndent": 99.25,
+        "rightIndent": 0.0,
+        "firstLineIndent": -28.35,
+        "spaceBefore": 6.0,
+        "spaceAfter": 6.0,
+        "spaceBeforeAuto": 0,
+        "spaceAfterAuto": 0,
+        "lineSpacing": 14.5,
+        "lineSpacingRule": "wdLineSpaceAtLeast",
+        "keepTogether": 0,
+        "keepWithNext": 0,
+        "pageBreakBefore": 0,
+        "widowControl": -1,
+        "outlineLevel": "wdOutlineLevelBodyText",
+        "hyphenation": -1,
+        "readingOrder": "wdReadingOrderLtr"
+      },
+      "fontFormatting": {
+        "fontName": "",
+        "fontSize": 10.0,
+        "bold": false,
+        "italic": false,
+        "underline": "wdUnderlineNone",
+        "underlineColor": "wdColorAutomatic",
+        "underlineColorRGB": "auto",
+        "strikeThrough": false,
+        "doubleStrikeThrough": false,
+        "subscript": false,
+        "superscript": false,
+        "color": "wdColorAutomatic",
+        "colorRGB": "auto",
+        "highlightColor": "wdNoHighlight",
+        "allCaps": false,
+        "smallCaps": false,
+        "scaling": 100,
+        "spacing": 0.0,
+        "position": 0,
+        "kerning": 0.0
+      },
+      "listFormatting": {
+        "hasList": true,
+        "listType": "wdListBullet",
+        "listLevelNumber": 1,
+        "listString": "",
+        "listTemplateOutlineNumbered": true,
+        "currentLevelFormat": {
+          "numberFormat": "",
+          "numberStyle": "wdListNumberStyleBullet",
+          "textPosition": 99.25,
+          "tabPosition": 99.25,
+          "numberPosition": 70.9,
+          "alignment": "wdListLevelAlignLeft",
+          "startAt": 1
+        }
+      },
+      "tabStops": [
+        {
+          "pos": 42.55,
+          "align": "Left"
+        },
+        {
+          "pos": 70.9,
+          "align": "Left"
+        },
+        {
+          "pos": 99.25,
+          "align": "Left"
+        },
+        {
+          "pos": 127.6,
+          "align": "Left"
+        },
+        {
+          "pos": 155.95,
+          "align": "Left"
+        },
+        {
+          "pos": 177.25,
+          "align": "Left"
+        },
+        {
+          "pos": 212.7,
+          "align": "Left"
+        },
+        {
+          "pos": 248.15,
+          "align": "Left"
+        },
+        {
+          "pos": 283.6,
+          "align": "Left"
+        },
+        {
+          "pos": 319.05,
+          "align": "Left"
+        },
+        {
+          "pos": 354.5,
+          "align": "Left"
+        },
+        {
+          "pos": 389.95,
+          "align": "Left"
+        },
+        {
+          "pos": 425.4,
+          "align": "Left"
+        },
+        {
+          "pos": 460.85,
+          "align": "Left"
+        },
+        {
+          "pos": 496.3,
+          "align": "Left"
+        },
+        {
+          "pos": 531.75,
+          "align": "Left"
+        },
+        {
+          "pos": 567.2,
+          "align": "Left"
+        }
+      ]
+    },
+    {
+      "userStyleIndex": 11,
+      "userStyleName": "Recital Paragraph",
+      "whenToApply": "Apply to 'WHEREAS' clauses or recitals at the beginning of contracts. Usually starts with 'WHEREAS', 'RECITAL', or similar. Provides background context before the operative provisions. Often indented or italicized. Found between parties identification and 'NOW THEREFORE'.",
+      "wdStyleName": "Überschrift 4",
+      "wdStyleBuiltIn": true,
+      "isInTableCell": false,
+      "paragraphFormatting": {
+        "alignment": "wdAlignParagraphLeft",
+        "leftIndent": 42.55,
+        "rightIndent": 0.0,
+        "firstLineIndent": -42.55,
+        "spaceBefore": 6.0,
+        "spaceAfter": 6.0,
+        "spaceBeforeAuto": 0,
+        "spaceAfterAuto": 0,
+        "lineSpacing": 14.5,
+        "lineSpacingRule": "wdLineSpaceAtLeast",
+        "keepTogether": 0,
+        "keepWithNext": -1,
+        "pageBreakBefore": 0,
+        "widowControl": -1,
+        "outlineLevel": "wdOutlineLevel4",
+        "hyphenation": -1,
+        "readingOrder": "wdReadingOrderLtr"
+      },
+      "fontFormatting": {
+        "fontName": "Verdana",
+        "fontSize": 10.0,
+        "bold": false,
+        "italic": false,
+        "underline": "wdUnderlineNone",
+        "underlineColor": "wdColorAutomatic",
+        "underlineColorRGB": "auto",
+        "strikeThrough": false,
+        "doubleStrikeThrough": false,
+        "subscript": false,
+        "superscript": false,
+        "color": "wdColorAutomatic",
+        "colorRGB": "auto",
+        "highlightColor": "wdNoHighlight",
+        "allCaps": false,
+        "smallCaps": false,
+        "scaling": 100,
+        "spacing": 0.0,
+        "position": 0,
+        "kerning": 0.0
+      },
+      "listFormatting": {
+        "hasList": true,
+        "listType": "wdListOutlineNumbering",
+        "listLevelNumber": 4,
+        "listString": "b)",
+        "listTemplateOutlineNumbered": true,
+        "currentLevelFormat": {
+          "numberFormat": "%4)",
+          "numberStyle": "wdListNumberStyleLowercaseLetter",
+          "textPosition": 42.55,
+          "tabPosition": 42.55,
+          "numberPosition": 0.0,
+          "alignment": "wdListLevelAlignLeft",
+          "startAt": 1
+        }
+      },
+      "tabStops": [
+        {
+          "pos": 42.55,
+          "align": "List"
+        },
+        {
+          "pos": 70.9,
+          "align": "Left"
+        },
+        {
+          "pos": 99.25,
+          "align": "Left"
+        },
+        {
+          "pos": 127.6,
+          "align": "Left"
+        },
+        {
+          "pos": 155.95,
+          "align": "Left"
+        },
+        {
+          "pos": 177.25,
+          "align": "Left"
+        },
+        {
+          "pos": 212.7,
+          "align": "Left"
+        },
+        {
+          "pos": 248.15,
+          "align": "Left"
+        },
+        {
+          "pos": 283.6,
+          "align": "Left"
+        },
+        {
+          "pos": 319.05,
+          "align": "Left"
+        },
+        {
+          "pos": 354.5,
+          "align": "Left"
+        },
+        {
+          "pos": 389.95,
+          "align": "Left"
+        },
+        {
+          "pos": 425.4,
+          "align": "Left"
+        },
+        {
+          "pos": 460.85,
+          "align": "Left"
+        },
+        {
+          "pos": 496.3,
+          "align": "Left"
+        },
+        {
+          "pos": 531.75,
+          "align": "Left"
+        },
+        {
+          "pos": 567.2,
+          "align": "Left"
+        }
+      ]
+    },
+    {
+      "userStyleIndex": 12,
+      "userStyleName": "Quote",
+      "whenToApply": "Apply to quoted material, excerpts from other documents, or text that should stand apart from main body. Usually indented from both margins. May be italicized. Used for citations, referenced provisions, or formal quotations.",
+      "wdStyleName": "Zitat 1",
+      "wdStyleBuiltIn": false,
+      "isInTableCell": false,
+      "paragraphFormatting": {
+        "alignment": "wdAlignParagraphJustify",
+        "leftIndent": 42.55,
+        "rightIndent": 28.35,
+        "firstLineIndent": 0.0,
+        "spaceBefore": 6.0,
+        "spaceAfter": 6.0,
+        "spaceBeforeAuto": 0,
+        "spaceAfterAuto": 0,
+        "lineSpacing": 14.5,
+        "lineSpacingRule": "wdLineSpaceAtLeast",
+        "keepTogether": 0,
+        "keepWithNext": 0,
+        "pageBreakBefore": 0,
+        "widowControl": -1,
+        "outlineLevel": "wdOutlineLevelBodyText",
+        "hyphenation": -1,
+        "readingOrder": "wdReadingOrderLtr"
+      },
+      "fontFormatting": {
+        "fontName": "Verdana",
+        "fontSize": 10.0,
+        "bold": false,
+        "italic": true,
+        "underline": "wdUnderlineNone",
+        "underlineColor": "wdColorAutomatic",
+        "underlineColorRGB": "auto",
+        "strikeThrough": false,
+        "doubleStrikeThrough": false,
+        "subscript": false,
+        "superscript": false,
+        "color": "wdColorAutomatic",
+        "colorRGB": "auto",
+        "highlightColor": "wdNoHighlight",
+        "allCaps": false,
+        "smallCaps": false,
+        "scaling": 100,
+        "spacing": 0.0,
+        "position": 0,
+        "kerning": 0.0
+      },
+      "listFormatting": {
+        "hasList": false,
+        "listType": "none"
+      },
+      "tabStops": [
+        {
+          "pos": 42.55,
+          "align": "Left"
+        },
+        {
+          "pos": 70.9,
+          "align": "Left"
+        },
+        {
+          "pos": 99.25,
+          "align": "Left"
+        },
+        {
+          "pos": 127.6,
+          "align": "Left"
+        },
+        {
+          "pos": 155.95,
+          "align": "Left"
+        },
+        {
+          "pos": 177.25,
+          "align": "Left"
+        },
+        {
+          "pos": 212.7,
+          "align": "Left"
+        },
+        {
+          "pos": 248.15,
+          "align": "Left"
+        },
+        {
+          "pos": 283.6,
+          "align": "Left"
+        },
+        {
+          "pos": 319.05,
+          "align": "Left"
+        },
+        {
+          "pos": 354.5,
+          "align": "Left"
+        },
+        {
+          "pos": 389.95,
+          "align": "Left"
+        },
+        {
+          "pos": 425.4,
+          "align": "Left"
+        },
+        {
+          "pos": 460.85,
+          "align": "Left"
+        },
+        {
+          "pos": 496.3,
+          "align": "Left"
+        },
+        {
+          "pos": 531.75,
+          "align": "Left"
+        },
+        {
+          "pos": 567.2,
+          "align": "Left"
+        }
+      ]
+    },
+    {
+      "userStyleIndex": 13,
+      "userStyleName": "Indented Quote",
+      "whenToApply": "Apply to indented quoted material, excerpts from other documents, or text that should stand apart from main body. Usually indented from both margins. May be italicized. Used for citations, referenced provisions, or formal quotations, where this should be indended, for example if part of a numbered or bulleted sequence.",
+      "wdStyleName": "Zitat 2",
+      "wdStyleBuiltIn": false,
+      "isInTableCell": false,
+      "paragraphFormatting": {
+        "alignment": "wdAlignParagraphJustify",
+        "leftIndent": 70.9,
+        "rightIndent": 28.35,
+        "firstLineIndent": 0.0,
+        "spaceBefore": 6.0,
+        "spaceAfter": 6.0,
+        "spaceBeforeAuto": 0,
+        "spaceAfterAuto": 0,
+        "lineSpacing": 14.5,
+        "lineSpacingRule": "wdLineSpaceAtLeast",
+        "keepTogether": 0,
+        "keepWithNext": 0,
+        "pageBreakBefore": 0,
+        "widowControl": -1,
+        "outlineLevel": "wdOutlineLevelBodyText",
+        "hyphenation": -1,
+        "readingOrder": "wdReadingOrderLtr"
+      },
+      "fontFormatting": {
+        "fontName": "Verdana",
+        "fontSize": 10.0,
+        "bold": false,
+        "italic": true,
+        "underline": "wdUnderlineNone",
+        "underlineColor": "wdColorAutomatic",
+        "underlineColorRGB": "auto",
+        "strikeThrough": false,
+        "doubleStrikeThrough": false,
+        "subscript": false,
+        "superscript": false,
+        "color": "wdColorAutomatic",
+        "colorRGB": "auto",
+        "highlightColor": "wdNoHighlight",
+        "allCaps": false,
+        "smallCaps": false,
+        "scaling": 100,
+        "spacing": 0.0,
+        "position": 0,
+        "kerning": 0.0
+      },
+      "listFormatting": {
+        "hasList": false,
+        "listType": "none"
+      },
+      "tabStops": [
+        {
+          "pos": 42.55,
+          "align": "Left"
+        },
+        {
+          "pos": 70.9,
+          "align": "Left"
+        },
+        {
+          "pos": 99.25,
+          "align": "Left"
+        },
+        {
+          "pos": 127.6,
+          "align": "Left"
+        },
+        {
+          "pos": 155.95,
+          "align": "Left"
+        },
+        {
+          "pos": 177.25,
+          "align": "Left"
+        },
+        {
+          "pos": 212.7,
+          "align": "Left"
+        },
+        {
+          "pos": 248.15,
+          "align": "Left"
+        },
+        {
+          "pos": 283.6,
+          "align": "Left"
+        },
+        {
+          "pos": 319.05,
+          "align": "Left"
+        },
+        {
+          "pos": 354.5,
+          "align": "Left"
+        },
+        {
+          "pos": 389.95,
+          "align": "Left"
+        },
+        {
+          "pos": 425.4,
+          "align": "Left"
+        },
+        {
+          "pos": 460.85,
+          "align": "Left"
+        },
+        {
+          "pos": 496.3,
+          "align": "Left"
+        },
+        {
+          "pos": 531.75,
+          "align": "Left"
+        },
+        {
+          "pos": 567.2,
+          "align": "Left"
+        }
+      ]
+    },
+    {
+      "userStyleIndex": 14,
+      "userStyleName": "Intro/Extro BodyText",
+      "whenToApply": "Apply to paragraphs at the document start or end that identify the contracting parties or the signature block or an added list of documents and annexes. Contains party names, addresses, and defined short names, or other text that appears outside the structured main body of the document. Examples: 'ABC Corporation, a Delaware corporation (\\\"Buyer\\\")' or 'between: [Party A] and [Party B]'.",
+      "wdStyleName": "Normal 0",
+      "wdStyleBuiltIn": false,
+      "isInTableCell": false,
+      "paragraphFormatting": {
+        "alignment": "wdAlignParagraphJustify",
+        "leftIndent": 0.0,
+        "rightIndent": 0.0,
+        "firstLineIndent": 0.0,
+        "spaceBefore": 6.0,
+        "spaceAfter": 6.0,
+        "spaceBeforeAuto": 0,
+        "spaceAfterAuto": 0,
+        "lineSpacing": 14.5,
+        "lineSpacingRule": "wdLineSpaceAtLeast",
+        "keepTogether": 0,
+        "keepWithNext": 0,
+        "pageBreakBefore": 0,
+        "widowControl": -1,
+        "outlineLevel": "wdOutlineLevelBodyText",
+        "hyphenation": -1,
+        "readingOrder": "wdReadingOrderLtr"
+      },
+      "fontFormatting": {
+        "fontName": "Verdana",
+        "fontSize": 10.0,
+        "bold": false,
+        "italic": false,
+        "underline": "wdUnderlineNone",
+        "underlineColor": "wdColorAutomatic",
+        "underlineColorRGB": "auto",
+        "strikeThrough": false,
+        "doubleStrikeThrough": false,
+        "subscript": false,
+        "superscript": false,
+        "color": "wdColorAutomatic",
+        "colorRGB": "auto",
+        "highlightColor": "wdNoHighlight",
+        "allCaps": false,
+        "smallCaps": false,
+        "scaling": 100,
+        "spacing": 0.0,
+        "position": 0,
+        "kerning": 0.0
+      },
+      "listFormatting": {
+        "hasList": false,
+        "listType": "none"
+      },
+      "tabStops": [
+        {
+          "pos": 42.55,
+          "align": "Left"
+        },
+        {
+          "pos": 70.9,
+          "align": "Left"
+        },
+        {
+          "pos": 99.25,
+          "align": "Left"
+        },
+        {
+          "pos": 127.6,
+          "align": "Left"
+        },
+        {
+          "pos": 155.95,
+          "align": "Left"
+        },
+        {
+          "pos": 177.25,
+          "align": "Left"
+        },
+        {
+          "pos": 212.7,
+          "align": "Left"
+        },
+        {
+          "pos": 248.15,
+          "align": "Left"
+        },
+        {
+          "pos": 283.6,
+          "align": "Left"
+        },
+        {
+          "pos": 319.05,
+          "align": "Left"
+        },
+        {
+          "pos": 354.5,
+          "align": "Left"
+        },
+        {
+          "pos": 389.95,
+          "align": "Left"
+        },
+        {
+          "pos": 425.4,
+          "align": "Left"
+        },
+        {
+          "pos": 460.85,
+          "align": "Left"
+        },
+        {
+          "pos": 496.3,
+          "align": "Left"
+        },
+        {
+          "pos": 531.75,
+          "align": "Left"
+        },
+        {
+          "pos": 567.2,
+          "align": "Left"
+        }
+      ]
+    },
+    {
+      "userStyleIndex": 15,
+      "userStyleName": "Transitional Paragraphs",
+      "whenToApply": "Apply to transitional paragraphs like 'NOW, THEREFORE, in consideration of...' or 'NOW THEREFORE, the parties agree as follows:'. Marks transition from recitals to operative provisions. Usually one paragraph, often all caps start.",
+      "wdStyleName": "Normal 0",
+      "wdStyleBuiltIn": false,
+      "isInTableCell": false,
+      "paragraphFormatting": {
+        "alignment": "wdAlignParagraphJustify",
+        "leftIndent": 0.0,
+        "rightIndent": 0.0,
+        "firstLineIndent": 0.0,
+        "spaceBefore": 6.0,
+        "spaceAfter": 6.0,
+        "spaceBeforeAuto": 0,
+        "spaceAfterAuto": 0,
+        "lineSpacing": 14.5,
+        "lineSpacingRule": "wdLineSpaceAtLeast",
+        "keepTogether": 0,
+        "keepWithNext": 0,
+        "pageBreakBefore": 0,
+        "widowControl": -1,
+        "outlineLevel": "wdOutlineLevelBodyText",
+        "hyphenation": -1,
+        "readingOrder": "wdReadingOrderLtr"
+      },
+      "fontFormatting": {
+        "fontName": "Verdana",
+        "fontSize": 10.0,
+        "bold": false,
+        "italic": false,
+        "underline": "wdUnderlineNone",
+        "underlineColor": "wdColorAutomatic",
+        "underlineColorRGB": "auto",
+        "strikeThrough": false,
+        "doubleStrikeThrough": false,
+        "subscript": false,
+        "superscript": false,
+        "color": "wdColorAutomatic",
+        "colorRGB": "auto",
+        "highlightColor": "wdNoHighlight",
+        "allCaps": false,
+        "smallCaps": false,
+        "scaling": 100,
+        "spacing": 0.0,
+        "position": 0,
+        "kerning": 0.0
+      },
+      "listFormatting": {
+        "hasList": false,
+        "listType": "none"
+      },
+      "tabStops": [
+        {
+          "pos": 42.55,
+          "align": "Left"
+        },
+        {
+          "pos": 70.9,
+          "align": "Left"
+        },
+        {
+          "pos": 99.25,
+          "align": "Left"
+        },
+        {
+          "pos": 127.6,
+          "align": "Left"
+        },
+        {
+          "pos": 155.95,
+          "align": "Left"
+        },
+        {
+          "pos": 177.25,
+          "align": "Left"
+        },
+        {
+          "pos": 212.7,
+          "align": "Left"
+        },
+        {
+          "pos": 248.15,
+          "align": "Left"
+        },
+        {
+          "pos": 283.6,
+          "align": "Left"
+        },
+        {
+          "pos": 319.05,
+          "align": "Left"
+        },
+        {
+          "pos": 354.5,
+          "align": "Left"
+        },
+        {
+          "pos": 389.95,
+          "align": "Left"
+        },
+        {
+          "pos": 425.4,
+          "align": "Left"
+        },
+        {
+          "pos": 460.85,
+          "align": "Left"
+        },
+        {
+          "pos": 496.3,
+          "align": "Left"
+        },
+        {
+          "pos": 531.75,
+          "align": "Left"
+        },
+        {
+          "pos": 567.2,
+          "align": "Left"
+        }
+      ]
+    },
+    {
+      "userStyleIndex": 16,
+      "userStyleName": "Footnotes",
+      "whenToApply": "Apply to footnote content, usually smaller font, found at page bottom. May start with superscript number. Provides supplementary information or citations. Rarely used in contracts but common in memos and opinions.",
+      "wdStyleName": "Normal 0",
+      "wdStyleBuiltIn": false,
+      "isInTableCell": false,
+      "paragraphFormatting": {
+        "alignment": "wdAlignParagraphJustify",
+        "leftIndent": 0.0,
+        "rightIndent": 0.0,
+        "firstLineIndent": 0.0,
+        "spaceBefore": 6.0,
+        "spaceAfter": 6.0,
+        "spaceBeforeAuto": 0,
+        "spaceAfterAuto": 0,
+        "lineSpacing": 14.5,
+        "lineSpacingRule": "wdLineSpaceAtLeast",
+        "keepTogether": 0,
+        "keepWithNext": 0,
+        "pageBreakBefore": 0,
+        "widowControl": -1,
+        "outlineLevel": "wdOutlineLevelBodyText",
+        "hyphenation": -1,
+        "readingOrder": "wdReadingOrderLtr"
+      },
+      "fontFormatting": {
+        "fontName": "Verdana",
+        "fontSize": 8.0,
+        "bold": false,
+        "italic": false,
+        "underline": "wdUnderlineNone",
+        "underlineColor": "wdColorAutomatic",
+        "underlineColorRGB": "auto",
+        "strikeThrough": false,
+        "doubleStrikeThrough": false,
+        "subscript": false,
+        "superscript": false,
+        "color": "wdColorAutomatic",
+        "colorRGB": "auto",
+        "highlightColor": "wdNoHighlight",
+        "allCaps": false,
+        "smallCaps": false,
+        "scaling": 100,
+        "spacing": 0.0,
+        "position": 0,
+        "kerning": 0.0
+      },
+      "listFormatting": {
+        "hasList": false,
+        "listType": "none"
+      },
+      "tabStops": [
+        {
+          "pos": 42.55,
+          "align": "Left"
+        },
+        {
+          "pos": 70.9,
+          "align": "Left"
+        },
+        {
+          "pos": 99.25,
+          "align": "Left"
+        },
+        {
+          "pos": 127.6,
+          "align": "Left"
+        },
+        {
+          "pos": 155.95,
+          "align": "Left"
+        },
+        {
+          "pos": 177.25,
+          "align": "Left"
+        },
+        {
+          "pos": 212.7,
+          "align": "Left"
+        },
+        {
+          "pos": 248.15,
+          "align": "Left"
+        },
+        {
+          "pos": 283.6,
+          "align": "Left"
+        },
+        {
+          "pos": 319.05,
+          "align": "Left"
+        },
+        {
+          "pos": 354.5,
+          "align": "Left"
+        },
+        {
+          "pos": 389.95,
+          "align": "Left"
+        },
+        {
+          "pos": 425.4,
+          "align": "Left"
+        },
+        {
+          "pos": 460.85,
+          "align": "Left"
+        },
+        {
+          "pos": 496.3,
+          "align": "Left"
+        },
+        {
+          "pos": 531.75,
+          "align": "Left"
+        },
+        {
+          "pos": 567.2,
+          "align": "Left"
+        }
+      ]
+    }
+  ],
+  "wdStyleDefinitions": {
+    "Überschrift 1": {
+      "wdStyleName": "Überschrift 1",
+      "styleType": "wdStyleTypeParagraph",
+      "builtIn": true,
+      "baseStyleHierarchy": [
+        "Normal 0",
+        "Standard",
+        ""
+      ],
+      "nextParagraphStyle": "Normal 0",
+      "paragraphFormat": {
+        "alignment": "wdAlignParagraphLeft",
+        "leftIndent": 42.55,
+        "rightIndent": 0.0,
+        "firstLineIndent": -42.55,
+        "spaceBefore": 18.0,
+        "spaceAfter": 6.0,
+        "lineSpacing": 14.5,
+        "lineSpacingRule": "wdLineSpaceAtLeast",
+        "keepTogether": 0,
+        "keepWithNext": -1,
+        "pageBreakBefore": 0,
+        "widowControl": -1,
+        "outlineLevel": "wdOutlineLevel1"
+      },
+      "tabStops": [
+        {
+          "position": 42.55,
+          "alignment": "wdAlignTabList",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 70.9,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 99.25,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 127.6,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 155.95,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        }
+      ],
+      "fontFormat": {
+        "name": "Verdana",
+        "size": 10.0,
+        "bold": true,
+        "italic": false,
+        "underline": "wdUnderlineNone",
+        "allCaps": true,
+        "smallCaps": false,
+        "strikeThrough": false,
+        "doubleStrikeThrough": false,
+        "subscript": false,
+        "superscript": false,
+        "color": "wdColorAutomatic",
+        "colorRGB": "auto",
+        "scaling": 100,
+        "spacing": 0.0,
+        "position": 0,
+        "kerning": 14.0
+      },
+      "listFormat": {
+        "hasListTemplate": true,
+        "outlineNumbered": true,
+        "linkedLevel": 1,
+        "templateFingerprint": "1:wdListNumberStyleUppercaseRoman:%1.|2:wdListNumberStyleUppercaseLetter:%2.|3:wdListNumberStyleArabic:%3.|4:wdListNumberStyleLowercaseLetter:%4)|5:wdListNumberStyleLowercaseRoman:(%5)|6:wdListNumberStyleArabic:%6.|7:wdListNumberStyleArabic:%6.%7|8:wdListNumberStyleArabic:%6.%7.%8|9:wdListNumberStyleLowercaseLetter:%9)|",
+        "levels": [
+          {
+            "level": 1,
+            "numberStyle": "wdListNumberStyleUppercaseRoman",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%1.",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 2,
+            "numberStyle": "wdListNumberStyleUppercaseLetter",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%2.",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 3,
+            "numberStyle": "wdListNumberStyleArabic",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%3.",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 4,
+            "numberStyle": "wdListNumberStyleLowercaseLetter",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%4)",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 5,
+            "numberStyle": "wdListNumberStyleLowercaseRoman",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "(%5)",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 6,
+            "numberStyle": "wdListNumberStyleArabic",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%6.",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 7,
+            "numberStyle": "wdListNumberStyleArabic",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%6.%7",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 8,
+            "numberStyle": "wdListNumberStyleArabic",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%6.%7.%8",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 9,
+            "numberStyle": "wdListNumberStyleLowercaseLetter",
+            "textPosition": 70.9,
+            "tabPosition": 70.9,
+            "numberPosition": 42.55,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%9)",
+            "trailingCharacter": "wdTrailingTab"
+          }
+        ]
+      }
+    },
+    "Überschrift 2": {
+      "wdStyleName": "Überschrift 2",
+      "styleType": "wdStyleTypeParagraph",
+      "builtIn": true,
+      "baseStyleHierarchy": [
+        "Normal 0",
+        "Standard",
+        ""
+      ],
+      "nextParagraphStyle": "Normal 0",
+      "paragraphFormat": {
+        "alignment": "wdAlignParagraphLeft",
+        "leftIndent": 42.55,
+        "rightIndent": 0.0,
+        "firstLineIndent": -42.55,
+        "spaceBefore": 6.0,
+        "spaceAfter": 6.0,
+        "lineSpacing": 14.5,
+        "lineSpacingRule": "wdLineSpaceAtLeast",
+        "keepTogether": 0,
+        "keepWithNext": -1,
+        "pageBreakBefore": 0,
+        "widowControl": -1,
+        "outlineLevel": "wdOutlineLevel2"
+      },
+      "tabStops": [
+        {
+          "position": 42.55,
+          "alignment": "wdAlignTabList",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 70.9,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 99.25,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 127.6,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 155.95,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        }
+      ],
+      "fontFormat": {
+        "name": "Verdana",
+        "size": 10.0,
+        "bold": true,
+        "italic": false,
+        "underline": "wdUnderlineNone",
+        "allCaps": false,
+        "smallCaps": false,
+        "strikeThrough": false,
+        "doubleStrikeThrough": false,
+        "subscript": false,
+        "superscript": false,
+        "color": "wdColorAutomatic",
+        "colorRGB": "auto",
+        "scaling": 100,
+        "spacing": 0.0,
+        "position": 0,
+        "kerning": 0.0
+      },
+      "listFormat": {
+        "hasListTemplate": true,
+        "outlineNumbered": true,
+        "linkedLevel": 2,
+        "templateFingerprint": "1:wdListNumberStyleUppercaseRoman:%1.|2:wdListNumberStyleUppercaseLetter:%2.|3:wdListNumberStyleArabic:%3.|4:wdListNumberStyleLowercaseLetter:%4)|5:wdListNumberStyleLowercaseRoman:(%5)|6:wdListNumberStyleArabic:%6.|7:wdListNumberStyleArabic:%6.%7|8:wdListNumberStyleArabic:%6.%7.%8|9:wdListNumberStyleLowercaseLetter:%9)|",
+        "levels": [
+          {
+            "level": 1,
+            "numberStyle": "wdListNumberStyleUppercaseRoman",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%1.",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 2,
+            "numberStyle": "wdListNumberStyleUppercaseLetter",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%2.",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 3,
+            "numberStyle": "wdListNumberStyleArabic",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%3.",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 4,
+            "numberStyle": "wdListNumberStyleLowercaseLetter",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%4)",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 5,
+            "numberStyle": "wdListNumberStyleLowercaseRoman",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "(%5)",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 6,
+            "numberStyle": "wdListNumberStyleArabic",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%6.",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 7,
+            "numberStyle": "wdListNumberStyleArabic",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%6.%7",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 8,
+            "numberStyle": "wdListNumberStyleArabic",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%6.%7.%8",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 9,
+            "numberStyle": "wdListNumberStyleLowercaseLetter",
+            "textPosition": 70.9,
+            "tabPosition": 70.9,
+            "numberPosition": 42.55,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%9)",
+            "trailingCharacter": "wdTrailingTab"
+          }
+        ]
+      }
+    },
+    "Überschrift 3": {
+      "wdStyleName": "Überschrift 3",
+      "styleType": "wdStyleTypeParagraph",
+      "builtIn": true,
+      "baseStyleHierarchy": [
+        "Normal 0",
+        "Standard",
+        ""
+      ],
+      "nextParagraphStyle": "Normal 0",
+      "paragraphFormat": {
+        "alignment": "wdAlignParagraphLeft",
+        "leftIndent": 42.55,
+        "rightIndent": 0.0,
+        "firstLineIndent": -42.55,
+        "spaceBefore": 6.0,
+        "spaceAfter": 6.0,
+        "lineSpacing": 14.5,
+        "lineSpacingRule": "wdLineSpaceAtLeast",
+        "keepTogether": 0,
+        "keepWithNext": -1,
+        "pageBreakBefore": 0,
+        "widowControl": -1,
+        "outlineLevel": "wdOutlineLevel3"
+      },
+      "tabStops": [
+        {
+          "position": 42.55,
+          "alignment": "wdAlignTabList",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 70.9,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 99.25,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 127.6,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 155.95,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        }
+      ],
+      "fontFormat": {
+        "name": "Verdana",
+        "size": 10.0,
+        "bold": false,
+        "italic": false,
+        "underline": "wdUnderlineNone",
+        "allCaps": false,
+        "smallCaps": false,
+        "strikeThrough": false,
+        "doubleStrikeThrough": false,
+        "subscript": false,
+        "superscript": false,
+        "color": "wdColorAutomatic",
+        "colorRGB": "auto",
+        "scaling": 100,
+        "spacing": 0.0,
+        "position": 0,
+        "kerning": 0.0
+      },
+      "listFormat": {
+        "hasListTemplate": true,
+        "outlineNumbered": true,
+        "linkedLevel": 3,
+        "templateFingerprint": "1:wdListNumberStyleUppercaseRoman:%1.|2:wdListNumberStyleUppercaseLetter:%2.|3:wdListNumberStyleArabic:%3.|4:wdListNumberStyleLowercaseLetter:%4)|5:wdListNumberStyleLowercaseRoman:(%5)|6:wdListNumberStyleArabic:%6.|7:wdListNumberStyleArabic:%6.%7|8:wdListNumberStyleArabic:%6.%7.%8|9:wdListNumberStyleLowercaseLetter:%9)|",
+        "levels": [
+          {
+            "level": 1,
+            "numberStyle": "wdListNumberStyleUppercaseRoman",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%1.",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 2,
+            "numberStyle": "wdListNumberStyleUppercaseLetter",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%2.",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 3,
+            "numberStyle": "wdListNumberStyleArabic",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%3.",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 4,
+            "numberStyle": "wdListNumberStyleLowercaseLetter",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%4)",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 5,
+            "numberStyle": "wdListNumberStyleLowercaseRoman",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "(%5)",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 6,
+            "numberStyle": "wdListNumberStyleArabic",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%6.",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 7,
+            "numberStyle": "wdListNumberStyleArabic",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%6.%7",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 8,
+            "numberStyle": "wdListNumberStyleArabic",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%6.%7.%8",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 9,
+            "numberStyle": "wdListNumberStyleLowercaseLetter",
+            "textPosition": 70.9,
+            "tabPosition": 70.9,
+            "numberPosition": 42.55,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%9)",
+            "trailingCharacter": "wdTrailingTab"
+          }
+        ]
+      }
+    },
+    "Normal 1": {
+      "wdStyleName": "Normal 1",
+      "styleType": "wdStyleTypeParagraph",
+      "builtIn": false,
+      "baseStyleHierarchy": [
+        "Normal 0",
+        "Standard",
+        ""
+      ],
+      "nextParagraphStyle": "Normal 1",
+      "paragraphFormat": {
+        "alignment": "wdAlignParagraphJustify",
+        "leftIndent": 42.55,
+        "rightIndent": 0.0,
+        "firstLineIndent": 0.0,
+        "spaceBefore": 6.0,
+        "spaceAfter": 6.0,
+        "lineSpacing": 14.5,
+        "lineSpacingRule": "wdLineSpaceAtLeast",
+        "keepTogether": 0,
+        "keepWithNext": 0,
+        "pageBreakBefore": 0,
+        "widowControl": -1,
+        "outlineLevel": "wdOutlineLevelBodyText"
+      },
+      "tabStops": [
+        {
+          "position": 42.55,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 70.9,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 99.25,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 127.6,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 155.95,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        }
+      ],
+      "fontFormat": {
+        "name": "Verdana",
+        "size": 10.0,
+        "bold": false,
+        "italic": false,
+        "underline": "wdUnderlineNone",
+        "allCaps": false,
+        "smallCaps": false,
+        "strikeThrough": false,
+        "doubleStrikeThrough": false,
+        "subscript": false,
+        "superscript": false,
+        "color": "wdColorAutomatic",
+        "colorRGB": "auto",
+        "scaling": 100,
+        "spacing": 0.0,
+        "position": 0,
+        "kerning": 0.0
+      }
+    },
+    "Normal 2": {
+      "wdStyleName": "Normal 2",
+      "styleType": "wdStyleTypeParagraph",
+      "builtIn": false,
+      "baseStyleHierarchy": [
+        "Normal 0",
+        "Standard",
+        ""
+      ],
+      "nextParagraphStyle": "Normal 2",
+      "paragraphFormat": {
+        "alignment": "wdAlignParagraphJustify",
+        "leftIndent": 70.9,
+        "rightIndent": 0.0,
+        "firstLineIndent": 0.0,
+        "spaceBefore": 6.0,
+        "spaceAfter": 6.0,
+        "lineSpacing": 14.5,
+        "lineSpacingRule": "wdLineSpaceAtLeast",
+        "keepTogether": 0,
+        "keepWithNext": 0,
+        "pageBreakBefore": 0,
+        "widowControl": -1,
+        "outlineLevel": "wdOutlineLevelBodyText"
+      },
+      "tabStops": [
+        {
+          "position": 42.55,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 70.9,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 99.25,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 127.6,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 155.95,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        }
+      ],
+      "fontFormat": {
+        "name": "Verdana",
+        "size": 10.0,
+        "bold": false,
+        "italic": false,
+        "underline": "wdUnderlineNone",
+        "allCaps": false,
+        "smallCaps": false,
+        "strikeThrough": false,
+        "doubleStrikeThrough": false,
+        "subscript": false,
+        "superscript": false,
+        "color": "wdColorAutomatic",
+        "colorRGB": "auto",
+        "scaling": 100,
+        "spacing": 0.0,
+        "position": 0,
+        "kerning": 0.0
+      }
+    },
+    "Buchstabiert1": {
+      "wdStyleName": "Buchstabiert1",
+      "styleType": "wdStyleTypeParagraph",
+      "builtIn": false,
+      "baseStyleHierarchy": [
+        "Überschrift 8",
+        "Normal 0",
+        "Standard",
+        ""
+      ],
+      "nextParagraphStyle": "Buchstabiert1",
+      "paragraphFormat": {
+        "alignment": "wdAlignParagraphJustify",
+        "leftIndent": 70.9,
+        "rightIndent": 0.0,
+        "firstLineIndent": -28.35,
+        "spaceBefore": 6.0,
+        "spaceAfter": 6.0,
+        "lineSpacing": 14.5,
+        "lineSpacingRule": "wdLineSpaceAtLeast",
+        "keepTogether": -1,
+        "keepWithNext": -1,
+        "pageBreakBefore": 0,
+        "widowControl": -1,
+        "outlineLevel": "wdOutlineLevel9"
+      },
+      "tabStops": [
+        {
+          "position": 70.9,
+          "alignment": "wdAlignTabList",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 99.25,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 127.6,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 155.95,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        }
+      ],
+      "fontFormat": {
+        "name": "Verdana",
+        "size": 10.0,
+        "bold": false,
+        "italic": false,
+        "underline": "wdUnderlineNone",
+        "allCaps": false,
+        "smallCaps": false,
+        "strikeThrough": false,
+        "doubleStrikeThrough": false,
+        "subscript": false,
+        "superscript": false,
+        "color": "wdColorAutomatic",
+        "colorRGB": "auto",
+        "scaling": 100,
+        "spacing": 0.0,
+        "position": 0,
+        "kerning": 0.0
+      },
+      "listFormat": {
+        "hasListTemplate": true,
+        "outlineNumbered": true,
+        "linkedLevel": 9,
+        "templateFingerprint": "1:wdListNumberStyleUppercaseRoman:%1.|2:wdListNumberStyleUppercaseLetter:%2.|3:wdListNumberStyleArabic:%3.|4:wdListNumberStyleLowercaseLetter:%4)|5:wdListNumberStyleLowercaseRoman:(%5)|6:wdListNumberStyleArabic:%6.|7:wdListNumberStyleArabic:%6.%7|8:wdListNumberStyleArabic:%6.%7.%8|9:wdListNumberStyleLowercaseLetter:%9)|",
+        "levels": [
+          {
+            "level": 1,
+            "numberStyle": "wdListNumberStyleUppercaseRoman",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%1.",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 2,
+            "numberStyle": "wdListNumberStyleUppercaseLetter",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%2.",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 3,
+            "numberStyle": "wdListNumberStyleArabic",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%3.",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 4,
+            "numberStyle": "wdListNumberStyleLowercaseLetter",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%4)",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 5,
+            "numberStyle": "wdListNumberStyleLowercaseRoman",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "(%5)",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 6,
+            "numberStyle": "wdListNumberStyleArabic",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%6.",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 7,
+            "numberStyle": "wdListNumberStyleArabic",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%6.%7",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 8,
+            "numberStyle": "wdListNumberStyleArabic",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%6.%7.%8",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 9,
+            "numberStyle": "wdListNumberStyleLowercaseLetter",
+            "textPosition": 70.9,
+            "tabPosition": 70.9,
+            "numberPosition": 42.55,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%9)",
+            "trailingCharacter": "wdTrailingTab"
+          }
+        ]
+      }
+    },
+    "Buchstabiert2": {
+      "wdStyleName": "Buchstabiert2",
+      "styleType": "wdStyleTypeParagraph",
+      "builtIn": false,
+      "baseStyleHierarchy": [
+        "Buchstabiert1",
+        "Überschrift 8",
+        "Normal 0",
+        "Standard",
+        ""
+      ],
+      "nextParagraphStyle": "Buchstabiert2",
+      "paragraphFormat": {
+        "alignment": "wdAlignParagraphJustify",
+        "leftIndent": 99.25,
+        "rightIndent": 0.0,
+        "firstLineIndent": -28.35,
+        "spaceBefore": 6.0,
+        "spaceAfter": 6.0,
+        "lineSpacing": 14.5,
+        "lineSpacingRule": "wdLineSpaceAtLeast",
+        "keepTogether": -1,
+        "keepWithNext": -1,
+        "pageBreakBefore": 0,
+        "widowControl": -1,
+        "outlineLevel": "wdOutlineLevel9"
+      },
+      "tabStops": [
+        {
+          "position": 99.25,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 127.6,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 155.95,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        }
+      ],
+      "fontFormat": {
+        "name": "Verdana",
+        "size": 10.0,
+        "bold": false,
+        "italic": false,
+        "underline": "wdUnderlineNone",
+        "allCaps": false,
+        "smallCaps": false,
+        "strikeThrough": false,
+        "doubleStrikeThrough": false,
+        "subscript": false,
+        "superscript": false,
+        "color": "wdColorAutomatic",
+        "colorRGB": "auto",
+        "scaling": 100,
+        "spacing": 0.0,
+        "position": 0,
+        "kerning": 0.0
+      },
+      "listFormat": {
+        "hasListTemplate": true,
+        "outlineNumbered": true,
+        "linkedLevel": 1,
+        "templateFingerprint": "1:wdListNumberStyleLowercaseRoman:%1.|2:wdListNumberStyleLowercaseLetter:%2.|3:wdListNumberStyleLowercaseRoman:%3.|4:wdListNumberStyleArabic:%4.|5:wdListNumberStyleLowercaseLetter:%5.|6:wdListNumberStyleLowercaseRoman:%6.|7:wdListNumberStyleArabic:%7.|8:wdListNumberStyleLowercaseLetter:%8.|9:wdListNumberStyleLowercaseRoman:%9.|",
+        "levels": [
+          {
+            "level": 1,
+            "numberStyle": "wdListNumberStyleLowercaseRoman",
+            "textPosition": 106.9,
+            "tabPosition": 9999999.0,
+            "numberPosition": 88.9,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%1.",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 2,
+            "numberStyle": "wdListNumberStyleLowercaseLetter",
+            "textPosition": 142.9,
+            "tabPosition": 9999999.0,
+            "numberPosition": 124.9,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%2.",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 3,
+            "numberStyle": "wdListNumberStyleLowercaseRoman",
+            "textPosition": 178.9,
+            "tabPosition": 9999999.0,
+            "numberPosition": 169.9,
+            "alignment": "wdListLevelAlignRight",
+            "startAt": 1,
+            "numberFormat": "%3.",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 4,
+            "numberStyle": "wdListNumberStyleArabic",
+            "textPosition": 214.9,
+            "tabPosition": 9999999.0,
+            "numberPosition": 196.9,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%4.",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 5,
+            "numberStyle": "wdListNumberStyleLowercaseLetter",
+            "textPosition": 250.9,
+            "tabPosition": 9999999.0,
+            "numberPosition": 232.9,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%5.",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 6,
+            "numberStyle": "wdListNumberStyleLowercaseRoman",
+            "textPosition": 286.9,
+            "tabPosition": 9999999.0,
+            "numberPosition": 277.9,
+            "alignment": "wdListLevelAlignRight",
+            "startAt": 1,
+            "numberFormat": "%6.",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 7,
+            "numberStyle": "wdListNumberStyleArabic",
+            "textPosition": 322.9,
+            "tabPosition": 9999999.0,
+            "numberPosition": 304.9,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%7.",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 8,
+            "numberStyle": "wdListNumberStyleLowercaseLetter",
+            "textPosition": 358.9,
+            "tabPosition": 9999999.0,
+            "numberPosition": 340.9,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%8.",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 9,
+            "numberStyle": "wdListNumberStyleLowercaseRoman",
+            "textPosition": 394.9,
+            "tabPosition": 9999999.0,
+            "numberPosition": 385.9,
+            "alignment": "wdListLevelAlignRight",
+            "startAt": 1,
+            "numberFormat": "%9.",
+            "trailingCharacter": "wdTrailingTab"
+          }
+        ]
+      }
+    },
+    "Punktiert 1": {
+      "wdStyleName": "Punktiert 1",
+      "styleType": "wdStyleTypeParagraph",
+      "builtIn": false,
+      "baseStyleHierarchy": [
+        "Normal 0",
+        "Standard",
+        ""
+      ],
+      "nextParagraphStyle": "Punktiert 1",
+      "paragraphFormat": {
+        "alignment": "wdAlignParagraphJustify",
+        "leftIndent": 70.9,
+        "rightIndent": 0.0,
+        "firstLineIndent": -28.35,
+        "spaceBefore": 6.0,
+        "spaceAfter": 6.0,
+        "lineSpacing": 14.5,
+        "lineSpacingRule": "wdLineSpaceAtLeast",
+        "keepTogether": 0,
+        "keepWithNext": 0,
+        "pageBreakBefore": 0,
+        "widowControl": -1,
+        "outlineLevel": "wdOutlineLevelBodyText"
+      },
+      "tabStops": [
+        {
+          "position": 42.55,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 70.9,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 99.25,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 127.6,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 155.95,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        }
+      ],
+      "fontFormat": {
+        "name": "Verdana",
+        "size": 10.0,
+        "bold": false,
+        "italic": false,
+        "underline": "wdUnderlineNone",
+        "allCaps": false,
+        "smallCaps": false,
+        "strikeThrough": false,
+        "doubleStrikeThrough": false,
+        "subscript": false,
+        "superscript": false,
+        "color": "wdColorAutomatic",
+        "colorRGB": "auto",
+        "scaling": 100,
+        "spacing": 0.0,
+        "position": 0,
+        "kerning": 0.0
+      },
+      "listFormat": {
+        "hasListTemplate": true,
+        "outlineNumbered": false,
+        "linkedLevel": 1,
+        "templateFingerprint": "1:wdListNumberStyleBullet:|",
+        "levels": [
+          {
+            "level": 1,
+            "numberStyle": "wdListNumberStyleBullet",
+            "textPosition": 70.9,
+            "tabPosition": 70.9,
+            "numberPosition": 42.55,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "bulletFont": "Symbol",
+            "bulletCharCode": 61623,
+            "numberFormat": "",
+            "trailingCharacter": "wdTrailingTab"
+          }
+        ]
+      }
+    },
+    "Punktiert 2": {
+      "wdStyleName": "Punktiert 2",
+      "styleType": "wdStyleTypeParagraph",
+      "builtIn": false,
+      "baseStyleHierarchy": [
+        "Normal 0",
+        "Standard",
+        ""
+      ],
+      "nextParagraphStyle": "Punktiert 2",
+      "paragraphFormat": {
+        "alignment": "wdAlignParagraphJustify",
+        "leftIndent": 99.25,
+        "rightIndent": 0.0,
+        "firstLineIndent": -28.35,
+        "spaceBefore": 6.0,
+        "spaceAfter": 6.0,
+        "lineSpacing": 14.5,
+        "lineSpacingRule": "wdLineSpaceAtLeast",
+        "keepTogether": 0,
+        "keepWithNext": 0,
+        "pageBreakBefore": 0,
+        "widowControl": -1,
+        "outlineLevel": "wdOutlineLevelBodyText"
+      },
+      "tabStops": [
+        {
+          "position": 42.55,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 70.9,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 99.25,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 127.6,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 155.95,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        }
+      ],
+      "fontFormat": {
+        "name": "Verdana",
+        "size": 10.0,
+        "bold": false,
+        "italic": false,
+        "underline": "wdUnderlineNone",
+        "allCaps": false,
+        "smallCaps": false,
+        "strikeThrough": false,
+        "doubleStrikeThrough": false,
+        "subscript": false,
+        "superscript": false,
+        "color": "wdColorAutomatic",
+        "colorRGB": "auto",
+        "scaling": 100,
+        "spacing": 0.0,
+        "position": 0,
+        "kerning": 0.0
+      },
+      "listFormat": {
+        "hasListTemplate": true,
+        "outlineNumbered": true,
+        "linkedLevel": 1,
+        "templateFingerprint": "1:wdListNumberStyleBullet:|2:wdListNumberStyleBullet:o|3:wdListNumberStyleBullet:|4:wdListNumberStyleBullet:|5:wdListNumberStyleBullet:o|6:wdListNumberStyleBullet:|7:wdListNumberStyleBullet:|8:wdListNumberStyleBullet:o|9:wdListNumberStyleBullet:|",
+        "levels": [
+          {
+            "level": 1,
+            "numberStyle": "wdListNumberStyleBullet",
+            "textPosition": 99.25,
+            "tabPosition": 99.25,
+            "numberPosition": 70.9,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "bulletFont": "Symbol",
+            "bulletCharCode": 61623,
+            "numberFormat": "",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 2,
+            "numberStyle": "wdListNumberStyleBullet",
+            "textPosition": 72.0,
+            "tabPosition": 72.0,
+            "numberPosition": 54.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "bulletFont": "Courier New",
+            "bulletCharCode": 111,
+            "numberFormat": "",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 3,
+            "numberStyle": "wdListNumberStyleBullet",
+            "textPosition": 108.0,
+            "tabPosition": 108.0,
+            "numberPosition": 90.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "bulletFont": "Wingdings",
+            "bulletCharCode": 61607,
+            "numberFormat": "",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 4,
+            "numberStyle": "wdListNumberStyleBullet",
+            "textPosition": 144.0,
+            "tabPosition": 144.0,
+            "numberPosition": 126.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "bulletFont": "Symbol",
+            "bulletCharCode": 61623,
+            "numberFormat": "",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 5,
+            "numberStyle": "wdListNumberStyleBullet",
+            "textPosition": 180.0,
+            "tabPosition": 180.0,
+            "numberPosition": 162.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "bulletFont": "Courier New",
+            "bulletCharCode": 111,
+            "numberFormat": "",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 6,
+            "numberStyle": "wdListNumberStyleBullet",
+            "textPosition": 216.0,
+            "tabPosition": 216.0,
+            "numberPosition": 198.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "bulletFont": "Wingdings",
+            "bulletCharCode": 61607,
+            "numberFormat": "",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 7,
+            "numberStyle": "wdListNumberStyleBullet",
+            "textPosition": 252.0,
+            "tabPosition": 252.0,
+            "numberPosition": 234.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "bulletFont": "Symbol",
+            "bulletCharCode": 61623,
+            "numberFormat": "",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 8,
+            "numberStyle": "wdListNumberStyleBullet",
+            "textPosition": 288.0,
+            "tabPosition": 288.0,
+            "numberPosition": 270.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "bulletFont": "Courier New",
+            "bulletCharCode": 111,
+            "numberFormat": "",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 9,
+            "numberStyle": "wdListNumberStyleBullet",
+            "textPosition": 324.0,
+            "tabPosition": 324.0,
+            "numberPosition": 306.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "bulletFont": "Wingdings",
+            "bulletCharCode": 61607,
+            "numberFormat": "",
+            "trailingCharacter": "wdTrailingTab"
+          }
+        ]
+      }
+    },
+    "Überschrift 4": {
+      "wdStyleName": "Überschrift 4",
+      "styleType": "wdStyleTypeParagraph",
+      "builtIn": true,
+      "baseStyleHierarchy": [
+        "Normal 0",
+        "Standard",
+        ""
+      ],
+      "nextParagraphStyle": "Normal 0",
+      "paragraphFormat": {
+        "alignment": "wdAlignParagraphLeft",
+        "leftIndent": 42.55,
+        "rightIndent": 0.0,
+        "firstLineIndent": -42.55,
+        "spaceBefore": 6.0,
+        "spaceAfter": 6.0,
+        "lineSpacing": 14.5,
+        "lineSpacingRule": "wdLineSpaceAtLeast",
+        "keepTogether": 0,
+        "keepWithNext": -1,
+        "pageBreakBefore": 0,
+        "widowControl": -1,
+        "outlineLevel": "wdOutlineLevel4"
+      },
+      "tabStops": [
+        {
+          "position": 42.55,
+          "alignment": "wdAlignTabList",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 70.9,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 99.25,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 127.6,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 155.95,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        }
+      ],
+      "fontFormat": {
+        "name": "Verdana",
+        "size": 10.0,
+        "bold": false,
+        "italic": false,
+        "underline": "wdUnderlineNone",
+        "allCaps": false,
+        "smallCaps": false,
+        "strikeThrough": false,
+        "doubleStrikeThrough": false,
+        "subscript": false,
+        "superscript": false,
+        "color": "wdColorAutomatic",
+        "colorRGB": "auto",
+        "scaling": 100,
+        "spacing": 0.0,
+        "position": 0,
+        "kerning": 0.0
+      },
+      "listFormat": {
+        "hasListTemplate": true,
+        "outlineNumbered": true,
+        "linkedLevel": 4,
+        "templateFingerprint": "1:wdListNumberStyleUppercaseRoman:%1.|2:wdListNumberStyleUppercaseLetter:%2.|3:wdListNumberStyleArabic:%3.|4:wdListNumberStyleLowercaseLetter:%4)|5:wdListNumberStyleLowercaseRoman:(%5)|6:wdListNumberStyleArabic:%6.|7:wdListNumberStyleArabic:%6.%7|8:wdListNumberStyleArabic:%6.%7.%8|9:wdListNumberStyleLowercaseLetter:%9)|",
+        "levels": [
+          {
+            "level": 1,
+            "numberStyle": "wdListNumberStyleUppercaseRoman",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%1.",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 2,
+            "numberStyle": "wdListNumberStyleUppercaseLetter",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%2.",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 3,
+            "numberStyle": "wdListNumberStyleArabic",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%3.",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 4,
+            "numberStyle": "wdListNumberStyleLowercaseLetter",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%4)",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 5,
+            "numberStyle": "wdListNumberStyleLowercaseRoman",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "(%5)",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 6,
+            "numberStyle": "wdListNumberStyleArabic",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%6.",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 7,
+            "numberStyle": "wdListNumberStyleArabic",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%6.%7",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 8,
+            "numberStyle": "wdListNumberStyleArabic",
+            "textPosition": 42.55,
+            "tabPosition": 42.55,
+            "numberPosition": 0.0,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%6.%7.%8",
+            "trailingCharacter": "wdTrailingTab"
+          },
+          {
+            "level": 9,
+            "numberStyle": "wdListNumberStyleLowercaseLetter",
+            "textPosition": 70.9,
+            "tabPosition": 70.9,
+            "numberPosition": 42.55,
+            "alignment": "wdListLevelAlignLeft",
+            "startAt": 1,
+            "numberFormat": "%9)",
+            "trailingCharacter": "wdTrailingTab"
+          }
+        ]
+      }
+    },
+    "Zitat 1": {
+      "wdStyleName": "Zitat 1",
+      "styleType": "wdStyleTypeParagraph",
+      "builtIn": false,
+      "baseStyleHierarchy": [
+        "Normal 0",
+        "Standard",
+        ""
+      ],
+      "nextParagraphStyle": "Normal 0",
+      "paragraphFormat": {
+        "alignment": "wdAlignParagraphJustify",
+        "leftIndent": 42.55,
+        "rightIndent": 28.35,
+        "firstLineIndent": 0.0,
+        "spaceBefore": 6.0,
+        "spaceAfter": 6.0,
+        "lineSpacing": 14.5,
+        "lineSpacingRule": "wdLineSpaceAtLeast",
+        "keepTogether": 0,
+        "keepWithNext": 0,
+        "pageBreakBefore": 0,
+        "widowControl": -1,
+        "outlineLevel": "wdOutlineLevelBodyText"
+      },
+      "tabStops": [
+        {
+          "position": 42.55,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 70.9,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 99.25,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 127.6,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 155.95,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        }
+      ],
+      "fontFormat": {
+        "name": "Verdana",
+        "size": 10.0,
+        "bold": false,
+        "italic": true,
+        "underline": "wdUnderlineNone",
+        "allCaps": false,
+        "smallCaps": false,
+        "strikeThrough": false,
+        "doubleStrikeThrough": false,
+        "subscript": false,
+        "superscript": false,
+        "color": "wdColorAutomatic",
+        "colorRGB": "auto",
+        "scaling": 100,
+        "spacing": 0.0,
+        "position": 0,
+        "kerning": 0.0
+      }
+    },
+    "Zitat 2": {
+      "wdStyleName": "Zitat 2",
+      "styleType": "wdStyleTypeParagraph",
+      "builtIn": false,
+      "baseStyleHierarchy": [
+        "Normal 0",
+        "Standard",
+        ""
+      ],
+      "nextParagraphStyle": "Normal 0",
+      "paragraphFormat": {
+        "alignment": "wdAlignParagraphJustify",
+        "leftIndent": 70.9,
+        "rightIndent": 28.35,
+        "firstLineIndent": 0.0,
+        "spaceBefore": 6.0,
+        "spaceAfter": 6.0,
+        "lineSpacing": 14.5,
+        "lineSpacingRule": "wdLineSpaceAtLeast",
+        "keepTogether": 0,
+        "keepWithNext": 0,
+        "pageBreakBefore": 0,
+        "widowControl": -1,
+        "outlineLevel": "wdOutlineLevelBodyText"
+      },
+      "tabStops": [
+        {
+          "position": 42.55,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 70.9,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 99.25,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 127.6,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 155.95,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        }
+      ],
+      "fontFormat": {
+        "name": "Verdana",
+        "size": 10.0,
+        "bold": false,
+        "italic": true,
+        "underline": "wdUnderlineNone",
+        "allCaps": false,
+        "smallCaps": false,
+        "strikeThrough": false,
+        "doubleStrikeThrough": false,
+        "subscript": false,
+        "superscript": false,
+        "color": "wdColorAutomatic",
+        "colorRGB": "auto",
+        "scaling": 100,
+        "spacing": 0.0,
+        "position": 0,
+        "kerning": 0.0
+      }
+    },
+    "Normal 0": {
+      "wdStyleName": "Normal 0",
+      "styleType": "wdStyleTypeParagraph",
+      "builtIn": false,
+      "baseStyleHierarchy": [
+        "Standard",
+        ""
+      ],
+      "nextParagraphStyle": "Normal 0",
+      "paragraphFormat": {
+        "alignment": "wdAlignParagraphJustify",
+        "leftIndent": 0.0,
+        "rightIndent": 0.0,
+        "firstLineIndent": 0.0,
+        "spaceBefore": 6.0,
+        "spaceAfter": 6.0,
+        "lineSpacing": 14.5,
+        "lineSpacingRule": "wdLineSpaceAtLeast",
+        "keepTogether": 0,
+        "keepWithNext": 0,
+        "pageBreakBefore": 0,
+        "widowControl": -1,
+        "outlineLevel": "wdOutlineLevelBodyText"
+      },
+      "tabStops": [
+        {
+          "position": 42.55,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 70.9,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 99.25,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 127.6,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        },
+        {
+          "position": 155.95,
+          "alignment": "wdAlignTabLeft",
+          "leader": "wdTabLeaderSpaces"
+        }
+      ],
+      "fontFormat": {
+        "name": "Verdana",
+        "size": 10.0,
+        "bold": false,
+        "italic": false,
+        "underline": "wdUnderlineNone",
+        "allCaps": false,
+        "smallCaps": false,
+        "strikeThrough": false,
+        "doubleStrikeThrough": false,
+        "subscript": false,
+        "superscript": false,
+        "color": "wdColorAutomatic",
+        "colorRGB": "auto",
+        "scaling": 100,
+        "spacing": 0.0,
+        "position": 0,
+        "kerning": 0.0
+      }
+    }
+  }
+}

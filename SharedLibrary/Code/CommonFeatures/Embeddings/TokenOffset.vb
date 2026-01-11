@@ -3,7 +3,6 @@
 
 ' =============================================================================
 ' File: TokenOffset.vb
-' Part of: Red Ink Shared Library
 ' Purpose: Lightweight data model representing a single token with its character-level
 '          position in source text. Used for aligning tokenized text back to original
 '          documents for highlighting, extraction, and span-based operations.

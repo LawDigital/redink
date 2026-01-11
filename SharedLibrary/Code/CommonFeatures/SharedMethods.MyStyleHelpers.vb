@@ -1,7 +1,26 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
-
+' =============================================================================
+' File: SharedMethods.MyStyleHelpers.vb
+' Purpose: Reads a MyStyle prompt definition file and lets the user select one
+'          applicable prompt for a given calling application ("Word" / "Outlook").
+'
+' File Format (INI-like, line-based):
+'  - Empty lines are ignored.
+'  - Comment lines starting with ";" are ignored.
+'  - Supported entry formats:
+'      * "App|Title|Prompt"  (App: "Word", "Outlook", or "All")
+'      * "Title|Prompt"      (legacy format; treated as "All|Title|Prompt")
+'
+' Behavior:
+'  - Filters entries by application ("All" or the normalized calling application).
+'  - Sorts entries by title (case-insensitive).
+'  - Displays entries as "Title (App)" and enforces unique display labels.
+'  - Optional "None" entry (ID 0) returns "NONE".
+'  - Uses SharedMethods.SelectValue to show the picker UI and returns the selected
+'    prompt string; returns "ERROR" on validation/processing errors.
+' =============================================================================
 
 Option Strict On
 Option Explicit On
@@ -9,9 +28,25 @@ Option Explicit On
 Namespace SharedLibrary
     Partial Public Class SharedMethods
 
+        ''' <summary>
+        ''' Helpers for loading MyStyle prompt definitions and showing a selection UI.
+        ''' </summary>
         Public NotInheritable Class MyStyleHelpers
 
-            ' Main entry point
+            ''' <summary>
+            ''' Reads a MyStyle prompt definition file, filters prompts for the specified application,
+            ''' shows a picker UI, and returns the selected prompt text.
+            ''' </summary>
+            ''' <param name="iniPath">Full path to the MyStyle prompt definition file.</param>
+            ''' <param name="callingApplication">Application name ("Word" or "Outlook").</param>
+            ''' <param name="defaultValue">Default selected item ID passed to the picker.</param>
+            ''' <param name="promptText">Prompt text shown in the picker UI.</param>
+            ''' <param name="headerText">Optional header text shown in the picker UI.</param>
+            ''' <param name="AddNone">If <c>True</c>, adds a "None" option returning "NONE" (ID 0).</param>
+            ''' <returns>
+            ''' The selected prompt text, or "NONE" if "None" was selected or no applicable items exist,
+            ''' or "ERROR" on validation/processing errors.
+            ''' </returns>
             Public Shared Function SelectPromptFromMyStyle(ByVal iniPath As System.String,
                                                    ByVal callingApplication As System.String,
                                                    Optional ByVal defaultValue As System.Int32 = 0,
@@ -159,6 +194,12 @@ Namespace SharedLibrary
 
             ' ------- Helpers (Shared) -------
 
+            ''' <summary>
+            ''' Normalizes an application name to "Word", "Outlook", or "All".
+            ''' Returns <c>Nothing</c> for unknown/empty inputs.
+            ''' </summary>
+            ''' <param name="input">Raw application name read from file or passed in by the caller.</param>
+            ''' <returns>"Word", "Outlook", "All", or <c>Nothing</c>.</returns>
             Private Shared Function NormalizeAppName(ByVal input As System.String) As System.String
                 If input Is Nothing Then
                     Return Nothing
@@ -177,6 +218,12 @@ Namespace SharedLibrary
                 Return Nothing
             End Function
 
+            ''' <summary>
+            ''' Ensures a unique display label by appending a numeric suffix if needed.
+            ''' </summary>
+            ''' <param name="display">The proposed display label.</param>
+            ''' <param name="seen">Case-insensitive set used to track already-used display labels.</param>
+            ''' <returns>The original display label if unique; otherwise a suffixed variant.</returns>
             Private Shared Function MakeUniqueDisplay(ByVal display As System.String,
                                               ByVal seen As System.Collections.Generic.HashSet(Of System.String)) As System.String
                 If seen.Contains(display) = False Then
@@ -194,10 +241,23 @@ Namespace SharedLibrary
                 End While
             End Function
 
-            ' Local container for parsed entries (not called directly)
+            ''' <summary>
+            ''' Container for one parsed MyStyle entry (application, title, prompt).
+            ''' </summary>
             Private NotInheritable Class MyStyleEntry
+                ''' <summary>
+                ''' Normalized application name ("Word", "Outlook", or "All").
+                ''' </summary>
                 Public Property App As System.String
+
+                ''' <summary>
+                ''' Entry title shown to the user.
+                ''' </summary>
                 Public Property Title As System.String
+
+                ''' <summary>
+                ''' Prompt text returned when this entry is selected.
+                ''' </summary>
                 Public Property Prompt As System.String
             End Class
 

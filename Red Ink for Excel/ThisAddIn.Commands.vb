@@ -1,9 +1,6 @@
 ﻿' Part of "Red Ink for Excel"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
-Option Strict On
-Option Explicit On
-
 ' =============================================================================
 ' File: ThisAddIn.Commands.vb
 ' Purpose: Defines command methods invoked by the UI for translation, correction,
@@ -22,13 +19,13 @@ Option Explicit On
 '          controlling range vs cell-by-cell vs formula handling, color check, pane usage,
 '          file object inclusion, batch path, worksheet content, and shortening percentage.
 '   - Freestyle(...) parses prefix triggers (CellByCellPrefix, CellByCellPrefix2, TextPrefix,
-'       TextPrefix2, BubblesPrefix, PanePrefix, BatchPrefix, PurePrefix, ExtTrigger,
+'       TextPrefix2, BubblesPrefix, PanePrefix, BatchPrefix, PurePrefix, ExtTrigger, ExtTriggerFixed,
 '       ExtWSTrigger, ColorTrigger, ObjectTrigger, ObjectTrigger2) to derive execution mode
 '       and augment OtherPrompt with file content, worksheet text, color analysis, file object
 '       reference, clipboard object, or batch directory processing.
 '   - Batch processing: collects a target insertion line (LineNumber) and directory path
 '       (BatchPath), validating presence of allowedExtensions.
-'   - File/worksheet inclusion: replaces ExtTrigger occurrences with tagged file content; adds
+'   - File/worksheet inclusion: replaces ExtTrigger and ExtTriggerFixed occurrences with tagged file content; adds
 '       additional worksheet text via GatherSelectedWorksheets when ExtWSTrigger is present.
 '   - Settings: builds dictionaries of setting names/descriptions and displays a settings window;
 '       refreshes menus via AddContextMenu using a SplashScreen.
@@ -38,8 +35,12 @@ Option Explicit On
 '       operations; result is not explicitly returned (no Return statement) in this file.
 ' =============================================================================
 
+Option Strict On
+Option Explicit On
+
 Imports System.Diagnostics
 Imports System.Drawing
+Imports System.IO
 Imports System.Text.RegularExpressions
 Imports System.Threading.Tasks
 Imports System.Windows.Forms
@@ -48,6 +49,518 @@ Imports SharedLibrary.SharedLibrary.SharedMethods
 Imports SLib = SharedLibrary.SharedLibrary.SharedMethods
 
 Partial Public Class ThisAddIn
+
+
+    ' Add these at the top of the ThisAddIn partial class, before the command methods
+
+    ''' <summary>
+    ''' Helper class to track file loading results for the Freestyle external file embedding feature.
+    ''' </summary>
+    Private Class FileLoadingContext
+        Public Property GlobalDocumentCounter As Integer = 0
+        Public Property LoadedFiles As New List(Of Tuple(Of String, Integer))() ' (path, charCount)
+        Public Property FailedFiles As New List(Of String)()
+        Public Property IgnoredFilesPerDir As New Dictionary(Of String, Integer)(StringComparer.OrdinalIgnoreCase)
+
+        ''' <summary>OCR mode: 0=not set, 1=enable for all, 2=ask individually</summary>
+        Public Property DirectoryOCRMode As Integer = 0
+
+        ''' <summary>Tracks the current directory being processed (for including path in output).</summary>
+        Public Property CurrentDirectoryPath As String = ""
+
+        ''' <summary>Total number of files expected to be loaded (for determining if filename should be included).</summary>
+        Public Property ExpectedFileCount As Integer = 0
+
+        ''' <summary>PDFs that heuristics suggest may contain images/scanned content but OCR was not performed.</summary>
+        Public Property PdfsWithPossibleImages As New List(Of String)()
+
+        ''' <summary>Maximum files to load from a single directory.</summary>
+        Public Const MaxFilesPerDirectory As Integer = 50
+
+        ''' <summary>Whether to recurse into subdirectories when loading a directory.</summary>
+        Public Const RecurseDirectories As Boolean = False
+
+        ''' <summary>Ask user confirmation if directory has more than this many files.</summary>
+        Public Const ConfirmDirectoryFileCount As Integer = 10
+
+        ''' <summary>Supported file extensions for GetFileContent (Excel version supports fewer types).</summary>
+        Public Shared ReadOnly SupportedExtensions As String() = {
+        ".txt", ".rtf", ".doc", ".docx", ".pdf", ".ini", ".csv", ".log",
+        ".json", ".xml", ".html", ".htm"
+    }
+    End Class
+
+    ''' <summary>
+    ''' Checks if a trigger placeholder at a given index is wrapped in XML tags.
+    ''' </summary>
+    ''' <param name="prompt">The prompt string to check.</param>
+    ''' <param name="idx">The index of the trigger in the prompt.</param>
+    ''' <param name="trigger">The trigger text to look for.</param>
+    ''' <returns>True if the trigger is wrapped in XML tags, False otherwise.</returns>
+    Private Function IsWrappedInXml(prompt As String, idx As Integer, trigger As String) As Boolean
+        Dim wrappedPattern As String = "<(?<name>[A-Za-z][\w\-]*)\b[^>]*>\s*" & Regex.Escape(trigger) & "\s*</\k<name>>"
+        Dim matches As MatchCollection = Regex.Matches(prompt, wrappedPattern, RegexOptions.IgnoreCase)
+        For Each m As Match In matches
+            If idx >= m.Index AndAlso idx < m.Index + m.Length Then
+                Return True
+            End If
+        Next
+        Return False
+    End Function
+
+    Private Async Function LoadSingleFileAsync(filePath As String, isWrapped As Boolean, ctx As FileLoadingContext, Optional isFromDirectory As Boolean = False) As Task(Of String)
+        Try
+            Dim doOCR As Boolean = False
+            Dim askUser As Boolean = False
+
+            ' Check if OCR is available at all
+            Dim ocrAvailable As Boolean = SharedMethods.IsOcrAvailable(_context)
+
+            ' Determine OCR behavior based on context and availability
+            If ocrAvailable Then
+                If isFromDirectory Then
+                    If ctx.DirectoryOCRMode = 1 Then
+                        doOCR = True
+                        askUser = False
+                    ElseIf ctx.DirectoryOCRMode = 2 Then
+                        doOCR = True
+                        askUser = True
+                    Else
+                        doOCR = True
+                        askUser = True
+                    End If
+                Else
+                    doOCR = True
+                    askUser = True
+                End If
+            Else
+                doOCR = False
+                askUser = False
+            End If
+
+            ' Load file content with determined OCR settings
+            Dim fileResult = Await GetFileContentEx(
+                optionalFilePath:=filePath,
+                Silent:=True,
+                DoOCR:=doOCR,
+                AskUser:=askUser
+            )
+
+            ' Track PDFs that may have incomplete content
+            If fileResult.PdfMayBeIncomplete Then
+                ctx.PdfsWithPossibleImages.Add(filePath)
+            End If
+
+            If String.IsNullOrWhiteSpace(fileResult.Content) Then
+                ctx.FailedFiles.Add(filePath)
+                Return ""
+            End If
+
+            ctx.GlobalDocumentCounter += 1
+            Dim docNum As Integer = ctx.GlobalDocumentCounter
+            ctx.LoadedFiles.Add(Tuple.Create(filePath, fileResult.Content.Length))
+
+            If isWrapped Then
+                Return fileResult.Content
+            Else
+                Dim includeFileInfo As Boolean = (ctx.ExpectedFileCount > 1) OrElse isFromDirectory
+
+                Dim openTag As String
+                Dim closeTag As String = "</document" & docNum.ToString() & ">"
+
+                If includeFileInfo Then
+                    Dim fileName As String = Path.GetFileName(filePath)
+                    If isFromDirectory AndAlso Not String.IsNullOrEmpty(ctx.CurrentDirectoryPath) Then
+                        openTag = "<document" & docNum.ToString() & " directory=""" & ctx.CurrentDirectoryPath & """ filename=""" & fileName & """>"
+                    Else
+                        openTag = "<document" & docNum.ToString() & " filename=""" & fileName & """>"
+                    End If
+                Else
+                    openTag = "<document" & docNum.ToString() & ">"
+                End If
+
+                Return openTag & fileResult.Content & closeTag
+            End If
+        Catch ex As Exception
+            ctx.FailedFiles.Add(filePath)
+            Return ""
+        End Try
+    End Function
+    ''' <summary>
+    ''' Loads all supported files from a directory and returns their combined content.
+    ''' Prompts for OCR only when there are multiple PDF files in the directory.
+    ''' </summary>
+    ''' <param name="dirPath">The directory path to load files from.</param>
+    ''' <param name="isWrapped">If True, the directory trigger was already wrapped in XML (not used for individual files).</param>
+    ''' <param name="ctx">The file loading context for tracking state.</param>
+    ''' <returns>Combined content of all files, or "ABORT" if user cancelled, or empty string on error.</returns>
+    Private Async Function LoadDirectoryFilesAsync(dirPath As String, isWrapped As Boolean, ctx As FileLoadingContext) As Task(Of String)
+        Try
+            If Not IO.Directory.Exists(dirPath) Then
+                ctx.FailedFiles.Add(dirPath)
+                Return ""
+            End If
+
+            Dim searchOption As IO.SearchOption = If(FileLoadingContext.RecurseDirectories, IO.SearchOption.AllDirectories, IO.SearchOption.TopDirectoryOnly)
+            Dim allFiles As String() = IO.Directory.GetFiles(dirPath, "*.*", searchOption)
+
+            ' Filter to supported extensions
+            Dim supportedFiles As New List(Of String)()
+            Dim ignoredCount As Integer = 0
+
+            For Each f In allFiles
+                Dim ext As String = IO.Path.GetExtension(f).ToLowerInvariant()
+                If FileLoadingContext.SupportedExtensions.Contains(ext) Then
+                    supportedFiles.Add(f)
+                Else
+                    ignoredCount += 1
+                End If
+            Next
+
+            If ignoredCount > 0 Then
+                ctx.IgnoredFilesPerDir(dirPath) = ignoredCount
+            End If
+
+            ' Check if too many files
+            If supportedFiles.Count > FileLoadingContext.MaxFilesPerDirectory Then
+                Dim truncateAnswer As Integer = ShowCustomYesNoBox(
+                $"The directory '{dirPath}' contains {supportedFiles.Count} supported files, but the maximum is {FileLoadingContext.MaxFilesPerDirectory}." & vbCrLf & vbCrLf &
+                $"Only the first {FileLoadingContext.MaxFilesPerDirectory} files will be loaded. Continue?",
+                "Yes, continue", "No, abort")
+                If truncateAnswer <> 1 Then
+                    Return "ABORT"
+                End If
+                supportedFiles = supportedFiles.Take(FileLoadingContext.MaxFilesPerDirectory).ToList()
+            ElseIf supportedFiles.Count > FileLoadingContext.ConfirmDirectoryFileCount Then
+                Dim confirmAnswer As Integer = ShowCustomYesNoBox(
+                $"The directory '{dirPath}' contains {supportedFiles.Count} files to load. Continue?",
+                "Yes, continue", "No, abort")
+                If confirmAnswer <> 1 Then
+                    Return "ABORT"
+                End If
+            End If
+
+            If supportedFiles.Count = 0 Then
+                ShowCustomMessageBox($"No supported files found in directory '{dirPath}'.")
+                Return ""
+            End If
+
+            ' Count PDF files in the directory
+            Dim pdfFiles As List(Of String) = supportedFiles.Where(Function(f) IO.Path.GetExtension(f).Equals(".pdf", StringComparison.OrdinalIgnoreCase)).ToList()
+            Dim pdfCount As Integer = pdfFiles.Count
+
+            ' Reset directory OCR mode for this directory
+            ctx.DirectoryOCRMode = 0
+
+            ' Only ask about OCR if there are multiple PDF files in the directory AND OCR is available
+            If pdfCount > 1 AndAlso SharedMethods.IsOcrAvailable(_context) Then
+                Dim ocrChoice As Integer = ShowCustomYesNoBox(
+                    $"The directory '{dirPath}' contains {pdfCount} PDF files." & vbCrLf & vbCrLf &
+                    "Some PDFs may require OCR (optical character recognition) to extract text from scanned documents or images." & vbCrLf & vbCrLf &
+                    "How would you like to handle OCR for these PDF files?",
+                    "Enable OCR for all PDFs",
+                    "Choose individually for each PDF",
+                    "Close this window to abort")
+
+                If ocrChoice = 0 Then
+                    ' User closed the dialog - abort
+                    Return "ABORT"
+                ElseIf ocrChoice = 1 Then
+                    ' Enable OCR for all without asking
+                    ctx.DirectoryOCRMode = 1
+                ElseIf ocrChoice = 2 Then
+                    ' Ask individually for each PDF
+                    ctx.DirectoryOCRMode = 2
+                End If
+            End If
+            ' If pdfCount <= 1 or OCR not available, we don't set DirectoryOCRMode
+
+            ' Set the current directory path for inclusion in document tags
+            ctx.CurrentDirectoryPath = dirPath
+
+            ' Update expected file count to include these directory files
+            ctx.ExpectedFileCount += supportedFiles.Count
+
+            ' Load all files - each file gets its own document wrapper with incrementing counter
+            Dim resultBuilder As New System.Text.StringBuilder()
+            For Each filePath In supportedFiles
+                ' Always wrap individual files from directory with document tags
+                ' Pass isFromDirectory=True to use directory OCR mode for PDFs
+                Dim fileContent As String = Await LoadSingleFileAsync(filePath, False, ctx, isFromDirectory:=True)
+                If Not String.IsNullOrWhiteSpace(fileContent) Then
+                    resultBuilder.Append(fileContent)
+                End If
+            Next
+
+            ' Clear the current directory path after processing
+            ctx.CurrentDirectoryPath = ""
+
+            Return resultBuilder.ToString()
+        Catch ex As Exception
+            ctx.FailedFiles.Add(dirPath)
+            Return ""
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Processes all external file/directory triggers in the prompt ({doc}, {dir}, and fixed paths).
+    ''' Processes triggers in positional order to maintain correct document numbering.
+    ''' </summary>
+    ''' <param name="prompt">The prompt to process.</param>
+    ''' <returns>A tuple containing: (success flag, modified prompt). If success is False, the operation should abort.</returns>
+    Private Async Function ProcessExternalFileTriggers(prompt As String) As Task(Of (Success As Boolean, ModifiedPrompt As String))
+        ' Check if any file triggers are present
+        Dim hasExtTriggers As Boolean = prompt.IndexOf(ExtTrigger, StringComparison.OrdinalIgnoreCase) >= 0
+        Dim hasDirTriggers As Boolean = prompt.IndexOf(ExtDirTrigger, StringComparison.OrdinalIgnoreCase) >= 0
+        Dim hasFixedPaths As Boolean = False
+
+        ' Prepare fixed path pattern
+        Dim fixedPrefix As String = ""
+        Dim fixedSuffix As String = ""
+        Dim patternFixed As String = ""
+
+        If Not String.IsNullOrWhiteSpace(ExtTriggerFixed) AndAlso
+       ExtTriggerFixed.IndexOf("[path]", StringComparison.OrdinalIgnoreCase) >= 0 Then
+            Dim pathTokenIndex As Integer = ExtTriggerFixed.IndexOf("[path]", StringComparison.OrdinalIgnoreCase)
+            fixedPrefix = ExtTriggerFixed.Substring(0, pathTokenIndex)
+            fixedSuffix = ExtTriggerFixed.Substring(pathTokenIndex + "[path]".Length)
+            If Not (String.IsNullOrEmpty(fixedPrefix) AndAlso String.IsNullOrEmpty(fixedSuffix)) Then
+                patternFixed = Regex.Escape(fixedPrefix) & "(?<path>.*?)" & Regex.Escape(fixedSuffix)
+                hasFixedPaths = Regex.IsMatch(prompt, patternFixed, RegexOptions.IgnoreCase)
+            End If
+        End If
+
+        ' No triggers present - nothing to do
+        If Not hasExtTriggers AndAlso Not hasDirTriggers AndAlso Not hasFixedPaths Then
+            Return (True, prompt)
+        End If
+
+        ' Create context for tracking
+        Dim ctx As New FileLoadingContext()
+
+        ' Count total expected files/triggers to determine if filenames should be included
+        ' This is an estimate - actual count may differ after user selections
+        Dim extTriggerCount As Integer = Regex.Matches(prompt, Regex.Escape(ExtTrigger), RegexOptions.IgnoreCase).Count
+        Dim dirTriggerCount As Integer = Regex.Matches(prompt, Regex.Escape(ExtDirTrigger), RegexOptions.IgnoreCase).Count
+        Dim fixedPathCount As Integer = 0
+        If Not String.IsNullOrEmpty(patternFixed) Then
+            fixedPathCount = Regex.Matches(prompt, patternFixed, RegexOptions.IgnoreCase).Count
+        End If
+        ctx.ExpectedFileCount = extTriggerCount + fixedPathCount
+        ' Note: dirTriggerCount files are added in LoadDirectoryFilesAsync
+
+        ' NOTE: OCR prompt is handled per-directory when multiple PDFs are found,
+        ' or per-file with AskUser=True for individual files/single PDFs
+
+        ' === Process all triggers in positional order ===
+        ' We need to find the first trigger of any type, process it, then repeat
+        ' This ensures document numbering follows the order in the prompt
+
+        Dim continueProcessing As Boolean = True
+        While continueProcessing
+            ' Find position of each trigger type
+            Dim extIdx As Integer = prompt.IndexOf(ExtTrigger, StringComparison.OrdinalIgnoreCase)
+            Dim dirIdx As Integer = prompt.IndexOf(ExtDirTrigger, StringComparison.OrdinalIgnoreCase)
+            Dim fixedIdx As Integer = -1
+            Dim fixedMatch As Match = Nothing
+
+            If Not String.IsNullOrEmpty(patternFixed) Then
+                fixedMatch = Regex.Match(prompt, patternFixed, RegexOptions.IgnoreCase Or RegexOptions.Singleline)
+                If fixedMatch.Success Then
+                    ' Check if it looks like a path
+                    Dim candidatePath As String = If(fixedMatch.Groups("path").Value, "").Trim()
+                    ' Remove quotes if present
+                    If (candidatePath.Length >= 2 AndAlso candidatePath.StartsWith("""") AndAlso candidatePath.EndsWith("""")) OrElse
+                   (candidatePath.Length >= 2 AndAlso candidatePath.StartsWith("'") AndAlso candidatePath.EndsWith("'")) Then
+                        candidatePath = candidatePath.Substring(1, candidatePath.Length - 2).Trim()
+                    End If
+                    Dim looksLikePath As Boolean = candidatePath.Contains("\") OrElse candidatePath.Contains("/") OrElse candidatePath.Contains(":")
+                    If looksLikePath Then
+                        fixedIdx = fixedMatch.Index
+                    Else
+                        fixedMatch = Nothing ' Not a path, ignore this match
+                    End If
+                End If
+            End If
+
+            ' Determine which trigger comes first
+            Dim minIdx As Integer = Integer.MaxValue
+            Dim triggerType As String = ""
+
+            If extIdx >= 0 AndAlso extIdx < minIdx Then
+                minIdx = extIdx
+                triggerType = "ext"
+            End If
+            If dirIdx >= 0 AndAlso dirIdx < minIdx Then
+                minIdx = dirIdx
+                triggerType = "dir"
+            End If
+            If fixedIdx >= 0 AndAlso fixedIdx < minIdx Then
+                minIdx = fixedIdx
+                triggerType = "fixed"
+            End If
+
+            ' No more triggers found
+            If triggerType = "" Then
+                continueProcessing = False
+                Continue While
+            End If
+
+            ' Process the first trigger found
+            Select Case triggerType
+                Case "ext"
+                    ' Process {doc} trigger - individual file, use OCR with AskUser=True
+                    Globals.ThisAddIn.DragDropFormLabel = "Select a file to include"
+                    Dim selectedFile As String = ""
+
+                    Using frm As New DragDropForm(DragDropMode.FileOnly)
+                        If frm.ShowDialog() = DialogResult.OK Then
+                            selectedFile = frm.SelectedFilePath
+                        End If
+                    End Using
+
+                    Dim replacementText As String = ""
+
+                    If Not String.IsNullOrWhiteSpace(selectedFile) Then
+                        Dim isWrapped As Boolean = IsWrappedInXml(prompt, extIdx, ExtTrigger)
+                        ' Individual file - isFromDirectory=False means OCR with AskUser=True
+                        replacementText = Await LoadSingleFileAsync(selectedFile, isWrapped, ctx, isFromDirectory:=False)
+                    Else
+                        Dim answer As Integer = ShowCustomYesNoBox(
+                        "No file selected. Do you want to continue or abort?",
+                        "Continue", "Abort")
+                        If answer <> 1 Then Return (False, prompt)
+                    End If
+
+                    prompt = prompt.Substring(0, extIdx) & replacementText & prompt.Substring(extIdx + ExtTrigger.Length)
+
+                Case "dir"
+                    ' Process {dir} trigger - directory processing with OCR prompt for multiple PDFs
+                    Globals.ThisAddIn.DragDropFormLabel = "Select a directory to include"
+                    Dim selectedDir As String = ""
+
+                    Using frm As New DragDropForm(DragDropMode.DirectoryOnly)
+                        If frm.ShowDialog() = DialogResult.OK Then
+                            selectedDir = frm.SelectedFilePath
+                        End If
+                    End Using
+
+                    Dim replacementText As String = ""
+
+                    If Not String.IsNullOrWhiteSpace(selectedDir) Then
+                        Dim isWrapped As Boolean = IsWrappedInXml(prompt, dirIdx, ExtDirTrigger)
+                        replacementText = Await LoadDirectoryFilesAsync(selectedDir, isWrapped, ctx)
+
+                        If replacementText = "ABORT" Then
+                            Return (False, prompt)
+                        End If
+                    Else
+                        Dim answer As Integer = ShowCustomYesNoBox(
+                        "No directory selected. Do you want to continue or abort?",
+                        "Continue", "Abort")
+                        If answer <> 1 Then Return (False, prompt)
+                    End If
+
+                    prompt = prompt.Substring(0, dirIdx) & replacementText & prompt.Substring(dirIdx + ExtDirTrigger.Length)
+
+                Case "fixed"
+                    ' Process fixed path trigger
+                    Dim tokenText As String = fixedMatch.Value
+                    Dim candidatePath As String = If(fixedMatch.Groups("path").Value, "").Trim()
+
+                    ' Remove quotes if present
+                    If (candidatePath.Length >= 2 AndAlso candidatePath.StartsWith("""") AndAlso candidatePath.EndsWith("""")) OrElse
+                   (candidatePath.Length >= 2 AndAlso candidatePath.StartsWith("'") AndAlso candidatePath.EndsWith("'")) Then
+                        candidatePath = candidatePath.Substring(1, candidatePath.Length - 2).Trim()
+                    End If
+
+                    ' Expand environment variables
+                    Dim expandedPath As String = SLib.ExpandEnvironmentVariables(candidatePath)
+                    If Not String.IsNullOrWhiteSpace(expandedPath) Then
+                        candidatePath = expandedPath
+                    End If
+
+                    Dim replacementText As String = ""
+
+                    ' Check if it's wrapped in XML
+                    Dim wrappedPatternTemplate As String = "<(?<name>[A-Za-z][\w\-]*)\b[^>]*>[^<]*" & Regex.Escape(tokenText) & "[^<]*</\k<name>>"
+                    Dim isWrapped As Boolean = Regex.IsMatch(prompt, wrappedPatternTemplate, RegexOptions.IgnoreCase Or RegexOptions.Singleline)
+
+                    ' Determine if it's a file or directory
+                    If IO.File.Exists(candidatePath) Then
+                        ' Individual file - isFromDirectory=False means OCR with AskUser=True
+                        replacementText = Await LoadSingleFileAsync(candidatePath, isWrapped, ctx, isFromDirectory:=False)
+                    ElseIf IO.Directory.Exists(candidatePath) Then
+                        ' Directory - will prompt for OCR if multiple PDFs found
+                        replacementText = Await LoadDirectoryFilesAsync(candidatePath, isWrapped, ctx)
+                        If replacementText = "ABORT" Then
+                            Return (False, prompt)
+                        End If
+                    Else
+                        ctx.FailedFiles.Add(candidatePath)
+                        replacementText = ""
+                    End If
+
+                    prompt = prompt.Substring(0, fixedMatch.Index) & replacementText & prompt.Substring(fixedMatch.Index + fixedMatch.Length)
+            End Select
+        End While
+
+        ' === Show summary and confirm before proceeding ===
+        If ctx.LoadedFiles.Count > 0 OrElse ctx.FailedFiles.Count > 0 OrElse ctx.IgnoredFilesPerDir.Count > 0 OrElse ctx.PdfsWithPossibleImages.Count > 0 Then
+            Dim summary As New System.Text.StringBuilder()
+            summary.AppendLine("File inclusion summary:")
+            summary.AppendLine("")
+
+            If ctx.LoadedFiles.Count > 0 Then
+                summary.AppendLine($"Successfully loaded ({ctx.LoadedFiles.Count} files):")
+                Dim totalChars As Integer = 0
+                For Each item In ctx.LoadedFiles
+                    summary.AppendLine($"  • {item.Item1} ({item.Item2:N0} chars)")
+                    totalChars += item.Item2
+                Next
+                summary.AppendLine($"  Total: {totalChars:N0} characters")
+                summary.AppendLine("")
+            End If
+
+            If ctx.PdfsWithPossibleImages.Count > 0 Then
+                summary.AppendLine($"⚠ PDFs that may contain images/scans ({ctx.PdfsWithPossibleImages.Count} file(s)):")
+                For Each f In ctx.PdfsWithPossibleImages
+                    summary.AppendLine($"  • {Path.GetFileName(f)}")
+                Next
+                summary.AppendLine("  (Text extraction may be incomplete - OCR was not available or not performed)")
+                summary.AppendLine("")
+            End If
+
+            If ctx.FailedFiles.Count > 0 Then
+                summary.AppendLine($"Failed to load ({ctx.FailedFiles.Count} items):")
+                For Each f In ctx.FailedFiles
+                    summary.AppendLine($"  • {f}")
+                Next
+                summary.AppendLine("")
+            End If
+
+            ' ... rest of summary ...
+
+            If ctx.IgnoredFilesPerDir.Count > 0 Then
+                summary.AppendLine("Ignored unsupported files:")
+                For Each kvp In ctx.IgnoredFilesPerDir
+                    summary.AppendLine($"  • {kvp.Key}: {kvp.Value} file(s)")
+                Next
+                summary.AppendLine("")
+            End If
+
+            Dim proceedAnswer As Integer = ShowCustomYesNoBox(
+            summary.ToString().TrimEnd() & vbCrLf & vbCrLf & "Do you want to proceed with these files?",
+            "Proceed", "Abort")
+
+            If proceedAnswer <> 1 Then
+                Return (False, prompt)
+            End If
+        End If
+
+        Return (True, prompt)
+    End Function
+
 
     ''' <summary>
     ''' Translates the selected range to INI_Language1 using SP_Translate. Sets TranslateLanguage.
@@ -305,8 +818,9 @@ Partial Public Class ThisAddIn
         Dim BatchInstruct As String = $"use '{BatchPrefix}' if to process a directory of files"
         Dim BubblesInstruct As String = $"use '{BubblesPrefix}' for inserting comments only"
         Dim PaneInstruct As String = $"use '{PanePrefix}' for using the pane"
-        Dim ExtInstruct As String = $"; insert '{ExtTrigger}' (multiple times) for text of (a) file(s) (txt, docx, pdf) or '{ExtWSTrigger}' to add more worksheet(s)"
+        Dim ExtInstruct As String = $"; insert '{ExtTrigger}' or '{ExtTriggerFixed}' (multiple times) for including the text of (a) file(s) (txt, docx, pdf), {ExtDirTrigger} for a directory of text files, or '{ExtWSTrigger}' to add more worksheet(s)"
         Dim AddonInstruct As String = $"; add '{ColorTrigger}' to check for colorcodes"
+        Dim NoFormulasInstruct As String = $"; add '{NoFormulasTrigger}' to ignore formulas in cells"
         Dim ObjectInstruct As String = $"; add '{ObjectTrigger}'/'{ObjectTrigger2}' for adding a file object"
         Dim FileObject As String = ""
         Dim InsertWS As String = ""
@@ -321,6 +835,9 @@ Partial Public Class ThisAddIn
                 DoFileObject = True
             End If
         End If
+
+        AddonInstruct += NoFormulasInstruct.Replace("; add", ",")
+
         Dim PromptLibInstruct As String = ""
         If INI_PromptLib Then
             PromptLibInstruct = " or press 'OK' for the prompt library"
@@ -497,64 +1014,25 @@ Partial Public Class ThisAddIn
             DoColor = True
             OtherPrompt = Regex.Replace(OtherPrompt, Regex.Escape(ColorTrigger), "", RegexOptions.IgnoreCase)
         End If
-        If Not String.IsNullOrEmpty(OtherPrompt) AndAlso OtherPrompt.IndexOf(ExtTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
-            ' Count total occurrences first (case-insensitive) so inserted file text containing {doc} does not trigger extra loops.
-            Dim totalOccurrences As Integer = Regex.Matches(OtherPrompt, Regex.Escape(ExtTrigger), RegexOptions.IgnoreCase).Count
-            ' Detect if a placeholder occurrence is already enclosed by any tag, e.g. <tag>...{doc}...</tag>
-            Dim wrappedPattern As String =
-                "<(?<name>[A-Za-z][\w\-]*)\b[^>]*>[^<]*" & Regex.Escape(ExtTrigger) & "[^<]*</\k<name>>"
-            If totalOccurrences = 1 Then
-                ' Single-occurrence behavior with optional auto-wrapping
-                DragDropFormLabel = ""
-                DragDropFormFilter = ""
-                Dim doc As String = Await GetFileContent(Nothing, False, Not String.IsNullOrWhiteSpace(INI_APICall_Object), True)
-                If String.IsNullOrWhiteSpace(doc) Then
-                    ShowCustomMessageBox("The file you have selected is empty or not supported - exiting.")
-                    Return False
-                End If
-                Dim isWrapped As Boolean = Regex.IsMatch(OtherPrompt, wrappedPattern, RegexOptions.IgnoreCase)
-                Dim replacementText As String = If(isWrapped, doc, $"<document>{doc}</document>")
-                OtherPrompt = Regex.Replace(OtherPrompt, Regex.Escape(ExtTrigger), replacementText, RegexOptions.IgnoreCase)
-                ShowCustomMessageBox($"This file will be included in your prompt where you have referred to {ExtTrigger}: " & vbCrLf & vbCrLf & doc)
-            Else
-                ' Multi-occurrence behavior: prompt separately for each placeholder
-                For occurrence As Integer = 1 To totalOccurrences
-                    Dim idx As Integer = OtherPrompt.IndexOf(ExtTrigger, StringComparison.OrdinalIgnoreCase)
-                    If idx < 0 Then Exit For
-                    DragDropFormLabel = ""
-                    DragDropFormFilter = ""
-                    Dim docPart As String = Await GetFileContent(Nothing, False, Not String.IsNullOrWhiteSpace(INI_APICall_Object), True)
-                    If String.IsNullOrWhiteSpace(docPart) Then
-                        Dim answer As Integer = ShowCustomYesNoBox($"The file you selected for occurrence #{occurrence} is empty, not supported or you cancelled the upload. Do you want to continue or abort?", "Continue", "Abort")
-                        If answer = 2 Then Return False
-                    End If
 
-                    Dim replacementText As String = ""
-
-                    If Not String.IsNullOrEmpty(docPart) Then
-                        ' Determine if this specific occurrence is already wrapped by any tag pair
-                        Dim isWrappedThis As Boolean = False
-                        Dim mcol As MatchCollection = Regex.Matches(OtherPrompt, wrappedPattern, RegexOptions.IgnoreCase)
-                        For Each m As Match In mcol
-                            If idx >= m.Index AndAlso idx < m.Index + m.Length Then
-                                isWrappedThis = True
-                                Exit For
-                            End If
-                        Next
-                        replacementText = If(isWrappedThis, docPart, $"<document{occurrence}>{docPart}</document{occurrence}>")
-
-                    End If
-
-                    ' Replace only the first remaining occurrence (manual replacement keeps later placeholders intact)
-                    OtherPrompt = OtherPrompt.Substring(0, idx) & replacementText & OtherPrompt.Substring(idx + ExtTrigger.Length)
-
-                    If Not String.IsNullOrWhiteSpace(docPart) Then
-                        ShowCustomMessageBox($"This file will be included at occurrence #{occurrence} (of {totalOccurrences}) where you used {ExtTrigger}:" &
-                                         vbCrLf & vbCrLf & docPart)
-                    End If
-                Next
-            End If
+        If Not String.IsNullOrEmpty(OtherPrompt) And OtherPrompt.IndexOf(NoFormulasTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
+            DoFormulas = False
+            OtherPrompt = Regex.Replace(OtherPrompt, Regex.Escape(NoFormulasTrigger), "", RegexOptions.IgnoreCase)
         End If
+
+        ' === External file/directory embedding ===
+        ' Handles {doc}, {dir}, and {path} triggers with unified document numbering
+
+        Dim fileResult = Await ProcessExternalFileTriggers(OtherPrompt)
+        If Not fileResult.Success Then
+            Return False
+        End If
+        OtherPrompt = fileResult.ModifiedPrompt
+
+        Debug.WriteLine(OtherPrompt)
+
+        ' == worksheet embedding ===
+
         If Not String.IsNullOrEmpty(OtherPrompt) And OtherPrompt.IndexOf(ExtWSTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
             If Not DoRange Then
                 ShowCustomMessageBox($"{ExtWSTrigger} cannot be combined with cell by cell processing - exiting.")
@@ -605,6 +1083,9 @@ Partial Public Class ThisAddIn
         End If
     End Function
 
+
+
+
     Private _win As HelpMeInky = Nothing
 
     ''' <summary>
@@ -629,13 +1110,15 @@ Partial Public Class ThisAddIn
             {"Timeout_2", "Timeout of {model2}"},
             {"DoubleS", "Convert '" & ChrW(223) & "' to 'ss'"},
             {"NoEmDash", "Convert em to en dash"},
+            {"Ignore", "Activate 'Ignore' prompt (for 'prompt injection' protection)"},
             {"PreCorrection", "Additional instruction for prompts"},
             {"PostCorrection", "Prompt to apply after queries"},
             {"Language1", "Default translation language 1"},
             {"Language2", "Default translation language 2"},
             {"PromptLibPath", "Prompt library file"},
             {"PromptLibPathLocal", "Prompt library file (local)"},
-            {"DefaultPrefix", "Default prefix to use in 'Freestyle'"}
+            {"DefaultPrefix", "Default prefix to use in 'Freestyle'"},
+            {"Location", "Location information to use, e.g., in 'Freestyle'"}
         }
         Dim SettingsTips As New Dictionary(Of String, String) From {
             {"Temperature", "The higher, the more creative the LLM will be (0.0-2.0)"},
@@ -644,13 +1127,15 @@ Partial Public Class ThisAddIn
             {"Timeout_2", "In milliseconds"},
             {"DoubleS", "For Switzerland"},
             {"NoEmDash", "This will convert long dashes typically generated by LLMs but that are not commonly used (thus suggesting that the text has been AI generated)"},
+            {"Ignore", "Allow system prompts to use {Ignore} as a placeholder for text to ignore, such as malicious prompt injections; Freestyle and some other commands use {Ignore}; the chatbots have an independent protection"},
             {"PreCorrection", "Add prompting text that will be added to all basic requests (e.g., for special language tasks)"},
             {"PostCorrection", "Add a prompt that will be applied to each result before it is further processed (slow!)"},
             {"Language1", "The language (in English) that will be used for the first quick access button in the ribbon"},
             {"Language2", "The language (in English) that will be used for the second quick access button in the ribbon"},
             {"PromptLibPath", "The filename (including path, support environmental variables) for your prompt library (if any)"},
             {"PromptLibPathLocal", "The filename (including path, support environmental variables) for your local prompt library (if any)"},
-            {"DefaultPrefix", "You can define here the default prefix to use within 'Freestyle' if no other prefix is used (will be added authomatically)."}
+            {"DefaultPrefix", "You can define here the default prefix to use within 'Freestyle' if no other prefix is used (will be added authomatically)."},
+            {"Location", "Provide location information (e.g., 'We are in Zurich, Switzerland') to be used in 'Freestyle', chatbot and some other prompts that contain {Location} to get more location specific results."}
         }
         ShowSettingsWindow(Settings, SettingsTips)
         Dim splash As New SplashScreen("Updating menu following your changes ...")

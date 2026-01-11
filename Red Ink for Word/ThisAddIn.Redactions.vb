@@ -1323,6 +1323,10 @@ Partial Public Class ThisAddIn
         Private Shared Function SetDllDirectory(lpPathName As String) As Boolean
         End Function
 
+        Public Shared Sub EnsurePdfiumLoadedPublic()
+            EnsurePdfiumLoaded()
+        End Sub
+
         ''' <summary>
         ''' Preloads pdfium.dll from bin directory or x64 subdirectory to avoid loading failures.
         ''' Uses kernel32.dll LoadLibrary and SetDllDirectory APIs.

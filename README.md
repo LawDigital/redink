@@ -31,7 +31,12 @@ Red Ink is an add-in for Microsoft Office on Windows that allows you to access y
 * In Excel, Red Ink can also be used to analyse large database tables (e.g. for processing a data breach) using AI
 * Directories of documents can be analyzed in series (e.g., in a due diligence process for specific clauses) or data can be extracted (e.g., to create a timeline); the result is displayed as a table in Excel
 * Directories of files can be automatically renamed by AI based on their content
-* Finally, Red Ink also offers a local chat bot that provides access to all configured language models via any browser on the user’s computer, even without logging in – ideal for researching or brainstorming outside of Word, Excel, or Outlook
+* Word styles can be automatically applied based on the content of a document (in order to get a document in line with house style)
+* Configuration settings for models, special services and more can be imported from outside sources and updated automatically (see https://redink.ai/get-more)
+* Various features allow you to protect yourself against prompt injection attacks
+* Red Ink also offers a local chat bot that provides access to all configured language models via any browser on the user’s computer, even without logging in – ideal for researching or brainstorming outside of Word, Excel, or Outlook
+
+There are two versions of Red Ink: A "General Audience" (or GA) version and a "Preview" version (which has new features earlier and receives more frequent updates). They are also distinguished here on GitHub. The latest updates to the code are in the "Preview" branch.
 
 Note: Many of these features depend on the model you configure and some require advanced models; make sure you have sufficiently strong model for your use case
 

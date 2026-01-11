@@ -1,5 +1,37 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: HelpMeInky.vb
+' Purpose: Provides a WinForms chat window ("Help me, AN8!") that lets the user ask questions and
+'          forwards them to the configured LLM, enriched with a product manual and optional
+'          configuration file content.
+'
+' Architecture:
+'  - UI: A `WebBrowser` displays chat HTML; a multiline `TextBox` collects user input; buttons for
+'    send/clear/close; checkboxes for "stay on top" and "include configuration files".
+'  - Chat Rendering: A small HTML+CSS+JS document is injected into `WebBrowser`. Messages are appended
+'    as HTML fragments; "Thinking..." is added/removed by DOM id.
+'  - Conversation State: `_history` stores (role, content) tuples; transcript/HTML is persisted in
+'    `My.Settings` and restored on next load.
+'  - Welcome: On first open (or after clearing), a welcome message is generated via the LLM; a guard
+'    (`_welcomeInProgress`) prevents concurrent welcomes.
+'  - Manual Loading: Loads the manual text once per configured path/URL (`INI_HelpMeInkyPath`) with a
+'    simple cache; supports local text formats and remote HTTP(S) with basic PDF detection.
+'  - LLM Invocation: Uses `_context.SP_HelpMe` as a system prompt; optionally applies an alternate
+'    model config via `GetSpecialTaskModel` and serializes requests via `_modelSemaphore`.
+'  - Optional Config Enrichment: When enabled, reads known config files and redacts API keys before
+'    appending them to the LLM prompt.
+'
+' Persistence:
+'  - Window bounds, top-most preference, include-config preference, last transcript and last HTML are
+'    stored in `My.Settings`.
+'
+' External Dependencies:
+'  - Markdig: Markdown -> HTML rendering.
+'  - HtmlAgilityPack: HTML -> plain text extraction for manual loading.
+'  - SharedLibrary.SharedMethods: LLM invocation, PDF/RTF reading, config discovery, model switching.
+' =============================================================================
 
 Option Strict On
 Option Explicit On
@@ -19,15 +51,31 @@ Imports System.Windows.Forms
 
 Namespace SharedLibrary
 
+    ''' <summary>
+    ''' WinForms chat window that collects user questions, renders the conversation as HTML, and
+    ''' invokes the configured LLM with manual/config context.
+    ''' </summary>
     Public Class HelpMeInky
         Inherits System.Windows.Forms.Form
 
+        ''' <summary>Window title template for this form.</summary>
         Private WindowTitle As String = $"Help me, {AN8}!"
+
+        ''' <summary>Name shown in the chat UI for assistant messages.</summary>
         Private Const AssistantName As String = AN8
 
+        ''' <summary>Shared configuration/context provider (prompts, INI paths, model settings, etc.).</summary>
         Private ReadOnly _context As ISharedContext
+
+        ''' <summary>Host application name/version used for prompt enrichment (if provided).</summary>
         Private ReadOnly _hostAppName As String
+
+        ''' <summary>Markdown pipeline used to render assistant responses into HTML.</summary>
         Private ReadOnly _mdPipeline As Markdig.MarkdownPipeline
+
+        ''' <summary>
+        ''' Browser control used to display the conversation. Hosts injected HTML with small JS helpers.
+        ''' </summary>
         Private ReadOnly _chat As WebBrowser = New WebBrowser() With {
         .Dock = DockStyle.Fill,
         .AllowWebBrowserDrop = False,
@@ -35,31 +83,69 @@ Namespace SharedLibrary
         .WebBrowserShortcutsEnabled = True,
         .ScriptErrorsSuppressed = True
     }
+
+        ''' <summary>Text input for user messages.</summary>
         Private ReadOnly _txtInput As TextBox = New TextBox() With {
         .Dock = DockStyle.Fill,
         .Multiline = True,
         .AcceptsReturn = True,
         .WordWrap = True
     }
-        Private ReadOnly _btnClear As Button = New Button() With {.Text = "Clear", .AutoSize = True}
-        Private ReadOnly _btnClose As Button = New Button() With {.Text = "Close", .AutoSize = True}
-        Private ReadOnly _btnSend As Button = New Button() With {.Text = $"Ask {AssistantName}", .AutoSize = True}
-        Private ReadOnly _chkNoTopMost As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = "Do not stay on top", .AutoSize = True}
-        Private ReadOnly _chkIncludeConfig As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = "Include configuration files", .AutoSize = True} ' New checkbox for configs
 
+        ''' <summary>Clears conversation state and persisted chat.</summary>
+        Private ReadOnly _btnClear As Button = New Button() With {.Text = "Clear", .AutoSize = True}
+
+        ''' <summary>Closes the form.</summary>
+        Private ReadOnly _btnClose As Button = New Button() With {.Text = "Close", .AutoSize = True}
+
+        ''' <summary>Sends the current text input to the LLM.</summary>
+        Private ReadOnly _btnSend As Button = New Button() With {.Text = $"Ask {AssistantName}", .AutoSize = True}
+
+        ''' <summary>
+        ''' When checked, disables TopMost behavior ("Do not stay on top").
+        ''' </summary>
+        Private ReadOnly _chkNoTopMost As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = "Do not stay on top", .AutoSize = True}
+
+        ''' <summary>
+        ''' When checked, appends configuration files (with API key redaction) to the LLM prompt.
+        ''' </summary>
+        Private ReadOnly _chkIncludeConfig As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = "Include configuration files", .AutoSize = True}
+
+        ''' <summary>Indicates whether the chat HTML document finished loading and can be appended to.</summary>
         Private _htmlReady As Boolean = False
+
+        ''' <summary>Queue for HTML fragments appended before the browser document is ready.</summary>
         Private ReadOnly _htmlQueue As New List(Of String)()
+
+        ''' <summary>DOM id of the latest "Thinking..." placeholder message, if any.</summary>
         Private _lastThinkingId As String = Nothing
+
+        ''' <summary>Conversation history used to build transcript and LLM context.</summary>
         Private ReadOnly _history As New List(Of (Role As String, Content As String))()
+
+        ''' <summary>Cached manual text for the currently configured manual path/URL.</summary>
         Private _manualCache As String = Nothing
+
+        ''' <summary>Path/URL that `_manualCache` was loaded from.</summary>
         Private _manualCachePath As String = Nothing
+
+        ''' <summary>Welcome generation state flag (0 = none, 1 = running).</summary>
         Private _welcomeInProgress As Integer = 0 ' 0 = none, 1 = running
 
+        ''' <summary>Indicates whether alternate HelpMe model availability has been evaluated.</summary>
         Private _helpMeAltResolved As Boolean = False
+
+        ''' <summary>Indicates whether an alternate HelpMe model is available and will be used.</summary>
         Private _helpMeAltAvailable As Boolean = False
+
+        ''' <summary>Serializes LLM calls to avoid concurrent model switching/use.</summary>
         Private ReadOnly _modelSemaphore As New Threading.SemaphoreSlim(1, 1)
 
-
+        ''' <summary>
+        ''' Creates the chat form and wires UI event handlers.
+        ''' </summary>
+        ''' <param name="context">Shared application context holding prompts and configuration.</param>
+        ''' <param name="hostAppName">Host application name/version used for prompt enrichment.</param>
         Public Sub New(context As ISharedContext, Optional hostAppName As String = "")
             MyBase.New()
             _context = context
@@ -71,7 +157,7 @@ Namespace SharedLibrary
             Me.MinimumSize = New System.Drawing.Size(720, 420)
             Me.Font = New System.Drawing.Font("Segoe UI", 9.0F)
             Try
-                Me.Icon = Icon.FromHandle(New Bitmap(My.Resources.Red_Ink_Logo).GetHicon())
+                Me.Icon = Icon.FromHandle(New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)).GetHicon())
             Catch
             End Try
 
@@ -102,7 +188,7 @@ Namespace SharedLibrary
             pnlButtons.Controls.Add(_btnClear)
             pnlButtons.Controls.Add(_btnClose)
             pnlButtons.Controls.Add(_chkNoTopMost)
-            pnlButtons.Controls.Add(_chkIncludeConfig) ' Add config checkbox to button panel
+            pnlButtons.Controls.Add(_chkIncludeConfig)
 
             table.Controls.Add(_chat, 0, 0)
             table.Controls.Add(_txtInput, 0, 1)
@@ -129,10 +215,14 @@ Namespace SharedLibrary
             AddHandler _chkIncludeConfig.CheckedChanged, AddressOf OnIncludeConfigChanged
         End Sub
 
+        ''' <summary>Writes a diagnostic message to the debug output.</summary>
         Private Sub Dbg(msg As String)
             Debug.WriteLine($"[HelpMeInky {DateTime.Now:HH:mm:ss.fff}] {msg}")
         End Sub
 
+        ''' <summary>
+        ''' Executes an action on the UI thread (no-op if the form is disposed).
+        ''' </summary>
         Private Sub Ui(action As Action)
             If Me.IsDisposed Then Return
             If Me.InvokeRequired Then
@@ -142,6 +232,9 @@ Namespace SharedLibrary
             End If
         End Sub
 
+        ''' <summary>
+        ''' Shows or raises the window, restores from minimized state, and focuses the input box.
+        ''' </summary>
         Public Sub ShowRaised(Optional owner As IWin32Window = Nothing)
             Dbg("ShowRaised")
             If Me.WindowState = FormWindowState.Minimized Then Me.WindowState = FormWindowState.Normal
@@ -154,10 +247,12 @@ Namespace SharedLibrary
             _txtInput.SelectAll()
         End Sub
 
+        ''' <summary>Re-applies TopMost behavior when the form becomes active.</summary>
         Private Sub OnActivated(sender As Object, e As EventArgs)
             ApplyTopMostBehavior()
         End Sub
 
+        ''' <summary>Persists the TopMost preference and applies the behavior immediately.</summary>
         Private Sub OnTopMostChanged(sender As Object, e As EventArgs)
             Try
                 My.Settings.HelpMeNoTopMost = _chkNoTopMost.Checked
@@ -167,6 +262,7 @@ Namespace SharedLibrary
             ApplyTopMostBehavior()
         End Sub
 
+        ''' <summary>Persists the include-config preference.</summary>
         Private Sub OnIncludeConfigChanged(sender As Object, e As EventArgs)
             Try
                 My.Settings.HelpMeIncludeConfig = _chkIncludeConfig.Checked
@@ -175,6 +271,9 @@ Namespace SharedLibrary
             End Try
         End Sub
 
+        ''' <summary>
+        ''' Applies TopMost based on `_chkNoTopMost`.
+        ''' </summary>
         Private Sub ApplyTopMostBehavior()
             ' If unchecked => stay always on top
             If _chkNoTopMost IsNot Nothing AndAlso _chkNoTopMost.Checked Then
@@ -184,6 +283,10 @@ Namespace SharedLibrary
             End If
         End Sub
 
+        ''' <summary>
+        ''' Loads persisted window settings, initializes the chat HTML document, restores persisted chat
+        ''' content, and generates a welcome message when needed.
+        ''' </summary>
         Private Async Sub OnLoadForm(sender As Object, e As EventArgs)
             Dbg("OnLoadForm start")
             Try
@@ -228,6 +331,9 @@ Namespace SharedLibrary
             End If
         End Sub
 
+        ''' <summary>
+        ''' Persists transcript/HTML and window settings when the form closes.
+        ''' </summary>
         Private Sub OnFormClosing(sender As Object, e As FormClosingEventArgs)
             Dbg("OnFormClosing")
             Try
@@ -248,6 +354,10 @@ Namespace SharedLibrary
             End Try
         End Sub
 
+        ''' <summary>
+        ''' Sends the current input text: renders user text, appends it to history, shows "Thinking...",
+        ''' and starts LLM invocation asynchronously.
+        ''' </summary>
         Private Sub OnSend(sender As Object, e As EventArgs)
             Dim userText = _txtInput.Text.Trim()
             Dbg($"OnSend len={userText.Length}")
@@ -260,6 +370,9 @@ Namespace SharedLibrary
             Dim __ = SendAsync(userText)
         End Sub
 
+        ''' <summary>
+        ''' Clears the conversation state, resets persisted chat, and then generates a new welcome.
+        ''' </summary>
         Private Async Sub OnClear(sender As Object, e As EventArgs)
             Dbg("OnClear start")
             Try
@@ -281,11 +394,15 @@ Namespace SharedLibrary
             End Try
         End Sub
 
+        ''' <summary>Closes the form.</summary>
         Private Sub OnClose(sender As Object, e As EventArgs)
             Dbg("OnClose")
             Me.Close()
         End Sub
 
+        ''' <summary>
+        ''' Handles keyboard shortcuts in the input box (Enter sends; Escape closes).
+        ''' </summary>
         Private Sub OnInputKeyDown(sender As Object, e As KeyEventArgs)
             If e.KeyCode = Keys.Enter Then
                 e.SuppressKeyPress = True
@@ -295,7 +412,10 @@ Namespace SharedLibrary
             End If
         End Sub
 
-        Private Async Function SafeGenerateWelcomeAsync() As Task(Of Task)
+        ''' <summary>
+        ''' Generates the welcome message, ensuring only one welcome is generated concurrently.
+        ''' </summary>
+        Private Async Function SafeGenerateWelcomeAsync() As Task
             If Interlocked.CompareExchange(_welcomeInProgress, 1, 0) <> 0 Then
                 Dbg("SafeGenerateWelcomeAsync skipped: already running")
                 Exit Function
@@ -311,7 +431,10 @@ Namespace SharedLibrary
             End Try
         End Function
 
-        Private Async Function GenerateWelcomeAsync() As Task(Of Task)
+        ''' <summary>
+        ''' Builds the welcome prompt, invokes the LLM, appends the response, and persists chat HTML.
+        ''' </summary>
+        Private Async Function GenerateWelcomeAsync() As Task
             Dbg("GenerateWelcomeAsync start")
             Dim langName As String = System.Globalization.CultureInfo.CurrentUICulture.DisplayName
             Dim partOfDay As String = GetPartOfDay()
@@ -343,7 +466,11 @@ Namespace SharedLibrary
             Dbg("GenerateWelcomeAsync done")
         End Function
 
-        Private Async Function SendAsync(userText As String) As Task(Of Task)
+        ''' <summary>
+        ''' Builds the user prompt (question + manual + conversation + optional config), invokes the LLM,
+        ''' and appends the response to the chat.
+        ''' </summary>
+        Private Async Function SendAsync(userText As String) As Task
             Dbg("SendAsync start")
             Try
                 Dim hostInfo As String = If(String.IsNullOrEmpty(_hostAppName), "", $" (Host application (and version of {AN} add-in): Microsoft {_hostAppName})")
@@ -392,6 +519,10 @@ Namespace SharedLibrary
             End Try
         End Function
 
+        ''' <summary>
+        ''' Reads known configuration files and returns a single string block to be appended to the LLM prompt.
+        ''' API keys are redacted by `SanitizeConfigContent`.
+        ''' </summary>
         Private Function GetConfigurationContent() As String
             Try
                 Dim sb As New StringBuilder()
@@ -477,6 +608,9 @@ Namespace SharedLibrary
             End Try
         End Function
 
+        ''' <summary>
+        ''' Redacts API keys and removes comment lines from INI-like configuration text before sending it to the LLM.
+        ''' </summary>
         Private Function SanitizeConfigContent(content As String) As String
             If String.IsNullOrEmpty(content) Then Return content
 
@@ -512,6 +646,10 @@ Namespace SharedLibrary
             Return result.ToString().TrimEnd()
         End Function
 
+        ''' <summary>
+        ''' Invokes the LLM for HelpMe. Optionally switches to a special model configuration for this task.
+        ''' Serialized via `_modelSemaphore` to avoid concurrent model switching/restores.
+        ''' </summary>
         Private Async Function CallHelpMeLlmAsync(systemPrompt As String, userPrompt As String) As Task(Of String)
             If _context Is Nothing Then Return ""
             If Not String.IsNullOrEmpty(_hostAppName) AndAlso systemPrompt.IndexOf(_hostAppName, StringComparison.OrdinalIgnoreCase) < 0 Then
@@ -561,6 +699,9 @@ Namespace SharedLibrary
             End Try
         End Function
 
+        ''' <summary>
+        ''' Returns manual text from cache when possible; otherwise loads it from the configured path/URL.
+        ''' </summary>
         Private Async Function GetManualOnceAsync() As Task(Of String)
             Dim path = If(_context IsNot Nothing, _context.INI_HelpMeInkyPath, "")
             If String.IsNullOrWhiteSpace(path) Then Return ""
@@ -576,6 +717,10 @@ Namespace SharedLibrary
             Return If(_manualCache, "")
         End Function
 
+        ''' <summary>
+        ''' Loads manual text from an HTTP(S) URL or a local file path.
+        ''' Supports basic PDF detection for remote content and uses helper readers for PDF/RTF/DOCX.
+        ''' </summary>
         Private Shared Async Function GetManualTextFreshAsync(pathOrUrl As String, Optional context As ISharedContext = Nothing) As Task(Of String)
             If String.IsNullOrWhiteSpace(pathOrUrl) Then Return ""
             Dim s As String = pathOrUrl.Trim()
@@ -721,6 +866,9 @@ Namespace SharedLibrary
             End Try
         End Function
 
+        ''' <summary>
+        ''' Reads DOCX text using Microsoft Word interop (opens the document read-only and returns its text).
+        ''' </summary>
         Private Shared Function ReadDocxWithWordInterop(path As String) As String
             Dim app As Microsoft.Office.Interop.Word.Application = Nothing
             Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
@@ -744,6 +892,9 @@ Namespace SharedLibrary
             End Try
         End Function
 
+        ''' <summary>
+        ''' Heuristic to determine whether text looks like HTML.
+        ''' </summary>
         Private Shared Function LooksLikeHtml(s As String) As Boolean
             If String.IsNullOrEmpty(s) Then Return False
             Dim t = s.TrimStart()
@@ -752,6 +903,9 @@ Namespace SharedLibrary
             OrElse t.IndexOf("<body", StringComparison.OrdinalIgnoreCase) >= 0
         End Function
 
+        ''' <summary>
+        ''' Converts HTML to plain text by extracting the document's inner text.
+        ''' </summary>
         Private Shared Function HtmlToPlain(html As String) As String
             Try
                 Dim doc As New HtmlAgilityPack.HtmlDocument()
@@ -762,6 +916,9 @@ Namespace SharedLibrary
             End Try
         End Function
 
+        ''' <summary>
+        ''' Initializes the HTML document used by the chat browser and resets the append queue.
+        ''' </summary>
         Private Sub InitializeChatHtml()
             Ui(Sub()
                    _htmlQueue.Clear()
@@ -806,6 +963,9 @@ Namespace SharedLibrary
                End Sub)
         End Sub
 
+        ''' <summary>
+        ''' Marks the chat HTML document as ready and flushes any queued HTML fragments.
+        ''' </summary>
         Private Sub Chat_DocumentCompleted(sender As Object, e As WebBrowserDocumentCompletedEventArgs)
             _htmlReady = True
             Dbg("DocumentCompleted flushQueue=" & _htmlQueue.Count)
@@ -822,6 +982,9 @@ Namespace SharedLibrary
             End If
         End Sub
 
+        ''' <summary>
+        ''' Intercepts navigation to external links and opens them via the OS shell.
+        ''' </summary>
         Private Sub Chat_Navigating(sender As Object, e As WebBrowserNavigatingEventArgs)
             Try
                 Dim scheme = e.Url?.Scheme?.ToLowerInvariant()
@@ -834,10 +997,14 @@ Namespace SharedLibrary
             End Try
         End Sub
 
+        ''' <summary>Prevents the WebBrowser control from opening new windows.</summary>
         Private Sub Chat_NewWindow(sender As Object, e As CancelEventArgs)
             e.Cancel = True
         End Sub
 
+        ''' <summary>
+        ''' Appends an HTML fragment to the chat document or queues it if the document is not ready.
+        ''' </summary>
         Private Sub AppendHtml(fragment As String)
             If String.IsNullOrEmpty(fragment) Then Return
             Ui(Sub()
@@ -853,17 +1020,26 @@ Namespace SharedLibrary
                End Sub)
         End Sub
 
+        ''' <summary>
+        ''' HTML-encodes and appends a user message to the chat view, then persists chat HTML.
+        ''' </summary>
         Private Sub AppendUserHtml(text As String)
             Dim encoded = WebUtility.HtmlEncode(text).Replace(vbCrLf, "<br>").Replace(vbLf, "<br>").Replace(vbCr, "<br>")
             AppendHtml($"<div class='msg user'><span class='who'>You:</span><span class='content'>{encoded}</span></div>")
             PersistChatHtml()
         End Sub
 
+        ''' <summary>
+        ''' Appends a "Thinking..." placeholder for the assistant and stores its DOM id for later removal.
+        ''' </summary>
         Private Sub ShowAssistantThinking()
             _lastThinkingId = "thinking-" & Guid.NewGuid().ToString("N")
             AppendHtml($"<div id=""{_lastThinkingId}"" class='msg assistant thinking'><span class='who'>{WebUtility.HtmlEncode(AssistantName)}:</span><span class='content'>Thinking...</span></div>")
         End Sub
 
+        ''' <summary>
+        ''' Removes the last "Thinking..." placeholder from the chat DOM (if present).
+        ''' </summary>
         Private Sub RemoveAssistantThinking()
             If String.IsNullOrEmpty(_lastThinkingId) Then Return
             Ui(Sub()
@@ -878,6 +1054,10 @@ Namespace SharedLibrary
                End Sub)
         End Sub
 
+        ''' <summary>
+        ''' Converts Markdown to HTML and appends an assistant message.
+        ''' Single-paragraph replies are rendered inline; multi-block replies are split into inline first paragraph + block content.
+        ''' </summary>
         Private Sub AppendAssistantMarkdown(md As String)
             md = If(md, "")
             Dim body = Markdig.Markdown.ToHtml(md, _mdPipeline)
@@ -911,6 +1091,9 @@ Namespace SharedLibrary
             End If
         End Sub
 
+        ''' <summary>
+        ''' Persists the current chat DOM (`#chat` inner HTML) into `My.Settings.LastHelpMeChatHtml`.
+        ''' </summary>
         Private Sub PersistChatHtml()
             Ui(Sub()
                    Try
@@ -925,6 +1108,9 @@ Namespace SharedLibrary
                End Sub)
         End Sub
 
+        ''' <summary>
+        ''' Restores a plain text transcript into the current chat HTML by parsing "You:" and "{AssistantName}:" prefixes.
+        ''' </summary>
         Private Sub AppendTranscriptToHtml(transcript As String)
             If String.IsNullOrEmpty(transcript) Then Return
             Dim lines = transcript.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf).Split({vbLf}, StringSplitOptions.None)
@@ -960,6 +1146,9 @@ Namespace SharedLibrary
             PersistChatHtml()
         End Sub
 
+        ''' <summary>
+        ''' Persists a bounded plain transcript into `My.Settings.LastHelpMeChat` using `INI_ChatCap` (minimum 5000).
+        ''' </summary>
         Private Sub PersistTranscriptLimited()
             Dim transcript = BuildTranscriptPlain()
             Dim cap As Integer = Math.Max(5000, If(_context IsNot Nothing, _context.INI_ChatCap, 0))
@@ -969,6 +1158,9 @@ Namespace SharedLibrary
             My.Settings.LastHelpMeChat = transcript
         End Sub
 
+        ''' <summary>
+        ''' Builds a plain text transcript from `_history` using "You:" and "{AssistantName}:" prefixes.
+        ''' </summary>
         Private Function BuildTranscriptPlain() As String
             Dim sb As New StringBuilder()
             For Each m In _history
@@ -981,6 +1173,9 @@ Namespace SharedLibrary
             Return sb.ToString()
         End Function
 
+        ''' <summary>
+        ''' Builds conversation text for LLM context, capped by `INI_ChatCap` (minimum 5000), taking the newest messages first.
+        ''' </summary>
         Private Function BuildConversationForLlm() As String
             Dim sb As New StringBuilder()
             Dim cap As Integer = Math.Max(5000, If(_context IsNot Nothing, _context.INI_ChatCap, 0))
@@ -999,6 +1194,9 @@ Namespace SharedLibrary
             Return sb.ToString()
         End Function
 
+        ''' <summary>
+        ''' Removes some Markdown formatting artifacts for plain transcript usage.
+        ''' </summary>
         Private Shared Function StripMarkdownForTranscript(md As String) As String
             If String.IsNullOrEmpty(md) Then Return ""
             Dim s = Regex.Replace(md, "```.*?```", "", RegexOptions.Singleline)
@@ -1006,6 +1204,9 @@ Namespace SharedLibrary
             Return s
         End Function
 
+        ''' <summary>
+        ''' Returns a simple part-of-day bucket based on the current local hour.
+        ''' </summary>
         Private Shared Function GetPartOfDay() As String
             Dim h = DateTime.Now.Hour
             If h < 12 Then Return "Morning"

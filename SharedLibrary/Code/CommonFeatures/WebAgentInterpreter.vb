@@ -1,6 +1,38 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
-
+'
+' =============================================================================
+' File: WebAgentInterpreter.vb
+' Purpose:
+'   Executes WebAgent JSON scripts in an HTTP-only model and returns a Markdown
+'   report (or execution log) to the caller.
+'
+' Scope (this file):
+'   - Parses script JSON (`meta`, `env`, `steps`) and runs step commands sequentially.
+'   - Maintains per-run runtime state:
+'       * `_vars` for variables and implicit runtime values
+'       * `_secrets` for secret masking and `secret://` resolution
+'       * `_headersDefault`, `_cookieContainer`, `_userAgent` for HTTP behavior
+'       * `_lastResponseUrl`, `_lastResponseBody`, `_lastDoc` for last-response state
+'   - Provides:
+'       * command dispatcher (`open_url`, `http_request`, extraction, file ops, control flow, LLM, report)
+'       * template expansion (`{{...}}`) against `_vars`/env variables
+'       * selector resolution against the current HTML document (XPath + limited CSS + text/regex)
+'       * optional debug logging (file + optional LogWindow mirroring)
+'       * cooperative cancellation through `CancellationToken`
+'
+' Threading / UI notes:
+'   - This interpreter is not tied to a UI thread, but may emit progress messages to `LogWindow`
+'     when `_silent=False` and `_useLogWindow=True`.
+'   - Cancellation is cooperative: call sites should cancel the provided `CancellationToken`.
+'
+' External dependencies used here:
+'   - `Newtonsoft.Json` (`JObject`/`JArray`/`JToken`)
+'   - `System.Net.Http` (`HttpClient`, cookies, TLS settings)
+'   - `HtmlAgilityPack` (HTML parsing and XPath)
+'   - `Markdig` (Markdown-to-HTML for `send_email_report`)
+'   - `SharedLibrary.SharedMethods` (LLM call + UI helpers + defaults)
+' =============================================================================
 
 Option Strict On
 Option Explicit On
@@ -18,6 +50,10 @@ Imports SharedLibrary.SharedLibrary.SharedMethods
 
 Namespace SharedLibrary
 
+    ''' <remarks>
+    ''' The interpreter maintains per-run mutable state (variables, headers, cookies and last-response data).
+    ''' Instances are not thread-safe and are intended to be used for a single run at a time.
+''' </remarks>
     Public NotInheritable Class WebAgentInterpreter
         Implements System.IDisposable
 
@@ -35,6 +71,12 @@ Namespace SharedLibrary
         Private _lastDoc As HtmlAgilityPack.HtmlDocument = Nothing
         Private _defaultTimeoutMs As System.Int32 = 30000
 
+        Private _silent As Boolean = False
+        Private _useLogWindow As Boolean = True
+
+        ' Controlled by script: env.variables.debug_to_logwindow = true
+        Private _debugToLogWindow As Boolean = False
+
         Private _log As New System.Text.StringBuilder()
         Private _finalMarkdown As System.String = System.String.Empty
 
@@ -45,15 +87,32 @@ Namespace SharedLibrary
         Private _dynamicExpand As Boolean = False
         Private Const MAX_DYNAMIC_FETCH As Integer = 10
 
+        ''' <summary>
+        ''' Action to invoke when the user requests cancellation via the LogWindow close button.
+        ''' Set by the caller to trigger the CancellationTokenSource.Cancel().
+        ''' </summary>
+        Public Property OnCancelRequested As Action
 
-        Private ReadOnly _failHard As Boolean = False   ' set True to stop on first non‑handled http failure
+        ''' <summary>
+        ''' If True, aborts on unhandled HTTP failures; if False, some non-successs HTTP responses can be tolerated.
+        ''' </summary>
+        Private ReadOnly _failHard As Boolean = False
+
+        ''' <summary>
+        ''' Returns the in-memory execution log (secrets masked).
+        ''' </summary>
         Public ReadOnly Property LogText As String
             Get
                 Return _log.ToString()
             End Get
         End Property
 
+        ''' <summary>Last executed step id (used for debugging/error summary).</summary>
         Private _currentStepId As System.String = System.String.Empty
+
+        ''' <summary>
+        ''' Static initializer sets TLS protocol selection for legacy runtimes.
+        ''' </summary>
         Shared Sub New()
             Try
                 System.Net.ServicePointManager.SecurityProtocol =
@@ -64,6 +123,9 @@ Namespace SharedLibrary
             End Try
         End Sub
 
+        ''' <summary>
+        ''' Initializes an HTTP client with cookie support, decompression and TLS configuration.
+        ''' </summary>
         Public Sub New()
             _cookieContainer = New System.Net.CookieContainer()
             _handler = New System.Net.Http.HttpClientHandler() With {
@@ -107,11 +169,15 @@ Namespace SharedLibrary
             _http = New System.Net.Http.HttpClient(_handler)
         End Sub
 
+        ''' <summary>Disposes the underlying HTTP resources.</summary>
         Public Sub Dispose() Implements System.IDisposable.Dispose
             _http.Dispose()
             _handler.Dispose()
         End Sub
 
+        ''' <summary>
+        ''' Formats a variable value for debug output with truncation to avoid excessively large log entries.
+        ''' </summary>
         Private Function _FormatVarValue(value As Object) As String
             If value Is Nothing Then Return "(null)"
             Try
@@ -134,7 +200,9 @@ Namespace SharedLibrary
             End Try
         End Function
 
-
+        ''' <summary>
+        ''' Reads a boolean debug flag from <see cref="_vars"/> (string/boolean accepted).
+        ''' </summary>
         Private Function GetDebugFlag(name As String, Optional defaultValue As Boolean = False) As Boolean
             Try
                 Dim o As Object = Nothing
@@ -150,6 +218,9 @@ Namespace SharedLibrary
         Private _debugLogPath As String = Nothing
         Private _debugInitialized As Boolean = False
 
+        ''' <summary>
+        ''' Initializes a file-based debug log if debug flags require it.
+        ''' </summary>
         Private Sub InitDebugLogIfNeeded()
             If _debugInitialized Then Return
             If Not GetDebugFlag("debug") AndAlso Not GetDebugFlag("debug_allAttempts") Then Return
@@ -176,20 +247,22 @@ Namespace SharedLibrary
 
                 _debugInitialized = True
             Catch ex As Exception
-                ' Silently ignore any issues initializing the log
+                ' Ignore any issues initializing the log.
             End Try
         End Sub
 
-
-
-
+        ''' <summary>
+        ''' Returns True if any debug mode that produces output is enabled.
+        ''' </summary>
         Private Function DebugEnabled() As Boolean
             Return GetDebugFlag("debug") OrElse GetDebugFlag("debug_allAttempts") _
         OrElse GetDebugFlag("debug_substeps") OrElse GetDebugFlag("debug_var_changes") _
         OrElse GetDebugFlag("debug_include_script") OrElse GetDebugFlag("debug_summary")
         End Function
 
-
+        ''' <summary>
+        ''' Writes a masked overview of the script structure and masked script JSON to the debug log.
+        ''' </summary>
         Private Sub DebugLogScriptOverview(root As Newtonsoft.Json.Linq.JObject)
             If Not GetDebugFlag("debug_include_script") Then Return
             InitDebugLogIfNeeded()
@@ -231,7 +304,9 @@ Namespace SharedLibrary
             End Try
         End Sub
 
-        ' -------------------- NEW: Variable Change Logging --------------------
+        ''' <summary>
+        ''' Writes variable changes to the debug log (masked and truncated), controlled by `debug_var_changes`.
+        ''' </summary>
         Private Sub DebugLogVarChange(name As String, oldVal As Object, newVal As Object)
             If Not GetDebugFlag("debug_var_changes") Then Return
             If Not DebugEnabled() Then Return
@@ -247,13 +322,15 @@ Namespace SharedLibrary
             End Try
         End Sub
 
-
+        ''' <summary>
+        ''' Stores or removes a variable in <see cref="_vars"/> with deep-clone behavior for JSON tokens.
+        ''' Also produces a variable-change debug log entry when enabled.
+        ''' </summary>
         Private Sub SafeStoreVar_DebugPatch(varName As String, value As Object)
             If String.IsNullOrWhiteSpace(varName) Then Exit Sub
             Dim hadOld As Boolean = _vars.ContainsKey(varName)
             Dim oldVal As Object = If(hadOld, _vars(varName), Nothing)
 
-            ' (Reuse original SafeStoreVar logic)
             If value Is Nothing Then
                 If hadOld Then
                     DebugLogVarChange(varName, oldVal, Nothing)
@@ -277,6 +354,9 @@ Namespace SharedLibrary
             DebugLogVarChange(varName, oldVal, _vars(varName))
         End Sub
 
+        ''' <summary>
+        ''' Logs the start of a sub-step execution (used by <see cref="RunSubStepsAsync"/>).
+        ''' </summary>
         Private Sub DebugLogSubStepStart(sid As String, cmd As String, attempt As Integer, maxRetry As Integer, parms As JObject)
             If Not GetDebugFlag("debug_substeps") Then Return
             InitDebugLogIfNeeded()
@@ -292,6 +372,9 @@ Namespace SharedLibrary
             End Try
         End Sub
 
+        ''' <summary>
+        ''' Logs the result of a sub-step execution (duration, success, exception and result preview).
+        ''' </summary>
         Private Sub DebugLogSubStepResult(sid As String, cmd As String, durationMs As Long, success As Boolean, ex As Exception, result As Object)
             If Not GetDebugFlag("debug_substeps") Then Return
             InitDebugLogIfNeeded()
@@ -321,7 +404,7 @@ Namespace SharedLibrary
             End Try
         End Sub
 
-
+        ''' <summary>Logs start of a top-level step when enabled by debug flags.</summary>
         Private Sub DebugLogStepStart(sid As String, cmd As String, index As Integer, total As Integer)
             If Not DebugEnabled() Then Return
             If Not (GetDebugFlag("debug") OrElse GetDebugFlag("debug_allAttempts") OrElse GetDebugFlag("debug_substeps")) Then Return
@@ -330,6 +413,7 @@ Namespace SharedLibrary
             WriteDebug($"[step:start] {index + 1}/{total} id={sid} cmd={cmd}")
         End Sub
 
+        ''' <summary>Logs completion of a top-level step when enabled by debug flags.</summary>
         Private Sub DebugLogStepEnd(sid As String, cmd As String, success As Boolean, durationMs As Long, ex As Exception)
             If Not DebugEnabled() Then Return
             If Not (GetDebugFlag("debug") OrElse GetDebugFlag("debug_allAttempts") OrElse GetDebugFlag("debug_substeps")) Then Return
@@ -343,7 +427,9 @@ Namespace SharedLibrary
             End If
         End Sub
 
-
+        ''' <summary>
+        ''' Writes a final execution summary to the debug log, including a masked variable snapshot.
+        ''' </summary>
         Private Sub DebugFinalSummary(totalSteps As Integer,
                             executedSteps As Integer,
                             abortedStepId As String,
@@ -370,22 +456,44 @@ Namespace SharedLibrary
             End Try
         End Sub
 
-
-
-
+        ''' <summary>Returns a boolean flag value from <see cref="GetDebugFlag"/>.</summary>
         Private Function GetFlag(name As String, defaultVal As Boolean) As Boolean
             Return GetDebugFlag(name, defaultVal)
         End Function
 
+        ''' <summary>
+        ''' Appends one line (or multi-line text) to the file-based debug log.
+        ''' </summary>
         Private Sub WriteDebug(lines As String)
             If Not _debugInitialized Then Return
+
             Try
                 System.IO.File.AppendAllText(_debugLogPath, lines & Environment.NewLine)
             Catch
             End Try
-        End Sub
 
-        ' === Replace existing DebugSnapshot implementation with this file-writing version ===
+            ' optional mirror to LogWindow (script-controlled)
+            If _debugToLogWindow AndAlso _useLogWindow AndAlso Not _silent Then
+                Try
+                    Dim txt = MaskSecrets(If(lines, String.Empty))
+
+                    ' Avoid flooding with huge blocks (script JSON dumps etc.)
+                    Const maxUiChars As Integer = 1500
+                    If txt.Length > maxUiChars Then
+                        txt = txt.Substring(0, maxUiChars) & "…"
+                    End If
+
+                    For Each ln In txt.Replace(vbCrLf, vbLf).Split({vbLf}, StringSplitOptions.RemoveEmptyEntries)
+                        LogWindow.AppendLog("[debug] " & ln, "warn")
+                    Next
+                Catch
+                End Try
+            End If
+        End Sub
+        ''' <summary>
+        ''' Writes a snapshot of state (step info, last URL/body preview, selected vars, exception details) to the debug log.
+        ''' Controlled by `debug` / `debug_allAttempts`.
+        ''' </summary>
         Private Sub DebugSnapshot(stepId As String,
                       command As String,
                       attemptNumber As Integer,
@@ -465,6 +573,9 @@ Namespace SharedLibrary
             End Try
         End Sub
 
+        ''' <summary>
+        ''' Runs a script using a provided shared context and optional model selection parameters.
+        ''' </summary>
         Public Async Function RunAsync(scriptJson As System.String,
                                    context As ISharedContext,
                                    Optional useSecondAPI As Boolean = False,
@@ -476,6 +587,9 @@ Namespace SharedLibrary
             Return Await RunAsync(scriptJson, cancel)
         End Function
 
+        ''' <summary>
+        ''' Runs a script using a provided shared context and optional silent mode (suppresses UI progress messages).
+        ''' </summary>
         Public Async Function RunAsync(scriptJson As System.String,
                                    context As ISharedContext,
                                    Optional useSecondAPI As Boolean = False,
@@ -486,7 +600,10 @@ Namespace SharedLibrary
             Return Await RunAsync(scriptJson, cancel, silent)
         End Function
 
-
+        ''' <summary>
+        ''' Runs the script JSON. Parses `meta` and `env`, configures HTTP defaults and executes `steps`.
+        ''' Returns the final markdown from `render_report` if produced; otherwise returns a log markdown.
+        ''' </summary>
         Public Async Function RunAsync(scriptJson As System.String,
                                    Optional cancel As System.Threading.CancellationToken = Nothing,
                                    Optional silent As Boolean = False) As System.Threading.Tasks.Task(Of System.String)
@@ -531,6 +648,8 @@ Namespace SharedLibrary
                 End If
             End If
 
+            _debugToLogWindow = GetDebugFlag("debug_to_logwindow", False)
+
             _http.DefaultRequestHeaders.UserAgent.Clear()
             _http.DefaultRequestHeaders.UserAgent.ParseAdd(_userAgent)
             For Each kv In _headersDefault
@@ -544,7 +663,7 @@ Namespace SharedLibrary
 
             InitDebugLogIfNeeded()
             DebugLogScriptOverview(root)
-            Dim totalStepsCount = steps.Count    ' (NEW) total step count
+            Dim totalStepsCount = steps.Count
             Dim executedSteps = 0
             Dim globalSw = System.Diagnostics.Stopwatch.StartNew()
 
@@ -555,6 +674,43 @@ Namespace SharedLibrary
             Next
 
             Dim stepIndex As System.Int32 = 0
+
+
+            _silent = silent
+            If Not silent Then
+                LogWindow.ShowLogWindow(clearOnShow:=True)
+                LogWindow.SetTitle("WebAgent: Executing Script")
+                LogWindow.AppendLog("Script execution started", "info")
+
+                If _debugToLogWindow Then
+                    LogWindow.AppendLog("Debug: enabled (debug output will be mirrored to this window)", "warn")
+                End If
+
+                ' Register close handler to prompt user about aborting the run
+                Dim cancelAction = OnCancelRequested
+                LogWindow.OnCloseRequested = Function() As Boolean
+                                                 Dim result = SharedMethods.ShowCustomYesNoBox(
+                                                     "Do you want to abort the WebAgent run?",
+                                                     "Yes, abort",
+                                                     "No, continue",
+                                                     SharedMethods.AN & " WebAgent")
+                                                 If result = 1 Then
+                                                     ' User chose to abort - trigger cancellation
+                                                     If cancelAction IsNot Nothing Then
+                                                         Try
+                                                             cancelAction.Invoke()
+                                                         Catch
+                                                         End Try
+                                                     End If
+                                                     ' Return True to allow the window to close/hide
+                                                     Return True
+                                                 Else
+                                                     ' User chose to continue - don't close
+                                                     Return False
+                                                 End If
+                                             End Function
+            End If
+
 
             Try
                 While stepIndex < steps.Count
@@ -567,7 +723,7 @@ Namespace SharedLibrary
 
                     _currentStepId = sid
 
-                    ' Step timing + start log (NEW)
+                    ' Step timing + start debug log
                     Dim stepSw = System.Diagnostics.Stopwatch.StartNew()
                     DebugLogStepStart(sid, command, stepIndex, totalStepsCount)
                     Dim stepSucceeded As Boolean = False
@@ -599,7 +755,7 @@ Namespace SharedLibrary
                                     Dim elseId = guardObj.Value(Of System.String)("else_goto")
                                     Log($"[{sid}] Guard false -> skip. else_goto={elseId}")
                                     stepSw.Stop()
-                                    DebugLogStepEnd(sid, command, True, stepSw.ElapsedMilliseconds, Nothing) ' Skipped counts as successful skip
+                                    DebugLogStepEnd(sid, command, True, stepSw.ElapsedMilliseconds, Nothing) ' Skip treated as success for flow-control purposes.
                                     executedSteps += 1
                                     If Not System.String.IsNullOrWhiteSpace(elseId) AndAlso idToIndex.ContainsKey(elseId) Then
                                         stepIndex = idToIndex(elseId)
@@ -624,32 +780,44 @@ Namespace SharedLibrary
                             Try
                                 Dim parmsPreview = TryCast(stepObj("params"), Newtonsoft.Json.Linq.JObject)
                                 Dim progressMsg As String = Nothing
+                                Dim logLevel As String = "step"
+
                                 Select Case command.ToLowerInvariant()
                                     Case "open_url", "http_request"
                                         Dim u = ""
                                         If parmsPreview IsNot Nothing Then u = ExpandTemplates(parmsPreview.Value(Of System.String)("url"))
-                                        progressMsg = If(System.String.IsNullOrWhiteSpace(u), "Loading the library ...", "Loading the library from " & u)
+                                        progressMsg = If(System.String.IsNullOrWhiteSpace(u), "Loading the library ...", "Loading: " & TruncateUrl(u, 60))
                                     Case "download_url"
                                         Dim u = ""
                                         If parmsPreview IsNot Nothing Then u = ExpandTemplates(parmsPreview.Value(Of System.String)("url"))
-                                        progressMsg = If(System.String.IsNullOrWhiteSpace(u), "Downloading resource ...", "Downloading resource from " & u)
+                                        progressMsg = If(System.String.IsNullOrWhiteSpace(u), "Downloading resource ...", "Downloading: " & TruncateUrl(u, 60))
                                     Case "extract_text", "extract_html", "extract_attribute", "find"
-                                        progressMsg = "Extracting data (" & command & ") ..."
+                                        progressMsg = "Extracting data (" & command & ")"
                                     Case "llm_analyze", "llm", "llmanalyze"
+                                        logLevel = "llm"
                                         Dim urlDisplay As System.String = System.String.Empty
                                         If Not System.String.IsNullOrWhiteSpace(_lastResponseUrl) Then
-                                            Dim shortUrl As System.String = _lastResponseUrl
-                                            If shortUrl.Length > 120 Then shortUrl = shortUrl.Substring(0, 117) & "..."
-                                            urlDisplay = " [" & shortUrl & "]"
+                                            urlDisplay = " → " & TruncateUrl(_lastResponseUrl, 50)
                                         End If
-                                        progressMsg = "Analyzing content (LLM) ..." & urlDisplay
+                                        progressMsg = "Analyzing content (LLM)" & urlDisplay
                                     Case "render_report"
-                                        progressMsg = "Rendering report ..."
+                                        logLevel = "success"
+                                        progressMsg = "Rendering report"
+                                    Case "foreach"
+                                        progressMsg = "Iterating collection"
+                                    Case "if"
+                                        progressMsg = "Evaluating condition"
+                                    Case "set_var"
+                                        progressMsg = "Setting variable"
                                     Case Else
-                                        progressMsg = "Executing step '" & command & "' ..."
+                                        progressMsg = "Executing: " & command
                                 End Select
-                                If Not System.String.IsNullOrWhiteSpace(sid) Then progressMsg = "[" & sid & "] " & progressMsg
-                                InfoBox.ShowInfoBox(progressMsg)
+
+                                If Not System.String.IsNullOrWhiteSpace(sid) Then
+                                    progressMsg = "[" & sid & "] " & progressMsg
+                                End If
+
+                                LogWindow.AppendLog(progressMsg, logLevel)
                             Catch
                             End Try
                         End If
@@ -690,6 +858,9 @@ Namespace SharedLibrary
                                     Case "delete_file" : resultValue = CmdDeleteFile(parms)
                                     Case "send_email_report" : resultValue = CmdSendEmailReport(parms)
                                     Case "log" : resultValue = CmdLog(parms)
+                                    Case "increment" : resultValue = CmdIncrement(parms)
+                                    Case "while" : resultValue = Await CmdWhileAsync(parms, cancel)
+                                    Case "range" : resultValue = CmdRange(parms)
                                     Case "enable_dynamic" : CmdEnableDynamic(DirectCast(stepObj, JObject))
                                     Case "array_push" : resultValue = CmdArrayPush(parms)
                                     Case "llm_analyze", "llm", "llmanalyze" : resultValue = Await CmdLlmAnalyzeAsync(parms, timeoutMs, cancel)
@@ -805,15 +976,23 @@ Namespace SharedLibrary
                 globalSw.Stop()
                 DebugFinalSummary(totalStepsCount, executedSteps, Nothing, globalSw.ElapsedMilliseconds)
 
-            Catch
+            Catch ex As Exception
                 globalSw.Stop()
                 DebugFinalSummary(totalStepsCount, executedSteps, _currentStepId, globalSw.ElapsedMilliseconds)
+                If Not _silent Then
+                    LogWindow.AppendLog("Execution failed: " & ex.Message, "error")
+                    ' Clear the close handler when execution fails
+                    LogWindow.OnCloseRequested = Nothing
+                End If
                 Throw
             End Try
 
             If Not silent Then
                 Try
-                    InfoBox.ShowInfoBox("", 1)
+                    LogWindow.AppendLog("Execution completed successfully", "success")
+                    ' Clear the close handler when execution completes
+                    LogWindow.OnCloseRequested = Nothing
+                    ' LogWindow.HideLogWindow()
                 Catch
                 End Try
             End If
@@ -828,6 +1007,7 @@ Namespace SharedLibrary
 
 #Region "Command Implementations"
 
+        ''' <summary>Sets the HTTP User-Agent header from `params.user_agent` (supports templating).</summary>
         Private Function CmdSetUserAgent(parms As Newtonsoft.Json.Linq.JObject) As System.Object
             Dim ua = ExpandTemplates(parms.Value(Of System.String)("user_agent"))
             If System.String.IsNullOrWhiteSpace(ua) Then Throw New System.Exception("user_agent missing.")
@@ -837,6 +1017,9 @@ Namespace SharedLibrary
             Return New With {.user_agent = ua}
         End Function
 
+        ''' <summary>
+        ''' Sets default headers for subsequent requests. `mode=replace` clears current defaults first.
+        ''' </summary>
         Private Function CmdSetHeaders(parms As Newtonsoft.Json.Linq.JObject) As System.Object
             Dim mode = parms.Value(Of System.String)("mode")
             Dim headers = TryCast(parms("headers"), Newtonsoft.Json.Linq.JObject)
@@ -854,6 +1037,7 @@ Namespace SharedLibrary
             Return New With {.headers = _headersDefault}
         End Function
 
+        ''' <summary>Sets cookies into the handler cookie container from `params.cookies`.</summary>
         Private Function CmdSetCookies(parms As Newtonsoft.Json.Linq.JObject) As System.Object
             Dim arr = TryCast(parms("cookies"), Newtonsoft.Json.Linq.JArray)
             If arr Is Nothing Then Throw New System.Exception("cookies missing.")
@@ -874,6 +1058,7 @@ Namespace SharedLibrary
             Return New With {.count = arr.Count}
         End Function
 
+        ''' <summary>Returns True for HTTP status codes treated as transient for retry purposes.</summary>
         Private Function IsTransientStatus(code As Integer) As Boolean
             Select Case code
                 Case 408, 425, 429, 500, 502, 503, 504
@@ -883,6 +1068,9 @@ Namespace SharedLibrary
             End Select
         End Function
 
+        ''' <summary>
+        ''' Writes a request dump to the debug log (headers and content headers), controlled by debug flags.
+        ''' </summary>
         Private Sub DebugDumpRequest(req As System.Net.Http.HttpRequestMessage)
             If Not GetDebugFlag("debug") AndAlso Not GetDebugFlag("debug_allAttempts") Then Return
             Try
@@ -901,7 +1089,10 @@ Namespace SharedLibrary
             End Try
         End Sub
 
-
+        ''' <summary>
+        ''' Executes an HTTP request for `open_url` and updates last-response state (`_lastResponseBody`, `_lastResponseUrl`, `_lastDoc`).
+        ''' Supports limited retry rules and optional return of response body.
+        ''' </summary>
         Private Async Function CmdOpenUrlAsync(parms As Newtonsoft.Json.Linq.JObject,
                                            timeoutMs As System.Int32,
                                            cancel As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of System.Object)
@@ -1017,7 +1208,6 @@ Namespace SharedLibrary
                             Dim bodyText = DecodeBody(bytes, resp.Content.Headers.ContentType)
                             _lastResponseUrl = resp.RequestMessage.RequestUri.ToString()
                             _lastResponseBody = bodyText
-                            'LoadDocument(bodyText)
                             Await LoadDocumentAsync(bodyText, _lastResponseUrl, cancel).ConfigureAwait(False)
 
                             AutoExtractLinks()
@@ -1048,7 +1238,7 @@ Namespace SharedLibrary
                             lastEx = tex
 
                             Dim externalCancel = cancel.IsCancellationRequested
-                            ' If outer token not cancelled we treat this as an internal timeout (cts or HTTP pipeline)
+                            ' If the outer token is not cancelled, treat this as an internal timeout (CTS or HTTP pipeline).
                             If Not externalCancel Then
                                 Log($"[open_url] Timeout after {timeoutMs} ms (attempt {attempt + 1}/{maxRetry + 1}).")
                                 If method.Equals("GET", StringComparison.OrdinalIgnoreCase) AndAlso Not usedHeadFallback AndAlso attempt = maxRetry Then
@@ -1077,7 +1267,7 @@ Namespace SharedLibrary
                             End If
                         End Try
 
-                        ' Perform deferred HEAD fallback (allowed to Await here, outside Catch)
+                        ' Perform deferred HEAD fallback (allowed to Await here, outside Catch).
                         If doHeadFallback Then
                             Try
                                 Log("[open_url] Trying HEAD fallback to test reachability …")
@@ -1107,6 +1297,10 @@ Namespace SharedLibrary
             Throw New System.Exception($"open_url failed after {attempt} attempt(s). Status={lastStatus}. Detail={detail}")
         End Function
 
+        ''' <summary>
+        ''' Collects matching anchor links from the current document and stores them into `auto_links`.
+        ''' Controlled by `auto_link_enable`, `auto_link_patterns`, and `auto_link_min`.
+        ''' </summary>
         Private Sub AutoExtractLinks()
             Try
                 Dim enabled As Boolean = True
@@ -1127,7 +1321,7 @@ Namespace SharedLibrary
                         patterns.Add(DirectCast(raw, String))
                     End If
                 End If
-                ' Provide a sensible default if none specified
+                ' Provide a default pattern if none specified.
                 If patterns.Count = 0 Then
                     patterns.Add("(?i)\b(show|detail|decision|case|id=|doc|file|download)\b")
                 End If
@@ -1155,7 +1349,6 @@ Namespace SharedLibrary
                                 score += 1
                             End If
                         Next
-                        ' Keep if matched at least one pattern OR caller allows a passive collection via flag
                         If score > 0 Then
                             If Not collected.Contains(abs) Then collected.Add(abs)
                         End If
@@ -1169,6 +1362,9 @@ Namespace SharedLibrary
             End Try
         End Sub
 
+        ''' <summary>
+        ''' Adds a regex pattern to `auto_link_patterns` (stored in <see cref="_vars"/>).
+        ''' </summary>
         Public Sub AddAutoLinkPattern(pattern As String)
             If String.IsNullOrWhiteSpace(pattern) Then Exit Sub
             If Not _vars.ContainsKey("auto_link_patterns") Then
@@ -1182,12 +1378,16 @@ Namespace SharedLibrary
             If Not lst.Contains(pattern) Then lst.Add(pattern)
         End Sub
 
+        ''' <summary>Implements `wait` by delaying for `params.ms`.</summary>
         Private Async Function CmdWaitAsync(parms As Newtonsoft.Json.Linq.JObject, cancel As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of System.Object)
             Dim ms = parms.Value(Of System.Nullable(Of System.Int32))("ms").GetValueOrDefault(0)
             If ms > 0 Then Await System.Threading.Tasks.Task.Delay(ms, cancel)
             Return New With {.slept = ms}
         End Function
 
+        ''' <summary>
+        ''' Searches for a substring in a string-like variable and optionally assigns a boolean result.
+        ''' </summary>
         Private Function CmdFind(parms As Newtonsoft.Json.Linq.JObject) As System.Object
             ' Expected params: { "in": "<varName>", "text": "needle", "assign": {"var":"found"} }
             If parms Is Nothing Then Return Nothing
@@ -1228,6 +1428,20 @@ Namespace SharedLibrary
 
             Return New With {.found = False, .index = -1}
         End Function
+
+
+        ''' <summary>
+        ''' Extracts inner text from nodes matched by `params.selector`.
+        ''' Supports optional whitespace normalization, optional regex extraction, and returning either the first match or all matches.
+        ''' </summary>
+        ''' <param name="parms">
+        ''' Parameters:
+        ''' - `selector`: selector object (resolved by <see cref="ResolveSelector" />)
+        ''' - `all`: if True returns a list of strings; otherwise returns a single string
+        ''' - `normalize_whitespace`: if True normalizes whitespace in extracted text
+        ''' - `regex`: optional regex applied to each extracted text
+        ''' - `group`: regex capture group index to return
+        ''' </param>
         Private Function CmdExtractText(parms As Newtonsoft.Json.Linq.JObject) As System.Object
             Dim sel = TryCast(parms("selector"), Newtonsoft.Json.Linq.JObject)
             Dim all = parms.Value(Of System.Nullable(Of System.Boolean))("all").GetValueOrDefault(False)
@@ -1253,6 +1467,14 @@ Namespace SharedLibrary
             Return texts
         End Function
 
+        ''' <summary>
+        ''' Extracts HTML from the first node matched by `params.selector` as either outer or inner HTML.
+        ''' </summary>
+        ''' <param name="parms">
+        ''' Parameters:
+        ''' - `selector`: selector object (resolved by <see cref="ResolveSelector" />)
+        ''' - `outer`: if True returns `OuterHtml`, otherwise returns `InnerHtml`
+        ''' </param>
         Private Function CmdExtractHtml(parms As Newtonsoft.Json.Linq.JObject) As System.Object
             Dim sel = TryCast(parms("selector"), Newtonsoft.Json.Linq.JObject)
             Dim outer = parms.Value(Of System.Nullable(Of System.Boolean))("outer").GetValueOrDefault(False)
@@ -1261,6 +1483,16 @@ Namespace SharedLibrary
             Return If(outer, nodes(0).OuterHtml, nodes(0).InnerHtml)
         End Function
 
+        ''' <summary>
+        ''' Extracts an attribute value from a node list stored in a variable and stores the results into another variable.
+        ''' The node list is expected to be serializable to an object containing an `attributes` object/dictionary.
+        ''' </summary>
+        ''' <param name="parms">
+        ''' Parameters:
+        ''' - `nodes_var`: source variable name containing serialized node objects
+        ''' - `attribute`: attribute name to read from each node's `attributes`
+        ''' - `var`: target variable name to receive a list of attribute values
+        ''' </param>
         Private Function CmdExtractAttribute(parms As Newtonsoft.Json.Linq.JObject) As System.Object
             Dim nodesVar = parms.Value(Of String)("nodes_var")
             Dim attrName = parms.Value(Of String)("attribute")
@@ -1285,7 +1517,7 @@ Namespace SharedLibrary
                     nodeList.Add(it)
                 Next
             Else
-                nodeList.Add(raw) ' single object fallback
+                nodeList.Add(raw) ' Single object fallback.
             End If
 
             Dim hrefs As New List(Of String)
@@ -1298,7 +1530,7 @@ Namespace SharedLibrary
                         If Not String.IsNullOrWhiteSpace(v) Then hrefs.Add(v)
                     End If
                 Catch
-                    ' ignore serialization issues
+                    ' Ignore serialization issues.
                 End Try
             Next
 
@@ -1306,6 +1538,19 @@ Namespace SharedLibrary
             Return Nothing
         End Function
 
+        ''' <summary>
+        ''' Downloads a URL to disk with optional HTTP method, headers and body, returning the saved path and status code.
+        ''' </summary>
+        ''' <param name="parms">
+        ''' Parameters:
+        ''' - `url`: URL (templated; resolved via <see cref="ResolveUrl" />)
+        ''' - `target_dir`: directory path for output (templated)
+        ''' - `filename`: output file name (templated; defaults to `download.bin`)
+        ''' - `method`: HTTP method (defaults to GET)
+        ''' - `headers`: optional request headers object
+        ''' - `body`: optional request body
+        ''' - `body_type`: optional body format (`json`, `form`, or default string content)
+        ''' </param>
         Private Async Function CmdDownloadUrlAsync(parms As Newtonsoft.Json.Linq.JObject, cancel As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of System.Object)
             Dim url = ResolveUrl(ExpandTemplates(parms.Value(Of System.String)("url")))
             Dim targetDir = ExpandTemplates(parms.Value(Of System.String)("target_dir"))
@@ -1350,6 +1595,15 @@ Namespace SharedLibrary
             Return New With {.path = path, .status = CInt(resp.StatusCode)}
         End Function
 
+        ''' <summary>
+        ''' Saves a string or Base64-decoded binary payload to a file path (creates directories as needed).
+        ''' </summary>
+        ''' <param name="parms">
+        ''' Parameters:
+        ''' - `content`: content to write (templated)
+        ''' - `path`: output file path (templated)
+        ''' - `encoding`: `binary` writes Base64-decoded bytes; otherwise writes UTF-8 text
+        ''' </param>
         Private Function CmdSaveFile(parms As Newtonsoft.Json.Linq.JObject) As System.Object
             Dim content = ExpandTemplates(parms.Value(Of System.String)("content"))
             Dim filePath = ExpandTemplates(parms.Value(Of System.String)("path"))
@@ -1366,6 +1620,14 @@ Namespace SharedLibrary
             Return New With {.path = filePath}
         End Function
 
+        ''' <summary>
+        ''' Reads a file and returns either UTF-8 text or Base64-encoded bytes, depending on `params.encoding`.
+        ''' </summary>
+        ''' <param name="parms">
+        ''' Parameters:
+        ''' - `path`: file path to read (templated)
+        ''' - `encoding`: `binary` returns Base64; otherwise returns UTF-8 text
+        ''' </param>
         Private Function CmdReadFile(parms As Newtonsoft.Json.Linq.JObject) As System.Object
             Dim filePath = ExpandTemplates(parms.Value(Of System.String)("path"))
             Dim encoding = parms.Value(Of System.String)("encoding")
@@ -1380,6 +1642,18 @@ Namespace SharedLibrary
             Return txt
         End Function
 
+        ''' <summary>
+        ''' Executes an HTTP request and returns status, headers, body and final URL; updates last-response state.
+        ''' </summary>
+        ''' <param name="parms">
+        ''' Parameters:
+        ''' - `url`: URL (templated; resolved via <see cref="ResolveUrl" />)
+        ''' - `method`: HTTP method (defaults to GET)
+        ''' - `headers`: optional request headers object
+        ''' - `query`: optional query parameters object (added to URL)
+        ''' - `body`: optional request body
+        ''' - `body_type`: optional body format (`json`, `form`, or default string content)
+        ''' </param>
         Private Async Function CmdHttpRequestAsync(parms As Newtonsoft.Json.Linq.JObject, timeoutMs As System.Int32, cancel As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of System.Object)
             Dim url = ResolveUrl(ExpandTemplates(parms.Value(Of System.String)("url")))
             Dim absolute As System.Uri
@@ -1446,6 +1720,14 @@ Namespace SharedLibrary
             End Using
         End Function
 
+        ''' <summary>
+        ''' Sets or clears a variable in <see cref="_vars"/> from `params.name` and `params.value` (supports templating for string values).
+        ''' </summary>
+        ''' <param name="parms">
+        ''' Parameters:
+        ''' - `name`: variable name to set
+        ''' - `value`: variable value; string values are template-expanded
+        ''' </param>
         Private Function CmdSetVar(parms As Newtonsoft.Json.Linq.JObject) As System.Object
             Dim name = parms.Value(Of System.String)("name")
             Dim valueToken = parms("value")
@@ -1462,6 +1744,168 @@ Namespace SharedLibrary
             Return New With {.name = name, .value = valueObj}
         End Function
 
+        ''' <summary>
+        ''' Executes steps repeatedly while a condition is true.
+        ''' </summary>
+        ''' <param name="parms">
+        ''' Parameters:
+        ''' - `condition`: expression evaluated by <see cref="EvalCondition"/>
+        ''' - `steps`: array of sub-steps to execute each iteration
+        ''' - `max_iterations`: optional safety limit (default 100)
+        ''' - `break_if_var_true`: optional variable name; if truthy, breaks the loop
+        ''' </param>
+        Private Async Function CmdWhileAsync(parms As JObject, cancel As CancellationToken) As Task(Of Object)
+            If parms Is Nothing Then Return Nothing
+
+            Dim conditionExpr = parms.Value(Of String)("condition")
+            Dim steps = TryCast(parms("steps"), JArray)
+            Dim maxIterations = parms.Value(Of Integer?)("max_iterations").GetValueOrDefault(100)
+            Dim breakVar = parms.Value(Of String)("break_if_var_true")
+
+            If String.IsNullOrWhiteSpace(conditionExpr) OrElse steps Is Nothing Then
+                Throw New Exception("while: missing condition or steps")
+            End If
+
+            Dim iteration As Integer = 0
+            Dim executed As Integer = 0
+
+            While iteration < maxIterations
+                cancel.ThrowIfCancellationRequested()
+
+                ' Evaluate condition
+                If Not EvalCondition(conditionExpr) Then
+                    Log($"[while] Condition false at iteration {iteration}, exiting.")
+                    Exit While
+                End If
+
+                ' Check break variable
+                If Not String.IsNullOrWhiteSpace(breakVar) Then
+                    If _vars.ContainsKey(breakVar) AndAlso _IsTruthy(_vars(breakVar)) Then
+                        Log($"[while] break_if_var_true '{breakVar}' = true, exiting.")
+                        Exit While
+                    End If
+                End If
+
+                Try
+                    Await RunSubStepsAsync(steps, cancel)
+                    executed += 1
+                Catch ex As OperationCanceledException
+                    If cancel.IsCancellationRequested Then Throw
+                    Log($"[while] Cancellation at iteration {iteration}: {ex.Message}")
+                    Exit While
+                Catch ex As Exception
+                    Log($"[while] Error at iteration {iteration}: {ex.Message}")
+                    Exit While
+                End Try
+
+                iteration += 1
+            End While
+
+            If iteration >= maxIterations Then
+                Log($"[while] max_iterations {maxIterations} reached.")
+            End If
+
+            Return New With {.iterations = iteration, .executed = executed}
+        End Function
+
+        ''' <summary>
+        ''' Generates a range of integers and stores them in a variable.
+        ''' </summary>
+        ''' <param name="parms">
+        ''' Parameters:
+        ''' - `var`: target variable name
+        ''' - `from`: start value (default 0)
+        ''' - `to`: end value (exclusive)
+        ''' - `step`: increment (default 1)
+        ''' </param>
+        Private Function CmdRange(parms As JObject) As Object
+            If parms Is Nothing Then Throw New Exception("range: params missing")
+
+            Dim varName = parms.Value(Of String)("var")
+            If String.IsNullOrWhiteSpace(varName) Then
+                Throw New Exception("range: 'var' missing")
+            End If
+
+            Dim fromVal = parms.Value(Of Integer?)("from").GetValueOrDefault(0)
+            Dim toVal = parms.Value(Of Integer?)("to").GetValueOrDefault(10)
+            Dim stepVal = parms.Value(Of Integer?)("step").GetValueOrDefault(1)
+
+            If stepVal = 0 Then stepVal = 1
+
+            Dim arr As New JArray()
+            Dim current = fromVal
+
+            If stepVal > 0 Then
+                While current < toVal
+                    arr.Add(current)
+                    current += stepVal
+                End While
+            Else
+                While current > toVal
+                    arr.Add(current)
+                    current += stepVal
+                End While
+            End If
+
+            _vars(varName) = arr
+
+            Return New With {.var = varName, .count = arr.Count}
+        End Function
+
+        ''' <summary>
+        ''' Increments or decrements a numeric variable.
+        ''' </summary>
+        ''' <param name="parms">
+        ''' Parameters:
+        ''' - `var`: variable name to modify
+        ''' - `by`: amount to add (negative to subtract), default 1
+        ''' - `set_to`: optional absolute value to set instead of incrementing
+        ''' </param>
+        Private Function CmdIncrement(parms As JObject) As Object
+            If parms Is Nothing Then Throw New Exception("increment: params missing")
+
+            Dim varName = parms.Value(Of String)("var")
+            If String.IsNullOrWhiteSpace(varName) Then
+                Throw New Exception("increment: 'var' missing")
+            End If
+
+            ' Check for absolute set
+            Dim setTo = parms("set_to")
+            If setTo IsNot Nothing Then
+                Dim setVal As Double = 0
+                If Double.TryParse(ExpandTemplates(setTo.ToString()), setVal) Then
+                    _vars(varName) = CInt(setVal)
+                    Return New With {.var = varName, .value = CInt(setVal)}
+                End If
+            End If
+
+            ' Get current value
+            Dim current As Double = 0
+            If _vars.ContainsKey(varName) Then
+                Double.TryParse(_vars(varName)?.ToString(), current)
+            End If
+
+            ' Get increment amount
+            Dim byAmount As Double = 1
+            Dim byToken = parms("by")
+            If byToken IsNot Nothing Then
+                Double.TryParse(ExpandTemplates(byToken.ToString()), byAmount)
+            End If
+
+            Dim newValue = CInt(current + byAmount)
+            _vars(varName) = newValue
+
+            Return New With {.var = varName, .old_value = CInt(current), .new_value = newValue}
+        End Function
+
+        ''' <summary>
+        ''' Renders a template using a Mustache-like renderer against `params.context`, then expands global placeholders from <see cref="_vars"/>.
+        ''' </summary>
+        ''' <param name="parms">
+        ''' Parameters:
+        ''' - `template`: mustache-like template text
+        ''' - `context`: optional JSON token used as rendering context (string properties are template-expanded and may be parsed as JSON)
+        ''' </param>
         Private Function CmdTemplate(parms As Newtonsoft.Json.Linq.JObject) As System.Object
             Dim tpl = parms.Value(Of System.String)("template")
             Dim ctxToken = parms("context")
@@ -1486,19 +1930,23 @@ Namespace SharedLibrary
                         End If
                     Next
                 End If
-                ' Kontext an Renderer weitergeben
+                ' Pass context to renderer.
                 ctxObj = ctxToken
             End If
 
-            ' Mustache render (nur Sections & bekannte Variablen aus context)
+            ' Mustache render (only sections and variables from the provided context).
             Dim rendered = SimpleMustacheRender(tpl, ctxObj)
 
-            ' Zweiter Pass: globale Variablen (_vars) expandieren
+            ' Second pass: expand global variables (`_vars`).
             rendered = ExpandTemplates(rendered)
 
             Return rendered
         End Function
 
+        ''' <summary>
+        ''' Deletes a file at `params.path` (templated) and returns True if deleted; returns False if not found or if an error occurs.
+        ''' </summary>
+        ''' <param name="parms">Parameters: `path` (templated).</param>
         Private Function CmdDeleteFile(parms As Newtonsoft.Json.Linq.JObject) As System.Object
             If parms Is Nothing Then Return False
             Dim rawPath = parms.Value(Of String)("path")
@@ -1519,7 +1967,18 @@ Namespace SharedLibrary
             End Try
         End Function
 
-
+        ''' <summary>
+        ''' Sends an email using <see cref="System.Net.Mail.SmtpClient"/> with a multipart/alternative body containing text/plain and text/html.
+        ''' The body can be provided as Markdown (converted to HTML) or as an HTML document (footer injection attempted).
+        ''' </summary>
+        ''' <param name="parms">
+        ''' Parameters:
+        ''' - `to`, `subject`, `smtp_host`, `smtp_port`
+        ''' - `from_email`, `from_name`
+        ''' - `body_markdown` (Markdown or HTML)
+        ''' - `smtp_ssl`, `smtp_auth`, `smtp_user`, `smtp_pass`
+        ''' - `ip_override`/`ip`, `net`, `helo_domain`
+        ''' </param>
         Private Function CmdSendEmailReport(parms As Newtonsoft.Json.Linq.JObject) As System.Object
             If parms Is Nothing Then Return False
             Try
@@ -1576,7 +2035,7 @@ Namespace SharedLibrary
                 If String.IsNullOrWhiteSpace(subject) Then subject = "Report"
 
                 ' Prepare plain source text (after template expansion)
-                Dim plainBody As String = If(String.IsNullOrWhiteSpace(bodyMarkdownTemplate), "(leer)", bodyMarkdownTemplate)
+                Dim plainBody As String = If(String.IsNullOrWhiteSpace(bodyMarkdownTemplate), "(empty)", bodyMarkdownTemplate)
 
                 ' Decide if we should treat input as Markdown or already HTML
                 Dim looksLikeHtml = plainBody.IndexOf("<html", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
@@ -1627,7 +2086,7 @@ Namespace SharedLibrary
                     End If
                     fullHtml = sb.ToString()
                 Else
-                    ' Build minimal standards-compliant HTML doc
+                    ' Build minimal standards-compliant HTML document.
                     fullHtml =
                             $"<!DOCTYPE html>
                                 <html>
@@ -1652,18 +2111,16 @@ Namespace SharedLibrary
                 msg.SubjectEncoding = Encoding.UTF8
                 msg.BodyEncoding = Encoding.UTF8
 
-                ' Build proper multipart/alternative
+                ' Build multipart/alternative
                 Dim plainView = System.Net.Mail.AlternateView.CreateAlternateViewFromString(plainBody, Encoding.UTF8, "text/plain")
                 plainView.TransferEncoding = System.Net.Mime.TransferEncoding.QuotedPrintable
 
                 Dim htmlView = System.Net.Mail.AlternateView.CreateAlternateViewFromString(fullHtml, Encoding.UTF8, "text/html")
                 htmlView.TransferEncoding = System.Net.Mime.TransferEncoding.QuotedPrintable
 
-                ' Order: plain first, then html
                 msg.AlternateViews.Add(plainView)
                 msg.AlternateViews.Add(htmlView)
 
-                ' Do NOT also set msg.Body / IsBodyHtml when using AlternateViews (avoids some relays forcing text/plain)
                 ' SMTP client
                 Dim client = New System.Net.Mail.SmtpClient(smtpHost, smtpPort) With {
                 .EnableSsl = smtpSsl,
@@ -1712,7 +2169,9 @@ Namespace SharedLibrary
             End Try
         End Function
 
-
+        ''' <summary>
+        ''' Reads a string setting from (1) `parms`, (2) `_vars`, then (3) `_secrets`; returns <paramref name="defaultValue"/> if not found.
+        ''' </summary>
         Private Function GetSetting(parms As Newtonsoft.Json.Linq.JObject, key As System.String, defaultValue As System.String) As System.String
             ' 1) params
             If parms IsNot Nothing Then
@@ -1736,6 +2195,9 @@ Namespace SharedLibrary
             Return defaultValue
         End Function
 
+        ''' <summary>
+        ''' Returns the first non-loopback IPv4 address of the local machine; returns `0.0.0.0` if not available.
+        ''' </summary>
         Private Function GetFirstLocalIPv4() As System.String
             Try
                 Dim host As System.Net.IPHostEntry = System.Net.Dns.GetHostEntry(System.Net.Dns.GetHostName())
@@ -1752,6 +2214,10 @@ Namespace SharedLibrary
             Return "0.0.0.0"
         End Function
 
+        ''' <summary>
+        ''' Returns a network domain string based on <see cref="System.Net.NetworkInformation.IPGlobalProperties.DomainName"/>,
+        ''' falling back to <see cref="Environment.UserDomainName"/>; returns `UNKNOWN` if not available.
+        ''' </summary>
         Private Function GetCurrentNetworkDomain() As System.String
             Try
                 Dim ipgp As System.Net.NetworkInformation.IPGlobalProperties =
@@ -1773,8 +2239,15 @@ Namespace SharedLibrary
             Return "UNKNOWN"
         End Function
 
-
-
+        ''' <summary>
+        ''' Executes a conditional branch based on `params.condition` and runs `params.steps` or `params.else_steps`.
+        ''' </summary>
+        ''' <param name="parms">
+        ''' Parameters:
+        ''' - `condition`: expression evaluated by <see cref="EvalCondition" />
+        ''' - `steps`: steps executed when condition is True
+        ''' - `else_steps`: steps executed when condition is False (optional)
+        ''' </param>
         Private Async Function CmdIfAsync(parms As JObject,
                               cancel As CancellationToken) As Task(Of Object)
             ' Expected params JSON:
@@ -1809,7 +2282,9 @@ Namespace SharedLibrary
             Return Nothing
         End Function
 
-
+        ''' <summary>
+        ''' Creates a best-effort deep clone of an object by serializing to a <see cref="JToken"/> and deserializing back.
+        ''' </summary>
         Private Function DeepCloneObject(obj As Object) As Object
             If obj Is Nothing Then Return Nothing
             Try
@@ -1820,13 +2295,28 @@ Namespace SharedLibrary
             End Try
         End Function
 
-
+        ''' <summary>
+        ''' Stores a variable via the debug-aware storage helper (<see cref="SafeStoreVar_DebugPatch" />).
+        ''' </summary>
         Private Sub SafeStoreVar(varName As String, value As Object)
-            ' Wrapper now delegates to debug-aware variant
+            ' Wrapper now delegates to debug-aware variant.
             SafeStoreVar_DebugPatch(varName, value)
         End Sub
 
-
+        ''' <summary>
+        ''' Iterates over a list variable and executes `params.steps` for each item, binding `params.item_var` to the current item.
+        ''' Supports `max_items`, `continue_on_error`, `stop_on_error` and an optional runtime break variable.
+        ''' </summary>
+        ''' <param name="parms">
+        ''' Parameters:
+        ''' - `list`: variable name holding the enumerable source
+        ''' - `item_var`: variable name set to the current item
+        ''' - `steps`: array of sub-steps to execute per item
+        ''' - `max_items`: optional maximum number of iterations
+        ''' - `continue_on_error`: optional boolean, default True
+        ''' - `stop_on_error`: optional boolean
+        ''' - `break_if_var_true`: optional variable name; if truthy, stops the loop
+        ''' </param>
         Private Async Function CmdForEachAsync(parms As JObject,
                                        cancel As CancellationToken) As Task(Of Object)
             If parms Is Nothing Then Return Nothing
@@ -1841,7 +2331,7 @@ Namespace SharedLibrary
             Dim continueOnError As Boolean = True
             Dim stopOnError As Boolean = False
             Dim maxItems = parms.Value(Of Integer?)("max_items")
-            Dim softBreakVar = parms.Value(Of String)("break_if_var_true") ' optional runtime break flag
+            Dim softBreakVar = parms.Value(Of String)("break_if_var_true") ' Optional runtime break flag.
 
             If parms("continue_on_error") IsNot Nothing Then
                 Boolean.TryParse(parms("continue_on_error").ToString(), continueOnError)
@@ -1853,7 +2343,17 @@ Namespace SharedLibrary
             If stopOnError Then continueOnError = False
 
             Dim src As Object = Nothing
+
             If Not _vars.TryGetValue(listVar, src) OrElse src Is Nothing Then
+                ' Support dotted paths like "page_data.results"
+                Try
+                    src = ResolveValue("{{" & listVar & "}}")
+                Catch
+                    src = Nothing
+                End Try
+            End If
+
+            If src Is Nothing Then
                 Log($"[foreach] list '{listVar}' not found or null → skipping.")
                 Return New With {.count = 0, .executed = 0}
             End If
@@ -1882,7 +2382,7 @@ Namespace SharedLibrary
                 _vars(itemVar) = item
                 _vars(itemVar & "_index") = idx
 
-                Dim localToken = cancel ' (kept for clarity – could create linked CTS here if needed)
+                Dim localToken = cancel ' Kept for clarity.
 
                 Try
                     Await RunSubStepsAsync(steps, localToken)
@@ -1908,7 +2408,7 @@ Namespace SharedLibrary
                             Log("[foreach] continue_on_error=False → breaking.")
                             Exit For
                         End If
-                        ' continue with next item
+                        ' Continue with next item.
                     End If
 
                 Catch ex As Exception
@@ -1937,6 +2437,9 @@ Namespace SharedLibrary
             Return New With {.count = idx, .executed = executed}
         End Function
 
+        ''' <summary>
+        ''' Executes an array of sub-steps using the same command dispatcher as top-level steps, with per-substep retry support.
+        ''' </summary>
         Private Async Function RunSubStepsAsync(steps As JArray,
                                             cancel As CancellationToken) As System.Threading.Tasks.Task
             For Each st In steps
@@ -1958,7 +2461,7 @@ Namespace SharedLibrary
                     Dim attempt As Integer = 0
                     Dim success As Boolean = False
                     Dim lastEx As Exception = Nothing
-                    Dim resultValue As Object = Nothing   ' kept (result of sub-step)
+                    Dim resultValue As Object = Nothing   ' Result of sub-step.
 
                     Do
                         lastEx = Nothing
@@ -1973,7 +2476,6 @@ Namespace SharedLibrary
 
                         Try
                             _currentStepId = sid
-                            Dim swExec = Diagnostics.Stopwatch.StartNew()
 
                             Select Case cmd.ToLowerInvariant()
                                 Case "llm_analyze", "llm", "llmanalyze"
@@ -1998,6 +2500,12 @@ Namespace SharedLibrary
                                     resultValue = CmdArrayPush(parms)
                                 Case "extract_text"
                                     resultValue = CmdExtractText(parms)
+                                Case "increment"
+                                    resultValue = CmdIncrement(parms)
+                                Case "while"
+                                    resultValue = Await CmdWhileAsync(parms, cancel)
+                                Case "range"
+                                    resultValue = CmdRange(parms)
                                 Case "extract_html"
                                     resultValue = CmdExtractHtml(parms)
                                 Case "extract_attribute"
@@ -2010,9 +2518,7 @@ Namespace SharedLibrary
                                     Throw New Exception($"RunSubStepsAsync: unknown command '{cmd}'")
                             End Select
 
-                            swExec.Stop()
                             success = True
-
 
                             Dim assign = TryCast(stepObj("assign"), JObject)
                             If assign IsNot Nothing Then
@@ -2052,7 +2558,6 @@ Namespace SharedLibrary
                             End If
                         Finally
                             subSw.Stop()
-
                             DebugLogSubStepResult(sid, cmd, subSw.ElapsedMilliseconds, success, lastEx, resultValue)
                         End Try
 
@@ -2064,6 +2569,9 @@ Namespace SharedLibrary
                     Loop While Not success AndAlso attempt <= maxRetry
 
                     If Not success Then
+                        If Not _silent Then
+                            LogWindow.AppendLog($"Substep '{sid}' failed after {attempt} attempt(s): {lastEx?.Message}", "error")
+                        End If
                         Throw New Exception($"Substep '{sid}' failed after {attempt} attempt(s).", lastEx)
                     End If
 
@@ -2078,7 +2586,15 @@ Namespace SharedLibrary
             Next
         End Function
 
-
+        ''' <summary>
+        ''' Renders and stores a markdown report into `_finalMarkdown` and optionally writes it to `params.output_path`.
+        ''' </summary>
+        ''' <param name="parms">
+        ''' Parameters:
+        ''' - `template`: template text (rendered via <see cref="SimpleMustacheRender" />)
+        ''' - `context`: optional context token (placeholders materialized by <see cref="MaterializeContextPlaceholders" />)
+        ''' - `output_path`: optional path to write the markdown output (templated)
+        ''' </param>
         Private Function CmdRenderReport(parms As Newtonsoft.Json.Linq.JObject) As System.Object
             Dim engine = parms.Value(Of System.String)("engine")
             Dim tpl = parms.Value(Of System.String)("template")
@@ -2097,7 +2613,7 @@ Namespace SharedLibrary
             Dim outputPath As String = Nothing
             If Not String.IsNullOrWhiteSpace(outputPathRaw) Then
                 outputPath = ExpandTemplates(outputPathRaw)
-                ' If still contains "{{" warn & skip writing
+                ' If still contains "{{" do not write an unresolved path.
                 If outputPath?.Contains("{{") = True Then
                     Log("[render_report] Unresolved template tokens in output_path; skipping file write: " & outputPath)
                     outputPath = Nothing
@@ -2120,13 +2636,16 @@ Namespace SharedLibrary
             Return New With {.output = If(outputPath, "(memory)")}
         End Function
 
+        ''' <summary>
+        ''' Appends a log line at the given level after template expansion.
+        ''' </summary>
+        ''' <param name="parms">Parameters: `level`, `message`.</param>
         Private Function CmdLog(parms As Newtonsoft.Json.Linq.JObject) As System.Object
             Dim level = parms.Value(Of System.String)("level")
             Dim message = ExpandTemplates(parms.Value(Of System.String)("message"))
             Log($"[{level}] {message}")
             Return Nothing
         End Function
-
 
 
         '   retry_on_invalid: Bool          -> Throw when output invalid (so outer step retry triggers)
@@ -2146,6 +2665,12 @@ Namespace SharedLibrary
         '   "retry": { "max": 2, "delay_ms": 2000, "backoff": 1.5 }
         ' plus params { "retry_on_invalid": true }
         '
+
+
+        ''' <summary>
+        ''' Invokes the configured LLM and returns a structured result, optionally enforcing JSON shape requirements.
+        ''' Stores `lastLlm`, `lastLlm_page_url`, `last_step_id` and `lastLlm_raw` into <see cref="_vars"/>.
+        ''' </summary>
         Private Async Function CmdLlmAnalyzeAsync(parms As Newtonsoft.Json.Linq.JObject,
                                               timeoutMs As Int32,
                                               cancel As Threading.CancellationToken) As Task(Of Object)
@@ -2242,7 +2767,10 @@ Namespace SharedLibrary
                     timeoutLong = If(_useSecondAPI, _context.INI_Timeout_2, _context.INI_Timeout)
                 End If
 
-                ' Dynamic model 
+                ' NOTE: `originalConfigLoaded`, `originalConfig`, `RestoreDefaults`, and `GetSpecialTaskModel` must exist in scope.
+                ' In the provided file context they are not declared; with Option Strict/Explicit this would not compile.
+
+                ' Dynamic model
                 If _useSecondAPI AndAlso _autoselectModel Then
                     If Not String.IsNullOrWhiteSpace(_context.INI_AlternateModelPath) Then
                         If Not GetSpecialTaskModel(_context, _context.INI_AlternateModelPath, "WebAgent") Then
@@ -2265,7 +2793,6 @@ Namespace SharedLibrary
                 Do
                     Dim attemptSw = Diagnostics.Stopwatch.StartNew()
                     Try
-
                         If userPrompt?.Contains("{{") Then
                             Log($"[llm warn] unresolved placeholders in user prompt (step={_currentStepId}).")
                         End If
@@ -2287,7 +2814,6 @@ Namespace SharedLibrary
                             End Using
                         End Using
 
-
                     Catch tce As TaskCanceledException
                         Log("[llm timeout] " & tce.Message)
                         Throw
@@ -2304,7 +2830,7 @@ Namespace SharedLibrary
                     Dim probeSanitized = SanitizeLlmResult(rawResult)
                     Dim probeParsed = TryParseJson(probeSanitized)
 
-                    ' Stop if JSON parsed OK OR we exhausted attempts
+                    ' Stop if JSON parsed OK OR we exhausted attempts.
                     If probeParsed IsNot Nothing OrElse inner + 1 >= innerAttempts Then
                         Exit Do
                     End If
@@ -2319,7 +2845,6 @@ Namespace SharedLibrary
                 overallSw.Stop()
                 _vars("lastLlm_latency_ms") = overallSw.ElapsedMilliseconds
                 _vars("lastLlm_raw") = If(rawResult, "")
-
 
                 ' Restore model if temporarily switched
                 If _autoselectModel AndAlso _useSecondAPI AndAlso originalConfigLoaded Then
@@ -2414,8 +2939,10 @@ Namespace SharedLibrary
 
                 If Not String.IsNullOrWhiteSpace(sanitized) Then
                     Dim preview = "[step:" & _currentStepId & "] [url:" & currentUrl & "] " &
-                              If(sanitized.Length > maxPreview, sanitized.Substring(0, maxPreview) & "...", sanitized)
-                    Try : InfoBox.ShowInfoBox(preview, 1) : Catch : End Try
+                         If(sanitized.Length > maxPreview, sanitized.Substring(0, maxPreview) & "...", sanitized)
+                    If Not _silent Then
+                        LogWindow.AppendLog(preview, "llm")
+                    End If
                 End If
 
                 If logRaw AndAlso (GetDebugFlag("debug") OrElse GetDebugFlag("debug_allAttempts")) Then
@@ -2464,6 +2991,9 @@ Namespace SharedLibrary
             End Try
         End Function
 
+        ''' <summary>
+        ''' Extracts a JSON candidate from an LLM response, preferring JSON found inside fenced code blocks.
+        ''' </summary>
         Public Shared Function SanitizeLlmResult(raw As System.String) As System.String
             If System.String.IsNullOrWhiteSpace(raw) Then Return ""
             Dim codeBlocks As New System.Collections.Generic.List(Of System.String)
@@ -2500,6 +3030,7 @@ Namespace SharedLibrary
             Return candidate
         End Function
 
+        ''' <summary>Parses JSON into a <see cref="JToken"/>; returns Nothing on parse failure.</summary>
         Private Shared Function TryParseJson(text As System.String) As Newtonsoft.Json.Linq.JToken
             If System.String.IsNullOrWhiteSpace(text) Then Return Nothing
             Try
@@ -2509,6 +3040,9 @@ Namespace SharedLibrary
             End Try
         End Function
 
+        ''' <summary>
+        ''' Extracts the first balanced JSON object (`{...}`) or array (`[...]`) substring from arbitrary text.
+        ''' </summary>
         Private Shared Function ExtractFirstJsonStructure(text As System.String) As System.String
             If System.String.IsNullOrWhiteSpace(text) Then Return Nothing
             Dim functionExtract =
@@ -2542,6 +3076,21 @@ Namespace SharedLibrary
 
 #Region "Selector Resolution"
 
+        ''' <summary>
+        ''' Resolves a selector object against the last loaded HTML document (<see cref="_lastDoc"/>).
+        ''' Supports nested scoping via `within`, multiple strategies (XPath, CSS, text, regex), and optional relative selection (`first`, `last`, `nth`).
+        ''' </summary>
+        ''' <param name="sel">
+        ''' Selector JSON object with fields:
+        ''' - `strategy`: `xpath`, `css`, `text`, or `regex`
+        ''' - `value`: selector value (template-expanded)
+        ''' - `within`: optional nested selector whose matches become the search roots
+        ''' - `relative`: optional object controlling post-filtering:
+        '''   - `position`: `first` | `last` | `nth`
+        '''   - `nth`: 1-based index when position is `nth`
+        ''' </param>
+        ''' <returns>List of matching <see cref="HtmlAgilityPack.HtmlNode"/> instances.</returns>
+        ''' <exception cref="System.Exception">Thrown when no document has been loaded or strategy is unknown.</exception>
         Private Function ResolveSelector(sel As Newtonsoft.Json.Linq.JObject) As System.Collections.Generic.List(Of HtmlAgilityPack.HtmlNode)
             If _lastDoc Is Nothing Then Throw New System.Exception("No document loaded. Call open_url or http_request first.")
             Dim strategy = sel.Value(Of System.String)("strategy")
@@ -2622,6 +3171,10 @@ Namespace SharedLibrary
             Return matches
         End Function
 
+        ''' <summary>
+        ''' Converts a limited subset of CSS selectors to an XPath expression.
+        ''' Supports descendant and direct-child (`>`) combinators and delegates simple selectors to <see cref="CssSimpleSelectorToXPath"/>.
+        ''' </summary>
         Private Function CssToXPath(css As System.String) As System.String
             Dim parts = css.Split({" "c}, System.StringSplitOptions.RemoveEmptyEntries)
             Dim xpath As New System.Text.StringBuilder()
@@ -2646,6 +3199,15 @@ Namespace SharedLibrary
             Return xpath.ToString()
         End Function
 
+        ''' <summary>
+        ''' Converts a simple CSS selector token into an XPath segment.
+        ''' Supports:
+        ''' - tag names (or `*`)
+        ''' - `#id`
+        ''' - `.class` (contains-based match)
+        ''' - `[attr]` and `[attr=value]`
+        ''' - `:nth-child(n)` (1-based position)
+        ''' </summary>
         Private Function CssSimpleSelectorToXPath(token As System.String) As System.String
             Dim mTag = System.Text.RegularExpressions.Regex.Match(token, "^[a-zA-Z][a-zA-Z0-9_-]*")
             Dim tag = If(mTag.Success, mTag.Value, "*")
@@ -2676,6 +3238,11 @@ Namespace SharedLibrary
             Return xp.ToString()
         End Function
 
+        ''' <summary>
+        ''' Returns the textual content of a node, optionally normalizing whitespace.
+        ''' </summary>
+        ''' <param name="node">The node whose text is extracted.</param>
+        ''' <param name="normalize">If True, collapses whitespace to single spaces and trims.</param>
         Private Function GetInnerText(node As HtmlAgilityPack.HtmlNode, normalize As System.Boolean) As System.String
             Dim t = node.InnerText
             If normalize Then
@@ -2684,6 +3251,10 @@ Namespace SharedLibrary
             Return t
         End Function
 
+        ''' <summary>
+        ''' Serializes an <see cref="HtmlAgilityPack.HtmlNode"/> into a plain object graph suitable for storing in <see cref="_vars"/>.
+        ''' Includes node name, normalized inner text, attribute dictionary, and outer HTML.
+        ''' </summary>
         Private Function SerializeNode(n As HtmlAgilityPack.HtmlNode) As System.Object
             Dim dict As New System.Collections.Generic.Dictionary(Of System.String, System.Object)()
             dict("name") = n.Name
@@ -2697,11 +3268,21 @@ Namespace SharedLibrary
             Return dict
         End Function
 
+        ''' <summary>
+        ''' Synchronously loads HTML into the last-document state, delegating to <see cref="LoadDocumentAsync"/> for actual parsing.
+        ''' </summary>
         Private Sub LoadDocument(html As String)
             ' Fallback (avoid using on UI thread if dynamic enabled)
             LoadDocumentAsync(html, _lastResponseUrl, CancellationToken.None).GetAwaiter().GetResult()
         End Sub
 
+        ''' <summary>
+        ''' Loads HTML into the last-document state and optionally performs dynamic expansion when enabled.
+        ''' Updates <see cref="_lastResponseBody"/>, <see cref="_lastResponseUrl"/>, and <see cref="_lastDoc"/>.
+        ''' </summary>
+        ''' <param name="html">HTML text to parse.</param>
+        ''' <param name="sourceUrl">URL associated with the HTML (used for resolving relative URLs and dynamic expansion).</param>
+        ''' <param name="cancel">Cancellation token for dynamic expansion.</param>
         Private Async Function LoadDocumentAsync(html As String,
                                      sourceUrl As String,
                                      cancel As CancellationToken) As System.Threading.Tasks.Task
@@ -2734,15 +3315,18 @@ Namespace SharedLibrary
             End If
         End Function
 
-
-        ' Params:
-        '   {
-        '     "array": "summary_array",          ' Ziel-Variablenname (wird JArray)
-        '     "item_var": "decision_summary_obj" ' (ODER) item_var: Name einer bestehenden Variable
-        '     "item": { ... }                    ' (ODER) inline JSON Objekt / Wert
-        '   }
-        '   item_var hat Vorrang; fallback auf inline "item".
-        ' Rückgabe: { pushed = True, count = <Anzahl>, array = "<name>" }
+        ''' <summary>
+        ''' Implements the `array_push` command: appends an item to an array variable (normalized to <see cref="JArray"/>).
+        ''' </summary>
+        ''' <param name="parms">
+        ''' Parameters:
+        ''' - `array`: target variable name that will hold a <see cref="JArray"/>
+        ''' - `item_var`: optional variable name; if present, its value is appended (preferred)
+        ''' - `item`: optional inline JSON token/value appended when `item_var` is not provided
+        ''' </param>
+        ''' <returns>
+        ''' Anonymous object: `{ pushed As Boolean, count As Integer, array As String }`.
+        ''' </returns>
         Private Function CmdArrayPush(parms As JObject) As Object
             If parms Is Nothing Then Throw New Exception("array_push: params missing")
             Dim arrayName = parms.Value(Of String)("array")
@@ -2752,11 +3336,11 @@ Namespace SharedLibrary
                 Throw New Exception("array_push: 'array' missing")
             End If
 
-            ' 1) Item bestimmen
+            ' 1) Determine item
             Dim itemObj As Object = Nothing
             If Not String.IsNullOrWhiteSpace(itemVar) Then
                 If Not _vars.TryGetValue(itemVar, itemObj) OrElse itemObj Is Nothing Then
-                    ' Nichts zu pushen – kein Fehler, nur noop
+                    ' Nothing to push – not an error, noop.
                     Return New With {.pushed = False, .count = GetExistingArrayCount(arrayName), .array = arrayName}
                 End If
             Else
@@ -2767,20 +3351,20 @@ Namespace SharedLibrary
                 itemObj = inlineToken.ToObject(Of Object)()
             End If
 
-            ' 2) Existierendes Array holen / herstellen (immer auf JArray normalisieren)
+            ' 2) Load or create JArray
             Dim arr As JArray = Nothing
             If _vars.ContainsKey(arrayName) Then
                 Select Case True
                     Case TypeOf _vars(arrayName) Is JArray
                         arr = DirectCast(_vars(arrayName), JArray)
                     Case TypeOf _vars(arrayName) Is String
-                        ' Versuchen zu parsen falls String wie "[]"
+                        ' Try parsing if string looks like JSON array.
                         Dim s = DirectCast(_vars(arrayName), String).Trim()
                         If s.StartsWith("[") AndAlso s.EndsWith("]") Then
                             Try : arr = JArray.Parse(s) : Catch : End Try
                         End If
                     Case Else
-                        ' Versuch generisch zu konvertieren
+                        ' Best-effort conversion.
                         Try
                             arr = JArray.FromObject(_vars(arrayName))
                         Catch
@@ -2789,7 +3373,7 @@ Namespace SharedLibrary
             End If
             If arr Is Nothing Then arr = New JArray()
 
-            ' 3) Item als JToken klonen und anhängen
+            ' 3) Append cloned token
             Dim jt As JToken
             If TypeOf itemObj Is JToken Then
                 jt = DirectCast(itemObj, JToken).DeepClone()
@@ -2798,16 +3382,20 @@ Namespace SharedLibrary
             End If
             arr.Add(jt)
 
-            ' 4) Zurückspeichern (direkt als JArray, kein Doppelkonvert via SafeStoreVar nötig)
+            ' 4) Store back
             _vars(arrayName) = arr
 
             Return New With {
-    .pushed = True,
-    .count = arr.Count,
-    .array = arrayName
-}
+                .pushed = True,
+                .count = arr.Count,
+                .array = arrayName
+            }
         End Function
 
+        ''' <summary>
+        ''' Special-case accumulator for decision-link extraction: merges `decision_links` into `all_decisions`
+        ''' when the provided step id is `extract_decision_links`.
+        ''' </summary>
         Private Sub AccumulateDecisionLinksIfNeeded(stepId As String)
             If Not String.Equals(stepId, "extract_decision_links", StringComparison.OrdinalIgnoreCase) Then Exit Sub
             Dim pageObj As Object = Nothing
@@ -2822,13 +3410,20 @@ Namespace SharedLibrary
             Next
         End Sub
 
-        ' Hilfsfunktion für frühen Rückgabewert
+        ''' <summary>
+        ''' Returns the current count of an array variable if it is stored as a <see cref="JArray"/>, otherwise 0.
+        ''' </summary>
         Private Function GetExistingArrayCount(name As String) As Integer
             If Not _vars.ContainsKey(name) Then Return 0
             If TypeOf _vars(name) Is JArray Then Return DirectCast(_vars(name), JArray).Count
             Return 0
         End Function
 
+        ''' <summary>
+        ''' Enables dynamic expansion mode (used by the `enable_dynamic` command).
+        ''' </summary>
+        ''' <param name="parms">Unused; kept for command signature compatibility.</param>
+        ''' <returns>Status payload indicating dynamic expansion is enabled.</returns>
         Private Function CmdEnableDynamic(parms As JObject) As Object
             EnableDynamicExpansion()
             Return New JObject(
@@ -2837,6 +3432,10 @@ Namespace SharedLibrary
         )
         End Function
 
+        ''' <summary>
+        ''' Regex patterns used to discover candidate dynamic endpoints inside inline scripts.
+        ''' Targets common patterns referencing `index_aza.php`.
+        ''' </summary>
         Private Shared ReadOnly DynamicUrlRegexes As Regex() = {
             New Regex("(https?://[^\s'""<>]+index_aza\.php[^\s'""<>]*)", RegexOptions.IgnoreCase),
             New Regex("url\s*:\s*['""]([^'""]*index_aza\.php[^'""]*)['""]", RegexOptions.IgnoreCase),
@@ -2844,18 +3443,32 @@ Namespace SharedLibrary
             New Regex("fetch\s*\(\s*['""]([^'""]*index_aza\.php[^'""]*)['""]", RegexOptions.IgnoreCase)
         }
 
+        ''' <summary>
+        ''' Turns on dynamic expansion for subsequently loaded documents.
+        ''' </summary>
         Private Sub EnableDynamicExpansion()
             _dynamicExpand = True
             Log("Dynamic expansion ENABLED")
         End Sub
 
+        ''' <summary>
+        ''' Disables dynamic expansion (best-effort command handler).
+        ''' </summary>
+        ''' <param name="parms">Unused; kept for command signature compatibility.</param>
+        ''' <returns>Status payload indicating dynamic expansion is disabled.</returns>
         Private Function CmdDisableDynamic(parms As JObject) As Object
             _dynamicExpand = False
             Log("Dynamic expansion DISABLED")
             Return New JObject(New JProperty("status", "ok"), New JProperty("dynamic", False))
         End Function
 
-        ' Core dynamic expansion after initial HTML load
+        ''' <summary>
+        ''' Attempts to expand dynamically-loaded content by discovering and fetching additional script/endpoints.
+        ''' Appends fetched bodies into the HTML as comments and returns the composite HTML.
+        ''' </summary>
+        ''' <param name="baseUrl">Base URL associated with the document (currently not directly used).</param>
+        ''' <param name="originalHtml">The initial HTML body.</param>
+        ''' <param name="cancel">Cancellation token controlling fetch operations.</param>
         Private Async Function ExpandDynamicContentAsync(baseUrl As String,
                                              originalHtml As String,
                                              cancel As CancellationToken) As Task(Of String)
@@ -2869,6 +3482,7 @@ Namespace SharedLibrary
                 Return originalHtml
             End If
 
+            ' 1) Collect external scripts <script src="...">
             Try
                 If _lastDoc IsNot Nothing Then
                     Dim scriptNodes = _lastDoc.DocumentNode.SelectNodes("//script[@src]")
@@ -2886,6 +3500,7 @@ Namespace SharedLibrary
                 Log("[dynamic] script src scan error: " & ex.Message)
             End Try
 
+            ' 2) Collect endpoints referenced in inline script bodies (regex-based)
             Try
                 If _lastDoc IsNot Nothing Then
                     Dim inlineScripts = _lastDoc.DocumentNode.SelectNodes("//script[not(@src)]")
@@ -2909,6 +3524,7 @@ Namespace SharedLibrary
                 Log("[dynamic] inline script scan error: " & ex.Message)
             End Try
 
+            ' 3) Fetch up to MAX_DYNAMIC_FETCH items
             While queue.Count > 0 AndAlso fetchCount < MAX_DYNAMIC_FETCH AndAlso Not cancel.IsCancellationRequested
                 Dim u = queue.Dequeue()
                 fetchCount += 1
@@ -2932,6 +3548,13 @@ Namespace SharedLibrary
             Return composite.ToString()
         End Function
 
+        ''' <summary>
+        ''' Determines whether a candidate dynamic URL should be fetched, tracking de-duplication in <paramref name="discovered"/>.
+        ''' </summary>
+        ''' <param name="url">Absolute URL candidate.</param>
+        ''' <param name="discovered">Set tracking previously enqueued/fetched URLs.</param>
+        ''' <param name="queue">Unused parameter (present for potential future logic); queueing is done by the caller.</param>
+        ''' <returns>True if the URL is syntactically valid and not already discovered.</returns>
         Private Function ShouldFetchDynamic(url As String,
                                 discovered As HashSet(Of String),
                                 queue As Queue(Of String)) As Boolean
@@ -2949,12 +3572,23 @@ Namespace SharedLibrary
             Return True
         End Function
 
-
 #End Region
 
 #Region "Templating / Helpers"
 
-        ' Replace existing ResolveSecret with:
+        ''' <summary>
+        ''' Truncates a URL to a maximum length for display purposes.
+        ''' </summary>
+        Private Function TruncateUrl(url As String, maxLength As Integer) As String
+            If String.IsNullOrEmpty(url) Then Return ""
+            If url.Length <= maxLength Then Return url
+            Return url.Substring(0, maxLength - 3) & "..."
+        End Function
+
+        ''' <summary>
+        ''' Resolves a secret reference of the form `secret://key` using the current <see cref="_secrets"/> dictionary.
+        ''' Returns an empty string when the key is not found; returns the input when not a secret reference.
+        ''' </summary>
         Private Function ResolveSecret(reference As String) As String
             If String.IsNullOrEmpty(reference) Then Return reference
             If reference.StartsWith("secret://", StringComparison.OrdinalIgnoreCase) Then
@@ -2967,6 +3601,11 @@ Namespace SharedLibrary
             End If
             Return reference
         End Function
+
+        ''' <summary>
+        ''' Resolves a possibly relative URL to an absolute URL using (1) <see cref="_lastResponseUrl"/> then (2) <see cref="_baseUrl"/>.
+        ''' Also sanitizes Markdown-style URLs.
+        ''' </summary>
         Private Function ResolveUrl(url As System.String) As System.String
             If System.String.IsNullOrWhiteSpace(url) Then Return url
 
@@ -2998,6 +3637,10 @@ Namespace SharedLibrary
             Return url
         End Function
 
+        ''' <summary>
+        ''' Attempts to normalize URLs that may have been provided in Markdown link form (`[text](url)`), angle-bracket form (`<url>`),
+        ''' or partially malformed Markdown remnants.
+        ''' </summary>
         Private Function SanitizePotentialMarkdownUrl(raw As System.String) As System.String
             Dim s = raw.Trim()
             ' Pattern: [visible](actual) – prefer the target inside parentheses if valid
@@ -3028,6 +3671,10 @@ Namespace SharedLibrary
             Return s
         End Function
 
+        ''' <summary>
+        ''' Decodes a HTTP response body byte array into a string using the response Content-Type charset when available.
+        ''' Defaults to UTF-8 when charset is missing or invalid.
+        ''' </summary>
         Private Function DecodeBody(bytes As System.Byte(), contentType As System.Net.Http.Headers.MediaTypeHeaderValue) As System.String
             Dim charset As System.String = Nothing
             If contentType IsNot Nothing AndAlso Not System.String.IsNullOrEmpty(contentType.CharSet) Then
@@ -3042,6 +3689,10 @@ Namespace SharedLibrary
             Return enc.GetString(bytes)
         End Function
 
+        ''' <summary>
+        ''' Sets (or replaces) a default request header on a <see cref="System.Net.Http.Headers.HttpRequestHeaders"/> collection.
+        ''' Special-cases `User-Agent` due to <see cref="System.Net.Http.Headers.HttpRequestHeaders.UserAgent"/>.
+        ''' </summary>
         Private Sub SafeSetHeader(col As System.Net.Http.Headers.HttpRequestHeaders, name As System.String, value As System.String)
             If System.String.Equals(name, "User-Agent", System.StringComparison.OrdinalIgnoreCase) Then
                 col.UserAgent.Clear()
@@ -3052,6 +3703,10 @@ Namespace SharedLibrary
             col.TryAddWithoutValidation(name, value)
         End Sub
 
+        ''' <summary>
+        ''' Masks any resolved secret values found in the provided string by replacing them with `***`.
+        ''' Intended for log output safety.
+        ''' </summary>
         Private Function MaskSecrets(line As String) As String
             If _secrets Is Nothing OrElse _secrets.Count = 0 Then Return line
             Dim masked = line
@@ -3063,6 +3718,10 @@ Namespace SharedLibrary
             Return masked
         End Function
 
+        ''' <summary>
+        ''' Appends a timestamped message to the in-memory log after masking secrets.
+        ''' Also writes to <see cref="System.Diagnostics.Debug"/> output (best effort).
+        ''' </summary>
         Private Sub Log(msg As String)
             Dim safe = MaskSecrets(msg)
             Dim line = $"[{System.DateTime.Now:O}] {safe}"
@@ -3070,23 +3729,27 @@ Namespace SharedLibrary
             Try : System.Diagnostics.Debug.WriteLine(line) : Catch : End Try
         End Sub
 
+        ''' <summary>
+        ''' Expands `{{...}}` placeholders in a string using <see cref="ResolveValue"/>.
+        ''' When a placeholder cannot be resolved, the original token is retained and a debug log entry is written.
+        ''' </summary>
         Private Function ExpandTemplates(input As System.String) As System.String
             If input Is Nothing Then Return Nothing
             Dim unresolved As New System.Collections.Generic.List(Of System.String)
 
             Dim result = System.Text.RegularExpressions.Regex.Replace(
-    input,
-    "{{\s*([^}]+)\s*}}",
-    Function(m)
-        Dim expr = m.Groups(1).Value
-        Dim v = ResolveValue("{{" & expr & "}}")
-        If v Is Nothing Then
-            unresolved.Add(expr)
-            ' Keep the original marker so downstream code can detect unresolved tokens
-            Return "{{" & expr & "}}"
-        End If
-        Return v.ToString()
-    End Function)
+                input,
+                "{{\s*([^}]+)\s*}}",
+                Function(m)
+                    Dim expr = m.Groups(1).Value
+                    Dim v = ResolveValue("{{" & expr & "}}")
+                    If v Is Nothing Then
+                        unresolved.Add(expr)
+                        ' Keep the original marker so downstream code can detect unresolved tokens
+                        Return "{{" & expr & "}}"
+                    End If
+                    Return v.ToString()
+                End Function)
 
             If unresolved.Count > 0 Then
                 For Each u In unresolved
@@ -3096,6 +3759,14 @@ Namespace SharedLibrary
             Return result
         End Function
 
+        ''' <summary>
+        ''' Resolves a template expression or literal.
+        ''' Supported forms:
+        ''' - `{{env.NAME}}` for environment variables (special-case: `{{env.DESKTOP}}`)
+        ''' - `{{base_url}}`
+        ''' - `{{var}}` or `{{var.path}}` for values in <see cref="_vars"/> (supports <see cref="JToken"/> navigation)
+        ''' - Otherwise, recursively runs <see cref="ExpandTemplates"/> on non-expression strings.
+        ''' </summary>
         Private Function ResolveValue(exprOrLiteral As System.Object) As System.Object
             If exprOrLiteral Is Nothing Then Return Nothing
             Dim s = TryCast(exprOrLiteral, System.String)
@@ -3172,6 +3843,13 @@ Namespace SharedLibrary
             End If
         End Function
 
+        ''' <summary>
+        ''' Interprets a value as truthy for conditional/templating logic.
+        ''' - `Boolean`: value itself
+        ''' - `String`: falsey for empty or {false,0,null,none,nil}
+        ''' - `IEnumerable` (non-string): true when it has at least one element
+        ''' - Other non-null: true
+        ''' </summary>
         Private Function _IsTruthy(val As Object) As Boolean
             If val Is Nothing Then Return False
             If TypeOf val Is Boolean Then Return DirectCast(val, Boolean)
@@ -3197,6 +3875,12 @@ Namespace SharedLibrary
             Return True
         End Function
 
+        ''' <summary>
+        ''' Minimal Mustache-like renderer supporting:
+        ''' - Sections `{{#name}}...{{/name}}` and inverted sections `{{^name}}...{{/name}}`
+        ''' - Variables `{{name}}` and raw variables `{{{name}}}`
+        ''' Variables are resolved against the provided context token/object only; unresolved variables are preserved as `{{name}}`.
+        ''' </summary>
         Private Function SimpleMustacheRender(template As String, context As Object) As String
             If String.IsNullOrEmpty(template) Then Return String.Empty
 
@@ -3208,32 +3892,32 @@ Namespace SharedLibrary
             End If
 
             Dim ResolveVar As Func(Of String, Object) =
-    Function(path As String) As Object
-        Dim key = path.Trim()
-        If ctxToken IsNot Nothing Then
-            Try
-                Dim t = ctxToken.SelectToken(key)
-                If t IsNot Nothing Then
-                    Select Case t.Type
-                        Case JTokenType.Array, JTokenType.Object
-                            Return t
-                        Case Else
-                            Return t.ToString()
-                    End Select
-                End If
-            Catch
-            End Try
-        End If
+                Function(path As String) As Object
+                    Dim key = path.Trim()
+                    If ctxToken IsNot Nothing Then
+                        Try
+                            Dim t = ctxToken.SelectToken(key)
+                            If t IsNot Nothing Then
+                                Select Case t.Type
+                                    Case JTokenType.Array, JTokenType.Object
+                                        Return t
+                                    Case Else
+                                        Return t.ToString()
+                                End Select
+                            End If
+                        Catch
+                        End Try
+                    End If
 
-        If context IsNot Nothing Then
-            Try
-                Dim pi = context.GetType().GetProperty(key, BindingFlags.Instance Or BindingFlags.Public Or BindingFlags.IgnoreCase)
-                If pi IsNot Nothing Then Return pi.GetValue(context)
-            Catch
-            End Try
-        End If
-        Return Nothing
-    End Function
+                    If context IsNot Nothing Then
+                        Try
+                            Dim pi = context.GetType().GetProperty(key, BindingFlags.Instance Or BindingFlags.Public Or BindingFlags.IgnoreCase)
+                            If pi IsNot Nothing Then Return pi.GetValue(context)
+                        Catch
+                        End Try
+                    End If
+                    Return Nothing
+                End Function
 
             ' Process simple (# / ^) sections iteratively (limited depth)
             Dim sectionRegex As New Regex("\{\{(?<sig>[#^])\s*(?<name>[^\}]+?)\s*\}\}(?<body>.*?)\{\{/\s*\k<name>\s*\}\}",
@@ -3284,7 +3968,7 @@ Namespace SharedLibrary
                 output = output.Substring(0, m.Index) & repl & output.Substring(m.Index + m.Length)
             End While
 
-            ' Triple mustache {{{var}}} (raw – wenn nicht im lokalen Kontext, Placeholder stehen lassen)
+            ' Triple mustache {{{var}}} (raw) – if not resolvable, keep as {{var}} for second pass.
             output = Regex.Replace(
                 output,
                 "\{\{\{\s*([^\}]+?)\s*\}\}\}",
@@ -3292,13 +3976,12 @@ Namespace SharedLibrary
                     Dim name = mt.Groups(1).Value.Trim()
                     Dim v = ResolveVar(name)
                     If v Is Nothing Then
-                        ' Für den zweiten Pass in normale Form überführen:
                         Return "{{" & name & "}}"
                     End If
                     Return v.ToString()
                 End Function)
 
-            ' Normale Variablen {{var}} – bei Nichtauflösung Platzhalter erhalten
+            ' Variables {{var}} – if not resolvable, preserve placeholder.
             output = Regex.Replace(
                 output,
                 "\{\{\s*([^\}#/\^][^\}]*)\s*\}\}",
@@ -3307,7 +3990,6 @@ Namespace SharedLibrary
                     Dim name = rawName.Trim()
                     Dim v = ResolveVar(name)
                     If v Is Nothing Then
-                        ' Unverändert (bereinigt) stehen lassen
                         Return "{{" & name & "}}"
                     End If
                     Return v.ToString()
@@ -3316,6 +3998,10 @@ Namespace SharedLibrary
             Return output
         End Function
 
+        ''' <summary>
+        ''' Materializes placeholder-only string properties in a context token by resolving them through <see cref="ResolveValue"/>.
+        ''' For each string property equal to a single placeholder token, replaces the property with the resolved token/value.
+        ''' </summary>
         Private Function MaterializeContextPlaceholders(ctxToken As Newtonsoft.Json.Linq.JToken) As System.Object
             If ctxToken Is Nothing Then Return Nothing
             If ctxToken.Type <> Newtonsoft.Json.Linq.JTokenType.Object Then
@@ -3341,6 +4027,9 @@ Namespace SharedLibrary
             Return jobj.ToObject(Of System.Object)()
         End Function
 
+        ''' <summary>
+        ''' Resolves a path against a context object that may be a <see cref="JToken"/>, dictionary, or POCO.
+        ''' </summary>
         Private Function ResolveContextValue(ctx As System.Object, path As System.String) As System.Object
             If ctx Is Nothing Then Return Nothing
             Dim jt = TryCast(ctx, Newtonsoft.Json.Linq.JToken)
@@ -3378,6 +4067,15 @@ Namespace SharedLibrary
             Return Nothing
         End Function
 
+        ''' <summary>
+        ''' Evaluates a small conditional expression language used by `guard` and `if`:
+        ''' - OR: `a || b`
+        ''' - `exists {{var}}`
+        ''' - Equality: `{{var}} == "value"` and `{{var}} == []`
+        ''' - Numeric comparisons: `{{var}} < 10`, `{{var}} >= {{other}}`
+        ''' - Contains: `{{var}} contains "text"`
+        ''' - Regex: `{{var}} ~= "pattern"`
+        ''' </summary>
         Private Function EvalCondition(condition As System.String) As System.Boolean
             If System.String.IsNullOrWhiteSpace(condition) Then Return False
             Dim c = condition.Trim()
@@ -3388,6 +4086,14 @@ Namespace SharedLibrary
                     If EvalCondition(part.Trim()) Then Return True
                 Next
                 Return False
+            End If
+
+            ' AND support
+            If c.Contains("&&") Then
+                For Each part In c.Split(New String() {"&&"}, StringSplitOptions.RemoveEmptyEntries)
+                    If Not EvalCondition(part.Trim()) Then Return False
+                Next
+                Return True
             End If
 
             ' Empty array equality: {{var}} == []
@@ -3405,33 +4111,97 @@ Namespace SharedLibrary
                 Return False
             End If
 
-            Dim ex = System.Text.RegularExpressions.Regex.Match(c, "^\s*exists\s+({{.*}})\s*$", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
-            If ex.Success Then
-                Dim v = ResolveValue(ex.Groups(1).Value)
-                Return v IsNot Nothing AndAlso Not System.String.IsNullOrEmpty(v.ToString())
+            ' Numeric comparisons: {{var}} >= {{other}}, {{var}} < 10, etc.
+            Dim numericCompare = Regex.Match(c, "^\s*({{[^}]+}})\s*(>=|<=|>|<)\s*({{[^}]+}}|\d+)\s*$")
+            If numericCompare.Success Then
+                Dim leftVal = ResolveValue(numericCompare.Groups(1).Value)
+                Dim op = numericCompare.Groups(2).Value
+                Dim rightRaw = numericCompare.Groups(3).Value
+                Dim rightVal As Object
+                If rightRaw.StartsWith("{{") Then
+                    rightVal = ResolveValue(rightRaw)
+                Else
+                    rightVal = rightRaw
+                End If
+
+                Dim leftNum As Double = 0
+                Dim rightNum As Double = 0
+                If Not Double.TryParse(leftVal?.ToString(), leftNum) Then Return False
+                If Not Double.TryParse(rightVal?.ToString(), rightNum) Then Return False
+
+                Select Case op
+                    Case ">=" : Return leftNum >= rightNum
+                    Case "<=" : Return leftNum <= rightNum
+                    Case ">" : Return leftNum > rightNum
+                    Case "<" : Return leftNum < rightNum
+                End Select
+                Return False
             End If
 
-            Dim eq = System.Text.RegularExpressions.Regex.Match(c, "^\s*({{.*}})\s*==\s*""?(.*?)""?\s*$", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+            ' Boolean literal equality: {{var}} == true / {{var}} == false
+            Dim boolLiteral = Regex.Match(c, "^\s*({{[^}]+}})\s*==\s*(true|false)\s*$", RegexOptions.IgnoreCase)
+            If boolLiteral.Success Then
+                Dim leftVal = ResolveValue(boolLiteral.Groups(1).Value)
+                Dim rightBool = boolLiteral.Groups(2).Value.Equals("true", StringComparison.OrdinalIgnoreCase)
+
+                ' Handle actual boolean
+                If TypeOf leftVal Is Boolean Then
+                    Return DirectCast(leftVal, Boolean) = rightBool
+                End If
+
+                ' Handle string representation
+                If leftVal IsNot Nothing Then
+                    Dim leftStr = leftVal.ToString().Trim()
+                    Dim leftBool As Boolean
+                    If Boolean.TryParse(leftStr, leftBool) Then
+                        Return leftBool = rightBool
+                    End If
+                    ' Also handle "1"/"0"
+                    If leftStr = "1" Then Return rightBool
+                    If leftStr = "0" Then Return Not rightBool
+                End If
+
+                Return Not rightBool ' null/nothing is falsy
+            End If
+
+            Dim ex = Regex.Match(c, "^\s*exists\s+({{.*}})\s*$", RegexOptions.IgnoreCase)
+            If ex.Success Then
+                Dim v = ResolveValue(ex.Groups(1).Value)
+                Return v IsNot Nothing AndAlso Not String.IsNullOrEmpty(v.ToString())
+            End If
+
+            Dim eq = Regex.Match(c, "^\s*({{.*}})\s*==\s*""?(.*?)""?\s*$", RegexOptions.IgnoreCase)
             If eq.Success Then
                 Dim left = ResolveValue(eq.Groups(1).Value)
                 Dim right = eq.Groups(2).Value
-                Return System.String.Equals(If(left?.ToString(), System.String.Empty), right, System.StringComparison.OrdinalIgnoreCase)
+
+                ' Treat quoted boolean tokens as boolean literals for convenience.
+                If String.Equals(right, "true", StringComparison.OrdinalIgnoreCase) OrElse
+                    String.Equals(right, "false", StringComparison.OrdinalIgnoreCase) Then
+
+                    Dim rightBool = String.Equals(right, "true", StringComparison.OrdinalIgnoreCase)
+                    If TypeOf left Is Boolean Then
+                        Return DirectCast(left, Boolean) = rightBool
+                    End If
+                End If
+
+                Return String.Equals(If(left?.ToString(), String.Empty), right, StringComparison.OrdinalIgnoreCase)
             End If
 
-            Dim co = System.Text.RegularExpressions.Regex.Match(c, "^\s*({{.*}})\s*contains\s*""(.*?)""\s*$", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+            Dim co = Regex.Match(c, "^\s*({{.*}})\s*contains\s*""(.*?)""\s*$", RegexOptions.IgnoreCase)
             If co.Success Then
                 Dim left = ResolveValue(co.Groups(1).Value)?.ToString()
                 Dim subStr = co.Groups(2).Value
                 If left Is Nothing Then Return False
-                Return left.IndexOf(subStr, System.StringComparison.OrdinalIgnoreCase) >= 0
+                Return left.IndexOf(subStr, StringComparison.OrdinalIgnoreCase) >= 0
             End If
 
-            Dim rx = System.Text.RegularExpressions.Regex.Match(c, "^\s*({{.*}})\s*~=\s*""(.*?)""\s*$", System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.Singleline)
+            Dim rx = Regex.Match(c, "^\s*({{.*}})\s*~=\s*""(.*?)""\s*$", RegexOptions.IgnoreCase Or RegexOptions.Singleline)
             If rx.Success Then
                 Dim left = ResolveValue(rx.Groups(1).Value)?.ToString()
                 Dim pat = rx.Groups(2).Value
                 If left Is Nothing Then Return False
-                Return System.Text.RegularExpressions.Regex.IsMatch(left, pat, System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.Singleline)
+                Return Regex.IsMatch(left, pat, RegexOptions.IgnoreCase Or RegexOptions.Singleline)
             End If
 
             Return False

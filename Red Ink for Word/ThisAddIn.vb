@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 26.12.2025
+' 11.1.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -27,8 +27,8 @@
 ' Includes PdfiumViewer in unchanged form; Copyright (c) 2017 Pieter van Ginkel; licensed under the Apache 2.0 license (https://licenses.nuget.org/Apache-2.0) at https://github.com/pvginkel/PdfiumViewer
 ' Includes PDFsharp in unchanged form; Copyright (c) 2025 PDFSharp Team; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://docs.pdfsharp.net/
 ' Includes System.Interactive.Async in unchanged form; Copyright (c) 2025 by .NET Foundation and Contributors; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://github.com/dotnet/reactive
-' Includes also various Microsoft distributables and libraries copyrighted by Microsoft Corporation and available, among others, under the Microsoft EULA, the Visual Studio Community 2022 License and the MIT License (including Microsoft.Bcl.*, Microsoft.Extensions.*, System.*, System.Security.*, System.CodeDom, DocumentFormat.OpenXml.*, Microsoft.ml.*, CommunityToolkit.HighPerformance licensed under MIT License) (https://licenses.nuget.org/MIT); Copyright (c) 2016- Microsoft Corp.'
-'
+' Includes also various Microsoft distributables and libraries copyrighted by Microsoft Corporation and available, among others, under the Microsoft EULA, the Visual Studio Community 2022 License, the Microsoft.Web.WebView2 License (for Microsoft.Web.WebView2, see license on https://www.nuget.org/packages/Microsoft.Web.WebView2/ and below) and the MIT License (including Microsoft.Bcl.*, Microsoft.Extensions.*, System.*, System.Security.*, System.CodeDom, DocumentFormat.OpenXml.*, Microsoft.ml.*, CommunityToolkit.HighPerformance licensed under MIT License) (https://licenses.nuget.org/MIT); Copyright (c) 2016- Microsoft Corp.
+
 ' Licenses of Red Ink and of third-party components and further legal terms/notices are available in the installation folder and via https://redink.ai.
 '
 ' Documentation for developers: See at the end of this file, throughout the code and the manual (https://redink.ai).
@@ -47,7 +47,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.261225" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.110126" & SharedMethods.VersionQualifier
 
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
@@ -55,7 +55,7 @@ Partial Public Class ThisAddIn
     Public Const AN6 As String = "Inky" ' for chat
 
     Private Const ISearch_MinChars = 500         ' minimum characters for a search hit to be relevant
-    Private Const ISearch_MaxChars = 4000        ' characters that will be used per search result (rest will be cut off)
+    Private Const ISearch_MaxChars = 4000        ' characters that will be used per search result (rest will be cut off); not applicable to WebView2 retriever
     Private Const ISearch_MaxCrawlErrors = 3     ' maximum number of errors before search is aborted
     Private Const ShortenPercent As Integer = 20
     Private Const SummaryPercent As Integer = 20
@@ -68,6 +68,8 @@ Partial Public Class ThisAddIn
     Private Const TPMarkupTriggerR As String = ")"
     Private Const TPMarkupTriggerInstruct As String = "(rev[:user])"
     Private Const ExtTrigger As String = "{doc}"
+    Private Const ExtDirTrigger As String = "{dir}"
+    Private Const ExtTriggerFixed As String = "{[path]}"
     Private Const AddDocTrigger As String = "(adddoc)"
     Private Const MyStyleTrigger As String = "(mystyle)"
     Private Const MultiModelTrigger As String = "(multimodel)"
@@ -93,6 +95,8 @@ Partial Public Class ThisAddIn
     Private Const PurePrefix As String = "Pure:"
     Private Const ClipboardPrefix As String = "Clipboard:"
     Private Const ClipboardPrefix2 As String = "Clip:"
+    Private Const FilePrefix As String = "File:"
+    Private Const FilePrefix2 As String = "Files:"
     Private Const PanePrefix As String = "Pane:"
     Private Const BubblesPrefix As String = "Bubbles:"
     Private Const PushbackPrefix As String = "Reply:"
@@ -104,6 +108,8 @@ Partial Public Class ThisAddIn
     Private Const ChunkTrigger As String = "(iterate)"
     Private Const EmbedTrigger As String = "(embed)"
     Private Const RefreshTrigger As String = "(refresh)"
+    Private Const ToolSelectionTrigger As String = "(sources)"  ' Trigger in OtherPrompt to re-select tools for tooling-enabled models.
+    Public Const ToolFriendlyName As String = "Sources"  ' How to refer to tools (e.g., sources) towards the user
 
     Private Const MaxFilibuster As Integer = 10000 ' Maximum number of words for filibuster mode 
     Private Const ArgueAgainstDefault As Integer = 50 ' Number of words to propose for Argue Against
@@ -228,6 +234,28 @@ Partial Public Class ThisAddIn
     "yue-Hant-HK", "zu-ZA"
         }
 
+    ' Tooling
+
+    Public Const ToolingLog_AutoCloseDefaultSeconds As Integer = 20
+
+    Public Const InternalToolSuffix As String = " (internal)"  ' Suffix displayed for the internal web tool in selection dialogs.
+
+    Public Const InternalWebToolName As String = "web_content_retriever"
+    Public Const InternalWebToolDescription As String =
+        "Retrieves readable text from one or more web pages. Use this tool when you need to access the content behind a URL instead of relying on summaries or excerpts."
+
+    Public Const InternalWebToolDefinition As String =
+        "{""name"":""web_content_retriever"",""description"":""Fetches and returns readable text from one or more web URLs."",""parameters"":{""type"":""object"",""properties"":{""urls"":{""type"":""array"",""items"":{""type"":""string""},""description"":""One or more absolute URLs to fetch (preferred).""},""url"":{""type"":""string"",""description"":""Single absolute URL to fetch (alternative to urls).""}}}}" ' Note: do not require urls; code validates at runtime.
+
+    Public Const InternalWebToolInstructionsPrompt As String =
+        "web_content_retriever: Fetches readable text from web pages. " &
+        "Call this tool when you need the actual page content behind a link. " &
+        "Provide either urls (array of strings) or url (single string). " &
+        "Return value is plain text content for each URL (or an error per URL if retrieval fails)."
+
+    Public Shared SelectedToolNames As New List(Of String)()   ' Persisted list of selected tool names for tooling sessions.
+
+
     ' Declare variables publicly so that InterpolateAtRuntime can access them; case-sensitive
 
     Public TranslateLanguage As String
@@ -236,6 +264,7 @@ Partial Public Class ThisAddIn
     Public SummaryLength As Integer
     Public OtherPrompt As String = ""
     Public OutputLanguage As String = ""
+    Public MaxToolIterations As Integer = 10
     Public InsertDocs As String = ""
     Public MyStyleInsert As String = ""
     Public FormatInstruction As String = ""
@@ -256,6 +285,7 @@ Partial Public Class ThisAddIn
     Public TargetAudience As String
     Public DialogueContext As String
     Public ExtraInstructions As String
+    Public DiscussKnowledgeCache As String = ""
 
 
 
@@ -437,7 +467,7 @@ Partial Public Class ThisAddIn
     Public Sub InitializeAddInFeatures()
         InitializeConfig(True, True)
         AddContextMenu()
-        UpdateHandler.PeriodicCheckForUpdates(INI_UpdateCheckInterval, RDV, INI_UpdatePath)
+        UpdateHandler.PeriodicCheckForUpdates(INI_UpdateCheckInterval, RDV, INI_UpdatePath, _context)
     End Sub
 
 
@@ -453,8 +483,8 @@ Partial Public Class ThisAddIn
     Public Shared Async Function PostCorrection(inputText As String, Optional ByVal UseSecondAPI As Boolean = False) As Task(Of String)
         Return Await SharedMethods.PostCorrection(_context, inputText, UseSecondAPI)
     End Function
-    Public Shared Async Function LLM(ByVal promptSystem As String, ByVal promptUser As String, Optional ByVal Model As String = "", Optional ByVal Temperature As String = "", Optional ByVal Timeout As Long = 0, Optional ByVal UseSecondAPI As Boolean = False, Optional ByVal Hidesplash As Boolean = False, Optional ByVal AddUserPrompt As String = "", Optional ByVal FileObject As String = "") As Task(Of String)
-        Dim Response = Await SharedMethods.LLM(_context, promptSystem, promptUser, Model, Temperature, Timeout, UseSecondAPI, Hidesplash, AddUserPrompt, FileObject)
+    Public Shared Async Function LLM(ByVal promptSystem As String, ByVal promptUser As String, Optional ByVal Model As String = "", Optional ByVal Temperature As String = "", Optional ByVal Timeout As Long = 0, Optional ByVal UseSecondAPI As Boolean = False, Optional ByVal Hidesplash As Boolean = False, Optional ByVal AddUserPrompt As String = "", Optional ByVal FileObject As String = "", Optional ByVal ToolExecution As Boolean = False) As Task(Of String)
+        Dim Response = Await SharedMethods.LLM(_context, promptSystem, promptUser, Model, Temperature, Timeout, UseSecondAPI, Hidesplash, AddUserPrompt, FileObject, ToolExecution:=ToolExecution)
         Await EnsureUIThread().ConfigureAwait(False)
         Return Response
     End Function

@@ -3,7 +3,6 @@
 
 ' =============================================================================
 ' File: SearchResult.vb
-' Part of: Red Ink Shared Library
 ' Purpose: Lightweight data model representing a single search result from embedding
 '          similarity search. Contains match location, matched text, and similarity score.
 '

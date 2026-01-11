@@ -284,6 +284,12 @@ Public Class frmAIChat
     ''' </summary>
     Private _alternateModelDisplayName As String = Nothing
 
+    ''' <summary>
+    ''' Cached list of currently selected tools for the chat session.
+    ''' Populated via SelectToolsForSession when tooling is used.
+    ''' </summary>
+    Private _selectedToolsForChat As List(Of ModelConfig) = Nothing
+
     ' =========================================================================
     ' UI Controls - Buttons
     ' =========================================================================
@@ -309,6 +315,13 @@ Public Class frmAIChat
     ''' Text changes based on _alternateModelSelected state: "Primary model" or "Alternate Model".
     ''' </summary>
     Private WithEvents btnSwitchModel As New Button() With {.Text = "Switch Model", .AutoSize = True}
+
+    ''' <summary>
+    ''' Opens tool selection dialog to configure which tools are available.
+    ''' Disabled when current model does not support tooling.
+    ''' </summary>
+    Private WithEvents btnTools As New Button() With {.Text = Globals.ThisAddIn.ToolFriendlyName, .AutoSize = True}
+
 
     ' =========================================================================
     ' UI Controls - Checkboxes
@@ -349,6 +362,18 @@ Public Class frmAIChat
         .AutoSize = True,
         .Checked = My.Settings.DoCommands
     }
+
+    ''' <summary>
+    ''' When checked, enables tool calling via ExecuteToolingLoop instead of direct LLM().
+    ''' Only enabled when current model supports tooling.
+    ''' Persisted to My.Settings.ChatEnableTooling.
+    ''' </summary>
+    Private WithEvents chkEnableTooling As New System.Windows.Forms.CheckBox() With {
+        .Text = $"Enable {Globals.ThisAddIn.ToolFriendlyName.ToLower}",
+        .AutoSize = True,
+        .Checked = My.Settings.ChatEnableTooling
+    }
+
 
     ''' <summary>
     ''' Controls window TopMost property.
@@ -551,7 +576,7 @@ Public Class frmAIChat
         ' Configure form appearance
         Me.Font = New System.Drawing.Font("Segoe UI", 9)
         Me.FormBorderStyle = FormBorderStyle.Sizable
-        Me.Icon = Icon.FromHandle(New Bitmap(My.Resources.Red_Ink_Logo).GetHicon())
+        Me.Icon = Icon.FromHandle(New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)).GetHicon())
         Me.TopMost = True
         Me.MinimumSize = New Size(830, 521)
 
@@ -586,6 +611,7 @@ Public Class frmAIChat
             pnlButtons.Controls.Add(btnSwitchModel)
         End If
 
+        pnlButtons.Controls.Add(btnTools)
         pnlButtons.Controls.Add(btnExit)
 
         ' Populate checkbox panel
@@ -593,6 +619,7 @@ Public Class frmAIChat
         pnlCheckboxes.Controls.Add(chkIncludeselection)
         pnlCheckboxes.Controls.Add(chkIncludeDocText)
         pnlCheckboxes.Controls.Add(chkPermitCommands)
+        pnlCheckboxes.Controls.Add(chkEnableTooling)
         pnlCheckboxes.Controls.Add(chkStayOnTop)
         pnlCheckboxes.Controls.Add(chkConvertMarkdown)
         pnlCheckboxes.Controls.Add(chkIncludeOtherDocs)
@@ -612,6 +639,10 @@ Public Class frmAIChat
         AddHandler chkStayOnTop.Click, AddressOf chkStayontop_Click
         AddHandler chkConvertMarkdown.Click, AddressOf chkConvertMarkdown_Click
 
+        ' Attach event handlers for tooling controls
+        AddHandler chkEnableTooling.Click, AddressOf chkEnableTooling_Click
+        AddHandler btnTools.Click, AddressOf btnTools_Click
+
         ' Update window title with active model name
         UpdateTitle()
 
@@ -623,8 +654,13 @@ Public Class frmAIChat
             Dim result = Await WelcomeMessage()
         End If
 
+
+        ' Update tooling controls based on current model support
+        UpdateToolingControlsState()
+
         ' Set focus to user input if empty
         If String.IsNullOrEmpty(txtUserInput.Text) Then txtUserInput.Focus()
+
     End Sub
 
     ' =========================================================================
@@ -737,7 +773,8 @@ Public Class frmAIChat
             ' compatibility but second one is the active version.
 
             SystemPrompt = _context.SP_ChatWord().
-                        Replace("{UserLanguage}", UserLanguage) &
+                        Replace("{UserLanguage}", UserLanguage).
+                        Replace("{Location}", ThisAddIn.Location) &
                         $" Your name is '{AN5}'. The current date and time is: {DateTime.Now.ToString("MMMM dd, yyyy hh:mm tt")}." &
                         If(chkIncludeDocText.Checked, vbLf & "You have access to the user's active document." & vbLf, "") &
                         If(chkIncludeselection.Checked, vbLf & "You have access to a selection of the active document." & vbLf, "") &
@@ -856,20 +893,98 @@ Public Class frmAIChat
             _chatHistory.Add(("user", userPrompt.TrimEnd()))
 
             ' ──────────────────────────────────────────────────────────────
-            ' STEP 7: Display "Thinking..." Placeholder
+            ' STEP 7: Determine if Tooling Should Be Used
             ' ──────────────────────────────────────────────────────────────
+            Dim aiResponseOriginal As String
+
+            ' Check if tooling should be used
+            Dim useTooling As Boolean = False
+            Dim currentConfig As ModelConfig = Nothing
+
+            If chkEnableTooling.Checked Then
+                ' Get effective model config
+                If _alternateModelSelected AndAlso _alternateModelConfig IsNot Nothing Then
+                    currentConfig = _alternateModelConfig
+                Else
+                    currentConfig = SharedMethods.GetCurrentConfig(_context)
+                End If
+
+                ' Use shared function - checks APICall_ToolInstructions
+                useTooling = SharedMethods.ModelSupportsTooling(currentConfig)
+            End If
+
+            If useTooling Then
+                ' Ensure tools are selected
+                If _selectedToolsForChat Is Nothing OrElse _selectedToolsForChat.Count = 0 Then
+                    ' Temporarily disable TopMost so dialog is not blocked
+                    Dim wasTopMost As Boolean = Me.TopMost
+                    Try
+                        Me.TopMost = False
+                        ' Show tool selection dialog
+                        _selectedToolsForChat = Globals.ThisAddIn.SelectToolsForSession(forceDialog:=False)
+                    Finally
+                        Me.TopMost = wasTopMost
+                    End Try
+
+                    ' If user cancelled or no tools selected, fall back to regular LLM
+                    If _selectedToolsForChat Is Nothing OrElse _selectedToolsForChat.Count = 0 Then
+                        useTooling = False
+                    End If
+                End If
+            End If
+
+            ' ──────────────────────────────────────────────────────────────
+            ' STEP 8: Display "Thinking..." Placeholder
+            ' ──────────────────────────────────────────────────────────────
+            Dim thinkingMessage As String = If(useTooling,
+                $"{AN5}: Thinking (using {Globals.ThisAddIn.ToolFriendlyName.ToLower})...",
+                $"{AN5}: Thinking...")
+
             Await UpdateUIAsync(Sub()
-                                    AppendToChatHistory($"{AN5}: Thinking...")
+                                    AppendToChatHistory(thinkingMessage)
                                 End Sub)
 
             Await UpdateUIAsync(Sub()
-                                    ShowAssistantThinking()
+                                    ShowAssistantThinking(useTooling)
                                 End Sub)
 
             ' ──────────────────────────────────────────────────────────────
-            ' STEP 8: Call LLM Asynchronously
+            ' STEP 9: Call LLM Asynchronously (with optional Tooling)
             ' ──────────────────────────────────────────────────────────────
-            Dim aiResponseOriginal As String = Await CallLlmWithSelectedModelAsync(SystemPrompt, fullPrompt.ToString())
+
+
+            If useTooling AndAlso _selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0 Then
+                ' Apply alternate model config temporarily if selected
+                Dim backupConfig As ModelConfig = Nothing
+                Dim appliedAlternate As Boolean = False
+
+                Try
+                    If _alternateModelSelected AndAlso _alternateModelConfig IsNot Nothing Then
+                        backupConfig = SharedMethods.GetCurrentConfig(_context)
+                        SharedMethods.ApplyModelConfig(_context, _alternateModelConfig)
+                        appliedAlternate = True
+                    End If
+
+                    ' Call ExecuteToolingLoop with the same fullPrompt as non-tooling calls
+                    ' hideSplash:=True suppresses splash during chat
+                    ' hideLogWindow:=True suppresses log window for chat integration
+                    aiResponseOriginal = Await Globals.ThisAddIn.ExecuteToolingLoop(
+                        SystemPrompt,
+                        userPrompt,
+                        _selectedToolsForChat,
+                        _useSecondApi,
+                        fullPromptOverride:=fullPrompt.ToString(),
+                        hideSplash:=True,
+                        hideLogWindow:=True)
+                Finally
+                    If appliedAlternate AndAlso backupConfig IsNot Nothing Then
+                        SharedMethods.RestoreDefaults(_context, backupConfig)
+                    End If
+                End Try
+            Else
+                ' Standard LLM call (normal behavior)
+                aiResponseOriginal = Await CallLlmWithSelectedModelAsync(SystemPrompt, fullPrompt.ToString())
+            End If
 
             ' ──────────────────────────────────────────────────────────────
             ' STEP 9: Process LLM Response
@@ -1085,7 +1200,7 @@ Public Class frmAIChat
     Private Async Function WelcomeMessage() As Task(Of String)
         Try
             ' Build system prompt with assistant identity and current timestamp
-            SystemPrompt = _context.SP_ChatWord().Replace("{UserLanguage}", UserLanguage) &
+            SystemPrompt = _context.SP_ChatWord().Replace("{UserLanguage}", UserLanguage).Replace("{Location}", ThisAddIn.Location) &
                           $" Your name is '{AN5}'. The current date and time is: {DateTime.Now.ToString("F")}."
             txtUserInput.Text = ""
 
@@ -1308,6 +1423,19 @@ Public Class frmAIChat
         My.Settings.Save()
     End Sub
 
+    ''' <summary>
+    ''' Handles chkEnableTooling checkbox click. Persists preference.
+    ''' </summary>
+    Private Sub chkEnableTooling_Click(sender As Object, e As EventArgs)
+        My.Settings.ChatEnableTooling = chkEnableTooling.Checked
+        My.Settings.Save()
+
+        ' Clear cached tool selection when tooling disabled
+        If Not chkEnableTooling.Checked Then
+            _selectedToolsForChat = Nothing
+        End If
+    End Sub
+
     ' =========================================================================
     ' Button Event Handlers - User Actions
     ' =========================================================================
@@ -1333,6 +1461,50 @@ Public Class frmAIChat
             My.Computer.Clipboard.SetText(lastAssistantMsg.Content)
         Else
             SharedMethods.ShowCustomMessageBox("No last AI answer available.")
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' Handles btnTools click. Opens tool selection dialog.
+    ''' </summary>
+    ''' <summary>
+    ''' Handles btnTools click. Opens tool selection dialog.
+    ''' </summary>
+    Private Sub btnTools_Click(sender As Object, e As EventArgs)
+        Dim wasTopMost As Boolean = Me.TopMost
+        Try
+            Me.TopMost = False
+            Dim selectedTools = Globals.ThisAddIn.SelectToolsForSession(forceDialog:=True, Globals.ThisAddIn.ToolFriendlyName)
+            If selectedTools IsNot Nothing Then
+                _selectedToolsForChat = selectedTools
+            End If
+        Finally
+            Me.TopMost = wasTopMost
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Updates enabled state of tooling controls based on current model's tooling support.
+    ''' Called after model switches and on form load.
+    ''' </summary>
+    Private Sub UpdateToolingControlsState()
+        Dim currentConfig As ModelConfig = Nothing
+
+        If _alternateModelSelected AndAlso _alternateModelConfig IsNot Nothing Then
+            currentConfig = _alternateModelConfig
+        Else
+            currentConfig = SharedMethods.GetCurrentConfig(_context)
+        End If
+
+        ' Use shared function - checks APICall_ToolInstructions
+        Dim supportsTooling As Boolean = SharedMethods.ModelSupportsTooling(currentConfig)
+
+        chkEnableTooling.Enabled = supportsTooling
+        btnTools.Enabled = supportsTooling
+
+        If Not supportsTooling Then
+            chkEnableTooling.Checked = False
+            _selectedToolsForChat = Nothing
         End If
     End Sub
 
@@ -1380,53 +1552,57 @@ Public Class frmAIChat
                 Return
             End If
 
-            ' Show model selection dialog
-            SharedMethods.LastAlternateModel = "" ' Sentinel value
-            Dim ok As Boolean = SharedMethods.ShowModelSelection(
-                _context,
-                _context.INI_AlternateModelPath,
-                "Alternate Model",
-                "Select the alternate model you want to use:",
-                "",
-                2)
+            ' Temporarily disable TopMost so dialog is not blocked
+            Dim wasTopMost As Boolean = Me.TopMost
+            Try
+                Me.TopMost = False
 
-            If Not ok Then
-                ' User cancelled dialog
-                Return
-            End If
+                ' Show model selection dialog
+                SharedMethods.LastAlternateModel = "" ' Sentinel value
+                Dim ok As Boolean = SharedMethods.ShowModelSelection(
+                    _context,
+                    _context.INI_AlternateModelPath,
+                    "Alternate Model",
+                    "Select the alternate model you want to use:",
+                    "",
+                    2)
 
-            ' ─────────────────────────────────────────────────────────────
-            ' Snapshot Pattern: Capture alternate config then restore original
-            ' ─────────────────────────────────────────────────────────────
-            ' The selector has applied chosen model to context at this point.
-            ' We snapshot it, then immediately restore original so global context
-            ' remains pristine. The snapshot will be temporarily applied only
-            ' during LLM calls via CallLlmWithSelectedModelAsync.
+                If Not ok Then
+                    ' User cancelled dialog
+                    Return
+                End If
 
-            Dim justApplied As ModelConfig = SharedMethods.GetCurrentConfig(_context)
+                ' ─────────────────────────────────────────────────────────────
+                ' Snapshot Pattern: Capture alternate config then restore original
+                ' ─────────────────────────────────────────────────────────────
+                Dim justApplied As ModelConfig = SharedMethods.GetCurrentConfig(_context)
 
-            ' Restore original config immediately
-            If SharedMethods.originalConfigLoaded Then
-                SharedMethods.RestoreDefaults(_context, SharedMethods.originalConfig)
-            End If
-            SharedMethods.originalConfigLoaded = False
+                ' Restore original config immediately
+                If SharedMethods.originalConfigLoaded Then
+                    SharedMethods.RestoreDefaults(_context, SharedMethods.originalConfig)
+                End If
+                SharedMethods.originalConfigLoaded = False
 
-            ' Check if user actually selected an alternate (vs. primary)
-            Dim userChoseAlternate As Boolean = Not String.IsNullOrWhiteSpace(SharedMethods.LastAlternateModel)
+                ' Check if user actually selected an alternate (vs. primary)
+                Dim userChoseAlternate As Boolean = Not String.IsNullOrWhiteSpace(SharedMethods.LastAlternateModel)
 
-            If userChoseAlternate Then
-                ' Store snapshot for use during LLM calls
-                _alternateModelSelected = True
-                _alternateModelConfig = justApplied
-                _alternateModelDisplayName = SharedMethods.LastAlternateModel
-                _useSecondApi = True
-            Else
-                ' User selected primary model from dialog
-                _alternateModelSelected = False
-                _alternateModelConfig = Nothing
-                _alternateModelDisplayName = Nothing
-                _useSecondApi = False
-            End If
+                If userChoseAlternate Then
+                    ' Store snapshot for use during LLM calls
+                    _alternateModelSelected = True
+                    _alternateModelConfig = justApplied
+                    _alternateModelDisplayName = SharedMethods.LastAlternateModel
+                    _useSecondApi = True
+                Else
+                    ' User selected primary model from dialog
+                    _alternateModelSelected = False
+                    _alternateModelConfig = Nothing
+                    _alternateModelDisplayName = Nothing
+                    _useSecondApi = False
+                End If
+
+            Finally
+                Me.TopMost = wasTopMost
+            End Try
 
             UpdateModelButtonText()
             UpdateTitle()
@@ -1496,10 +1672,10 @@ Public Class frmAIChat
             chkIncludeDocText.Enabled = True
             chkIncludeselection.Enabled = True
             chkPermitCommands.Enabled = True
-
-            ' Note: Previous checked states NOT restored automatically
-            ' User must re-check as needed
         End If
+
+        ' Update tooling controls based on new model
+        UpdateToolingControlsState()
     End Sub
 
     ' =========================================================================
@@ -3778,9 +3954,13 @@ function removeById(id) {{
     ''' Shows "Thinking..." placeholder while waiting for LLM response.
     ''' Generates unique DOM ID for later removal.
     ''' </summary>
-    Public Sub ShowAssistantThinking()
+    ''' <param name="isTooling">When True, displays tooling-specific message.</param>
+    Public Sub ShowAssistantThinking(Optional isTooling As Boolean = False)
         _lastThinkingId = "thinking-" & Guid.NewGuid().ToString("N")
-        AppendHtml($"<div id=""{_lastThinkingId}"" class='msg assistant thinking'><span class='who'>{HtmlEncode(AN5)}:</span><span class='content'>Thinking...</span></div>")
+        Dim thinkingText As String = If(isTooling,
+            $"Thinking (using {Globals.ThisAddIn.ToolFriendlyName.ToLower})...",
+            "Thinking...")
+        AppendHtml($"<div id=""{_lastThinkingId}"" class='msg assistant thinking'><span class='who'>{HtmlEncode(AN5)}:</span><span class='content'>{thinkingText}</span></div>")
     End Sub
 
     ''' <summary>

@@ -21,6 +21,8 @@
 '    and revision-tag helpers (`AddMarkupTags`, `InsertMarkupText`, `SearchAndReplace`).
 '  - Output & UI Surfaces: dispatches results to clipboard panes, new docs, in-place replacements,
 '    podcast scripts, slide decks, bubbles/pushbacks, with progress/cancellation handling.
+'  - Story Routing: Detects non-main stories (comments, footnotes/endnotes) and routes processing to
+'    specialized handlers (`ProcessSelectedTextInActiveCommentBubble`, `ProcessSelectedTextInActiveFootnote`).
 '
 ' External Dependencies:
 '  - Microsoft.Office.Interop.Word for document automation and story navigation.
@@ -93,6 +95,9 @@ Partial Public Class ThisAddIn
     ' - SlideDeck: String containing the file path to the PowerPoint deck to be created or modified.
     ' - AddDocs: Boolean flag indicating whether insertdocs should be added
     ' - DoMyStyle: Boolean flag whether MyStyleInsert shall be used
+    ' - DoBubblesExtract: Boolean flag whether text shall be extracted from bubbles
+    ' - DoPushback: Boolean flag whether a pushback to bubbles shall be done
+    ' - SelectedTools: List of ModelConfig indicating the tools selected for tooling runs
 
     ''' <summary>
     ''' Stores paragraph-level style, font, list, alignment, and spacing information for reapplication after text processing.
@@ -168,8 +173,36 @@ Partial Public Class ThisAddIn
     ''' <param name="DoMyStyle">Use MyStyle insertion.</param>
     ''' <param name="DoBubblesExtract">Extract text from bubbles.</param>
     ''' <param name="DoPushback">Reply to bubbles.</param>
+    ''' <param name="SelectedTools">Tools selected for Tooling</param>
     ''' <returns>Empty string on completion.</returns>
-    Private Async Function ProcessSelectedText(SysCommand As String, CheckMaxToken As Boolean, KeepFormat As Boolean, ParaFormatInline As Boolean, InPlace As Boolean, DoMarkup As Boolean, MarkupMethod As Integer, PutInClipboard As Boolean, PutInBubbles As Boolean, SelectionMandatory As Boolean, UseSecondAPI As Boolean, FormattingCap As Integer, Optional DoTPMarkup As Boolean = False, Optional TPMarkupname As String = "", Optional CreatePodcast As Boolean = False, Optional FileObject As String = "", Optional DoPane As Boolean = False, Optional ChunkSize As Integer = 0, Optional NoFormatAndFieldSaving As Boolean = False, Optional DoNewDoc As Boolean = False, Optional SlideDeck As String = "", Optional AddDocs As Boolean = False, Optional DoMyStyle As Boolean = False, Optional DoBubblesExtract As Boolean = False, Optional DoPushback As Boolean = False) As Task(Of String)
+    Public Async Function ProcessSelectedText(
+     SysCommand As String,
+     CheckMaxToken As Boolean,
+     KeepFormat As Boolean,
+     ParaFormatInline As Boolean,
+     InPlace As Boolean,
+     DoMarkup As Boolean,
+     MarkupMethod As Integer,
+     PutInClipboard As Boolean,
+     PutInBubbles As Boolean,
+     SelectionMandatory As Boolean,
+     UseSecondAPI As Boolean,
+     FormattingCap As Integer,
+     Optional DoTPMarkup As Boolean = False,
+     Optional TPMarkupname As String = "",
+     Optional CreatePodcast As Boolean = False,
+     Optional FileObject As String = "",
+     Optional DoPane As Boolean = False,
+     Optional ChunkSize As Integer = 0,
+     Optional NoFormatAndFieldSaving As Boolean = False,
+     Optional DoNewDoc As Boolean = False,
+     Optional SlideDeck As String = "",
+     Optional AddDocs As Boolean = False,
+     Optional DoMyStyle As Boolean = False,
+     Optional DoBubblesExtract As Boolean = False,
+     Optional DoPushback As Boolean = False,
+     Optional SelectedTools As List(Of ModelConfig) = Nothing) As Task(Of String)
+
 
         Dim application As Word.Application = Globals.ThisAddIn.Application
         Dim selection As Microsoft.Office.Interop.Word.Selection = application.Selection
@@ -177,6 +210,39 @@ Partial Public Class ThisAddIn
         If SysCommand = "" Then
             ShowCustomMessageBox("The (system-)prompt for the LLM is missing.")
             Return ""
+        End If
+
+        ' Route comment-bubble selections to a comment pipeline
+        If selection IsNot Nothing AndAlso selection.StoryType = Word.WdStoryType.wdCommentsStory Then
+            Dim bubbleSel As Word.Range = Nothing
+            Try
+                bubbleSel = selection.Range.Duplicate
+            Catch
+                bubbleSel = Nothing
+            End Try
+
+
+            Return Await ProcessSelectedTextInActiveCommentBubble(
+                                SysCommand,
+                                CheckMaxToken,
+                                bubbleSel,
+                                UseSecondAPI:=UseSecondAPI,
+                                SelectionMandatory:=SelectionMandatory,
+                                FileObject:=FileObject
+                            )
+        End If
+
+        If selection IsNot Nothing AndAlso
+   (selection.StoryType = Word.WdStoryType.wdFootnotesStory OrElse
+    selection.StoryType = Word.WdStoryType.wdEndnotesStory) Then
+
+            Return Await ProcessSelectedTextInActiveFootnote(
+                        SysCommand,
+                        CheckMaxToken,
+                        UseSecondAPI,
+                        SelectionMandatory,
+                        FileObject
+                    )
         End If
 
         If selection.Type = WdSelectionType.wdSelectionIP And SelectionMandatory Then
@@ -189,7 +255,7 @@ Partial Public Class ThisAddIn
 
                 If selection.Type = WdSelectionType.wdSelectionIP Or selection.Tables.Count = 0 Or PutInClipboard Or PutInBubbles Or DoPushback Then
 
-                    Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, CreatePodcast, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, AddDocs, DoMyStyle, DoBubblesExtract, False, DoPushback)
+                    Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, CreatePodcast, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, AddDocs, DoMyStyle, DoBubblesExtract, False, DoPushback, SelectedTools)
 
                 Else
 
@@ -261,7 +327,7 @@ Partial Public Class ThisAddIn
                                         InPlace, DoMarkup, MarkupMethod, PutInClipboard,
                                         PutInBubbles, SelectionMandatory, UseSecondAPI,
                                         FormattingCap, DoTPMarkup, TPMarkupname, False,
-                                        FileObject, DoPane, 0, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True)
+                                        FileObject, DoPane, 0, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True, SelectedTools:=SelectedTools)
 
                                     ' Throttle so Word doesn't lock up
                                     Await System.Threading.Tasks.Task.Delay(500)
@@ -311,7 +377,7 @@ Partial Public Class ThisAddIn
                                         ' Also verify it's not empty
                                         If textChunk.Start < textChunk.End Then
                                             textChunk.Select()
-                                            Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, False, FileObject, DoPane, ChunkSize * -1, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True)
+                                            Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, False, FileObject, DoPane, ChunkSize * -1, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True, SelectedTools:=SelectedTools)
                                             Await System.Threading.Tasks.Task.Delay(500)
                                         End If
                                     Else
@@ -322,7 +388,7 @@ Partial Public Class ThisAddIn
 
                                         If textChunk.Tables.Count = 0 AndAlso textChunk.Start < textChunk.End Then
                                             textChunk.Select()
-                                            Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, False, FileObject, DoPane, ChunkSize * -1, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True)
+                                            Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, False, FileObject, DoPane, ChunkSize * -1, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True, SelectedTools:=SelectedTools)
                                             Await System.Threading.Tasks.Task.Delay(500)
                                         End If
 
@@ -354,7 +420,7 @@ Partial Public Class ThisAddIn
                                         cellRange.End -= 1  ' Exclude cell marker
                                         If cellRange.Start < cellRange.End Then
                                             cellRange.Select()
-                                            Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, False, FileObject, DoPane, 0, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True)
+                                            Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, False, FileObject, DoPane, 0, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True, SelectedTools:=SelectedTools)
                                             Await System.Threading.Tasks.Task.Delay(500)
                                         End If
                                     Next
@@ -374,7 +440,7 @@ Partial Public Class ThisAddIn
 
                                     finalChunk.Select()
                                     Dim text = selection.Text
-                                    Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, False, FileObject, DoPane, ChunkSize * -1, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True)
+                                    Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, False, FileObject, DoPane, ChunkSize * -1, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True, SelectedTools:=SelectedTools)
                                 Else
                                     Do
                                         finalChunk.Start += 1
@@ -384,7 +450,7 @@ Partial Public Class ThisAddIn
 
                                     If finalChunk.Tables.Count = 0 AndAlso finalChunk.Start < finalChunk.End Then
                                         finalChunk.Select()
-                                        Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, False, FileObject, DoPane, ChunkSize * -1, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True)
+                                        Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, False, FileObject, DoPane, ChunkSize * -1, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True, SelectedTools:=SelectedTools)
                                     End If
                                 End If
                             End If
@@ -394,7 +460,7 @@ Partial Public Class ThisAddIn
 
                     ElseIf userdialog = 1 Then
 
-                        Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, CreatePodcast, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, AddDocs, DoMyStyle, DoBubblesExtract, False, DoPushback)
+                        Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, CreatePodcast, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, AddDocs, DoMyStyle, DoBubblesExtract, False, DoPushback, SelectedTools)
 
                     End If
 
@@ -448,8 +514,36 @@ Partial Public Class ThisAddIn
     ''' <param name="DoBubblesExtract">Extract from bubbles.</param>
     ''' <param name="InTable">Processing within table context.</param>
     ''' <param name="DoPushback">Reply to bubbles.</param>
+    ''' <param name="SelectedTools">The tools selected for tooling runs</param>
     ''' <returns>Empty string on completion.</returns>
-    Private Async Function TrueProcessSelectedText(SysCommand As String, CheckMaxToken As Boolean, KeepFormat As Boolean, ParaFormatInline As Boolean, InPlace As Boolean, DoMarkup As Boolean, MarkupMethod As Integer, PutInClipboard As Boolean, PutInBubbles As Boolean, SelectionMandatory As Boolean, UseSecondAPI As Boolean, FormattingCap As Integer, Optional DoTPMarkup As Boolean = False, Optional TPMarkupname As String = "", Optional CreatePodcast As Boolean = False, Optional FileObject As String = "", Optional DoPane As Boolean = False, Optional ChunkSize As Integer = 0, Optional NoFormatAndFieldSaving As Boolean = False, Optional DoNewDoc As Boolean = False, Optional SlideDeck As String = "", Optional AddDocs As Boolean = False, Optional DoMyStyle As Boolean = False, Optional DoBubblesExtract As Boolean = False, Optional InTable As Boolean = False, Optional DoPushback As Boolean = False) As Task(Of String)
+    Private Async Function TrueProcessSelectedText(SysCommand As String,
+       CheckMaxToken As Boolean,
+       KeepFormat As Boolean,
+       ParaFormatInline As Boolean,
+       InPlace As Boolean,
+       DoMarkup As Boolean,
+       MarkupMethod As Integer,
+       PutInClipboard As Boolean,
+       PutInBubbles As Boolean,
+       SelectionMandatory As Boolean,
+       UseSecondAPI As Boolean,
+       FormattingCap As Integer,
+       Optional DoTPMarkup As Boolean = False,
+       Optional TPMarkupname As String = "",
+       Optional CreatePodcast As Boolean = False,
+       Optional FileObject As String = "",
+       Optional DoPane As Boolean = False,
+       Optional ChunkSize As Integer = 0,
+       Optional NoFormatAndFieldSaving As Boolean = False,
+       Optional DoNewDoc As Boolean = False,
+       Optional SlideDeck As String = "",
+       Optional AddDocs As Boolean = False,
+       Optional DoMyStyle As Boolean = False,
+       Optional DoBubblesExtract As Boolean = False,
+       Optional InTable As Boolean = False,
+       Optional DoPushback As Boolean = False,
+       Optional SelectedTools As List(Of ModelConfig) = Nothing) As Task(Of String)
+
 
         Dim application As Word.Application = Globals.ThisAddIn.Application
         Dim selection As Microsoft.Office.Interop.Word.Selection = application.Selection
@@ -899,20 +993,44 @@ Partial Public Class ThisAddIn
 
                 Dim LLMResult As String = ""
 
-                If SelectedAlternateModels Is Nothing OrElse SelectedAlternateModels.Count = 0 OrElse DoMarkup OrElse PutInBubbles OrElse DoPushback OrElse SlideInsert <> "" Then
-
-                    LLMResult = Await LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText), "", "", 0, UseSecondAPI, False, OtherPrompt, FileObject)
-
+                ' If tools are selected and the model supports tooling, enter the tool execution loop
+                If SelectedTools IsNot Nothing AndAlso SelectedTools.Count > 0 AndAlso UseSecondAPI Then
+                    LLMResult = Await ExecuteToolingLoop(
+                        SysCommand,
+                        SelectedText,
+                        SelectedTools,
+                        UseSecondAPI,
+                        FileObject,
+                        DoTPMarkup,
+                        BubblesText,
+                        NoFormatting,
+                        KeepFormat,
+                        SlideDeck,
+                        DoMyStyle,
+                        MyStyleInsert,
+                        AddDocs,
+                        InsertDocs,
+                        SlideInsert,
+                        OtherPrompt)
                 Else
 
-                    For Each mc As ModelConfig In SelectedAlternateModels
-                        Dim err As Boolean = False
-                        ApplyModelConfig(_context, mc, err)
+                    ' Other LLM calls w/o Tooling
 
-                        LLMResult += mc.ModelDescription & ":" & vbCrLf & vbCrLf & Await LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText), "", "", 0, UseSecondAPI, False, OtherPrompt, FileObject) & vbCrLf
+                    If SelectedAlternateModels Is Nothing OrElse SelectedAlternateModels.Count = 0 OrElse DoMarkup OrElse PutInBubbles OrElse DoPushback OrElse SlideInsert <> "" Then
 
-                    Next
+                        LLMResult = Await LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText), "", "", 0, UseSecondAPI, False, OtherPrompt, FileObject)
 
+                    Else
+
+                        For Each mc As ModelConfig In SelectedAlternateModels
+                            Dim err As Boolean = False
+                            ApplyModelConfig(_context, mc, err)
+
+                            LLMResult += mc.ModelDescription & ":" & vbCrLf & vbCrLf & Await LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText), "", "", 0, UseSecondAPI, False, OtherPrompt, FileObject) & vbCrLf
+
+                        Next
+
+                    End If
                 End If
 
                 OtherPrompt = ""
@@ -1261,7 +1379,7 @@ Partial Public Class ThisAddIn
                             LLMResult = SLib.RemoveHTML(LLMResult)
                             If MarkupMethod = 2 Or MarkupMethod = 3 Then
                                 Dim SaveRng As Range = rng.Duplicate
-                                CompareAndInsert(SelectedText, LLMResult, rng, MarkupMethod = 3, "This is the markup of the text inserted:")
+                                CompareAndInsert(SelectedText, LLMResult, rng, MarkupMethod = 3, "This is the markup of the text inserted:", trailingCR)
                                 If Not ParaFormatInline AndAlso Not NoFormatting AndAlso Not NoFormatAndFieldSaving Then
                                     ApplyParagraphFormat(rng)
                                 End If
@@ -1304,7 +1422,7 @@ Partial Public Class ThisAddIn
                                         If INI_MarkdownConvert Then LLMResult = RemoveMarkdownFormatting(LLMResult)
                                     End If
                                     Dim SaveRng As Range = rng.Duplicate
-                                    CompareAndInsert(SelectedText, LLMResult, rng, MarkupMethod = 3, "This is the markup of the text inserted:")
+                                    CompareAndInsert(SelectedText, LLMResult, rng, MarkupMethod = 3, "This is the markup of the text inserted:", trailingCR)
                                     If Not ParaFormatInline AndAlso Not NoFormatting AndAlso Not NoFormatAndFieldSaving Then
                                         ApplyParagraphFormat(rng)
                                     End If
@@ -1373,7 +1491,7 @@ Partial Public Class ThisAddIn
                                         rng = selection.Range
                                     End If
                                     Dim SaveRng As Range = rng.Duplicate
-                                    CompareAndInsert(SelectedText, LLMResult, rng.Duplicate, MarkupMethod = 3, "This is the markup of the text inserted:")
+                                    CompareAndInsert(SelectedText, LLMResult, rng.Duplicate, MarkupMethod = 3, "This is the markup of the text inserted:", trailingCR)
                                     If Not ParaFormatInline AndAlso Not NoFormatting AndAlso Not NoFormatAndFieldSaving Then
                                         ApplyParagraphFormat(rng)
                                     End If
@@ -1492,6 +1610,183 @@ Partial Public Class ThisAddIn
 
     End Function
 
+
+    ''' <summary>
+    ''' Processes text in the active footnote or endnote story by sending either the current selection (when non-empty)
+    ''' or the entire note text to the LLM, then replacing that same scope with the LLM result using the standard
+    ''' Markdown-to-Word insertion pipeline.
+    ''' </summary>
+    ''' <param name="sysCommand">System prompt used for the LLM call.</param>
+    ''' <param name="checkMaxToken">When true, estimates token count for the input text and warns if the configured output limit may be exceeded.</param>
+    ''' <param name="useSecondApi">When true, routes the LLM call to the configured secondary API.</param>
+    ''' <param name="selectionMandatory">When true, shows an error when the resolved input text is empty.</param>
+    ''' <param name="fileObject">Optional file object parameter forwarded to the LLM call.</param>
+    ''' <returns>Always returns an empty string; errors are reported via message boxes.</returns>
+    ''' <remarks>
+    ''' This routine is invoked when <see cref="Microsoft.Office.Interop.Word.Selection.StoryType"/> is
+    ''' <see cref="Microsoft.Office.Interop.Word.WdStoryType.wdFootnotesStory"/> or
+    ''' <see cref="Microsoft.Office.Interop.Word.WdStoryType.wdEndnotesStory"/>.
+    ''' </remarks>
+    Private Async Function ProcessSelectedTextInActiveFootnote(
+    ByVal sysCommand As String,
+    ByVal checkMaxToken As Boolean,
+    ByVal useSecondApi As Boolean,
+    ByVal selectionMandatory As Boolean,
+    Optional ByVal fileObject As String = ""
+) As Task(Of String)
+
+        Try
+            Dim app As Word.Application = Globals.ThisAddIn.Application
+            If app Is Nothing OrElse app.Selection Is Nothing OrElse app.Selection.Range Is Nothing Then Return ""
+
+            Dim sel As Word.Range = app.Selection.Range
+
+            Dim doc As Word.Document = Nothing
+            Try : doc = sel.Document : Catch : doc = Nothing : End Try
+            If doc Is Nothing Then Return ""
+
+            ' Must be inside footnote or endnote story.
+            Dim st As Word.WdStoryType
+            Try : st = sel.StoryType : Catch : Return "" : End Try
+
+            Dim inFootnote As Boolean = (st = Word.WdStoryType.wdFootnotesStory)
+            Dim inEndnote As Boolean = (st = Word.WdStoryType.wdEndnotesStory)
+
+            If Not inFootnote AndAlso Not inEndnote Then
+                ShowCustomMessageBox("Place the cursor inside a footnote/endnote (or select footnote text), then retry.")
+                Return ""
+            End If
+
+            ' 1) Resolve owning note object
+            Dim owningFootnote As Word.Footnote = Nothing
+            Dim owningEndnote As Word.Endnote = Nothing
+
+            If inFootnote Then
+                Try
+                    For Each fn As Word.Footnote In doc.Footnotes
+                        Dim r As Word.Range = fn.Range
+                        If sel.Start >= r.Start AndAlso sel.End <= r.End Then
+                            owningFootnote = fn
+                            Exit For
+                        End If
+                    Next
+                Catch
+                End Try
+            ElseIf inEndnote Then
+                Try
+                    For Each en As Word.Endnote In doc.Endnotes
+                        Dim r As Word.Range = en.Range
+                        If sel.Start >= r.Start AndAlso sel.End <= r.End Then
+                            owningEndnote = en
+                            Exit For
+                        End If
+                    Next
+                Catch
+                End Try
+            End If
+
+            Dim noteRange As Word.Range = Nothing
+            Try
+                If owningFootnote IsNot Nothing Then noteRange = owningFootnote.Range.Duplicate
+                If owningEndnote IsNot Nothing Then noteRange = owningEndnote.Range.Duplicate
+            Catch
+                noteRange = Nothing
+            End Try
+
+            If noteRange Is Nothing Then
+                ShowCustomMessageBox("Cursor is in footnote/endnote story, but no owning note could be resolved.")
+                Return ""
+            End If
+
+            ' 2) Decide whether the user actually has a meaningful selection
+            Dim hasRealSelection As Boolean = False
+            Try
+                hasRealSelection = (sel.Start < sel.End AndAlso Not String.IsNullOrWhiteSpace(SafeRangeText(sel)))
+            Catch
+                hasRealSelection = False
+            End Try
+
+            ' 3) Input range: selection if meaningful, else whole note
+            Dim inputRange As Word.Range = If(hasRealSelection, sel.Duplicate, noteRange.Duplicate)
+
+            ' Best-effort: exclude trailing marker
+            Try
+                If inputRange.End > inputRange.Start Then inputRange.End -= 1
+            Catch
+            End Try
+
+            Dim inputText As String = SafeRangeText(inputRange)
+            If String.IsNullOrWhiteSpace(inputText) Then
+                If selectionMandatory Then ShowCustomMessageBox("The footnote/endnote contains no text to process.")
+                Return ""
+            End If
+
+            ' 4) Optional token warning
+            If checkMaxToken Then
+                Dim maxTok As Integer = If(useSecondApi, INI_MaxOutputToken_2, INI_MaxOutputToken)
+                If maxTok > 0 Then
+                    Dim est As Integer = EstimateTokenCount(inputText)
+                    If est > maxTok Then
+                        ShowCustomMessageBox($"Your footnote/endnote text may exceed the model output limits ({maxTok} tokens).")
+                    End If
+                End If
+            End If
+
+            ' 5) Call LLM
+            Dim llmResult As String =
+            Await LLM(
+                promptSystem:=sysCommand,
+                promptUser:="<TEXTTOPROCESS>" & inputText & "</TEXTTOPROCESS>",
+                Model:="",
+                Temperature:="",
+                Timeout:=0,
+                UseSecondAPI:=useSecondApi,
+                Hidesplash:=False,
+                AddUserPrompt:=OtherPrompt,
+                FileObject:=fileObject
+            )
+
+            llmResult = llmResult.Replace("<TEXTTOPROCESS>", "").Replace("</TEXTTOPROCESS>", "")
+
+            If Not String.IsNullOrEmpty(llmResult) Then
+                llmResult = Await PostCorrection(llmResult, useSecondApi)
+            End If
+
+            If String.IsNullOrWhiteSpace(llmResult) Then
+                ShowCustomMessageBox("The LLM did not return any content to process.")
+                Return ""
+            End If
+
+            ' 6) Write back: selection or whole note
+            Dim targetRange As Word.Range = If(hasRealSelection, sel.Duplicate, noteRange.Duplicate)
+
+            Try
+                If targetRange.End > targetRange.Start Then targetRange.End -= 1
+            Catch
+            End Try
+
+            ' Clear + insert (footnotes accept formatted insertion like main doc text)
+            Try
+                targetRange.Text = ""
+            Catch
+            End Try
+
+            ' Insert formatted content into footnote/endnote text (use the main document markdown pipeline)
+            Dim trSel As Word.Selection = app.Selection
+            trSel.SetRange(targetRange.Start, targetRange.End)
+            trSel.Select()
+
+            ' Reuse your main inserter (HTML/Markdown -> Word)
+            InsertTextWithMarkdown(trSel, llmResult, TrailingCR:=False, AddTrailingIfNeeded:=True)
+
+            Return ""
+
+        Catch ex As Exception
+            Debug.WriteLine($"ProcessSelectedTextInActiveFootnote error: {ex.Message}{vbCrLf}{ex.StackTrace}")
+            ShowCustomMessageBox($"Error processing footnote/endnote: {ex.Message}")
+            Return ""
+        End Try
+    End Function
 
 
     ''' <summary>
@@ -1987,14 +2282,11 @@ Partial Public Class ThisAddIn
         Debug.WriteLine(selection.Text)
 
         If range.Start < range.End AndAlso Not TrailingCR Then
-            ' Check if space exists before and after range; needed because Word automatically removes a space when deleting text
             Dim docStart As Integer = range.Document.Content.Start
             Dim docEnd As Integer = range.Document.Content.End
 
             If range.Start > docStart AndAlso range.End < docEnd Then
-                ' One-character range before range
                 Dim beforerange As Range = range.Document.Range(range.Start - 1, range.Start)
-                ' One-character range after range
                 Dim afterrange As Range = range.Document.Range(range.End - 1, range.End)
 
                 Debug.WriteLine($"Beforetext='{beforerange.Text}'")
@@ -2019,18 +2311,17 @@ Partial Public Class ThisAddIn
             Result = ResultBack
         End Try
 
+        Debug.WriteLine($"After Unescape: {Result}")
+
         Dim markdownSource As String = Result
 
         Result = Result.Replace(vbLf & " " & vbLf, vbLf & vbLf)
 
         Dim pattern As String = "((\r\n|\n|\r){2,})"
         Result = Regex.Replace(Result, pattern, Function(m As Match)
-                                                    ' Check if the match reaches the end of the string:
                                                     If m.Index + m.Length = Result.Length Then
-                                                        ' At end: return the breaks as they are
                                                         Return m.Value
                                                     Else
-                                                        ' Otherwise: insert &nbsp; between the breaks
                                                         Dim breaks As String = m.Value
                                                         Dim regexBreaks As New Regex("(\r\n|\n|\r)")
                                                         Dim splitBreaks = regexBreaks.Matches(breaks)
@@ -2042,6 +2333,41 @@ Partial Public Class ThisAddIn
                                                         Return resultx
                                                     End If
                                                 End Function)
+
+        ' ============= PROTECT SPECIAL PATTERNS BEFORE MARKDOWN CONVERSION =============
+        ' Protect {{...}} placeholders (merge fields, special elements) - MUST come first
+        Dim curlyPlaceholders As New List(Of String)()
+        Result = System.Text.RegularExpressions.Regex.Replace(
+            Result,
+            "\{\{.*?\}\}",
+            Function(m)
+                curlyPlaceholders.Add(m.Value)
+                Return $"[[CURLY_{curlyPlaceholders.Count - 1}]]"
+            End Function,
+            RegexOptions.Singleline)
+
+        ' Protect single curly braces {word} that Markdig interprets as generic attributes
+        Dim singleCurlyPlaceholders As New List(Of String)()
+        Result = System.Text.RegularExpressions.Regex.Replace(
+            Result,
+            "\{[^{}]+\}",
+            Function(m)
+                singleCurlyPlaceholders.Add(m.Value)
+                Return $"[[SCURLY_{singleCurlyPlaceholders.Count - 1}]]"
+            End Function,
+            RegexOptions.Singleline)
+
+        ' Protect <...> angle bracket content that is NOT valid HTML
+        Dim anglePlaceholders As New List(Of String)()
+        Result = System.Text.RegularExpressions.Regex.Replace(
+            Result,
+            "<(?![/]?(?:p|br|div|span|strong|b|i|em|u|a|ul|ol|li|h[1-6]|table|tr|td|th|thead|tbody|img|hr|pre|code|blockquote)[ >/])[^>]+>",
+            Function(m)
+                anglePlaceholders.Add(m.Value)
+                Return $"[[ANGLE_{anglePlaceholders.Count - 1}]]"
+            End Function,
+            RegexOptions.IgnoreCase Or RegexOptions.Singleline)
+        ' ================================================================================
 
         Dim builder As New MarkdownPipelineBuilder()
 
@@ -2066,11 +2392,28 @@ Partial Public Class ThisAddIn
 
         Dim htmlResult As String = Markdown.ToHtml(Result, markdownPipeline).Trim
 
+        ' ============= RESTORE PROTECTED PATTERNS AFTER MARKDOWN CONVERSION =============
+        ' Restore {{...}} placeholders - DO NOT encode, these need to be processed by RestoreSpecialTextElements
+        For idx As Integer = 0 To curlyPlaceholders.Count - 1
+            htmlResult = htmlResult.Replace($"[[CURLY_{idx}]]", curlyPlaceholders(idx))
+        Next
+
+        ' Restore single curly braces {word} - keep as literal text
+        For idx As Integer = 0 To singleCurlyPlaceholders.Count - 1
+            htmlResult = htmlResult.Replace($"[[SCURLY_{idx}]]", System.Net.WebUtility.HtmlEncode(singleCurlyPlaceholders(idx)))
+        Next
+
+        ' Restore <...> placeholders (HTML-encode them so they display as text)
+        For idx As Integer = 0 To anglePlaceholders.Count - 1
+            htmlResult = htmlResult.Replace($"[[ANGLE_{idx}]]", System.Net.WebUtility.HtmlEncode(anglePlaceholders(idx)))
+        Next
+        ' ================================================================================
+
         ' Remove all real newlines so they are not converted as text
         htmlResult = htmlResult _
-            .Replace(vbCrLf, "") _
-            .Replace(vbCr, "") _
-            .Replace(vbLf, "")
+        .Replace(vbCrLf, "") _
+        .Replace(vbCr, "") _
+        .Replace(vbLf, "")
 
         ' Load the HTML into HtmlDocument
         Dim htmlDoc As New HtmlAgilityPack.HtmlDocument()
@@ -2107,7 +2450,6 @@ Partial Public Class ThisAddIn
         Debug.WriteLine("TrailingCR = " & TrailingCR)
         Debug.WriteLine(selection.Text)
     End Sub
-
 
     ''' <summary>
     ''' Lightweight structure holding revision metadata (start, end, text, type, author) for efficient processing without repeated COM calls.
@@ -2374,7 +2716,7 @@ Partial Public Class ThisAddIn
     ''' <param name="TextforWindow">Window caption.</param>
     ''' <param name="paraformatinline">Inline paragraph formatting flag.</param>
     ''' <param name="noformatting">Skip formatting.</param>
-    Private Sub CompareAndInsert(text1 As String, text2 As String, targetRange As Range, Optional ShowInWindow As Boolean = False, Optional TextforWindow As String = "A text with these changes will be inserted ('Esc' to abort):", Optional paraformatinline As Boolean = False, Optional noformatting As Boolean = True)
+    Private Sub CompareAndInsert(text1 As String, text2 As String, targetRange As Range, Optional ShowInWindow As Boolean = False, Optional TextforWindow As String = "A text with these changes will be inserted ('Esc' to abort):", Optional paraformatinline As Boolean = False, Optional noformatting As Boolean = True, Optional trailingCR As Boolean = False)
         Try
 
             Dim diffBuilder As New InlineDiffBuilder(New Differ())
@@ -2382,6 +2724,8 @@ Partial Public Class ThisAddIn
 
             Debug.WriteLine("A Text1 = " & text1)
             Debug.WriteLine("A Text2 = " & text2)
+
+            If Not trailingCR Then text2 = text2.TrimEnd(vbCr, vbLf).TrimEnd(vbCr, vbLf)
 
             ' Pre-process the texts to replace line breaks with a unique marker
             text1 = text1.Replace(vbCrLf, " {vbCrLf} ").Replace(vbCr, " {vbCr} ").Replace(vbLf, " {vbLf} ")
@@ -2399,15 +2743,15 @@ Partial Public Class ThisAddIn
             '--- 1) pull out all {{…}} fields into a list and replace them with placeholders:
             Dim mergefields As New List(Of String)
             text1 = System.Text.RegularExpressions.Regex.Replace(text1, "\{\{.*?\}\}",
-    Function(m)
-        mergefields.Add(m.Value)
-        Return $"[[MF{mergefields.Count - 1}]]"
-    End Function)
+                Function(m)
+                    mergefields.Add(m.Value)
+                    Return $"[[MF{mergefields.Count - 1}]]"
+                End Function)
             text2 = System.Text.RegularExpressions.Regex.Replace(text2, "\{\{.*?\}\}",
-    Function(m)
-        mergefields.Add(m.Value)
-        Return $"[[MF{mergefields.Count - 1}]]"
-    End Function)
+                Function(m)
+                    mergefields.Add(m.Value)
+                    Return $"[[MF{mergefields.Count - 1}]]"
+                End Function)
 
             ' Split the texts into words and convert them into a line-by-line format
             ' 3) In Worte splitten (ohne leere Einträge) und zeilenweise darstellen
@@ -2491,6 +2835,8 @@ Partial Public Class ThisAddIn
             ' Insert formatted text into the specified range
             If Not ShowInWindow Then
                 Debug.WriteLine("Text with tags: " & vbCrLf & "'" & sText & "'" & vbCrLf & vbCrLf)
+                ' Trim trailing line breaks that may have been added during diff processing
+                sText = sText.TrimEnd(vbCr, vbLf).TrimEnd(vbCr, vbLf)
                 InsertMarkupText(sText, targetRange)
             Else
                 sText = Regex.Replace(sText, "\{\{.*?\}\}", String.Empty)
@@ -2529,6 +2875,7 @@ Partial Public Class ThisAddIn
         Try
             wordApp.ScreenUpdating = False
             doc.TrackRevisions = False
+
 
             ' A) Preserve the trailing ¶ so the next paragraph never joins in
             docStart = doc.Content.Start

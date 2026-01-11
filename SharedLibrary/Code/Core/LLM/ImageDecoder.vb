@@ -1,5 +1,21 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: ImageDecoder.vb
+' Purpose: Extracts base64-encoded image data embedded in a JSON object (typically an LLM response),
+'          determines its MIME type, and saves the decoded image to a uniquely named file on the user's Desktop.
+'
+' Architecture:
+'  - Recursive Search: `FindImageData` traverses the JSON token tree and attempts to interpret string tokens
+'    as base64-encoded image bytes.
+'  - Validation: `TryGetImageData` validates candidate base64 content by attempting to load it as a
+'    `System.Drawing.Image` from a `MemoryStream`.
+'  - MIME Type Resolution: Attempts to read a sibling property named `mime_type`; if absent, falls back to
+'    magic-byte detection for PNG/JPEG/GIF.
+'  - File Output: `DecodeAndSaveImage` saves the decoded image as `AI_Image_NNN.<ext>` on the Desktop,
+'    incrementing `NNN` to avoid overwriting existing files.
+' =============================================================================
 
 Option Strict On
 Option Explicit On
@@ -10,8 +26,19 @@ Imports System.IO
 Imports Newtonsoft.Json.Linq
 Imports SharedLibrary.SharedLibrary
 
+''' <summary>
+''' Provides helper methods to locate base64-encoded image payloads in a JSON object and persist them as image files.
+''' </summary>
 Public Class ImageDecoder
 
+    ''' <summary>
+    ''' Recursively searches the provided JSON token for a string value containing a valid base64-encoded image.
+    ''' On success, returns the decoded bytes and a resolved MIME type.
+    ''' </summary>
+    ''' <param name="token">Root token to search.</param>
+    ''' <param name="imageBytes">Receives the decoded image bytes when found.</param>
+    ''' <param name="mimeType">Receives the resolved MIME type when found.</param>
+    ''' <returns><c>True</c> if a valid image was found; otherwise <c>False</c>.</returns>
     Private Shared Function FindImageData(token As JToken, ByRef imageBytes As Byte(), ByRef mimeType As String) As Boolean
         If token.Type = JTokenType.String Then
             If TryGetImageData(token, imageBytes, mimeType) Then
@@ -30,6 +57,14 @@ Public Class ImageDecoder
         Return False
     End Function
 
+    ''' <summary>
+    ''' Attempts to decode the token string as base64 and validate that it can be loaded as an image.
+    ''' If validation succeeds, also attempts to resolve the MIME type from the token context or content.
+    ''' </summary>
+    ''' <param name="token">String token to interpret as base64.</param>
+    ''' <param name="imageBytes">Receives the decoded image bytes.</param>
+    ''' <param name="mimeType">Receives the resolved MIME type.</param>
+    ''' <returns><c>True</c> if the token represents a valid image; otherwise <c>False</c>.</returns>
     Private Shared Function TryGetImageData(token As JToken, ByRef imageBytes As Byte(), ByRef mimeType As String) As Boolean
         Dim base64Str As String = token.ToString()
         Try
@@ -37,16 +72,18 @@ Public Class ImageDecoder
             ' Validate that the byte array represents a valid image.
             Using ms As New MemoryStream(bytes)
                 Using img As Image = Image.FromStream(ms)
-                    ' Successfully loaded image
+                    ' Successfully loaded image.
                 End Using
             End Using
 
             imageBytes = bytes
-            ' Try to get the MIME type from a nearby property
+
+            ' Try to get the MIME type from a nearby property.
             mimeType = GetMimeTypeFromParent(token)
             If String.IsNullOrEmpty(mimeType) Then
                 mimeType = DetectMimeType(bytes)
             End If
+
             Return True
 
         Catch ex As Exception
@@ -57,6 +94,11 @@ Public Class ImageDecoder
         Return False
     End Function
 
+    ''' <summary>
+    ''' Attempts to read the MIME type from a sibling JSON property named <c>mime_type</c>.
+    ''' </summary>
+    ''' <param name="token">A token whose parent chain is inspected for a sibling <c>mime_type</c> property.</param>
+    ''' <returns>The MIME type string if found; otherwise an empty string.</returns>
     Private Shared Function GetMimeTypeFromParent(token As JToken) As String
         If token.Parent IsNot Nothing AndAlso TypeOf token.Parent Is JProperty Then
             Dim parentProp As JProperty = CType(token.Parent, JProperty)
@@ -72,6 +114,11 @@ Public Class ImageDecoder
         Return String.Empty
     End Function
 
+    ''' <summary>
+    ''' Detects the MIME type of a byte array by checking common image magic bytes (PNG, JPEG, GIF).
+    ''' </summary>
+    ''' <param name="bytes">Image file bytes.</param>
+    ''' <returns>The detected MIME type or an empty string if unknown.</returns>
     Private Shared Function DetectMimeType(bytes As Byte()) As String
         If bytes Is Nothing OrElse bytes.Length < 4 Then Return String.Empty
 
@@ -96,6 +143,11 @@ Public Class ImageDecoder
         Return String.Empty
     End Function
 
+    ''' <summary>
+    ''' Maps a MIME type to a file extension used when saving to disk.
+    ''' </summary>
+    ''' <param name="mimeType">MIME type string (or short format name such as "png").</param>
+    ''' <returns>File extension including a leading dot (e.g., ".png"), or empty string if unsupported.</returns>
     Private Shared Function GetExtensionFromMimeType(mimeType As String) As String
         Select Case mimeType.ToLower()
             Case "image/jpeg", "jpeg"
@@ -110,6 +162,12 @@ Public Class ImageDecoder
     End Function
 
 
+    ''' <summary>
+    ''' Searches the provided JSON object for an embedded base64 image and, if found, saves it to a uniquely named file
+    ''' on the current user's Desktop.
+    ''' </summary>
+    ''' <param name="jsonData">JSON object to search for base64-encoded image data.</param>
+    ''' <returns>Full path of the saved image file, or an empty string if no supported image was found or saving failed.</returns>
     Public Shared Function DecodeAndSaveImage(jsonData As JObject) As String
         Dim imageBytes As Byte() = Nothing
         Dim mimeType As String = String.Empty
@@ -166,5 +224,3 @@ Public Class ImageDecoder
     End Function
 
 End Class
-
-

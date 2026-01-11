@@ -761,6 +761,8 @@ Partial Public Class ThisAddIn
     ByVal replacementText As System.String,
     ByVal tweakReplacement As System.Action(Of Microsoft.Office.Interop.Word.Font))
 
+        Dim includeHidden As Boolean = True ' handle hidden text properly during trimming
+
         If rng Is Nothing Then Return
 
         Dim doc As Microsoft.Office.Interop.Word.Document = rng.Document
@@ -840,7 +842,9 @@ Partial Public Class ThisAddIn
 
                 ' Trim trailing spaces/tabs from the group so tokens hug content
                 While groupEnd > foundStart
-                    Dim ch As Char = doc.Range(Start:=groupEnd - 1, [End]:=groupEnd).Text(0)
+                    'Dim ch As Char = doc.Range(Start:=groupEnd - 1, [End]:=groupEnd).Text(0)
+                    Dim ch As Char = SafeGetSingleChar(OneCharRange(doc, groupEnd - 1, includeHidden))
+                    If ch = ChrW(0) Then Exit While
                     If ch = " "c OrElse ch = vbTab Then
                         groupEnd -= 1
                     Else
@@ -921,7 +925,9 @@ Partial Public Class ThisAddIn
                 End If
                 ' Trim trailing spaces/tabs
                 While contentEnd > contentStart
-                    Dim ch As Char = doc.Range(Start:=contentEnd - 1, [End]:=contentEnd).Text(0)
+                    'Dim ch As Char = doc.Range(Start:=contentEnd - 1, [End]:=contentEnd).Text(0)
+                    Dim ch As Char = SafeGetSingleChar(OneCharRange(doc, contentEnd - 1, includeHidden))
+                    If ch = ChrW(0) Then Exit While
                     If ch = " "c OrElse ch = vbTab Then
                         contentEnd -= 1
                     Else
@@ -930,7 +936,9 @@ Partial Public Class ThisAddIn
                 End While
                 ' Trim leading spaces/tabs
                 While contentStart < contentEnd
-                    Dim ch As Char = doc.Range(Start:=contentStart, [End]:=contentStart + 1).Text(0)
+                    'Dim ch As Char = doc.Range(Start:=contentStart, [End]:=contentStart + 1).Text(0)
+                    Dim ch As Char = SafeGetSingleChar(OneCharRange(doc, contentStart, includeHidden))
+                    If ch = ChrW(0) Then Exit While
                     If ch = " "c OrElse ch = vbTab Then
                         contentStart += 1
                     Else
@@ -1001,6 +1009,59 @@ ContinueLoop:
 
         rng.SetRange(Start:=originalStart, [End]:=allowedEnd)
     End Sub
+
+
+    ''' <summary>
+    ''' Gets the first character from a single-character range without throwing.
+    ''' </summary>
+    ''' <param name="r">A Word range expected to span one character.</param>
+    ''' <returns>
+    ''' The first character of <paramref name="r"/> when retrievable; otherwise <see cref="ChrW"/>(0) when no character is available
+    ''' (for example because the character is hidden/special under the current text retrieval mode).
+    ''' </returns>
+    ''' <remarks>
+    ''' This is a defensive helper to reduce COM-related exceptions and edge cases where <see cref="Word.Range.Text"/> can be empty.
+    ''' </remarks>
+    Private Shared Function SafeGetSingleChar(r As Word.Range) As Char
+        If r Is Nothing Then Return ChrW(0)
+
+        Dim t As String = r.Text
+        If Not String.IsNullOrEmpty(t) Then Return t(0)
+
+        ' Fallback: often works when Range.Text is Nothing for hidden/special content
+        Try
+            If r.Characters IsNot Nothing AndAlso r.Characters.Count >= 1 Then
+                Dim ct As String = r.Characters(1).Text
+                If Not String.IsNullOrEmpty(ct) Then Return ct(0)
+            End If
+        Catch
+            ' ignore COM glitches; treat as non-retrievable
+        End Try
+
+        Return ChrW(0)
+    End Function
+
+    ''' <summary>
+    ''' Creates a one-character range and aligns its text retrieval mode for hidden text.
+    ''' </summary>
+    ''' <param name="doc">Document used to create the range.</param>
+    ''' <param name="startPos">Start position for the one-character range.</param>
+    ''' <param name="includeHidden">When true, sets <see cref="Word.TextRetrievalMode.IncludeHiddenText"/> on the created range.</param>
+    ''' <returns>A Word range spanning exactly one character.</returns>
+    ''' <remarks>
+    ''' Some ranges can throw when setting <see cref="Word.Range.TextRetrievalMode"/> depending on the story/context; errors are ignored.
+    ''' </remarks>
+    Private Shared Function OneCharRange(doc As Word.Document, startPos As Integer, includeHidden As Boolean) As Word.Range
+        Dim r As Word.Range = doc.Range(Start:=startPos, [End]:=startPos + 1)
+        Try
+            r.TextRetrievalMode.IncludeHiddenText = includeHidden
+            ' Keep default behavior for field codes unless you explicitly want them here.
+            ' r.TextRetrievalMode.IncludeFieldCodes = False
+        Catch
+            ' ignore; some ranges can throw depending on context
+        End Try
+        Return r
+    End Function
 
     ''' <summary>
     ''' Replaces highlighted portions with <mark> tags, optionally retaining paragraph breaks

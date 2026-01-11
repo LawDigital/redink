@@ -1,5 +1,28 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: ClipboardHelper.vb
+' Purpose: Reads the current Windows clipboard content and converts the first supported
+'          clipboard payload into a `(mimeType, base64)` pair.
+'
+' Architecture:
+'  - STA access: Clipboard APIs are invoked on a dedicated STA thread to satisfy
+'    Windows Forms clipboard threading requirements.
+'  - Format precedence (first match wins):
+'     1) Outlook attachment: "FileGroupDescriptorW"/"FileGroupDescriptor" + "FileContents"
+'     2) Explorer file drop list: file path -> MimeHelper.GetFileMimeTypeAndBase64
+'     3) Audio stream: Clipboard.GetAudioStream (assumed WAV)
+'     4) Rich text: TextDataFormat.Rtf
+'     5) HTML: TextDataFormat.Html
+'     6) CSV: TextDataFormat.CommaSeparatedValue
+'     7) Plain text: Clipboard.GetText
+'     8) Bitmap image: Clipboard.GetImage (re-encoded as PNG)
+'     9) Enhanced Metafile (EMF): CF_ENHMETAFILE -> Metafile -> Bitmap -> PNG
+'  - Output: Base64 encoding is used for all supported payloads.
+'  - Resource handling: Releases COM wrappers and native EMF handles to avoid holding
+'    clipboard data objects longer than necessary.
+' =============================================================================
 
 Option Strict On
 Option Explicit On
@@ -8,21 +31,34 @@ Namespace SharedLibrary
 
     Friend Module ClipboardHelper
 
+        ''' <summary>
+        ''' Releases a COM object reference (if any) to avoid holding clipboard data objects
+        ''' alive longer than necessary.
+        ''' </summary>
+        ''' <param name="obj">Candidate object that may be a COM wrapper.</param>
         Private Sub SafeReleaseCom(obj As Object)
             Try
                 If obj IsNot Nothing AndAlso System.Runtime.InteropServices.Marshal.IsComObject(obj) Then
                     System.Runtime.InteropServices.Marshal.FinalReleaseComObject(obj)
                 End If
             Catch
-                ' ignore
+                ' Ignore release failures; clipboard retrieval should not fail because cleanup did not succeed.
             End Try
         End Sub
 
+        ''' <summary>
+        ''' Tries to read the current clipboard content and returns the first supported payload as a
+        ''' MIME type and Base64-encoded content.
+        ''' </summary>
+        ''' <param name="mimeType">On success: MIME type of the extracted clipboard payload.</param>
+        ''' <param name="base64">On success: Base64-encoded payload bytes (or UTF-8 bytes for text formats).</param>
+        ''' <returns><see langword="True"/> if a supported clipboard payload was found; otherwise <see langword="False"/>.</returns>
         Friend Function TryGetClipboardObject(ByRef mimeType As String, ByRef base64 As String) As Boolean
             Dim succeeded As Boolean = False
             Dim localMimeType As String = Nothing
             Dim localBase64 As String = Nothing
 
+            ' Clipboard APIs require an STA thread. All reads are performed inside this dedicated STA thread.
             Dim t As New System.Threading.Thread(
 Sub()
     Try
@@ -36,10 +72,13 @@ Sub()
             Try
                 If fgStream IsNot Nothing Then
                     Using reader As New System.IO.BinaryReader(fgStream, System.Text.Encoding.Unicode, leaveOpen:=False)
-                        ' skip itemCount + fixed fields
+                        ' Read file name from FILEGROUPDESCRIPTOR structure (first item only).
                         reader.ReadInt32() ' itemCount
+
+                        ' Skip fixed-size fields up to the start of cFileName.
                         reader.BaseStream.Seek(4 + 16 + 8 + 8 + 8 + 4 + 4, System.IO.SeekOrigin.Current)
-                        ' read filename (up to 260 WCHARs)
+
+                        ' Read filename (up to 260 WCHARs).
                         Dim nameChars As New System.Collections.Generic.List(Of Char)
                         For i = 0 To 259
                             Dim ch As Char = reader.ReadChar()
@@ -48,7 +87,7 @@ Sub()
                         Next
                         Dim fileName As String = New String(nameChars.ToArray())
 
-                        ' pull the raw attachment bytes
+                        ' Pull the raw attachment bytes.
                         Dim contentObj = System.Windows.Forms.Clipboard.GetData("FileContents")
                         Dim contentStream = TryCast(contentObj, System.IO.Stream)
                         Try
@@ -57,14 +96,14 @@ Sub()
                                     contentStream.CopyTo(ms)
                                     Dim bytes() As Byte = ms.ToArray()
 
-                                    ' 2) WAV-header sniff
+                                    ' Prefer identifying WAV by RIFF/WAVE headers where applicable.
                                     If bytes.Length >= 12 AndAlso
                                        System.Text.Encoding.ASCII.GetString(bytes, 0, 4) = "RIFF" AndAlso
                                        System.Text.Encoding.ASCII.GetString(bytes, 8, 4) = "WAVE" Then
 
                                         localMimeType = "audio/wav"
                                     Else
-                                        ' 3) fallback to extension-based mapping
+                                        ' Fallback to extension-based MIME mapping derived from the extracted file name.
                                         Dim ext = System.IO.Path.GetExtension(fileName).ToLowerInvariant()
                                         Select Case ext
                                             Case ".wav" : localMimeType = "audio/wav"
@@ -82,14 +121,14 @@ Sub()
                                 End Using
                             End If
                         Finally
-                            ' Ensure we drop COM references that can hold the clipboard data object
+                            ' Ensure we drop references that can keep the clipboard data object alive.
                             If contentStream IsNot Nothing Then contentStream.Dispose()
                             SafeReleaseCom(contentObj)
                         End Try
                     End Using
                 End If
             Finally
-                ' BinaryReader.Dispose closes fgStream; also release COM wrapper if any
+                ' BinaryReader.Dispose closes fgStream; also release COM wrapper if any.
                 SafeReleaseCom(fgObj)
             End Try
         End If
@@ -174,6 +213,7 @@ Sub()
                 If NativeClipboardX.IsClipboardFormatAvailable(NativeClipboardX.CF_ENHMETAFILE) Then
                     Dim src As IntPtr = NativeClipboardX.GetClipboardData(NativeClipboardX.CF_ENHMETAFILE)
                     If src <> IntPtr.Zero Then
+                        ' Copy the metafile handle so we can safely create a Metafile instance.
                         Dim clone As IntPtr = NativeClipboardX.CopyEnhMetaFile(src, Nothing)
                         Try
                             Using emf As New System.Drawing.Imaging.Metafile(clone, False)
@@ -190,7 +230,7 @@ Sub()
                                 End Using
                             End Using
                         Finally
-                            ' Always free the duplicated handle
+                            ' Always free the duplicated handle.
                             NativeClipboardX.DeleteEnhMetaFile(clone)
                         End Try
                         If succeeded Then Exit Sub
@@ -202,13 +242,17 @@ Sub()
         End If
 
     Catch
-        ' suppress all exceptions
+        ' Suppress all exceptions to keep clipboard probing non-fatal for callers.
     End Try
 End Sub)
 
             t.SetApartmentState(System.Threading.ApartmentState.STA)
             t.Start()
-            t.Join()
+
+            ' Wait up to 5 seconds; if the clipboard is locked, treat as failure.
+            If Not t.Join(5000) Then
+                Return False
+            End If
 
             If succeeded Then
                 mimeType = localMimeType

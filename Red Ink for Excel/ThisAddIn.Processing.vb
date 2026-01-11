@@ -347,8 +347,11 @@ Partial Public Class ThisAddIn
                     End Try
 
                     If HasPDF Then
-                        If Not String.IsNullOrWhiteSpace(INI_APICall_Object) Then
-                            Dim answer As Integer = ShowCustomYesNoBox("The selected directory contains PDF files. Do you want to use your main model's OCR capabilities (if any) to extract text from PDFs that do not appear to contain searchable text?", "Yes, use OCR as needed", "No, do it without OCR")
+                        If SharedMethods.IsOcrAvailable(_context) Then
+                            Dim answer As Integer = ShowCustomYesNoBox(
+                                "The selected directory contains PDF files. Do you want to use your model's OCR capabilities to extract text from PDFs that do not appear to contain searchable text?",
+                                "Yes, use OCR as needed",
+                                "No, do it without OCR")
                             If answer = 1 Then
                                 DoOCR = True
                             ElseIf answer <> 2 Then
@@ -690,29 +693,260 @@ Partial Public Class ThisAddIn
                                         Dim options As New List(Of String)()
                                         Dim wb As Microsoft.Office.Interop.Excel.Workbook = CType(cell.Worksheet.Parent, Microsoft.Office.Interop.Excel.Workbook)
                                         Dim refRange As Excel.Range = Nothing
+                                        Dim formulaResolved As Boolean = False
 
                                         If formula1.StartsWith("="c) Then
-                                            Dim nameKey As String = formula1.Substring(1)
-                                            Try
-                                                Dim nm As Excel.Name = CType(wb.Names(nameKey), Excel.Name)
-                                                refRange = nm.RefersToRange
-                                            Catch ex As Exception
-                                            End Try
+                                            ' Handle INDIRECT/INDIREKT formulas first
+                                            Dim upperFormula As String = formula1.ToUpperInvariant()
+                                            If upperFormula.Contains("INDIRECT") OrElse upperFormula.Contains("INDIREKT") Then
+                                                Try
+                                                    Dim oldCalc As Excel.XlCalculation = app.Calculation
+                                                    app.Calculation = Excel.XlCalculation.xlCalculationAutomatic
+
+                                                    Try
+                                                        ' Extract the argument inside INDIREKT(...)
+                                                        Dim m As Match = Regex.Match(formula1, "=\s*INDIREKT?\s*\((.+)\)\s*$", RegexOptions.IgnoreCase)
+                                                        If m.Success Then
+                                                            Dim innerFormula As String = "=" & m.Groups(1).Value
+
+                                                            ' Store original cell state
+                                                            Dim originalHasFormula As Boolean = CBool(cell.HasFormula)
+                                                            Dim originalFormulaLocal As String = If(originalHasFormula, CStr(cell.FormulaLocal), "")
+                                                            Dim originalValue As Object = If(Not originalHasFormula, cell.Value2, Nothing)
+
+                                                            ' Store and temporarily remove data validation
+                                                            Dim hadValidation As Boolean = False
+                                                            Dim validationType As Integer = 0
+                                                            Dim validationFormula1 As String = ""
+                                                            Dim validationFormula2 As String = ""
+                                                            Dim validationOperator As Integer = 0
+                                                            Dim validationAlertStyle As Integer = 0
+                                                            Dim validationIgnoreBlank As Boolean = True
+                                                            Dim validationInCellDropdown As Boolean = True
+                                                            Try
+                                                                validationType = cell.Validation.Type
+                                                                hadValidation = True
+                                                                ' Keep the formula exactly as Excel returns it (in local format)
+                                                                validationFormula1 = cell.Validation.Formula1
+                                                                Try : validationFormula2 = cell.Validation.Formula2 : Catch : End Try
+                                                                validationOperator = cell.Validation.Operator
+                                                                validationAlertStyle = cell.Validation.AlertStyle
+                                                                validationIgnoreBlank = cell.Validation.IgnoreBlank
+                                                                validationInCellDropdown = cell.Validation.InCellDropdown
+
+                                                                Debug.WriteLine($"Captured validation: Type={validationType}, Formula1={validationFormula1}")
+
+                                                                cell.Validation.Delete()
+                                                            Catch
+                                                            End Try
+
+                                                            Try
+                                                                ' Try FormulaLocal first (for localized function names)
+                                                                ' But ensure cell is in a state that accepts formulas
+                                                                cell.NumberFormat = "General"
+
+                                                                ' Clear any existing content first
+                                                                cell.ClearContents()
+
+                                                                ' Set formula - try Formula property first, fall back to FormulaLocal
+                                                                Try
+                                                                    cell.FormulaLocal = innerFormula
+                                                                Catch
+                                                                    ' If FormulaLocal fails, the formula might need conversion
+                                                                End Try
+
+                                                                ' Force recalculation of the entire worksheet
+                                                                cell.Worksheet.Calculate()
+
+                                                                ' Check if it was actually parsed as a formula
+                                                                If CBool(cell.HasFormula) Then
+                                                                    Dim addressResult As Object = cell.Value2
+
+                                                                    'Debug.WriteLine($"Cell: {cell.Address(False, False)}")
+                                                                    'Debug.WriteLine($"HasFormula: {cell.HasFormula}")
+                                                                    'Debug.WriteLine($"Inner formula: {innerFormula}")
+                                                                    'Debug.WriteLine($"addressResult type: {If(addressResult Is Nothing, "Nothing", addressResult.GetType().ToString())}")
+                                                                    'Debug.WriteLine($"addressResult value: {If(addressResult Is Nothing, "Nothing", addressResult.ToString())}")
+
+                                                                    If addressResult IsNot Nothing AndAlso Not IsError(addressResult) Then
+                                                                        Dim rangeAddrStr As String = addressResult.ToString().Trim()
+
+                                                                        If Not String.IsNullOrWhiteSpace(rangeAddrStr) AndAlso Not rangeAddrStr.StartsWith("="c) Then
+                                                                            If rangeAddrStr.Contains("!") Then
+                                                                                Dim parts = rangeAddrStr.Split("!"c)
+                                                                                Dim sheetName = parts(0).Trim("'"c)
+                                                                                Dim rangeRef = parts(1)
+
+                                                                                Dim targetSheet As Microsoft.Office.Interop.Excel.Worksheet =
+                                                                                    CType(wb.Sheets(sheetName), Microsoft.Office.Interop.Excel.Worksheet)
+
+                                                                                refRange = targetSheet.Range(rangeRef)
+                                                                            Else
+                                                                                refRange = cell.Worksheet.Range(rangeAddrStr)
+                                                                            End If
+
+                                                                            formulaResolved = (refRange IsNot Nothing)
+                                                                        End If
+                                                                    End If
+                                                                Else
+                                                                    Debug.WriteLine($"Formula not parsed - cell.HasFormula = False, cell.Text = {cell.Text}")
+                                                                End If
+                                                            Finally
+                                                                ' Restore original cell content
+                                                                Try
+                                                                    If originalHasFormula Then
+                                                                        cell.FormulaLocal = originalFormulaLocal
+                                                                    ElseIf originalValue IsNot Nothing Then
+                                                                        cell.ClearContents()
+                                                                        cell.Value2 = originalValue
+                                                                    Else
+                                                                        cell.ClearContents()
+                                                                    End If
+                                                                Catch
+                                                                End Try
+
+                                                                ' Restore data validation
+                                                                If hadValidation Then
+                                                                    Dim valFormulaEnglish As String = validationFormula1
+                                                                    Dim valFormulaLocal As String = validationFormula1
+
+                                                                    ' CRITICAL: Disable alerts. 
+                                                                    ' INDIRECT/VLOOKUP validations often evaluate to #N/A during setup. 
+                                                                    ' Without this, Excel throws a COM exception instead of accepting the "invalid" state.
+                                                                    Dim oldAlerts As Boolean = app.DisplayAlerts
+                                                                    app.DisplayAlerts = False
+
+                                                                    Try
+                                                                        ' 1. Robust normalization using the cell engine
+                                                                        ' Ensure we have both confirmed Local and English versions.
+                                                                        If Not String.IsNullOrEmpty(validationFormula1) AndAlso validationFormula1.StartsWith("=") Then
+                                                                            Try
+                                                                                cell.ClearContents()
+                                                                                cell.FormulaLocal = validationFormula1
+                                                                                valFormulaEnglish = cell.Formula      ' English (commas)
+                                                                                valFormulaLocal = cell.FormulaLocal   ' Local (semicolons, localized names)
+                                                                            Catch
+                                                                                ' If translation fails, assume capture was correct as-is
+                                                                            End Try
+                                                                        End If
+
+                                                                        ' 2. Restore Cell Content
+                                                                        Try
+                                                                            If originalHasFormula Then
+                                                                                cell.FormulaLocal = originalFormulaLocal
+                                                                            ElseIf originalValue IsNot Nothing Then
+                                                                                cell.ClearContents()
+                                                                                cell.Value2 = originalValue
+                                                                            Else
+                                                                                cell.ClearContents()
+                                                                            End If
+                                                                        Catch
+                                                                        End Try
+
+                                                                        ' 3. Restore Validation
+                                                                        Try
+                                                                            cell.Validation.Delete()
+                                                                        Catch
+                                                                        End Try
+
+                                                                        If validationType = Excel.XlDVType.xlValidateList Then
+                                                                            Try
+                                                                                ' Use Placeholder pattern for stability
+                                                                                cell.Validation.Add(
+                                                                                    Type:=Excel.XlDVType.xlValidateList,
+                                                                                    AlertStyle:=CType(validationAlertStyle, Excel.XlDVAlertStyle),
+                                                                                    Operator:=Excel.XlFormatConditionOperator.xlBetween,
+                                                                                    Formula1:="placeholder")
+
+                                                                                ' OPTIMIZED: Try LOCAL formula first.
+                                                                                ' Your environment uses Semicolons/German. Validation.Modify works best with Local syntax.
+                                                                                ' DisplayAlerts=False allows it to pass even if the reference is currently #N/A.
+                                                                                Try
+                                                                                    cell.Validation.Modify(
+                                                                                        Type:=Excel.XlDVType.xlValidateList,
+                                                                                        AlertStyle:=CType(validationAlertStyle, Excel.XlDVAlertStyle),
+                                                                                        Operator:=Excel.XlFormatConditionOperator.xlBetween,
+                                                                                        Formula1:=valFormulaLocal)
+                                                                                Catch exLocal As Exception
+                                                                                    ' Fallback: Try English only if Local failed
+                                                                                    Debug.WriteLine($"Modify Local failed ({exLocal.Message}), retrying English: {valFormulaEnglish}")
+                                                                                    cell.Validation.Modify(
+                                                                                        Type:=Excel.XlDVType.xlValidateList,
+                                                                                        AlertStyle:=CType(validationAlertStyle, Excel.XlDVAlertStyle),
+                                                                                        Operator:=Excel.XlFormatConditionOperator.xlBetween,
+                                                                                        Formula1:=valFormulaEnglish)
+                                                                                End Try
+
+                                                                                cell.Validation.IgnoreBlank = validationIgnoreBlank
+                                                                                cell.Validation.InCellDropdown = validationInCellDropdown
+                                                                            Catch ex As Exception
+                                                                                Debug.WriteLine($"List Validation failed completely: {ex.Message}")
+                                                                            End Try
+                                                                        Else
+                                                                            ' Non-list validation
+                                                                            Try
+                                                                                cell.Validation.Add(
+                                                                                    Type:=CType(validationType, Excel.XlDVType),
+                                                                                    AlertStyle:=CType(validationAlertStyle, Excel.XlDVAlertStyle),
+                                                                                    Operator:=CType(validationOperator, Excel.XlFormatConditionOperator),
+                                                                                    Formula1:=valFormulaLocal,
+                                                                                    Formula2:=If(String.IsNullOrEmpty(validationFormula2), Type.Missing, validationFormula2))
+
+                                                                                cell.Validation.IgnoreBlank = validationIgnoreBlank
+                                                                                cell.Validation.InCellDropdown = validationInCellDropdown
+                                                                            Catch
+                                                                            End Try
+                                                                        End If
+                                                                    Catch restoreEx As Exception
+                                                                        Debug.WriteLine($"Validation restore failed: {restoreEx.Message}")
+                                                                    Finally
+                                                                        app.DisplayAlerts = oldAlerts
+                                                                    End Try
+                                                                End If
+                                                            End Try
+                                                        End If
+                                                    Finally
+                                                        app.Calculation = oldCalc
+                                                    End Try
+                                                Catch ex As Exception
+                                                    Debug.WriteLine($"INDIRECT eval failed: {ex.Message}")
+                                                End Try
+                                            End If
+
+                                            ' ORIGINAL: Try named range lookup
+                                            If Not formulaResolved AndAlso refRange Is Nothing Then
+                                                Dim nameKey As String = formula1.Substring(1)
+                                                Try
+                                                    Dim nm As Excel.Name = CType(wb.Names(nameKey), Excel.Name)
+                                                    refRange = nm.RefersToRange
+                                                Catch ex As Exception
+                                                End Try
+                                            End If
                                         End If
 
-                                        If refRange Is Nothing AndAlso formula1.StartsWith("="c) Then
+                                        ' ORIGINAL: Try static range reference
+                                        If refRange Is Nothing AndAlso formula1.StartsWith("="c) AndAlso Not formulaResolved Then
                                             Dim addrx As String = formula1.Substring(1)
                                             Try
                                                 refRange = cell.Worksheet.Range(addrx)
                                             Catch ex1 As COMException
+                                                ' ORIGINAL: Try cross-sheet reference
                                                 Dim parts = addrx.Split("!"c)
-                                                Dim sheetName = parts(0)
-                                                Dim rangeAddr = parts(1)
-                                                Dim otherSheet As Microsoft.Office.Interop.Excel.Worksheet = CType(wb.Sheets(sheetName), Microsoft.Office.Interop.Excel.Worksheet)
-                                                refRange = otherSheet.Range(rangeAddr)
+                                                If parts.Length >= 2 Then
+                                                    Dim sheetName = parts(0).Trim("'"c)
+                                                    If Not sheetName.StartsWith("[") Then
+                                                        Dim rangeAddr = parts(1)
+                                                        Try
+                                                            Dim otherSheet As Microsoft.Office.Interop.Excel.Worksheet = CType(wb.Sheets(sheetName), Microsoft.Office.Interop.Excel.Worksheet)
+                                                            refRange = otherSheet.Range(rangeAddr)
+                                                        Catch
+                                                        End Try
+                                                    End If
+                                                End If
                                             End Try
                                         End If
 
+                                        ' ORIGINAL: Extract values from resolved range
                                         If refRange IsNot Nothing Then
                                             Dim tmp = refRange.Value2
                                             If TypeOf tmp Is Object(,) Then
@@ -729,7 +963,8 @@ Partial Public Class ThisAddIn
                                                 options.Add(tmp.ToString())
                                             End If
                                             Marshal.ReleaseComObject(refRange)
-                                        Else
+                                        ElseIf Not formulaResolved Then
+                                            ' ORIGINAL: Fallback - split by comma
                                             If formula1.StartsWith("="c) Then
                                                 options.AddRange(formula1.Substring(1) _
                                                 .Split(","c) _

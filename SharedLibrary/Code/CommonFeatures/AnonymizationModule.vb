@@ -1,18 +1,43 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
-Option Strict On
-Option Explicit On
-
-Imports System.IO
-Imports System.Text
-Imports System.Text.RegularExpressions
-Imports SharedLibrary.SharedLibrary.SharedMethods
-
-' --------------------------------------------------------------------------
-' AnonymizationModule for VSTO Add-In
+' =============================================================================
+' File: AnonymizationModule.vb
+' Purpose:
+'   Provides text anonymization and re-identification based on an external
+'   configuration file (`redink-anon.txt`) and/or user input. Detected entities
+'   are replaced with placeholders and recorded in-memory so placeholders can
+'   later be re-identified during the current session.
 '
-' File structure of redink-anon.txt (located at AnonFilepath):
+' Architecture / How it works:
+'   - Settings Lookup:
+'       `LoadAnonSettingsForModel` reads `redink-anon.txt` and returns the
+'       "mode; type" tuple for a given model name. Model-specific sections
+'       override `[All]`.
+'   - Mode / Type Parsing:
+'       `GetModeFromSettings` and `GetTypeFromSettings` parse the settings tuple.
+'   - Pattern Compilation:
+'       Patterns are compiled either:
+'         * from the file (`CompilePatternsForModel`, `BuildDefaultPromptFromFile`)
+'         * or from user input (`BuildPatternInfosFromRawInput`)
+'       Supported entries include:
+'         * `Regex:` lines (raw regex pattern, optional `{{prefix}}`)
+'         * literal tokens (regex-escaped)
+'         * wildcard tokens containing `*` (the `*` is converted into `[\p{L}\p{N}-]*`)
+'         * comma-separated tokens, where quoted strings ("...") are treated as one token
+'   - Replacement Strategy:
+'       `AnonymizeText` repeatedly finds the earliest match among all patterns,
+'       replaces it with a placeholder built from a prefix + GroupID + sub-index,
+'       and stores the placeholder -> original mapping in `EntitiesMappings`.
+'       For the same GroupID, repeated occurrences of the same matched value reuse
+'       the same sub-index.
+'   - Review UI:
+'       For modes that require review (`show`, `askshow`) the anonymized text is
+'       displayed for editing via `ShowCustomWindow`.
+'   - Re-identification:
+'       `ReidentifyText` replaces placeholders using the current in-memory mappings.
+'
+' Configuration file structure (`redink-anon.txt` at `AnonFilepath`):
 '
 '   ; Comment lines start with semicolon
 '
@@ -28,22 +53,25 @@ Imports SharedLibrary.SharedLibrary.SharedMethods
 '
 ' Sections:
 '   [All] applies to any model. Subsequent lines until next [Section] apply to All.
-'   [ModelName, OtherModel] applies only to those models. In case of conflict, model-specific overrides [All].
+'   [ModelName, OtherModel] applies only to those models. In case of conflict,
+'   model-specific overrides [All].
 '
 ' Lines under a section:
 '   Anon = mode; type
 '     - mode = none, silent, ask, askshow, show
-'     - type = 0 (none), 1 (user prompt with last prompt default), 2 (user prompt empty), 
+'     - type = 0 (none), 1 (user prompt with last prompt default), 2 (user prompt empty),
 '              3 (file-based only), 4 (user prompt with file-based default)
 '   Regex:pattern      (regular expression pattern; may include {{prefix}} to override placeholder)
 '   ENTITY literal     (exact match, escaped for regex)
-'   WILDCARD*          (wildcard '*' converts to ".*")
-'   Multiple entities can be comma-separated on one line; quoted strings ( "multi word" ) are treated as single terms.
+'   WILDCARD*          (wildcard '*' converts to "[\p{L}\p{N}-]*")
+'   Multiple entities can be comma-separated on one line; quoted strings ("multi word")
+'   are treated as single terms.
 '
 ' Placeholder format: <prefix_GGGG_SSS>
 '   - prefix: default "redacted" or custom via {{prefix}}
 '   - GGGG: 4-digit GroupID (unique per pattern)
-'   - SSS:  sub-index (starts at 1 for first match of that pattern, increments for subsequent distinct matches)
+'   - SSS:  sub-index (starts at 1 for first distinct match of that pattern,
+'          increments for subsequent distinct matches)
 '
 ' Modes:
 '   "none"    = No anonymization.
@@ -56,29 +84,64 @@ Imports SharedLibrary.SharedLibrary.SharedMethods
 '   0 = No anonymization.
 '   1 = Prompt user; default = last-used prompt (My.Settings.LastAnonPrompt).
 '   2 = Prompt user; default = empty.
-'   3 = Use only patterns from file; error if file missing or no patterns.
+'   3 = Use only patterns from file; no UI prompt.
 '   4 = Prompt user; default = literals/wildcards from file.
-' --------------------------------------------------------------------------
+' =============================================================================
+
+
+Option Strict On
+Option Explicit On
+
+Imports System.IO
+Imports System.Text
+Imports System.Text.RegularExpressions
+Imports SharedLibrary.SharedLibrary.SharedMethods
 
 Namespace SharedLibrary
 
+    ''' <summary>
+    ''' Provides anonymization and re-identification helpers based on a configuration file and/or user input.
+    ''' </summary>
     Public Module AnonymizationModule
 
-        ' Path to the anonymization configuration file on the desktop.
+        ''' <summary>
+        ''' Path to the anonymization configuration file on the Desktop.
+        ''' </summary>
         Public AnonFilepath As String = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), AnonFile)
 
-        ' Default placeholder prefix if none specified via {{prefix}}.
+        ''' <summary>
+        ''' Default placeholder prefix used when no custom <c>{{prefix}}</c> marker is provided.
+        ''' </summary>
         Private Const DEFAULT_PLACEHOLDER As String = AnonPlaceholder
 
-        ' Temporary in-memory mapping of placeholders to original entities.
+        ''' <summary>
+        ''' In-memory mapping of generated placeholders to original matched strings for the current session.
+        ''' </summary>
         Private EntitiesMappings As New List(Of KeyValuePair(Of String, String))
 
-        ' Internal class to hold each compiled pattern's information.
+        ''' <summary>
+        ''' Holds a compiled regex and the metadata required to generate placeholders for this pattern.
+        ''' </summary>
         Private Class PatternInfo
+
+            ''' <summary>
+            ''' Compiled regex used to detect matches in the working text.
+            ''' </summary>
             Public Property RegexPattern As Regex
+
+            ''' <summary>
+            ''' Placeholder prefix for this pattern (default or overridden by <c>{{prefix}}</c>).
+            ''' </summary>
             Public Property Prefix As String
+
+            ''' <summary>
+            ''' 1-based identifier assigned in compilation order; used as placeholder GroupID (GGGG).
+            ''' </summary>
             Public Property GroupID As Integer
 
+            ''' <summary>
+            ''' Initializes a new <see cref="PatternInfo"/>.
+            ''' </summary>
             Public Sub New(rx As Regex, prefix As String, groupID As Integer)
                 Me.RegexPattern = rx
                 Me.Prefix = prefix
@@ -92,6 +155,14 @@ Namespace SharedLibrary
         '    Searches [All] and [ModelName]; model-specific overrides [All].
         '    Returns empty string if no setting found or on error.
         ' ------------------------------------------------------------------------
+        ''' <summary>
+        ''' Reads <c>redink-anon.txt</c> and returns the <c>"mode; type"</c> setting for a given model name.
+        ''' </summary>
+        ''' <param name="modelName">Model name used to match a section header (e.g., <c>[ModelA, ModelB]</c>).</param>
+        ''' <returns>
+        ''' The raw settings string (<c>"mode; type"</c>), an empty string if no setting was found,
+        ''' or an empty string when the file does not exist.
+        ''' </returns>
         Public Function LoadAnonSettingsForModel(ByVal modelName As String) As String
             Dim allSetting As String = String.Empty
             Dim modelSetting As String = String.Empty
@@ -162,6 +233,11 @@ Namespace SharedLibrary
         ' 2. GetModeFromSettings(settingsString) As String
         '    Splits "mode; type" and returns mode in lowercase, or empty if invalid.
         ' ------------------------------------------------------------------------
+        ''' <summary>
+        ''' Extracts the anonymization mode (the part before the first semicolon) from a settings string.
+        ''' </summary>
+        ''' <param name="settingsString">The settings string in the form <c>"mode; type"</c>.</param>
+        ''' <returns>The lowercased mode; otherwise an empty string if not present.</returns>
         Public Function GetModeFromSettings(ByVal settingsString As String) As String
             Try
                 If String.IsNullOrWhiteSpace(settingsString) Then
@@ -182,6 +258,11 @@ Namespace SharedLibrary
         ' 3. GetTypeFromSettings(settingsString) As Integer
         '    Splits "mode; type" and returns type as integer, or 0 if invalid.
         ' ------------------------------------------------------------------------
+        ''' <summary>
+        ''' Extracts the anonymization type (the integer after the semicolon) from a settings string.
+        ''' </summary>
+        ''' <param name="settingsString">The settings string in the form <c>"mode; type"</c>.</param>
+        ''' <returns>The parsed type value; <c>0</c> if missing or invalid.</returns>
         Public Function GetTypeFromSettings(ByVal settingsString As String) As Integer
             Try
                 If String.IsNullOrWhiteSpace(settingsString) Then
@@ -207,6 +288,16 @@ Namespace SharedLibrary
         '    Performs anonymization based on mode and type for the specified model.
         '    Returns anonymized text or original text on error or "no anonymization".
         ' ------------------------------------------------------------------------
+        ''' <summary>
+        ''' Replaces occurrences of configured/user-provided entities in <paramref name="inputText"/> with placeholders.
+        ''' </summary>
+        ''' <param name="inputText">The input text to anonymize.</param>
+        ''' <param name="modelName">Model name used for retrieving file-based settings and patterns.</param>
+        ''' <param name="mode">Anonymization mode (<c>none</c>, <c>silent</c>, <c>ask</c>, <c>askshow</c>, <c>show</c>).</param>
+        ''' <param name="typeValue">Anonymization type (0..4) controlling whether patterns come from file and/or user prompt.</param>
+        ''' <returns>
+        ''' The anonymized text; the original text if no anonymization is requested; or an empty string on user cancel paths.
+        ''' </returns>
         Public Function AnonymizeText(ByVal inputText As String,
                           ByVal modelName As String,
                           ByVal mode As String,
@@ -215,27 +306,27 @@ Namespace SharedLibrary
             Dim result As String = inputText
 
             Try
-                ' 1) Wenn keine Anonymisierung gewünscht:
+                ' 1) If no anonymization is requested:
                 If String.IsNullOrEmpty(mode) OrElse mode = "none" OrElse typeValue = 0 Then
                     Return inputText
                 End If
 
-                ' 2) Bei "ask" oder "askshow" den Nutzer fragen:
+                ' 2) For "ask" or "askshow" prompt the user:
                 If mode = "ask" OrElse mode = "askshow" Then
                     Dim promptText As String = "Do you want to anonymize?"
                     If mode = "askshow" Then
                         promptText = "Do you want to anonymize and see the text?"
                     End If
 
-                    ' ShowCustomYesNoBox liefert: 1 = Ja, 0 = Nein
+                    ' ShowCustomYesNoBox returns: 1 = Yes, 0 = No
                     Dim choice As Integer = ShowCustomYesNoBox(promptText, "Yes", "No", $"{AN} Anonymization")
                     If choice <> 1 Then
                         Return inputText
                     End If
-                    ' Weiter mit Anonymisierung
+                    ' Continue with anonymization
                 End If
 
-                ' 3) Musterliste bauen (aus Datei oder Prompt):
+                ' 3) Build the pattern list (from file and/or prompt):
                 Dim patternsList As New List(Of PatternInfo)()
 
                 If typeValue = 3 Then
@@ -298,13 +389,13 @@ Namespace SharedLibrary
                     Return inputText
                 End If
 
-                ' 4) Anonymisierungsschleife: stets den frühesten Match suchen und ersetzen:
+                ' 4) Anonymization loop: always replace the earliest next match across all patterns.
                 EntitiesMappings.Clear()
                 Dim workingText As String = result
 
-                ' Statt nur eines Zählers pro GroupID, brauchen wir:
-                '  - pro Gruppe einen Integer-Zähler (für neue Sub-Indices)
-                '  - pro Gruppe ein Dictionary, das jedes neu gefundene matchedValue auf seinen Sub-Index abbildet
+                ' For each GroupID:
+                '  - keep a counter for new Sub-Indices
+                '  - keep a dictionary mapping each matched value to its Sub-Index
                 Dim groupSubCounters As New Dictionary(Of Integer, Integer)()
                 Dim groupValueToIndex As New Dictionary(Of Integer, Dictionary(Of String, Integer))()
 
@@ -317,7 +408,7 @@ Namespace SharedLibrary
                     Dim earliestMatch As System.Text.RegularExpressions.Match = Nothing
                     Dim matchPatternInfo As PatternInfo = Nothing
 
-                    ' Suche über alle Patterns den Matcher mit niedrigstem Index:
+                    ' Search across all patterns for the match with lowest index:
                     For Each pi In patternsList
                         Dim m As System.Text.RegularExpressions.Match = pi.RegexPattern.Match(workingText)
                         If m.Success Then
@@ -339,24 +430,24 @@ Namespace SharedLibrary
                     Dim placeholdersForGroup As Dictionary(Of String, Integer) = groupValueToIndex(grpID)
 
                     If placeholdersForGroup.ContainsKey(matchedValue) Then
-                        ' Wenn wir diese Zeichenfolge schon gesehen haben, benutzen wir denselben Index
+                        ' If this exact matched value has already been seen for this group, reuse the same Sub-Index.
                         subIndex = placeholdersForGroup(matchedValue)
                     Else
-                        ' Neue Zeichenfolge für diese Gruppe → Zähler inkrementieren
+                        ' New matched value for this group: increment Sub-Index counter.
                         Dim nextSub As Integer = groupSubCounters(grpID) + 1
                         groupSubCounters(grpID) = nextSub
                         subIndex = nextSub
                         placeholdersForGroup(matchedValue) = subIndex
 
-                        ' Nur beim ersten Auftreten einer neuen Zeichenfolge in dieser Gruppe fügen wir den EntitiesMappings-Eintrag hinzu
+                        ' Only on first occurrence of a new matched value in this group: store mapping.
                         Dim newPlaceholder As String = AnonPrefix & $"{matchPatternInfo.Prefix}_{grpID.ToString("D4")}_{subIndex}" & AnonSuffix
                         EntitiesMappings.Add(New KeyValuePair(Of String, String)(newPlaceholder, matchedValue))
                     End If
 
-                    ' Erstellt den Platzhalter-String:
+                    ' Build placeholder string:
                     Dim placeholder As String = AnonPrefix & $"{matchPatternInfo.Prefix}_{grpID.ToString("D4")}_{subIndex}" & AnonSuffix
 
-                    ' Text neu zusammensetzen:
+                    ' Rebuild text:
                     Dim before As String = workingText.Substring(0, earliestMatch.Index)
                     Dim after As String = workingText.Substring(earliestMatch.Index + earliestMatch.Length)
                     workingText = before & placeholder & after
@@ -365,7 +456,7 @@ Namespace SharedLibrary
 
                 result = workingText
 
-                ' 5) Bei "show" oder "askshow" den anonymisierten Text zur Bearbeitung anzeigen:
+                ' 5) For "show" or "askshow", show anonymized text for review/editing:
                 If mode = "show" OrElse mode = "askshow" Then
 
                     'Debug.WriteLine(ExportEntitiesMappings)
@@ -397,6 +488,11 @@ Namespace SharedLibrary
         ' 5. ReidentifyText(inputText) As String
         '    Replaces placeholders in inputText with original entities from EntitiesMappings.
         ' ------------------------------------------------------------------------
+        ''' <summary>
+        ''' Replaces placeholders in <paramref name="inputText"/> with original values from the current in-memory mapping.
+        ''' </summary>
+        ''' <param name="inputText">Text which may contain placeholders created by <see cref="AnonymizeText"/>.</param>
+        ''' <returns>The text with known placeholders replaced by their original values.</returns>
         Public Function ReidentifyText(ByVal inputText As String) As String
             Try
                 Dim output As String = inputText
@@ -416,6 +512,10 @@ Namespace SharedLibrary
         '      [prefix_0001_1]: OriginalEntity1
         '      [prefix_0002_1]: OriginalEntity2
         ' ------------------------------------------------------------------------
+        ''' <summary>
+        ''' Exports the current placeholder-to-original mappings as a multi-line string.
+        ''' </summary>
+        ''' <returns>A multi-line mapping representation in the form <c>{placeholder}: {original}</c>.</returns>
         Public Function ExportEntitiesMappings() As String
             Try
                 Dim sb As New StringBuilder()
@@ -432,9 +532,17 @@ Namespace SharedLibrary
 
         ' ------------------------------------------------------------------------
         ' Helper: BuildPatternInfosFromRawInput(rawInput) As List(Of PatternInfo)
-        '   Parsers comma-separated Tokens, erkennt "{{prefix}}", Zitate und Wildcards.
-        '   Wandelt "*" in "[\p{L}\p{N}-]*" (nur Satzzeichen), statt ".*?".
+        '   Parses comma-separated tokens, detects "{{prefix}}", quotes and wildcards.
+        '   Converts "*" to "[\p{L}\p{N}-]*".
         ' ------------------------------------------------------------------------
+        ''' <summary>
+        ''' Parses a comma-separated user input string into a list of compiled patterns.
+        ''' </summary>
+        ''' <param name="rawInput">
+        ''' Comma-separated tokens; quoted tokens (<c>"..."</c>) are treated as one token; tokens may contain
+        ''' wildcards (<c>*</c>) and an optional prefix marker (<c>{{prefix}}</c>).
+        ''' </param>
+        ''' <returns>A list of compiled patterns with assigned GroupIDs, in token order.</returns>
         Private Function BuildPatternInfosFromRawInput(ByVal rawInput As String) As List(Of PatternInfo)
             Dim patternInfos As New List(Of PatternInfo)()
 
@@ -489,7 +597,7 @@ Namespace SharedLibrary
                         Dim sbPat As New StringBuilder()
                         For Each c As Char In tokenWithoutMarker
                             If c = "*"c Then
-                                sbPat.Append("[\p{L}\p{N}-]*")  ' wildcard nur für Satzzeichen
+                                sbPat.Append("[\p{L}\p{N}-]*")  ' wildcard matches letters/numbers/hyphen only
                             Else
                                 sbPat.Append(Regex.Escape(c.ToString()))
                             End If
@@ -517,9 +625,14 @@ Namespace SharedLibrary
 
         ' ------------------------------------------------------------------------
         ' Helper: CompilePatternsForModel(modelName) As List(Of PatternInfo)
-        '   Liest Datei unter [All] und [ModelName], verarbeitet "Regex:"-Zeilen
-        '   und literal/wildcard-Zeilen. Wandelt "*" in "\w*".
+        '   Reads file under [All] and [ModelName], processes "Regex:" lines
+        '   and literal/wildcard lines. Converts "*" to "[\p{L}\p{N}-]*".
         ' ------------------------------------------------------------------------
+        ''' <summary>
+        ''' Reads <c>redink-anon.txt</c> and compiles patterns from matching sections (<c>[All]</c> and model sections).
+        ''' </summary>
+        ''' <param name="modelName">Model name used to determine whether a section applies.</param>
+        ''' <returns>A list of compiled patterns; empty if file is missing or no matching entity lines exist.</returns>
         Private Function CompilePatternsForModel(ByVal modelName As String) As List(Of PatternInfo)
             Dim patternInfos As New List(Of PatternInfo)()
 
@@ -598,7 +711,7 @@ Namespace SharedLibrary
                         End Try
 
                     Else
-                        ' Literal/Wildcard-Zeile: split bei Komma außerhalb von Anführungszeichen
+                        ' Literal/Wildcard line: split by commas outside quotes.
                         Dim tokens As New List(Of String)()
                         Dim sb As New StringBuilder()
                         Dim inQuotes As Boolean = False
@@ -636,7 +749,7 @@ Namespace SharedLibrary
                                 tokenWithoutMarker = tok.Remove(markerStart, (markerEnd + 2) - markerStart).Trim()
                             End If
 
-                            ' Erzeuge Regex: "*" → "[\p{L}\p{N}-]*", Zitate und Literale escapen
+                            ' Build regex pattern: "*" → "[\p{L}\p{N}-]*"; quoted tokens and literals are escaped.
                             Dim patternText As String = String.Empty
                             If tokenWithoutMarker.StartsWith("""") AndAlso tokenWithoutMarker.EndsWith("""") AndAlso tokenWithoutMarker.Length >= 2 Then
                                 Dim inner As String = tokenWithoutMarker.Substring(1, tokenWithoutMarker.Length - 2)
@@ -679,6 +792,12 @@ Namespace SharedLibrary
         '   Returns a comma-separated list of literal/wildcard tokens (with {{prefix}} intact)
         '   from [All] and [ModelName], ignoring "Regex:" lines.
         ' ------------------------------------------------------------------------
+        ''' <summary>
+        ''' Builds a comma-separated default prompt string from file-based literal/wildcard entries
+        ''' for <c>[All]</c> and matching model sections, ignoring <c>Regex:</c> lines.
+        ''' </summary>
+        ''' <param name="modelName">Model name used to determine whether a section applies.</param>
+        ''' <returns>A comma-separated token list; empty string if file is missing or no applicable tokens exist.</returns>
         Private Function BuildDefaultPromptFromFile(ByVal modelName As String) As String
             Dim literals As New List(Of String)()
 

@@ -3,7 +3,6 @@
 
 ' =============================================================================
 ' File: MlNetTokenizer.vb
-' Part of: Red Ink Shared Library
 ' Purpose: SentencePiece-based subword tokenization using Microsoft.ML.Tokenizers
 '          for embedding model input preparation. Converts text to token IDs with
 '          padding/truncation and tracks token offsets for alignment with source text.

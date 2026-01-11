@@ -1,6 +1,32 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
+' =============================================================================
+' File: SharedMethods.TextHandling.vb
+' Purpose: Provides helper methods for converting and inserting text into a
+'          Microsoft Word document range/selection, including Markdown-to-HTML
+'          conversion, HTML cleanup/simplification, and markup/format stripping.
+'
+' Architecture:
+'  - Markdown Insertion: `InsertTextWithMarkdown` converts Markdown to HTML (Markdig),
+'    normalizes line breaks, and delegates insertion to `InsertTextWithFormat`.
+'  - HTML Insertion: `InsertTextWithFormat` loads HTML (HtmlAgilityPack), normalizes
+'    `<br>` usage inside paragraphs/list items, applies Word-derived inline styles,
+'    constructs a CF_HTML clipboard packet (UTF-8 byte offsets), and pastes into Word.
+'  - Word Highlight Tags: `FixMarkTagsForWord` translates `<mark>` elements into
+'    `<span>` elements with `mso-highlight:*` so Word can interpret highlights.
+'  - HTML/Text Utilities: Helpers remove HTML, create normalized HTML with a
+'    `<head>`/`<meta charset>`, and simplify HTML by whitelisting tags/attributes.
+'  - Markdown Stripping: `RemoveMarkdownFormatting` removes a subset of Markdown
+'    markers while preserving bracketed/brace-delimited regions verbatim.
+'
+' External Dependencies:
+'  - Markdig: Markdown parsing/conversion to HTML.
+'  - HtmlAgilityPack: HTML parsing, manipulation, and entity decoding.
+'  - Microsoft.Office.Interop.Word: Word Range/Selection manipulation and paste APIs.
+' =============================================================================
+
+
 Option Strict On
 Option Explicit On
 
@@ -12,6 +38,12 @@ Imports Microsoft.Office.Interop.Word
 Namespace SharedLibrary
     Partial Public Class SharedMethods
 
+        ''' <summary>
+        ''' Converts the provided Markdown text to HTML and inserts it into the given Word selection.
+        ''' </summary>
+        ''' <param name="selection">A Word <see cref="Microsoft.Office.Interop.Word.Selection"/> (passed as <see cref="Object"/>).</param>
+        ''' <param name="gptResult">The Markdown text to convert and insert.</param>
+        ''' <param name="TrailingCR">If <c>True</c>, keeps trailing paragraph breaks; otherwise suppresses them.</param>
         Public Shared Sub InsertTextWithMarkdown(selection As Object, gptResult As String, TrailingCR As Boolean)
 
             Dim wordSelection As Microsoft.Office.Interop.Word.Selection = CType(selection, Microsoft.Office.Interop.Word.Selection)
@@ -23,12 +55,12 @@ Namespace SharedLibrary
 
             Dim pattern As String = "((\r\n|\n|\r){2,})"
             gptResult = Regex.Replace(gptResult, pattern, Function(m As Match)
-                                                              ' Prüfen, ob das Match bis zum Ende des Strings reicht:
+                                                              ' Check whether the match reaches to the end of the string
                                                               If m.Index + m.Length = gptResult.Length Then
-                                                                  ' Am Ende: Rückgabe der Umbrüche wie sie sind
+                                                                  ' At the end: return the line breaks as they are
                                                                   Return m.Value
                                                               Else
-                                                                  ' Andernfalls: &nbsp; zwischen die Umbrüche einfügen
+                                                                  ' Otherwise: insert &nbsp; between the line breaks
                                                                   Dim breaks As String = m.Value
                                                                   Dim regexBreaks As New Regex("(\r\n|\n|\r)")
                                                                   Dim splitBreaks = regexBreaks.Matches(breaks)
@@ -84,13 +116,20 @@ Namespace SharedLibrary
         End Sub
 
 
+        ''' <summary>
+        ''' Inserts HTML-formatted content into a Word range using CF_HTML clipboard formatting and Word paste APIs.
+        ''' </summary>
+        ''' <param name="formattedText">The HTML fragment to insert.</param>
+        ''' <param name="range">The Word range that defines the paste target and receives the updated inserted range.</param>
+        ''' <param name="ReplaceSelection">If <c>True</c>, pastes over the current selection; otherwise appends at the range end.</param>
+        ''' <param name="NoTrailingCR">If <c>True</c> and <paramref name="ReplaceSelection"/> is <c>True</c>, deletes the last paragraph mark after insertion.</param>
         Public Shared Sub InsertTextWithFormat(formattedText As String, ByRef range As Microsoft.Office.Interop.Word.Range, ReplaceSelection As Boolean, Optional NoTrailingCR As Boolean = False)
             Try
                 If formattedText Is Nothing OrElse formattedText.Trim() = "" Then
                     Return
                 End If
 
-                ' --- 0) Ursprünglichen Range-Anfang klonen und auf Start kollabieren ---
+                ' --- 0) Clone original range start and collapse to the start ---
                 Dim origRange As Microsoft.Office.Interop.Word.Range = range.Duplicate()
                 origRange.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseStart)
 
@@ -100,11 +139,11 @@ Namespace SharedLibrary
 
                 System.Diagnostics.Debug.WriteLine("PreFinalHTML[after-mark]=" & formattedText)
 
-                ' --- 1) HTML laden und <br> in eigene <p>-Elemente aufsplitten ---
+                ' --- 1) Load HTML and split <br> into separate <p> elements ---
                 Dim doc As New HtmlAgilityPack.HtmlDocument()
                 doc.LoadHtml(formattedText)
 
-                ' Alle <p> UND <li>-Knoten auswählen
+                ' Select all <p> and <li> nodes
                 Dim nodes As HtmlAgilityPack.HtmlNodeCollection = doc.DocumentNode.SelectNodes("//p | //li")
                 If nodes IsNot Nothing Then
                     For Each node As HtmlAgilityPack.HtmlNode In nodes.ToList()
@@ -139,13 +178,14 @@ Namespace SharedLibrary
 
                 formattedText = doc.DocumentNode.OuterHtml
 
-                ' --- 2) Schrift- und Absatz-Eigenschaften vom Range-Start auslesen ---
+                ' --- 2) Read font and paragraph properties from the start of the range ---
                 Dim fontName As String = origRange.Font.Name
                 Dim fontSize As Single = origRange.Font.Size
                 Dim isBold As Boolean = (origRange.Font.Bold = 1)
                 Dim isItalic As Boolean = (origRange.Font.Italic = 1)
                 Dim fontColor As Integer = origRange.Font.Color
-                ' BGR → RGB → HEX
+
+                ' Convert Word BGR color to RGB hex string
                 Dim bgr As Integer = fontColor And &HFFFFFF
                 Dim r As Integer = (bgr And &HFF)
                 Dim g As Integer = ((bgr >> 8) And &HFF)
@@ -175,13 +215,13 @@ Namespace SharedLibrary
                         lineHeightCss = "normal"
                 End Select
 
-                ' --- 3) CSS-Strings bauen ---
+                ' --- 3) Build CSS strings ---
                 Dim cssBody As String = $"font-family:'{fontName}'; color:{hexColor}; line-height:{lineHeightCss};"
                 Dim cssPara As String = cssBody & $" font-size:{fontSize}pt; margin-top:{spaceBefore}pt; margin-bottom:{spaceAfter}pt;"
                 If isBold Then cssPara &= " font-weight:bold;"
                 If isItalic Then cssPara &= " font-style:italic;"
 
-                ' --- 4) Inline-Styles anwenden ---
+                ' --- 4) Apply inline styles ---
                 Dim allTextContainers As HtmlAgilityPack.HtmlNodeCollection = doc.DocumentNode.SelectNodes("//p | //li")
                 If allTextContainers IsNot Nothing Then
                     For Each n As HtmlAgilityPack.HtmlNode In allTextContainers
@@ -189,7 +229,7 @@ Namespace SharedLibrary
                     Next
                 End If
 
-                ' Überschriften (h1–h6): nur Schriftfamilie/Farbe/Zeilenhöhe überschreiben
+                ' Headings (h1–h6): override only family/color/line-height
                 Dim headings As HtmlAgilityPack.HtmlNodeCollection = doc.DocumentNode.SelectNodes("//h1 | //h2 | //h3 | //h4 | //h5 | //h6")
                 If headings IsNot Nothing Then
                     For Each h As HtmlAgilityPack.HtmlNode In headings
@@ -208,7 +248,7 @@ Namespace SharedLibrary
 
                 formattedText = doc.DocumentNode.OuterHtml
 
-                ' --- 5) HTML-Fragment zusammensetzen ---
+                ' --- 5) Construct HTML fragment ---
                 Dim htmlHeader As String = "<html><head><meta charset=""UTF-8""></head>" &
                                    $"<body style=""font-family:'{fontName}'""><!--StartFragment-->"
                 Dim htmlFooter As String = "<!--EndFragment--></body></html>"
@@ -216,8 +256,7 @@ Namespace SharedLibrary
                 Dim cleanedHtml As String = htmlHeader & formattedText.Trim() & htmlFooter
                 cleanedHtml = CreateProperHtml(cleanedHtml).Replace(vbCr, "").Replace(vbLf, "").Replace(vbCrLf, "")
 
-                ' --- 6) Clipboard-Formattierung für HTML (korrekte UTF-8-Byte-Offests + Retry) ---
-                ' CF_HTML verlangt Byte-Offets (UTF-8), nicht .NET-Zeichenindizes.
+                ' --- 6) CF_HTML clipboard formatting (requires UTF-8 byte offsets) ---
                 Dim preamble As String =
             $"Version:0.9{vbCrLf}" &
             $"StartHTML:00000000{vbCrLf}" &
@@ -231,7 +270,6 @@ Namespace SharedLibrary
                 Dim idxFragStartTag As Integer = packet.IndexOf("<!--StartFragment-->", System.StringComparison.OrdinalIgnoreCase)
                 Dim idxFragStart As Integer = idxFragStartTag + "<!--StartFragment-->".Length
                 Dim idxFragEnd As Integer = packet.IndexOf("<!--EndFragment-->", System.StringComparison.OrdinalIgnoreCase)
-                Dim idxEndHtml As Integer = packet.Length
 
                 Dim enc As System.Text.Encoding = System.Text.Encoding.UTF8
                 Dim startHtmlOffset As Integer = enc.GetByteCount(packet.Substring(0, idxHtml))
@@ -250,7 +288,7 @@ Namespace SharedLibrary
                 Dim savedClipboard As System.Windows.Forms.IDataObject = ClipboardSnapshot.Capture()
                 Try
 
-                    ' Setzen der Zwischenablage auf STA mit kurzen Retries (Clipboard kann belegt sein)
+                    ' Set clipboard on STA with short retries (clipboard can be locked)
                     Dim setOk As Boolean = False
                     Dim clipboardThread As New System.Threading.Thread(
                                         Sub()
@@ -262,7 +300,7 @@ Namespace SharedLibrary
                                                 Catch exClip As System.Runtime.InteropServices.ExternalException
                                                     System.Threading.Thread.Sleep(50 * attempt)
                                                 Catch exAny As System.Exception
-                                                    ' Unerwartet – trotzdem noch 1–2 Retries
+                                                    ' Unexpected – still retry
                                                     System.Threading.Thread.Sleep(50 * attempt)
                                                 End Try
                                             Next
@@ -272,13 +310,13 @@ Namespace SharedLibrary
                     clipboardThread.Join()
 
                     If Not setOk Then
-                        Throw New System.Exception("HTML konnte nicht in die Zwischenablage geschrieben werden (Clipboard belegt?).")
+                        Throw New System.Exception("HTML could not be written to the clipboard (clipboard locked?).")
                     End If
 
-                    ' Kleine Wartezeit, damit Word sichere Daten liest
+                    ' Small delay to ensure Word reads stable data
                     System.Threading.Thread.Sleep(50)
 
-                    ' --- 7) Einfügen in den Word-Range (mit kleinem Retry gegen Timing-Probleme) ---
+                    ' --- 7) Paste into the Word range (with retries for timing issues) ---
                     range.Select()
                     Dim pasted As Boolean = False
                     For attempt As Integer = 1 To 4
@@ -298,13 +336,13 @@ Namespace SharedLibrary
                     Next
 
                     If Not pasted Then
-                        Throw New System.Exception("Einfügen in Word ist fehlgeschlagen.")
+                        Throw New System.Exception("Pasting into Word failed.")
                     End If
 
                     System.Threading.Thread.Sleep(100)
                     range = range.Application.Selection.Range
 
-                    ' --- 8) Optional: letztes Newline-Zeichen entfernen ---
+                    ' --- 8) Optionally remove last newline character ---
                     If ReplaceSelection AndAlso NoTrailingCR Then
                         Dim insertedRange As Microsoft.Office.Interop.Word.Range = range.Application.Selection.Range
                         Dim delRng As Microsoft.Office.Interop.Word.Range = insertedRange.Duplicate()
@@ -326,6 +364,12 @@ Namespace SharedLibrary
         End Sub
 
 
+        ''' <summary>
+        ''' Converts HTML <c>&lt;mark&gt;</c> tags into <c>&lt;span&gt;</c> tags that use Word-compatible highlight styles.
+        ''' </summary>
+        ''' <param name="html">The input HTML.</param>
+        ''' <param name="defaultColor">The default highlight token to apply for plain <c>&lt;mark&gt;</c> tags.</param>
+        ''' <returns>The transformed HTML string.</returns>
         Private Shared Function FixMarkTagsForWord(html As String, Optional defaultColor As String = "yellow") As String
             If String.IsNullOrEmpty(html) Then Return html
 
@@ -357,7 +401,11 @@ Namespace SharedLibrary
             Return html
         End Function
 
-        ' Map Word highlight token to a broadly supported CSS color keyword for background fill
+        ''' <summary>
+        ''' Maps a Word <c>mso-highlight</c> token to a CSS background color keyword.
+        ''' </summary>
+        ''' <param name="mso">The Word highlight token (for example, <c>yellow</c>).</param>
+        ''' <returns>A CSS color keyword that can be used for a background fill.</returns>
         Private Shared Function MsoHighlightToCssColor(mso As String) As String
             Select Case mso
                 Case "yellow" : Return "yellow"
@@ -380,15 +428,19 @@ Namespace SharedLibrary
         End Function
 
 
+        ''' <summary>
+        ''' Removes a trailing carriage return or line feed from the end of a Word range (up to the last 4 characters).
+        ''' </summary>
+        ''' <param name="range">The Word range to modify.</param>
         Public Shared Sub RemoveTrailingCr(ByRef range As Microsoft.Office.Interop.Word.Range)
             Try
-                ' Maximal 4 Zeichen von hinten prüfen
+                ' Check a maximum of the last 4 characters
                 Dim maxCheck As Integer = Math.Min(4, range.Characters.Count)
                 For i As Integer = 1 To maxCheck
-                    ' Index des i‑ten letzten Zeichens
+                    ' Index of the i-th last character
                     Dim idx As Integer = range.Characters.Count - i + 1
                     If range.Characters(idx).Text = vbCr Or range.Characters(idx).Text = vbLf Then
-                        ' gefundenes Absatzzeichen löschen und Schleife beenden
+                        ' Delete the found paragraph mark and stop
                         range.Characters(idx).Delete()
                         Exit For
                     End If
@@ -399,6 +451,11 @@ Namespace SharedLibrary
         End Sub
 
 
+        ''' <summary>
+        ''' Removes HTML tags from the provided HTML and returns the decoded plain text.
+        ''' </summary>
+        ''' <param name="html">The HTML input.</param>
+        ''' <returns>Plain text with HTML entities decoded.</returns>
         Public Shared Function RemoveHTML(html As String) As String
 
             If String.IsNullOrEmpty(html) Then
@@ -421,8 +478,7 @@ Namespace SharedLibrary
             ' HtmlEntity.DeEntitize converts HTML encoded characters to their decoded form
             textContent = HtmlEntity.DeEntitize(textContent)
 
-            ' Remove extra line breaks or whitespace caused by replaced tags
-            ' Convert multiple consecutive line breaks into a single one 
+            ' Remove extra line breaks or whitespace caused by replaced tags            
             textContent = Regex.Replace(textContent, "(?<!\\)\\[rnt]", Function(m)
                                                                            Select Case m.Value
                                                                                Case "\n" : Return vbLf
@@ -440,6 +496,11 @@ Namespace SharedLibrary
 
 
 
+        ''' <summary>
+        ''' Converts text with custom change markers into an RTF document string.
+        ''' </summary>
+        ''' <param name="inputText">The input text containing <c>[DEL_START]..[DEL_END]</c> and/or <c>[INS_START]..[INS_END]</c> markers.</param>
+        ''' <returns>An RTF string representing the input with basic formatting.</returns>
         Public Shared Function ConvertMarkupToRTF(inputText As String) As String
             ' Define the RTF header with font and color tables
             Dim rtfHeader As String =
@@ -457,7 +518,7 @@ Namespace SharedLibrary
             ' Convert [INS_START] ... [INS_END] to blue + underline
             rtfContent = Regex.Replace(rtfContent, "\[INS_START\](.*?)\[INS_END\]", "{\cf2\ul $1}{\ul0}", RegexOptions.Singleline)
 
-            ' Convert newlines to RTF paragraph breaks  yyyyyy
+            ' Convert newlines to RTF paragraph breaks
             rtfContent = Regex.Replace(rtfContent, "(?<!\\)\\r\\n", "\par ")
             rtfContent = Regex.Replace(rtfContent, "(?<!\\)\\r", "\par ")
             rtfContent = Regex.Replace(rtfContent, "(?<!\\)\\n", "\par ")
@@ -469,14 +530,19 @@ Namespace SharedLibrary
             Return rtfHeader & rtfContent & rtfFooter
         End Function
 
+        ''' <summary>
+        ''' Normalizes HTML by ensuring required elements exist, encoding text nodes, and removing <c>&lt;TEXTTOPROCESS&gt;</c> wrappers.
+        ''' </summary>
+        ''' <param name="inputHtml">The input HTML.</param>
+        ''' <returns>The normalized HTML.</returns>
         Public Shared Function CreateProperHtml(inputHtml As String) As String
-            ' 0) Vorab: Typografische Quotes normalisieren
+            ' 0) Normalize typographic quotes
             inputHtml = inputHtml _
                 .Replace("„"c, """"c) _
                 .Replace(ChrW(&H201C), """"c) _
                 .Replace(ChrW(&H201D), """"c)
 
-            ' 1) Entities maskieren: alle &...; Sequenzen merken und Platzhalter einsetzen
+            ' 1) Mask entities: store all &...; sequences and replace with placeholders
             Dim entityPattern As New System.Text.RegularExpressions.Regex("(&#\d+;|&[A-Za-z]+;)")
             Dim entities As New List(Of String)
             inputHtml = entityPattern.Replace(inputHtml,
@@ -485,15 +551,15 @@ Namespace SharedLibrary
             Return "###ENTITY" & (entities.Count - 1) & "###"
         End Function)
 
-            ' 2) <TEXTTOPROCESS>-Wrapper entfernen
+            ' 2) Remove <TEXTTOPROCESS> wrapper
             inputHtml = inputHtml.Replace("<TEXTTOPROCESS>", "") _
                          .Replace("</TEXTTOPROCESS>", "")
 
-            ' 3) HTML laden
+            ' 3) Load HTML
             Dim htmlDoc As New HtmlAgilityPack.HtmlDocument()
             htmlDoc.LoadHtml(inputHtml)
 
-            ' 4) <head> sicherstellen
+            ' 4) Ensure <head>
             Dim headTag = htmlDoc.DocumentNode.SelectSingleNode("//head")
             If headTag Is Nothing Then
                 headTag = HtmlAgilityPack.HtmlNode.CreateNode("<head></head>")
@@ -505,25 +571,24 @@ Namespace SharedLibrary
                 htmlTag.PrependChild(headTag)
             End If
 
-            ' 5) <meta charset="UTF-8"> einfügen, falls noch nicht vorhanden
+            ' 5) Insert <meta charset="UTF-8"> if not present
             If Not headTag.InnerHtml.Contains("charset") Then
                 headTag.InnerHtml = "<meta charset=""UTF-8"">" & headTag.InnerHtml
             End If
 
-            ' 6) Alle Textknoten encodieren
+            ' 6) Encode all text nodes
             For Each textNode As HtmlAgilityPack.HtmlNode In
             htmlDoc.DocumentNode.DescendantsAndSelf() _
                    .Where(Function(n) n.NodeType = HtmlAgilityPack.HtmlNodeType.Text)
 
                 Dim rawText As String = textNode.InnerText
-                ' (falls weitere Normalisierungen nötig sind, hier einfügen)
                 textNode.InnerHtml = HtmlEncodeAll(rawText)
             Next
 
-            ' 7) Generiertes HTML als String
+            ' 7) Render HTML
             Dim result As String = htmlDoc.DocumentNode.OuterHtml
 
-            ' 8) Platzhalter wieder gegen ursprüngliche Entities tauschen
+            ' 8) Restore masked entities
             result = System.Text.RegularExpressions.Regex.Replace(result, "###ENTITY(\d+)###",
         Function(m As System.Text.RegularExpressions.Match)
             Return entities(Integer.Parse(m.Groups(1).Value))
@@ -533,8 +598,10 @@ Namespace SharedLibrary
         End Function
 
         ''' <summary>
-        ''' Encodiert alle reservierten HTML‑Zeichen und alle Nicht‑ASCII (>127) in numerische Entities.
+        ''' Encodes reserved HTML characters and all non-ASCII characters (&gt; 127) as numeric entities.
         ''' </summary>
+        ''' <param name="s">The input string.</param>
+        ''' <returns>The encoded string.</returns>
         Private Shared Function HtmlEncodeAll(s As String) As String
             Dim sb As New System.Text.StringBuilder()
             For Each c As Char In s
@@ -558,6 +625,11 @@ Namespace SharedLibrary
 
 
 
+        ''' <summary>
+        ''' Exports a Word range as filtered HTML and returns a simplified HTML string.
+        ''' </summary>
+        ''' <param name="range">The Word range to export.</param>
+        ''' <returns>Simplified HTML for the provided range.</returns>
         Public Shared Function GetRangeHtml(ByVal range As Microsoft.Office.Interop.Word.Range) As String
             Dim htmlContent As String = String.Empty
             Dim tempFile As String = System.IO.Path.GetTempFileName()
@@ -580,6 +652,11 @@ Namespace SharedLibrary
             Return htmlContent
         End Function
 
+        ''' <summary>
+        ''' Simplifies HTML by removing non-whitelisted tags/attributes and stripping real line breaks.
+        ''' </summary>
+        ''' <param name="htmlContent">The HTML to simplify.</param>
+        ''' <returns>The simplified HTML.</returns>
         Public Shared Function SimplifyHtml(htmlContent As String) As String
             ' Load the HTML content into an HtmlDocument
             Dim htmlDoc As New HtmlAgilityPack.HtmlDocument()
@@ -598,6 +675,10 @@ Namespace SharedLibrary
             Return simplifiedHtml
         End Function
 
+        ''' <summary>
+        ''' Cleans an HTML node tree by removing non-whitelisted elements and non-whitelisted attributes.
+        ''' </summary>
+        ''' <param name="node">The node to clean (processed recursively).</param>
         Public Shared Sub CleanHtmlNode(node As HtmlNode)
             If node.NodeType = HtmlNodeType.Element Then
                 ' Define the allowed tags
@@ -635,6 +716,12 @@ Namespace SharedLibrary
         End Sub
 
 
+        ''' <summary>
+        ''' Removes a subset of Markdown formatting markers while preserving bracketed and brace-delimited regions verbatim.
+        ''' </summary>
+        ''' <param name="input">The input string.</param>
+        ''' <returns>The input with selected Markdown markers removed.</returns>
+        ''' <exception cref="System.Exception">Thrown when processing fails.</exception>
         Public Shared Function RemoveMarkdownFormatting(ByVal input As System.String) As System.String
             Try
                 If input Is Nothing Then
@@ -738,6 +825,11 @@ Namespace SharedLibrary
             End Try
         End Function
 
+        ''' <summary>
+        ''' Inserts text into a Word selection and applies bold formatting to sections delimited by <c>**</c>.
+        ''' </summary>
+        ''' <param name="selection">The Word selection to insert into.</param>
+        ''' <param name="gptResult">The input text containing <c>**</c> bold markers.</param>
         Public Shared Sub InsertTextWithBoldMarkers(selection As Microsoft.Office.Interop.Word.Selection, gptResult As String)
 
             ' Save the starting position of the insertion

@@ -25,17 +25,21 @@ Imports SharedLibrary.SharedLibrary.SharedMethods
 Partial Public Class ThisAddIn
 
     ''' <summary>
-    ''' Retrieves textual content from a supported file by using the provided path or prompting the user when no path is supplied.
+    ''' Retrieves textual content from a supported file, returning extended result with PDF completeness info.
     ''' </summary>
     ''' <param name="optionalFilePath">File path to load; environment variables are expanded when provided.</param>
     ''' <param name="Silent">Suppresses UI error/notification messages when set to True.</param>
     ''' <param name="DoOCR">Enables OCR while reading PDF files when True.</param>
-    ''' <param name="AskUser">Indicates whether PDF processing may prompt the user (passed through to PDF reader).</param>
-    ''' <returns>The file content as plain text, or an empty string when the operation is cancelled or fails.</returns>
-    Public Async Function GetFileContent(Optional ByVal optionalFilePath As String = Nothing, Optional Silent As Boolean = False, Optional DoOCR As Boolean = False, Optional AskUser As Boolean = True) As Task(Of String)
+    ''' <param name="AskUser">Indicates whether PDF processing may prompt the user.</param>
+    ''' <returns>A FileReadResult containing the file content and whether a PDF may be incomplete.</returns>
+    Public Async Function GetFileContentEx(Optional ByVal optionalFilePath As String = Nothing,
+                                           Optional Silent As Boolean = False,
+                                           Optional DoOCR As Boolean = False,
+                                           Optional AskUser As Boolean = True) As Task(Of FileReadResult)
+        Dim result As New FileReadResult()
         Dim filePath As String = ""
-        Try
 
+        Try
             If optionalFilePath IsNot Nothing Then
                 filePath = ExpandEnvironmentVariables(optionalFilePath)
             End If
@@ -45,48 +49,68 @@ Partial Public Class ThisAddIn
                     If form.ShowDialog() = DialogResult.OK Then
                         filePath = form.SelectedFilePath
                     Else
-                        ' User cancelled or closed form
-                        Return String.Empty
+                        Return result
                     End If
                 End Using
             End If
 
             filePath = RemoveCR(filePath.Trim())
             filePath = System.IO.Path.GetFullPath(filePath)
+
             If Not File.Exists(filePath) Then
                 If Not Silent Then ShowCustomMessageBox($"The file '{filePath}' was not found.")
-                Return ""
+                Return result
             End If
 
             If Not String.IsNullOrWhiteSpace(filePath) AndAlso IO.File.Exists(filePath) Then
                 Dim ext As String = IO.Path.GetExtension(filePath).ToLowerInvariant()
-                Dim FromFile As String
+                Dim FromFile As String = ""
+
                 Select Case ext
-                    Case ".txt", ".ini", ".csv", ".log", ".json", ".xml", ".html", ".htm"
+                    Case ".txt", ".ini", ".csv", ".log", ".json", ".xml", ".html", ".htm", ".md",
+                         ".vb", ".cs", ".js", ".ts", ".py", ".java", ".cpp", ".c", ".h", ".sql", ".yaml", ".yml"
                         FromFile = ReadTextFile(filePath)
                     Case ".rtf"
                         FromFile = ReadRtfAsText(filePath)
                     Case ".doc", ".docx"
                         FromFile = ReadWordDocument(filePath)
                     Case ".pdf"
-                        FromFile = Await ReadPdfAsText(filePath, True, DoOCR, AskUser, _context)
+                        Dim pdfResult = Await ReadPdfAsTextEx(filePath, True, DoOCR, AskUser, _context)
+                        FromFile = pdfResult.Content
+                        result.PdfMayBeIncomplete = pdfResult.OcrWasSkippedDueToHeuristics
                     Case ".pptx"
                         FromFile = GetPresentationJson(filePath)
                     Case Else
                         FromFile = "Error: File type not supported."
                 End Select
-                If FromFile.StartsWith("Error") And Len(FromFile) < 100 And Not Silent Then
+
+                If FromFile.StartsWith("Error") AndAlso Len(FromFile) < 100 AndAlso Not Silent Then
                     ShowCustomMessageBox(FromFile)
-                    Return ""
+                    result.Content = ""
                 Else
-                    Return FromFile
+                    result.Content = FromFile
                 End If
             End If
+
         Catch ex As System.Exception
             If Not Silent Then ShowCustomMessageBox($"An error occurred reading the file '{filePath}': {ex.Message}")
-            Return ""
+            result.Content = ""
         End Try
+
+        Return result
     End Function
+
+    ''' <summary>
+    ''' Retrieves textual content from a supported file (backward compatible wrapper).
+    ''' </summary>
+    Public Async Function GetFileContent(Optional ByVal optionalFilePath As String = Nothing,
+                                         Optional Silent As Boolean = False,
+                                         Optional DoOCR As Boolean = False,
+                                         Optional AskUser As Boolean = True) As Task(Of String)
+        Dim result = Await GetFileContentEx(optionalFilePath, Silent, DoOCR, AskUser)
+        Return result.Content
+    End Function
+
 
     ''' <summary>
     ''' Prompts the user for a file via DragDropForm, validates the selection, and returns the absolute path.

@@ -264,7 +264,7 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Function GetLogoPngBytes() As System.Byte()
         Try
-            Using src As System.Drawing.Bitmap = CType(My.Resources.Red_Ink_Logo.Clone(), System.Drawing.Bitmap)
+            Using src As System.Drawing.Bitmap = CType(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard).Clone(), System.Drawing.Bitmap)
                 Using ms As New System.IO.MemoryStream()
                     src.Save(ms, System.Drawing.Imaging.ImageFormat.Png)
                     Return ms.ToArray()
@@ -534,7 +534,7 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Function GetLogoDataUrl() As System.String
         Try
-            Using src As System.Drawing.Bitmap = CType(My.Resources.Red_Ink_Logo.Clone(), System.Drawing.Bitmap)
+            Using src As System.Drawing.Bitmap = CType(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard).Clone(), System.Drawing.Bitmap)
                 Using ms As New System.IO.MemoryStream()
                     src.Save(ms, System.Drawing.Imaging.ImageFormat.Png)
                     Dim b64 As System.String = System.Convert.ToBase64String(ms.ToArray())
@@ -894,6 +894,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("    <div class=""spacer""></div>")
         html.AppendLine("    <select id=""modelSel"" title=""Model""></select>")
         html.AppendLine("    <button id=""copyBtn"" title=""Copy last answer to clipboard"">Copy last</button>")
+        html.AppendLine("    <button id=""toWordBtn"" title=""Move this chat thread into a new Word document"">To Word</button>")
         html.AppendLine("    <button id=""clearBtn"" title=""Clear current conversation"">Clear</button>")
         html.AppendLine("    <button id=""chat1Btn"" class=""chatTab"" data-chat=""1"" title=""Chat 1"">1</button>")
         html.AppendLine("    <button id=""chat2Btn"" class=""chatTab"" data-chat=""2"" title=""Chat 2"">2</button>")
@@ -905,14 +906,14 @@ Partial Public Class ThisAddIn
         html.AppendLine("  <div class=""inputbar"">")
         html.AppendLine("    <textarea id=""msg"" placeholder=""" & System.Net.WebUtility.HtmlEncode(greet) & """ autofocus></textarea>")
         html.AppendLine("    <div class=""actions"">" &
-                            "<div class=""stack"">" &
-                                "<button id=""sendBtn"">Send</button>" &
-                                "<button id=""pureBtn"" title=""Send only this raw text (no system prompt, no history)"">Pure</button>" &
-                            "</div>" &
-                            "<button id=""cancelBtn"" style=""display:none;"">Cancel</button>" &
-                        "</div>")
+                    "<div class=""stack"">" &
+                        "<button id=""sendBtn"">Send</button>" &
+                        "<button id=""pureBtn"" title=""Send only this raw text (no system prompt, no history)"">Pure</button>" &
+                    "</div>" &
+                    "<button id=""cancelBtn"" style=""display:none;"">Cancel</button>" &
+                "</div>")
         html.AppendLine("  </div>")
-        html.AppendLine("  <div class=""hint"">Drag & drop a file • Enter=send • Shift+Enter=newline • Ctrl+L=clear</div>")
+        html.AppendLine("  <div class=""hint"">Drag & drop a file (only visible to the chatbot for the current prompt) • Enter=send • Shift+Enter=newline • Ctrl+L=clear</div>")
         html.AppendLine("</div>")
 
         ' JS
@@ -939,6 +940,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("const msgEl=document.getElementById('msg');")
         html.AppendLine("const modelSel=document.getElementById('modelSel');")
         html.AppendLine("const copyBtn=document.getElementById('copyBtn');")
+        html.AppendLine("const toWordBtn=document.getElementById('toWordBtn');")
         html.AppendLine("const clearBtn=document.getElementById('clearBtn');")
         html.AppendLine("const themeBtn=document.getElementById('themeBtn');")
         html.AppendLine("const cancelBtn=document.getElementById('cancelBtn');")
@@ -989,6 +991,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("modelSel.addEventListener('change',async()=>{if(__currentJobId)return;const opt=modelSel.options[modelSel.selectedIndex];if(!opt||opt.disabled||!opt.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}const r=await api('inky_setmodel',{Key:opt.value});updateModelTooltip();adjustModelSel();if(!r.ok){alert(r.error||'Failed to set model');return;}if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;});")
         html.AppendLine("clearBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_clear');if(r.ok){render([]);if(r.greeting)msgEl.placeholder=r.greeting;}else{alert(r.error||'Failed to clear');}adjustModelSel();});")
         html.AppendLine("copyBtn.addEventListener('click',async()=>{const r=await api('inky_copylast');if(!r.ok){alert(r.error||'Nothing to copy')}});")
+        html.AppendLine("toWordBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_toword');if(!r.ok){alert(r.error||'Failed to create Word document')}});")
         html.AppendLine("themeBtn.addEventListener('click',async()=>{if(__currentJobId)return;const target=!dark;setTheme(target);const r=await api('inky_toggletheme');if(!r.ok){setTheme(!target);alert(r.error||'Theme switch failed');return;}if(typeof r.darkMode==='boolean')setTheme(r.darkMode===true);adjustModelSel();});")
         html.AppendLine("msgEl.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}if(e.ctrlKey&&e.key.toLowerCase()==='l'){e.preventDefault();clearBtn.click();}});")
         html.AppendLine("sendBtn.addEventListener('click',send);")
@@ -1318,7 +1321,7 @@ Partial Public Class ThisAddIn
                         ' Persist state with user turn BEFORE returning (important)
                         SaveInkyState(st)
                         ' ------------------ (D) Prepare system prompt (same logic) ------------------
-                        Dim sysPromptBase As String = _context.SP_Chat
+                        Dim sysPromptBase As String = _context.SP_Chat.Replace("{Location}", Location)
                         Dim nowLocal As String = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss zzz", Globalization.CultureInfo.InvariantCulture)
                         sysPromptBase &= Environment.NewLine & "Current local date/time: " & nowLocal
                         sysPromptBase &= Environment.NewLine & $"Your name is '{AN6}'. "
@@ -1584,6 +1587,7 @@ Partial Public Class ThisAddIn
                             .history = ToBrowserTurns(stPure.History)
                         })
 
+
                     Case "inky_jobstatus"
                         ' (Job status check preserved)
                         ' ------------------------------------------------------------------
@@ -1623,6 +1627,36 @@ Partial Public Class ThisAddIn
                             Return JsonOk(New With {.ok = True, .job = jobId, .status = "cancelRequested"})
                         Catch ex As System.Exception
                             Return JsonErr("Cancel failed: " & ex.Message)
+                        End Try
+
+                    Case "inky_toword"
+                        Try
+                            Dim st As InkyState = LoadInkyState()
+                            Dim turns = If(st?.History, New System.Collections.Generic.List(Of ChatTurn)())
+
+                            Dim sb As New System.Text.StringBuilder()
+                            sb.AppendLine("# " & GetBotName() & " — Chat thread")
+                            sb.AppendLine()
+                            sb.AppendLine("Generated: " & DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss zzz", Globalization.CultureInfo.InvariantCulture))
+                            sb.AppendLine()
+
+                            For Each t In turns
+                                If t Is Nothing Then Continue For
+                                Dim who As String = If(String.Equals(t.Role, "user", StringComparison.OrdinalIgnoreCase), "You", GetBotName())
+                                sb.AppendLine("## " & who)
+                                sb.AppendLine(t.Markdown)
+                                sb.AppendLine()
+                            Next
+
+                            Dim markdownThread As String = sb.ToString()
+
+                            Dim ok As Boolean = Await TryCreateWordDocFromMarkdown(markdownThread).ConfigureAwait(False)
+
+                            If Not ok Then Return JsonErr("Could not create a Word document.")
+
+                            Return JsonOk(New With {.ok = True})
+                        Catch ex As System.Exception
+                            Return JsonErr("To Word failed: " & ex.Message)
                         End Try
 
                     Case "inky_clear"

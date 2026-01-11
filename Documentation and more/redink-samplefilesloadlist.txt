@@ -1,0 +1,42 @@
+; List of Sample Files that are automatically downloaded when requested by the user
+; The download function will also update the redink.ini configuration file if needed
+;
+; Format:
+;
+; FriendlyName; SourceUrl; App1, App2; ParameterForPath; IsFullPath; DefaultPath; DefaultFileName
+;
+; FriendlyName = name shown to the user
+; SourceUrl = where the file is obtained (with placeholders {AppsUrl}{AppsUrlDir})
+; App = Word, Excel, Outlook (scope, comma separated)
+; ParameterForPath = the parameter that needs to be set within redink.ini
+; IsFullPath = True if the parameter holds the full path; False if only the directory
+; DefaultPath = the default path to be used if none is use (will be expanded)
+; DefaultFileName = the default filename of the file on the target
+;
+; 28 December 2025
+
+Prompt Library; {AppsUrl}{AppsUrlDir}promptlib.txt; Word, Excel, Outlook; PromptLib; True; %Appdata%\microsoft\word; promptlib.txt
+
+Prompt Library (Transcriptor); {AppsUrl}{AppsUrlDir}promptlib-transcript.txt; Word; PromptLib_Transcript; True; %Appdata%\microsoft\word; promptlib_transcript.txt
+
+Renaming Library; {AppsUrl}{AppsUrlDir}renamelib.txt; Word, Excel; RenameLibPath; True; %Appdata%\microsoft\word; renamelib.txt
+
+Data Extractor Library; {AppsUrl}{AppsUrlDir}extractorlib.txt; Word, Excel; ExtractorPath; True; %Appdata%\microsoft\word; extractorlib.txt
+
+Find Clause Sample (Corp); {AppsUrl}{AppsUrlDir}redink-lib-samplecorp.txt; Word; FindClausePath; False; %Appdata%\microsoft\word; redink-lib-samplecorp.txt
+
+DocCheck Sample 1 (DPA); {AppsUrl}{AppsUrlDir}redink-dc-DPA.txt; Word; DocCheckPath; False; %Appdata%\microsoft\word; redink-dc-DPA.txt
+
+DocCheck Sample 2 (AI Act); {AppsUrl}{AppsUrlDir}redink-dc-AI_Act.txt; Word; DocCheckPath; False; %Appdata%\microsoft\word; redink-dc-AI_Act.txt
+
+WebAgent Sample 1 (BGer); {AppsUrl}{AppsUrlDir}redink-ag-Bundesgericht_Neuheiten.json; Word; WebAgentPath; False; %Appdata%\microsoft\word; redink-ag-Bundesgericht_Neuheiten.json
+
+Discuss this (Persona library); {AppsUrl}{AppsUrlDir}personalib.txt; Word; DiscussInkyPath; True; %APPDATA%\microsoft\word\; personalib.txt
+
+; This file is usually stored locally in network setups and contains additional personas; here we combine them for local setups
+Discuss this (Local Persona library); {AppsUrl}{AppsUrlDir}personaliblocal.txt; Word; DiscussInkyPathLocal; True; %APPDATA%\microsoft\word\; personaliblocal.txt
+
+WebAgent Sample 2 (DuckDuckGo); {AppsUrl}{AppsUrlDir}redink-ag-DuckDuckGo_WebSearch_AI_PreScreening.json; Word; WebAgentPath; False; %Appdata%\microsoft\word; redink-ag-DuckDuckGo_WebSearch_AI_PreScreening.json
+
+DocStyle Sample (Contract); {AppsUrl}{AppsUrlDir}redink-ds-General_Contract_Template.json; Word; WebAgentPath; False; %Appdata%\microsoft\word; redink-ds-General_Contract_Template.json
+

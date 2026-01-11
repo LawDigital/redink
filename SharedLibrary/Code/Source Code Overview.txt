@@ -1,0 +1,228 @@
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.'
+'
+' The compiled version of Red Ink also ...
+'
+' Includes DiffPlex in unchanged form; Copyright (c) 2023 Matthew Manela; licensed under the Apache-2.0 license (http://www.apache.org/licenses/LICENSE-2.0) at GitHub (https://github.com/mmanela/diffplex).
+' Includes Newtonsoft.Json in unchanged form; Copyright (c) 2023 James Newton-King; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://www.newtonsoft.com/json
+' Includes HtmlAgilityPack in unchanged form; Copyright (c) 2024 ZZZ Projects, Simon Mourrier,Jeff Klawiter,Stephan Grell; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://html-agility-pack.net/
+' Includes Bouncycastle.Cryptography in unchanged form; Copyright (c) 2024 Legion of the Bouncy Castle Inc.; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://www.bouncycastle.org/download/bouncy-castle-c/
+' Includes PdfPig in unchanged form; Copyright (c) 2024 UglyToad, EliotJones PdfPig, BobLd; licensed under the Apache 2.0 license (https://licenses.nuget.org/Apache-2.0) at https://github.com/UglyToad/PdfPig
+' Includes MarkDig in unchanged form; Copyright (c) 2024 Alexandre Mutel; licensed under the BSD 2 Clause (Simplified) license (https://licenses.nuget.org/BSD-2-Clause) at https://github.com/xoofx/markdig
+' Includes NAudio and components in unchanged form; Copyright (c) 2020 Mark Heath; licensed under a proprietary open source license (https://www.nuget.org/packages/NAudio/2.2.1/license) at https://github.com/naudio/NAudio
+' Includes Vosk in unchanged form; Copyright (c) 2022 Alpha Cephei Inc.; licensed under the Apache 2.0 license (https://licenses.nuget.org/Apache-2.0) at https://alphacephei.com/vosk/
+' Includes Whisper.net in unchanged form; Copyright (c) 2024 Sandro Hanea; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://github.com/sandrohanea/whisper.net
+' Includes Grpc.core/Grpc.net in unchanged form; Copyright (c) 2023/2025 The gRPC Authors; licensed under the Apache 2.0 license (https://licenses.nuget.org/Apache-2.0) at https://github.com/grpc/grpc
+' Includes Google Speech V1 library and related API libraries in unchanged form; Copyright (c) 2024 Google LLC; licensed under the Apache 2.0 license (https://licenses.nuget.org/Apache-2.0) at https://github.com/googleapis/google-cloud-dotnet
+' Includes Google Protobuf in unchanged form; Copyright (c) 2025 Google Inc.; licensed under the BSD-3-Clause license (https://licenses.nuget.org/BSD-3-Clause) at https://github.com/protocolbuffers/protobuf
+' Includes Google.Api in unchanged form; Copyright (c) 2025 Google LLC; licensed under the BSD-3-Clause license (https://licenses.nuget.org/BSD-3-Clause) at https://github.com/googleapis/gax-dotnet
+' Includes Google.Apis in unchanged form; Copyright (c) 2025 Google LLC; licensed under the Apache 2.0 license (https://licenses.nuget.org/Apache-2.0) at https://github.com/googleapis/google-api-dotnet-client
+' Includes Google.Longrunning in unchanged form; Copyright (c) 2025 Google LLC; licensed under the Apache 2.0 license (https://licenses.nuget.org/Apache-2.0) at https://github.com/googleapis/google-cloud-dotnet
+' Includes MarkdownToRTF in modified form; Copyright (c) 2025 Gustavo Hennig; original licensed under the MIT license (https://licenses.nuget.org/MIT) at https://github.com/GustavoHennig/MarkdownToRtf
+' Includes Nito.AsyncEx in unchanged form; Copyright (c) 2021 Stephen Cleary; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://github.com/StephenCleary/AsyncEx
+' Includes NetOffice libraries in unchanged form; Copyright (c) 2020 Sebastian Lange, Erika LeBlanc; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://github.com/netoffice/NetOffice-NuGet
+' Includes NAudio.Lame in unchanged form; Copyright (c) 2019 Corey Murtagh; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://github.com/Corey-M/NAudio.Lame
+' Includes PdfiumViewer in unchanged form; Copyright (c) 2017 Pieter van Ginkel; licensed under the Apache 2.0 license (https://licenses.nuget.org/Apache-2.0) at https://github.com/pvginkel/PdfiumViewer
+' Includes PDFsharp in unchanged form; Copyright (c) 2025 PDFSharp Team; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://docs.pdfsharp.net/
+' Includes System.Interactive.Async in unchanged form; Copyright (c) 2025 by .NET Foundation and Contributors; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://github.com/dotnet/reactive
+' Includes also various Microsoft distributables and libraries copyrighted by Microsoft Corporation and available, among others, under the Microsoft EULA, the Visual Studio Community 2022 License, the Microsoft.Web.WebView2 License (for Microsoft.Web.WebView2, see license on https://www.nuget.org/packages/Microsoft.Web.WebView2/ and below) and the MIT License (including Microsoft.Bcl.*, Microsoft.Extensions.*, System.*, System.Security.*, System.CodeDom, DocumentFormat.OpenXml.*, Microsoft.ml.*, CommunityToolkit.HighPerformance licensed under MIT License) (https://licenses.nuget.org/MIT); Copyright (c) 2016- Microsoft Corp.
+
+
+' =============================================================================
+' Red Ink Shared Library - Architectural Overview
+'
+' Purpose:
+'   Central reusable components for Office add-ins (Word, Excel, Outlook) and 
+'   AI-assisted document features: text processing, embeddings, anonymization, 
+'   UI, configuration, model orchestration, speech recognition, web automation,
+'   licensing, and context-aware search.
+'
+' Language: VB.NET (.NET Framework 4.8)
+' Target: Microsoft Office VSTO Add-ins
+'
+' =============================================================================
+' SUBSYSTEMS
+' =============================================================================
+'
+' [Core\Clipboard]
+'   NativeClipboard.vb              - P/Invoke wrappers for Win32 clipboard operations.
+'   ClipboardHelper.vb              - High-level helper (safe open/close, format handling).
+'   SharedMethods.ClipboardSnapshot - Capture current clipboard contents into a serializable snapshot.
+'   SharedMethods.PutInClipboard    - Put structured content safely.
+'   SharedMethods.StoreAndRestoreClipboard - RAII-style state preservation.
+'
+' [Core\Config]
+'   SharedMethods.LoadConfig        - Reads config from INI files on disk/environment variables.
+'                                     Includes InitializeConfig (first-time/reload initialization),
+'                                     ParseBoolean, INIValuesMissing, MissingSettingsWindow,
+'                                     RealAPIKey/RealAPIKeyMC (API key resolution with prefix handling).
+'   SharedMethods.Settings          - Strongly-typed settings accessors, defaults, and settings UI.
+'                                     Includes ShowSettingsWindow, ShowVariableConfigurationWindow,
+'                                     ShowExpertConfiguration, ShowAboutWindow, SwitchModels,
+'                                     UpdateAppConfig, ResetLocalAppConfig, GetActiveConfigFilePath.
+'   SharedMethods.UpdateIni         - INI file modification and update operations.
+'   SharedMethods.License           - Runtime license validation and user messaging.
+'   SharedContext.vb / ISharedContext - Cross-cutting context interface (150+ properties).
+'
+' [Core\LLM]
+'   ModelConfig                     - Model metadata and configuration container.
+'   ModelSelectorForm               - UI for single model selection.
+'   MultiModelSelectorForm          - UI for multi-model selection strategy.
+'   SharedMethods.MainLLM           - Primary orchestration for LLM model invocation.
+'   SharedMethods.AlternateModels   - Fallback / multi-model strategy with secondary API support.
+'   SharedMethods.AlternateModels.Tooling - Tooling capability helpers for model selection.
+'   JsonTemplateFormatter           - Mustache-like template engine for structured JSON output.
+'   MimeHelper                      - MIME type classification for assets.
+'   ImageDecoder                    - Convert embedded images to suitable analysis forms.
+'   SharedMethods.GoogleOAuthHelper - OAuth2 token handling for Google APIs.
+'   SharedMethods.Signing           - Cryptographic signing operations using BouncyCastle.
+'
+' [Core\Texthandling]
+'   SharedMethods.TextHandling      - Normalization, segmentation, cleaning, word counting.
+'   SharedMethods.TextHandlingExcel - Excel-specific cell/range text extraction.
+'   SharedMethods.Diff              - Diff operations built atop DiffPlex library.
+'
+' [Core\UI]
+'   ProgressForm / ProgressBarModule / DPIProgressForm - Unified DPI-aware progress UI.
+'   SharedMethods.Infobox           - User messages (info/warn/error) via ShowCustomMessageBox.
+'   SharedMethods.Pane              - Docked pane logic for Office task panes.
+'   SelectionFormSmall              - Lightweight selection dialog.
+'   SplashScreen / SplashScreenWorks / SplashScreenCountDown - Startup and progress visuals.
+'   SharedMethods.CustomForms       - Dynamic form generation (ShowCustomInputBox, ShowCustomYesNoBox,
+'                                     ShowCustomWindow, ShowCustomVariableInputForm).
+'
+' [Core\Various]
+'   SharedMethods.FileImporter      - File ingestion pipeline (PDF, DOCX, TXT via PdfPig/OpenXML/Interop).
+'   SharedMethods.ProcessParameterPlaceholders - Placeholder expansion in user prompts.
+'   SharedMethods.VarHelpers        - Generic variable utilities and environment expansion.
+'
+' [CommonFeatures\Embeddings]
+'   EmbeddingStore.vb               - ONNX-based neural embedding store for semantic search.
+'   EmbeddingStore_BagOfWords.vb    - Lightweight bag-of-words fallback for offline/simple scenarios.
+'   MlNetTokenizer.vb               - SentencePiece/WordPiece tokenization wrapper.
+'   OnnxAnonymizer.vb               - ONNX-based Named Entity Recognition (NER) with selective anonymization.
+'   TextChunk / TokenOffset / SearchResult - Data models for chunking, offsets, and search ranking.
+'
+' [CommonFeatures]
+'   AnonymizationModule.vb          - Top-level anonymization workflow coordinator.
+'   HelpMeInky.vb                   - Interactive "Help me, Inky!" assistant window (SharedLibrary).
+'   SharedMethods.MyStyleHelpers    - Styling helpers (fonts/colors/themes) with DefineMyStyle.
+'   SharedMethods.PromptLibrary     - Reusable LLM prompt templates loaded from INI_PromptLibPath.
+'   SharedMethods.TextFileEditor    - Text file manipulation operations.
+'   UpdateHandler.vb                - VSTO update checking and installation with retry logic.
+'   WebAgentInterpreter.vb          - JSON-based scripting engine for automated web tasks.
+'   FactExtractionService.vb        - Multi-file structured fact extraction module.
+'
+' [InstallationWizard]
+'   InitialConfig                   - First-run setup wizard.
+'   AppConfigurationVariable        - Variable binding for configuration.
+'
+' [Interop]
+'   WinAPI / WindowsWrapper / NativeMethods - Managed wrappers for Windows APIs.
+'
+' [Definitions]
+'   SharedContext.vb                - Cross-cutting context implementing ISharedContext.
+'   SharedMethods.Constants.vb      - Application-wide constants (naming, triggers, paths, prompts, licensing).
+'   SharedMethods.Constants.OwnBuild.Security.vb - Security-related constants (partial class extension).
+'
+' [Converter]
+'   MarkdownToRtfConverter          - Modified upstream library (MarkdownToRTF) for RTF generation.
+'
+' =============================================================================
+' ADD-IN SPECIFIC COMPONENTS (Not in SharedLibrary)
+' =============================================================================
+'
+' [Red Ink for Word]
+'   ThisAddIn.vb                    - VSTO entry point: startup sequencing, event wiring, config bridge,
+'                                     update checks, HTTP listener startup/shutdown, constants/triggers,
+'                                     COM automation exposure (RequestComAddInAutomationService → BridgeSubs).
+'   ThisAddIn.Properties.vb         - Context holder (SharedContext) + Override() helpers + RDV.
+'   ThisAddIn.Commands.vb           - Ribbon/context menu command handlers (Translate, Correct, Improve,
+'                                     Anonymize, Shorten, SwitchParty, Freestyle, ShowChatForm, etc.).
+'                                     Hosts HelpMeInky() (SharedLibrary) and DiscussInky() (Word-only UI).
+'   ThisAddIn.Commands.Freestyle.vb - Freeform/ad-hoc prompt execution and content generation.
+'   ThisAddIn.Menu.vb               - Context menu creation & teardown; maps triggers → command handlers.
+'   Form1.vb (frmAIChat)            - Word chat UI: include doc/selection/other docs, markdown rendering,
+'                                     command execution, model switching, "Sources" tooling toggle/picker.
+'   DiscussInky.vb                  - Extended discussion UI (Word-only): personas, missions, knowledge loading,
+'                                     auto-respond + sort-out flows, optional "Sources" tooling integration.
+'   DragDropForm.vb                 - File/folder drag & drop selector (FileOnly/DirectoryOnly/Both modes).
+'   ThisAddIn.FileHelpers.vb        - Word file ingestion helpers (txt/rtf/doc/docx/pdf/pptx + OCR).
+'   ThisAddIn.Helpers.vb            - Shared helper routines (text diff, HTML/Markdown conversion, dialogs).
+'   ThisAddIn.WordHelpers.vb        - Word-range/document manipulations (selection, insertion, cleanup).
+'   ThisAddIn.WordSearchHelper.vb   - Specialized search routines (clauses, hidden prompts, regex etc.).
+'   ThisAddIn.Redactions.vb         - PDF redaction pipeline (LLM-driven plan + PdfPig/PDFsharp rendering),
+'                                     burn-in image-only mode, pdfium loading, metadata stripping.
+'                                     Classes: PdfRedactionService, TextPosition, RedactionRangeDto,
+'                                     RedactionItemDto, RedactionResponseDto, RedactionRectangle, ArialFontResolver.
+'   ThisAddIn.TextToSpeech.vb       - Text-to-Speech (Google/OpenAI/System.Speech), SSML, playback, podcast mode.
+'   ThisAddIn.TextToSpeech.Form.vb  - TTS settings/voice picker UI (TTSSelectionForm), audio preview/playback.
+'   ThisAddIn.TextToSpeech.Commands.vb - Ribbon/context command handlers for TTS.
+'   ThisAddIn.Transcriptor.vb       - Speech-to-text transcription (Vosk/Whisper/Google streaming), audio capture.
+'   ThisAddIn.ContextSearch.vb      - Context-aware search: LLM direct, embeddings, bag-of-words; highlights via comments.
+'   ThisAddIn.Processing.vb         - Main selection processing pipeline and insertion/format preservation.
+'   ThisAddIn.Processing.Comments.vb - Word "bubbles" (comments) insertion/reply/extract helpers.
+'   ThisAddIn.Processing.HTMLToWord.vb - HTML → Word renderer for markdown/comment insertion flows.
+'   ThisAddIn.Processing.FormatSaveAndRestore.vb - Formatting capture/restore for fields/footnotes/endnotes/highlights.
+'   ThisAddIn.Processing.SearchGrounding.vb - Web search grounding for LLM responses.
+'   ThisAddIn.Processing.Tooling.vb - "Sources" tooling loop (LLM tool-calling orchestration) + log file output.
+'   ThisAddIn.PaneAndMerge.vb       - Task pane orchestration, pane content updates, merge/view logic.
+'   ThisAddIn.WebAgent.vb           - WebAgent Word UI for running WebAgentInterpreter scripts.
+'   ThisAddIn.WebExtension.vb       - Localhost HTTP listener (browser extension → Word insertion).
+'                                     Port: 12334; command: redink_sendtoword; UI thread marshaling.
+'   ThisAddIn.FindHiddenPrompt.vb   - Hidden/prompt-injection detection (invisible text, bidi/zero-width, etc.).
+'   ThisAddIn.FindClause.vb         - Clause / structured legal text identification.
+'   ThisAddIn.DocCheck.vb           - Rule-set-driven review runner (clause checks + bubbles).
+'   ThisAddIn.DocStyle.vb           - Learn/apply paragraph styles via JSON templates; list/numbering preservation.
+'   ThisAddIn.FileRAG.vb            - File-based Retrieval-Augmented Generation (embeddings, chunking).
+'   ThisAddIn.Slides.vb             - PowerPoint slide generation from Word content.
+'   ThisAddIn.SpecialServices.vb    - Ancillary external service tasks (update fetch, licensing).
+'   ThisAddIn.TranslateDocuments.vb - Batch translation / correction of Word `.docx` files via OpenXML (no interop editing).
+'   BridgeSubs.vb                   - COM-visible automation surface for external scripts/macros.
+'   Ribbon1.vb                      - Ribbon callbacks (buttons → Commands layer).
+'   VBA Helper\RI_Helper_Code_Word.bas - VBA macro helper for keyboard shortcuts (calls VSTO add-in methods).
+'   VBA Helper\redink_cleanempty.dotm - Empty template for building redink_helper.dotm.
+'   VBA Helper\readme.txt           - Build instructions for Word macro helper.
+'
+' [Red Ink for Excel]
+'   ThisAddIn.vb                    - VSTO entry point: startup/shutdown, config bridge, undo tracking,
+'                                     automation bridge (RequestComAddInAutomationService → BridgeSubs).
+'   ThisAddIn.Properties.vb         - Context holder (SharedContext) + RDV.
+'   ThisAddIn.Commands.vb           - Command handlers: Translate, Correct, Improve, Anonymize, Shorten,
+'                                     SwitchParty, Freestyle variants, file triggers, HelpMeInky, settings.
+'                                     Classes: FileLoadingContext.
+'   Form1.vb (frmAIChat)            - Excel chat UI: include worksheet/selection, optional write access,
+'                                     model switch, inline command parsing/execution against sheet.
+'                                     Classes: ParsedCommand.
+'   ThisAddIn.Pane.vb               - Task pane workflow + IntelligentMerge callback; applies parsed
+'                                     instructions to sheet.
+'   ThisAddIn.FileHelpers.vb        - Excel file ingestion helpers (txt/rtf/doc/docx/pdf + OCR) and GetFileName().
+'   DragDropForm.vb                 - File/folder drag & drop selector (FileOnly/DirectoryOnly/Both modes).
+'   ThisAddIn.FactExtractor.vb      - Fact extraction UI wired to SharedLibrary.FactExtractionService.
+'   ThisAddIn.CSVAnalyzer.vb        - CSV file analysis and processing.
+'   ThisAddIn.FileRenamer.vb        - AI-assisted file renaming.
+'   BridgeSubs.vb                   - COM-visible automation surface for external scripts/macros.
+'   Ribbon1.vb                      - Ribbon callbacks (buttons → Commands layer).
+'
+' [Red Ink for Outlook]
+'   ThisAddIn.vb                    - VSTO entry point: startup sequencing (two-phase initialization),
+'                                     OLE message filter (OleMessageFilter class), UI thread marshaling,
+'                                     config bridge, explorer/inspector lifecycle, power mode watcher,
+'                                     delayed startup with fallback timer, COM retry logic (ComRetry).
+'   ThisAddIn.Properties.vb         - Context holder (SharedContext) + Override() helpers + InitialConfigFailed.
+'   ThisAddIn.Commands.vb           - Email processing commands (MailReply, MailSumup, Translate, Correct,
+'                                     Improve, Shorten, Freestyle, etc.) and clipboard helpers.
+'                                     Includes email-context resolution, chain summarization, markup strategies.
+'   ThisAddIn.Helpers.vb            - Shared helper routines (text diff, HTML/Markdown conversion, dialogs).
+'   ThisAddIn.Processing.vb         - Background processing: HTTP listener, watchdog timers, update check.
+'   ThisAddIn.WebExtension.vb       - "Inky" local web UI + API route handler, job scheduling,
+'                                     markdown→HTML rendering, model switching (primary/secondary),
+'                                     browser sanitization. Classes: LlmJob, InkyState, ChatTurn.
+'   ThisAddIn.WebExtension.ListenerAndPower.vb
+'                                   - HttpListener lifecycle, suspend/resume handling, watchdog recovery,
+'                                     stuck detection. Classes: PowerNotificationWindow.
+'   ThisAddIn.WebExtension.FileHelpers.vb
+'                                   - Office/text extraction helpers for browser file uploads
+'                                     (Word/Excel/PPT/textlike).
+'   Ribbon1.vb / Ribbon2.vb         - Ribbon callbacks (buttons → Commands layer, dynamic enable/disable).
+'

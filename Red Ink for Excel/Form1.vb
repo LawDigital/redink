@@ -202,7 +202,7 @@ Public Class frmAIChat
         Me.Text = $"Chat (using " & If(_useSecondApi, _context.INI_Model_2, _context.INI_Model) & ")"
         Me.Font = New System.Drawing.Font("Segoe UI", 9)
         Me.FormBorderStyle = FormBorderStyle.Sizable ' Ensure border supports icons
-        Me.Icon = Icon.FromHandle(New Bitmap(My.Resources.Red_Ink_Logo).GetHicon())
+        Me.Icon = Icon.FromHandle(New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)).GetHicon())
         Me.TopMost = True ' Always on top
 
         ' Set the initial and minimum size of the form
@@ -274,7 +274,8 @@ Public Class frmAIChat
 
         Try
             ' Build entire conversation so far into one string for context
-            SystemPrompt = _context.SP_ChatExcel().Replace("{UserLanguage}", UserLanguage) &
+            SystemPrompt = _context.SP_ChatExcel().Replace("{UserLanguage}", UserLanguage).
+                Replace("{Location}", ThisAddIn.Location) &
                 $" Your name is '{AN5}'. The current date and time is: {DateTime.Now.ToString("MMMM dd, yyyy hh:mm tt")}. " &
                 If(chkIncludeDocText.Checked, vbLf & "You have access to the user's document. " & vbLf, "") &
                 If(chkIncludeselection.Checked, vbLf & "You have access to a selection of user's document. " & vbLf & " ", "") &
@@ -450,7 +451,7 @@ Public Class frmAIChat
     Private Async Function WelcomeMessage() As Task(Of String)
         Try
             ' Build entire conversation so far into one string for context
-            SystemPrompt = _context.SP_ChatExcel().Replace("{UserLanguage}", UserLanguage) &
+            SystemPrompt = _context.SP_ChatExcel().Replace("{UserLanguage}", UserLanguage).Replace("{Location}", ThisAddIn.Location) &
                 $" Your name is '{AN5}'. The current date and time is: {DateTime.Now.ToString("F")}. "
             txtUserInput.Text = ""
 

@@ -1,11 +1,44 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: SharedMethods.MainLLM.vb
+' Purpose: Contains the main shared LLM invocation pipeline, including optional post-correction,
+'          anonymization/re-identification, request construction (GET/POST), optional multipart
+'          object upload, retry/timeout/cancellation handling, response parsing, and token usage logging.
+'
+' Architecture:
+'  - PostCorrection: Optional second-stage call to `LLM` driven by `context.INI_PostCorrection`.
+'  - LLM (core pipeline):
+'      - Cancellation: Returns empty string early if `cancellationToken` is already canceled; links a local
+'        token source to support both caller cancellation and splash-screen cancellation.
+'      - Anonymization: Applies `AnonymizeText` / `ReidentifyText` based on model-specific settings and
+'        preserves optional `<TEXTTOPROCESS>` wrapping.
+'      - OAuth2 API key refresh (optional): Uses `GetFreshAccessToken` to refresh `context.DecodedAPI`
+'        or `context.DecodedAPI_2` and sets token expiry timestamps.
+'      - Endpoint/APICall templating: Replaces placeholders (model, prompts, temperature, API key, session id).
+'      - Dual-call mode (optional): Splits endpoint/body/response key on the Unicode "¦" separator to run
+'        a POST followed by a GET whose URL/body is filled from selected POST response tokens.
+'      - HTTP: Supports GET via `get:` endpoint prefix; otherwise POST. Retries 429 responses with backoff.
+'      - Response normalization: Detects simple SSE framing and extracts "data:" payloads, then validates JSON.
+'      - Response extraction: Uses `HandleObject` and `JsonTemplateFormatter.FormatJsonWithTemplate` and may
+'        append citations via `ExtractCitations`.
+'      - Output cleanup: Optional replacement of ß, dash normalization, whitespace cleanup, hidden marker removal,
+'        and optional removal of content up to the last `</THINK>` tag.
+'  - Prompt log and token spending log: `LogTokenSpending` persists recent prompts in settings and optionally
+'    appends a cost/token line to a desktop log file with retry/exclusive-lock writing.
+'  - JSON helpers: `HandleObject` and `FindJsonProperty` read selected values and detect error payloads.
+'  - OAuth2 helper: `GetFreshAccessToken` prepares a PEM key for `GoogleOAuthHelper` and refreshes access tokens.
+'  - Utility helpers: `CleanString` JSON-escapes prompt strings, `EstimateTokenCount` approximates token usage,
+'    `FixMimeType` normalizes MIME aliases used for object uploads.
+' =============================================================================
 
 Option Strict On
 Option Explicit On
 
 Imports System.Globalization
 Imports System.IO
+Imports System.Security.Cryptography.X509Certificates
 Imports System.Text
 Imports System.Text.RegularExpressions
 Imports System.Threading
@@ -17,6 +50,13 @@ Namespace SharedLibrary
 
     Partial Public Class SharedMethods
 
+        ''' <summary>
+        ''' Optionally performs a post-processing LLM call as configured by <paramref name="context"/> and returns the resulting text.
+        ''' </summary>
+        ''' <param name="context">Shared configuration context used to read post-correction settings and model/API selection.</param>
+        ''' <param name="inputText">Input text to be passed through the post-correction prompt.</param>
+        ''' <param name="UseSecondAPI">If <c>True</c>, uses the secondary API/model configuration from <paramref name="context"/>.</param>
+        ''' <returns>The original <paramref name="inputText"/> if post-correction is not configured; otherwise the post-corrected text.</returns>
         Public Shared Async Function PostCorrection(context As ISharedContext, inputText As String, Optional ByVal UseSecondAPI As Boolean = False) As Task(Of String)
             Dim OutputText As String = inputText
             If Not String.IsNullOrEmpty(context.INI_PostCorrection) Then
@@ -29,7 +69,23 @@ Namespace SharedLibrary
             Return OutputText
         End Function
 
-        Public Shared Async Function LLM(context As ISharedContext, ByVal promptSystem As String, ByVal promptUser As String, Optional ByVal Model As String = "", Optional ByVal Temperature As String = "", Optional ByVal Timeout As Long = 0, Optional ByVal UseSecondAPI As Boolean = False, Optional ByVal Hidesplash As Boolean = False, Optional ByVal AddUserPrompt As String = "", Optional FileObject As String = "", Optional cancellationToken As Threading.CancellationToken = Nothing) As Task(Of String)
+        ''' <summary>
+        ''' Calls a configured LLM endpoint and returns extracted response text based on the configured response template/key.
+        ''' </summary>
+        ''' <param name="context">Shared configuration context used for endpoint templates, headers, model selection, and feature flags.</param>
+        ''' <param name="promptSystem">System prompt content used to build the request (may be templated into endpoint/body).</param>
+        ''' <param name="promptUser">User prompt content used to build the request (may be templated into endpoint/body).</param>
+        ''' <param name="Model">Optional model override; "Default" or empty defers to configured model.</param>
+        ''' <param name="Temperature">Optional temperature override; "Default" or empty defers to configured temperature.</param>
+        ''' <param name="Timeout">Optional timeout override in milliseconds; 0 defers to configured timeout.</param>
+        ''' <param name="UseSecondAPI">If <c>True</c>, uses the secondary API/model configuration from <paramref name="context"/>.</param>
+        ''' <param name="Hidesplash">If <c>True</c>, suppresses the countdown splash UI.</param>
+        ''' <param name="AddUserPrompt">Optional additional user instruction used for placeholder replacement and logging.</param>
+        ''' <param name="FileObject">Optional file/clipboard object reference used for object upload features.</param>
+        ''' <param name="cancellationToken">Cancellation token propagated to network calls and linked to splash cancellation.</param>
+        ''' <param name="ToolExecution">If <c>True</c> then LLM expects to be in the tooling execution mode when calling an LLM (necessary for building APICall).</c>.</param>
+        ''' <returns>Extracted text from the JSON response; returns an empty string on cancellation or on handled errors.</returns>
+        Public Shared Async Function LLM(context As ISharedContext, ByVal promptSystem As String, ByVal promptUser As String, Optional ByVal Model As String = "", Optional ByVal Temperature As String = "", Optional ByVal Timeout As Long = 0, Optional ByVal UseSecondAPI As Boolean = False, Optional ByVal Hidesplash As Boolean = False, Optional ByVal AddUserPrompt As String = "", Optional FileObject As String = "", Optional cancellationToken As Threading.CancellationToken = Nothing, Optional ToolExecution As Boolean = False) As Task(Of String)
 
             If cancellationToken.IsCancellationRequested Then
                 Return ""
@@ -100,11 +156,14 @@ Namespace SharedLibrary
                 Dim DoubleS As Boolean
                 Dim NoThink As Boolean
 
+                ''' <summary>
+                ''' Per-request unique session identifier used for endpoint/body placeholder replacement.
+                ''' </summary>
                 Dim OwnSessionID As String = GenerateUniqueId()
 
-                ' === Unterstützung für zwei Aufrufe in einem Durchlauf ===
-                Dim sep As String = "¦" ' Unicode-Brottstrich, taucht praktisch nie in URLs/JSON auf
-                Dim sep2 As String = ";" ' Trennzeichen für mehrere Parameter in der Antwort auf POST
+                ' === Support for two calls in a single run ===
+                Dim sep As String = "¦" ' Unicode broken bar; rarely occurs in URLs/JSON.
+                Dim sep2 As String = ";" ' Separator for multiple parameters in the POST response key list.
                 Dim postEndpoint As String
                 Dim getEndpointTemplate As String = ""
                 Dim postAPICall As String
@@ -113,7 +172,6 @@ Namespace SharedLibrary
                 Dim getResponseKey As String = ""
 
                 Dim multiCall As Boolean = False
-
 
                 If UseSecondAPI Then
 
@@ -168,7 +226,13 @@ Namespace SharedLibrary
                     ModelValue = If(String.IsNullOrEmpty(Model) OrElse Model = "Default", ModelPlaceholder, Model)
                     TimeoutValue = If(Timeout = 0, context.INI_Timeout, Timeout)
                     TokenCountString = context.INI_TokenCount
+
+                    ' Tooling not supported for primary model by definition
+                    ToolExecution = False
+
                 End If
+
+                If TimeoutValue = 0 Then TimeoutValue = 30000
 
                 Dim timeoutSeconds = CInt(TimeoutValue \ 1000)
 
@@ -177,23 +241,82 @@ Namespace SharedLibrary
                     Return ""
                 End If
 
-
                 NoThink = False
                 If Not String.IsNullOrEmpty(ResponseKey) Then
                     Dim trigger As String = If(TryCast(NoThinkTrigger, String), String.Empty)
                     If Not String.IsNullOrEmpty(trigger) Then
-                        Dim respTrim As String = ResponseKey.TrimEnd()
-                        If respTrim.EndsWith(trigger, StringComparison.OrdinalIgnoreCase) Then
+
+                        Dim idx As Integer = ResponseKey.LastIndexOf(trigger, StringComparison.OrdinalIgnoreCase)
+                        If idx >= 0 Then
                             NoThink = True
-                            ResponseKey = respTrim.Substring(0, respTrim.Length - trigger.Length).TrimEnd()
+                            ' Remove ALL occurrences (case-insensitive) and trim.
+                            ResponseKey = Regex.Replace(ResponseKey,
+                                                        Regex.Escape(trigger),
+                                                        String.Empty,
+                                                        RegexOptions.IgnoreCase).Trim()
                         End If
+
                     End If
+                End If
+
+                ' --- ToolCallMatching trigger inside ResponseKey ---
+                ' Expected form: "(toolcall:<pattern>)" but we remove it even if malformed (e.g. missing ")", missing "<>").
+                ' Define the markers: ToolCallMatchingStart = "(toolcall:", ToolCallMatchingEnd = ")", ToolCallMatchingMiddle = ":"
+
+                Dim DetectToolCall As String = String.Empty
+
+                If Not String.IsNullOrEmpty(ResponseKey) Then
+
+                    Dim startMarker As String = ToolCallMatchingStart
+                    Dim startIdx As Integer = ResponseKey.IndexOf(startMarker, StringComparison.OrdinalIgnoreCase)
+
+                    If startIdx >= 0 Then
+                        ' Find the closing ")" after the marker; if missing, treat as malformed and consume to end.
+                        Dim endIdx As Integer = ResponseKey.IndexOf(ToolCallMatchingEnd, startIdx, StringComparison.OrdinalIgnoreCase)
+                        Dim triggerLen As Integer = If(endIdx >= 0,
+                               (endIdx - startIdx + ToolCallMatchingEnd.Length),
+                               (ResponseKey.Length - startIdx))
+
+                        Dim triggerText As String = ResponseKey.Substring(startIdx, triggerLen)
+
+                        ' 1) Extract pattern (prefer <...> if present)
+                        Dim lt As Integer = triggerText.IndexOf("<"c)
+                        Dim gt As Integer = triggerText.LastIndexOf(">"c)
+
+                        If lt >= 0 AndAlso gt > lt Then
+                            DetectToolCall = triggerText.Substring(lt + 1, gt - lt - 1).Trim()
+                        Else
+                            ' 2) Fallback: pattern starts after ":" and ends before ")" (or end of triggerText)
+                            Dim colonIdx As Integer = triggerText.IndexOf(ToolCallMatchingMiddle, StringComparison.OrdinalIgnoreCase)
+                            If colonIdx >= 0 Then
+                                Dim raw As String = triggerText.Substring(colonIdx + ToolCallMatchingMiddle.Length)
+                                Dim paren As Integer = raw.LastIndexOf(ToolCallMatchingEnd, StringComparison.OrdinalIgnoreCase)
+                                If paren >= 0 Then raw = raw.Substring(0, paren)
+                                DetectToolCall = raw.Trim()
+                            End If
+                        End If
+
+                        ' Validate .NET regex; if invalid, wipe it (but still remove trigger from ResponseKey)
+                        If Not String.IsNullOrWhiteSpace(DetectToolCall) Then
+                            Try
+                                Dim rx As New Regex(DetectToolCall)
+                            Catch ex As ArgumentException
+                                DetectToolCall = String.Empty
+                            End Try
+                        End If
+
+                        ' Remove the trigger block from ResponseKey (even if malformed)
+                        ResponseKey = (ResponseKey.Substring(0, startIdx) &
+                                       ResponseKey.Substring(startIdx + triggerLen)).Trim()
+                    End If
+
                 End If
 
                 ' Determine RKMode (default = 2) based on trigger markers optionally embedded in ResponseKey.
                 ' (rkmode_all)      -> 1
                 ' (rkmode_longest)  -> 2
                 ' (rkmode_first)    -> 3
+
                 ' If multiple markers somehow appear, the first one found in the list below (priority order) wins.
                 Dim RKMode As Integer = 2 ' default
                 If Not String.IsNullOrEmpty(ResponseKey) Then
@@ -222,8 +345,7 @@ Namespace SharedLibrary
                 'AddHandler splash.CancelRequested, Sub() cts.Cancel()
                 'Dim ct As System.Threading.CancellationToken = cts.Token
 
-                ' lokalen CTS mit dem externen Token verknüpfen,
-                ' damit sowohl der Aufrufer als auch der Splash-Abbrechen-Button greifen.
+                ' Link a local CTS with the external token so both caller cancellation and the splash cancel button apply.
                 cts = System.Threading.CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)
                 AddHandler splash.CancelRequested, Sub() cts.Cancel()
                 Dim ct As System.Threading.CancellationToken = cts.Token
@@ -263,7 +385,7 @@ Namespace SharedLibrary
                 Dim useGetMethod As Boolean = False
                 If Endpoint.StartsWith("get:", System.StringComparison.OrdinalIgnoreCase) Then
                     useGetMethod = True
-                    ' "get:"-Prefix entfernen
+                    ' Remove "get:" prefix.
                     Endpoint = Endpoint.Substring(4)
                 End If
 
@@ -276,6 +398,19 @@ Namespace SharedLibrary
                 requestBody = requestBody.Replace("{userinstruction}", CleanString(AddUserPrompt))
                 requestBody = requestBody.Replace("{temperature}", TemperatureValue)
 
+                ' Handle Tooling instructions if applicable
+
+                If ToolExecution Then
+                    requestBody = requestBody.Replace(LLM_APICall_Placeholder_ToolDefinitions, context.INI_APICall_ToolInstructions_2)
+                    requestBody = requestBody.Replace(LLM_APICall_Placeholder_ToolResponses, context.INI_APICall_ToolResponses_2)
+                Else
+                    ' Remove tool placeholders 
+                    requestBody = requestBody.Replace(LLM_APICall_Placeholder_ToolDefinitions, "")
+                    requestBody = requestBody.Replace(LLM_APICall_Placeholder_ToolResponses, "")
+                End If
+
+                ' Handle object upload if configured
+
                 Dim ObjectCall As String = If(UseSecondAPI, context.INI_APICall_Object_2, context.INI_APICall_Object)
                 Dim requiresMultipart As Boolean = ObjectCall.ToLowerInvariant().Trim().StartsWith("multipart:")
 
@@ -287,10 +422,8 @@ Namespace SharedLibrary
 
                 If Not String.IsNullOrWhiteSpace(ObjectCall) AndAlso Not String.IsNullOrWhiteSpace(FileObject) Then
 
-                    requestBody = requestBody.Replace("{objectcall}", ObjectCall)
-
                     Try
-                        Dim encodedData As String
+                        Dim encodedData As String = ""
 
                         If FileObject.Equals("clipboard", StringComparison.OrdinalIgnoreCase) Then
                             Dim mime As String = Nothing, data As String = Nothing
@@ -298,17 +431,15 @@ Namespace SharedLibrary
                                 If Not Hidesplash Then ShowCustomMessageBox("No supported data found in the clipboard.") Else Return "No supported data found in the clipboard."
                                 Return ""
                             End If
-                            mime = FixMimeType(mime)
+                            mimeType = FixMimeType(mime)
                             If Not requiresMultipart Then
-                                requestBody = requestBody.Replace("{mimetype}", mime) _
-                                                        .Replace("{encodeddata}", data)
+                                encodedData = data
                             Else
                                 fileBytes = System.Convert.FromBase64String(data)
                                 fileName = "clipboard.png"
-                                mimeType = mime
                             End If
                         Else
-                            ' Standard-Fall: Datei per MimeHelper
+                            ' Standard case: file processed via MimeHelper.
                             Dim mresult = MimeHelper.GetFileMimeTypeAndBase64(FileObject)
                             mimeType = FixMimeType(mresult.MimeType.Trim())
                             If Not requiresMultipart Then
@@ -319,6 +450,69 @@ Namespace SharedLibrary
                             End If
                         End If
 
+                        ' --- Handle multiple ObjectCall variants with MIME-type filters ---
+                        ' Format: [mime1,mime2]variant1¦[mime3]variant2¦variant3 (unfiltered fallback)
+                        Dim variantSep As String = "¦"
+                        Dim objectCallVariants() As String = ObjectCall.Split(New String() {variantSep}, StringSplitOptions.None)
+
+                        Dim selectedObjectCall As String = Nothing
+                        Dim unfilteredObjectCall As String = Nothing
+
+                        For Each objCallEntry As String In objectCallVariants
+                            Dim trimmedEntry As String = objCallEntry.Trim()
+                            If String.IsNullOrEmpty(trimmedEntry) Then Continue For
+
+                            ' Check if entry starts with a MIME filter [...]
+                            If trimmedEntry.StartsWith("[") Then
+                                Dim closeBracketIdx As Integer = trimmedEntry.IndexOf("]"c)
+                                If closeBracketIdx > 0 Then
+                                    ' Extract MIME types from filter
+                                    Dim filterPart As String = trimmedEntry.Substring(1, closeBracketIdx - 1)
+                                    Dim allowedMimes() As String = filterPart.Split(","c)
+
+                                    ' Check if current mimeType matches any allowed MIME type
+                                    For Each allowedMime As String In allowedMimes
+                                        Dim normalizedAllowed As String = FixMimeType(allowedMime.Trim()).ToLowerInvariant()
+                                        If mimeType.ToLowerInvariant() = normalizedAllowed Then
+                                            ' Match found - use the entry content after the filter
+                                            selectedObjectCall = trimmedEntry.Substring(closeBracketIdx + 1).TrimStart()
+                                            Exit For
+                                        End If
+                                    Next
+
+                                    If selectedObjectCall IsNot Nothing Then Exit For
+                                Else
+                                    ' Malformed filter (no closing bracket) - treat as unfiltered
+                                    If unfilteredObjectCall Is Nothing Then unfilteredObjectCall = trimmedEntry
+                                End If
+                            Else
+                                ' No filter - this is an unfiltered fallback entry
+                                If unfilteredObjectCall Is Nothing Then unfilteredObjectCall = trimmedEntry
+                            End If
+                        Next
+
+                        ' Use selected entry, or fall back to unfiltered entry
+                        If selectedObjectCall Is Nothing Then
+                            selectedObjectCall = unfilteredObjectCall
+                        End If
+
+                        ' If no matching entry found, show error
+                        If selectedObjectCall Is Nothing Then
+                            Dim errorMsg As String = $"Error: The file/object provided is of an unsupported MIME type ({mimeType}). None of the configured variants accept this type."
+                            If Hidesplash Then
+                                Return errorMsg
+                            Else
+                                ShowCustomMessageBox(errorMsg)
+                                Return ""
+                            End If
+                        End If
+
+                        ' Use the selected entry as the effective ObjectCall
+                        ObjectCall = selectedObjectCall
+                        requiresMultipart = ObjectCall.ToLowerInvariant().Trim().StartsWith("multipart:")
+
+                        requestBody = requestBody.Replace(LLM_APICall_Placeholder_Objectcall, ObjectCall)
+
                         If Not requiresMultipart Then
                             requestBody = requestBody.Replace("{mimetype}", mimeType)
                             requestBody = requestBody.Replace("{encodeddata}", encodedData)
@@ -327,10 +521,10 @@ Namespace SharedLibrary
 
                             Dim config As String
 
-                            ' Remove "multipart:" prefix
+                            ' Remove "multipart:" prefix.
                             config = ObjectCall.Substring("multipart:".Length)
 
-                            ' Split on unescaped semicolons (support ;; as escape for ;)
+                            ' Split on unescaped semicolons (support ;; as escape for ;).
                             Dim parts As New List(Of String)()
                             Dim current As String = ""
                             Dim i As Integer = 0
@@ -350,7 +544,7 @@ Namespace SharedLibrary
                             End While
                             If current.Length > 0 Then parts.Add(current)
 
-                            ' Parse fields and add to multipart
+                            ' Parse fields and add to multipart.
                             For Each part In parts
                                 Dim idx As Integer = part.IndexOf(":")
                                 If idx > 0 Then
@@ -359,7 +553,7 @@ Namespace SharedLibrary
                                     If fieldName.Equals("filefield", StringComparison.OrdinalIgnoreCase) Then
                                         fileFieldName = fieldValue
                                     Else
-                                        ' Replace placeholders as needed
+                                        ' Replace placeholders as needed.
                                         fieldValue = fieldValue.Replace("{model}", ModelValue) _
                                                                .Replace("{promptsystem}", CleanString(promptSystem)) _
                                                                .Replace("{promptuser}", CleanString(promptUser)) _
@@ -386,7 +580,7 @@ Namespace SharedLibrary
 
                 Try
 
-                    ' Configure HttpClient with timeout
+                    ' Configure HttpClient with timeout.
                     Using handler As New System.Net.Http.HttpClientHandler()
                         handler.UseProxy = True
                         handler.Proxy = System.Net.WebRequest.DefaultWebProxy
@@ -394,7 +588,7 @@ Namespace SharedLibrary
                         Using client As New System.Net.Http.HttpClient(handler)
                             client.Timeout = TimeSpan.FromMilliseconds(TimeoutValue)
 
-                            ' Send the request
+                            ' Send the request.
                             Try
 
                                 Dim maxRetries As Integer = 3
@@ -411,38 +605,49 @@ Namespace SharedLibrary
                                         Await System.Threading.Tasks.Task.Delay(delayIntervals(attempt - 1), ct)
                                     End If
 
-                                    'Dim requestContent As New System.Net.Http.StringContent(requestBody, System.Text.Encoding.UTF8, "application/json")
                                     Dim requestContent As System.Net.Http.HttpContent
                                     If requiresMultipart Then
+                                        ' Recreate MultipartFormDataContent on each attempt to avoid duplicate parts.
+                                        Dim attemptMultipart As New System.Net.Http.MultipartFormDataContent()
+
+                                        ' Re-add cached string fields (parsed earlier outside the loop).
+                                        For Each part In multipart
+                                            If TypeOf part Is System.Net.Http.StringContent Then
+                                                Dim name As String = part.Headers.ContentDisposition?.Name?.Trim(""""c)
+                                                If Not String.IsNullOrEmpty(name) Then
+                                                    Dim val As String = Await part.ReadAsStringAsync()
+                                                    attemptMultipart.Add(New System.Net.Http.StringContent(val, System.Text.Encoding.UTF8), name)
+                                                End If
+                                            End If
+                                        Next
+
+                                        ' Add file content.
                                         Dim fileContent As New System.Net.Http.ByteArrayContent(fileBytes)
                                         fileContent.Headers.ContentType = New System.Net.Http.Headers.MediaTypeHeaderValue(mimeType)
-                                        multipart.Add(fileContent, fileFieldName, fileName)
-                                        requestContent = multipart
+                                        attemptMultipart.Add(fileContent, fileFieldName, fileName)
+                                        requestContent = attemptMultipart
                                     Else
                                         requestContent = New System.Net.Http.StringContent(requestBody, System.Text.Encoding.UTF8, "application/json")
                                     End If
-
 
                                     Dim response As System.Net.Http.HttpResponseMessage
 
                                     splash.RestartCountdown(timeoutSeconds)
 
                                     If useGetMethod Then
-                                        ' 1) GET-Request erstellen
+                                        ' Build a GET request (no request body is sent here).
                                         Dim getReq As New System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Get, Endpoint)
-                                        '    Falls der GET-Endpunkt einen Body erwartet (selten), könnte man hier requestContent setzen:
-                                        '    getReq.Content = requestContent
                                         If Not String.IsNullOrEmpty(HeaderA) AndAlso Not String.IsNullOrEmpty(HeaderB) Then
                                             If Not getReq.Headers.Contains(HeaderA) Then
                                                 getReq.Headers.Add(HeaderA, HeaderB)
                                             End If
                                         End If
                                         If context.INI_APIDebug Then
-                                            Debug.WriteLine($"SENT TO API as GET ({Endpoint}):{Environment.NewLine}{String.Empty}") ' Kein Body
+                                            Debug.WriteLine($"SENT TO API as GET ({Endpoint}):{Environment.NewLine}{String.Empty}") ' No body.
                                         End If
                                         response = Await client.SendAsync(getReq, System.Net.Http.HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(False)
                                     Else
-                                        ' Klassischer POST-Request
+                                        ' Standard POST request.
                                         If Not String.IsNullOrEmpty(HeaderA) AndAlso Not String.IsNullOrEmpty(HeaderB) Then
                                             If Not client.DefaultRequestHeaders.Contains(HeaderA) Then
                                                 client.DefaultRequestHeaders.Add(HeaderA, HeaderB)
@@ -452,24 +657,19 @@ Namespace SharedLibrary
                                             If requiresMultipart Then
                                                 Dim multipartInfo As New System.Text.StringBuilder()
                                                 multipartInfo.AppendLine($"SENT TO API ({Endpoint}) as multipart:")
-                                                ' List all parts added so far:
-                                                For Each content As System.Net.Http.HttpContent In multipart
-                                                    ' Attempt to get the name
+                                                ' Cast requestContent back to MultipartFormDataContent for enumeration.
+                                                For Each content As System.Net.Http.HttpContent In DirectCast(requestContent, System.Net.Http.MultipartFormDataContent)
                                                     Dim contentName As String = ""
                                                     If content.Headers.ContentDisposition IsNot Nothing Then
                                                         contentName = content.Headers.ContentDisposition.Name
                                                         If Not String.IsNullOrEmpty(contentName) Then
-                                                            ' Remove quotes around the name, if present
                                                             contentName = contentName.Trim(""""c)
                                                         End If
                                                     End If
-                                                    ' Attempt to display the type of content
                                                     If TypeOf content Is System.Net.Http.StringContent Then
-                                                        ' Show a short preview of string part
                                                         Dim val As String = Await content.ReadAsStringAsync()
                                                         multipartInfo.AppendLine($" - {contentName}: '{val}'")
                                                     ElseIf TypeOf content Is System.Net.Http.ByteArrayContent Then
-                                                        ' For file part, show file name and content type
                                                         Dim fileNamex As String = ""
                                                         If content.Headers.ContentDisposition IsNot Nothing Then
                                                             fileNamex = content.Headers.ContentDisposition.FileName?.Trim(""""c)
@@ -507,20 +707,16 @@ Namespace SharedLibrary
                                              Nothing)
 
                                     If response.IsSuccessStatusCode Then
-                                        ' Read and return the response if the call succeeded.
                                         responseText = Await response.Content.ReadAsStringAsync().ConfigureAwait(False)
                                         Exit For
 
                                     ElseIf response.StatusCode = 429 Then
-                                        ' If we received a 429 error and haven't exhausted our retries, loop to retry.
                                         If attempt = maxRetries Then
                                             If Not Hidesplash Then ShowCustomMessageBox($"HTTP Error {response.StatusCode} when accessing the LLM endpoint: This error is typically either because (1) the server resource is exhausted on the side of the provider (retry it later or reduce the work load; {AN} already tried to slow down and wait, but this could not overcome the overload condition), or (2) you have not yet correctly configured your service account (e.g., with OpenAI API, you have to have a credit card registered and an amount entered before you generate your API key).") Else Return $"HTTP Error {response.StatusCode} when accessing the LLM endpoint: This error is typically either because (1) the server resource is exhausted on the side of the provider (retry it later or reduce the work load; {AN} already tried to slow down and wait, but this could not overcome the overload condition), or (2) you have not yet correctly configured your service account (e.g., with OpenAI API, you have to have a credit card registered and an amount entered before you generate your API key)."
                                             Return ""
                                         End If
-                                        ' Otherwise, continue the loop to retry the request.
                                         Continue For
                                     Else
-                                        ' For other HTTP errors, read the error content and show the message as before.
                                         Dim errorContent As String = Await response.Content.ReadAsStringAsync().ConfigureAwait(False)
                                         If Not Hidesplash Then ShowCustomMessageBox($"HTTP Error {response.StatusCode} when accessing the LLM endpoint: {errorContent}")
                                         Return ""
@@ -542,10 +738,10 @@ Namespace SharedLibrary
                                     End Try
                                 End If
 
-                                ' Normalize/validate response BEFORE JSON parse
+                                ' Normalize/validate response BEFORE JSON parse.
                                 Dim respTrim As String = If(responseText, String.Empty)
 
-                                ' SSE normalization: drop keepalive/comment lines starting with ":" and unwrap "data:" frames
+                                ' SSE normalization: drop keepalive/comment lines starting with ":" and unwrap "data:" frames.
                                 Dim sseProbe As String = respTrim.TrimStart()
                                 If sseProbe.StartsWith(":", StringComparison.Ordinal) OrElse sseProbe.StartsWith("data:", StringComparison.OrdinalIgnoreCase) Then
                                     Dim sb As New System.Text.StringBuilder()
@@ -556,12 +752,10 @@ Namespace SharedLibrary
                                         Dim t As String = If(raw, String.Empty).Trim()
                                         If t.Length = 0 Then Continue For
 
-                                        ' Skip SSE keepalive/comment lines like ":keepalive"
                                         If t.StartsWith(":", StringComparison.Ordinal) Then
                                             Continue For
                                         End If
 
-                                        ' Unwrap SSE "data: {json}" frames; ignore [DONE]
                                         If t.StartsWith("data:", StringComparison.OrdinalIgnoreCase) Then
                                             Dim payload As String = t.Substring(5).Trim()
                                             If payload.Length > 0 AndAlso Not payload.Equals("[DONE]", StringComparison.OrdinalIgnoreCase) Then
@@ -570,7 +764,6 @@ Namespace SharedLibrary
                                             Continue For
                                         End If
 
-                                        ' Fallback: pass-through non-SSE lines
                                         sb.AppendLine(raw)
                                     Next
 
@@ -590,27 +783,25 @@ Namespace SharedLibrary
                                     Return ""
                                 End If
 
-
-                                ' Process the response
-
+                                ' Process the response.
                                 Dim root As Newtonsoft.Json.Linq.JToken = Newtonsoft.Json.Linq.JToken.Parse(responseText)
                                 LogTokenSpending(root, TokenCountString, AddUserPrompt)
 
                                 If multiCall Then
 
-                                    ' 1) Alle Keys splitten und Werte extrahieren
+                                    ' 1) Split all keys and extract values from the POST response.
                                     Dim keys() As String = postResponseKey.Split(New String() {sep2}, StringSplitOptions.None)
                                     Dim extracted As New Dictionary(Of String, String)
 
                                     For Each key As String In keys
                                         Dim val As String = CType(root, Newtonsoft.Json.Linq.JObject).SelectToken(key)?.ToString()
                                         If String.IsNullOrEmpty(val) Then
-                                            Throw New System.Exception($"POST-Response enthält keinen Wert zu '{key}'.")
+                                            Throw New System.Exception($"POST response contains no value for '{key}'.")
                                         End If
                                         extracted(key) = val
                                     Next
 
-                                    ' 2) Platzhalter im GET-Endpoint füllen
+                                    ' 2) Fill placeholders in GET endpoint.
                                     Dim rawGetEndpoint As String = getEndpointTemplate
                                     rawGetEndpoint = rawGetEndpoint.Replace("{model}", ModelValue)
                                     rawGetEndpoint = rawGetEndpoint.Replace("{ownsessionid}", OwnSessionID)
@@ -619,7 +810,7 @@ Namespace SharedLibrary
                                         rawGetEndpoint = rawGetEndpoint.Replace("{" & kvp.Key & "}", kvp.Value)
                                     Next
 
-                                    ' 3) Platzhalter im optionalen GET-Body füllen
+                                    ' 3) Fill placeholders in optional GET body.
                                     Dim rawGetBody As String = getAPICallTemplate
                                     If Not String.IsNullOrWhiteSpace(rawGetBody) Then
                                         rawGetBody = rawGetBody.Replace("{model}", ModelValue)
@@ -630,7 +821,7 @@ Namespace SharedLibrary
                                         Next
                                     End If
 
-                                    ' 4) GET-Anfrage vorbereiten und Header setzen
+                                    ' 4) Prepare GET request and set header.
                                     Dim getReq As New System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Get, rawGetEndpoint)
 
                                     If Not String.IsNullOrEmpty(HeaderA) AndAlso Not String.IsNullOrEmpty(HeaderB) Then
@@ -654,7 +845,7 @@ Namespace SharedLibrary
 
                                     splash.RestartCountdown(timeoutSeconds)
 
-                                    ' 5) GET-Anfrage senden
+                                    ' 5) Send GET request.
                                     Dim getResponseText As String
                                     Using getResp = Await client.SendAsync(getReq, System.Net.Http.HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(False)
                                         If getResp.IsSuccessStatusCode Then
@@ -676,50 +867,65 @@ Namespace SharedLibrary
                                         End Try
                                     End If
 
-                                    ' 6) GET-Antwort exakt wie POST-Only weiterverarbeiten
+                                    ' 6) Process GET response using the same extraction logic as POST-only mode.
                                     Dim root2 As Newtonsoft.Json.Linq.JToken = Newtonsoft.Json.Linq.JToken.Parse(getResponseText)
 
                                     Select Case root2.Type
                                         Case Newtonsoft.Json.Linq.JTokenType.Object
                                             Dim obj2 As Newtonsoft.Json.Linq.JObject = CType(root2, Newtonsoft.Json.Linq.JObject)
-                                            Returnvalue = HandleObject(obj2, getResponseKey, getResponseText, RKMode)
+                                            Returnvalue = HandleObject(obj2, getResponseKey, getResponseText, RKMode, DetectToolCall)
 
                                         Case Newtonsoft.Json.Linq.JTokenType.Array
-                                            For Each item2 As Newtonsoft.Json.Linq.JToken In CType(root2, Newtonsoft.Json.Linq.JArray)
-                                                If item2.Type = Newtonsoft.Json.Linq.JTokenType.Object Then
-                                                    Returnvalue &= HandleObject(CType(item2, Newtonsoft.Json.Linq.JObject), getResponseKey, getResponseText, RKMode)
-                                                End If
-                                            Next
+                                            ' If template has a loop, process entire array at once
+                                            Dim hasLoop = Regex.IsMatch(ResponseKey, "\{\%\s*for\s+", RegexOptions.Singleline)
+                                            If hasLoop Then
+                                                ' Pass entire response to template formatter which will handle the array
+                                                Returnvalue = JsonTemplateFormatter.FormatJsonWithTemplate(responseText, ResponseKey)
+                                            Else
+                                                ' Legacy behavior: process each item separately
+                                                For Each item As Newtonsoft.Json.Linq.JToken In CType(root, Newtonsoft.Json.Linq.JArray)
+                                                    If item.Type = Newtonsoft.Json.Linq.JTokenType.Object Then
+                                                        Returnvalue &= HandleObject(CType(item, Newtonsoft.Json.Linq.JObject),
+                                                        ResponseKey, responseText, RKMode, DetectToolCall)
+                                                    End If
+                                                Next
+                                            End If
 
                                         Case Else
                                             If Not Hidesplash Then ShowCustomMessageBox($"Unexpected JSON root type: {root2.Type} ({getResponseText})")
                                     End Select
 
                                 Else
-                                    ' Verarbeitung für nur POST —
+                                    ' POST-only processing.
                                     Select Case root.Type
                                         Case Newtonsoft.Json.Linq.JTokenType.Object
                                             Dim jsonObject As Newtonsoft.Json.Linq.JObject = CType(root, Newtonsoft.Json.Linq.JObject)
-                                            Returnvalue = HandleObject(jsonObject, ResponseKey, responseText, RKMode)
+                                            Returnvalue = HandleObject(jsonObject, ResponseKey, responseText, RKMode, DetectToolCall)
 
                                         Case Newtonsoft.Json.Linq.JTokenType.Array
-                                            For Each item As Newtonsoft.Json.Linq.JToken In CType(root, Newtonsoft.Json.Linq.JArray)
-                                                If item.Type = Newtonsoft.Json.Linq.JTokenType.Object Then
-                                                    Returnvalue &= HandleObject(CType(item, Newtonsoft.Json.Linq.JObject),
-                                                ResponseKey, responseText, RKMode)
-                                                End If
-                                            Next
+                                            ' If template has a loop, process entire array at once
+                                            Dim hasLoop = Regex.IsMatch(ResponseKey, "\{\%\s*for\s+", RegexOptions.Singleline)
+                                            If hasLoop Then
+                                                ' Pass entire response to template formatter which will handle the array
+                                                Returnvalue = JsonTemplateFormatter.FormatJsonWithTemplate(responseText, ResponseKey)
+                                            Else
+                                                ' Legacy behavior: process each item separately
+                                                For Each item As Newtonsoft.Json.Linq.JToken In CType(root, Newtonsoft.Json.Linq.JArray)
+                                                    If item.Type = Newtonsoft.Json.Linq.JTokenType.Object Then
+                                                        Returnvalue &= HandleObject(CType(item, Newtonsoft.Json.Linq.JObject),
+                                                            ResponseKey, responseText, RKMode, DetectToolCall)
+                                                    End If
+                                                Next
+                                            End If
 
                                         Case Else
                                             If Not Hidesplash Then ShowCustomMessageBox($"Unexpected JSON root type: {root.Type} ({responseText})")
                                     End Select
                                 End If
 
-
                             Catch ex As System.Net.Http.HttpRequestException When Not ct.IsCancellationRequested
                                 If Not Hidesplash Then ShowCustomMessageBox($"An HTTP request exception occurred: {ex.Message} when accessing the LLM endpoint (2).")
                             Catch ex As TaskCanceledException When ct.IsCancellationRequested
-                                ' Wenn wirklich wir den Token gecancelt haben → durchreichen
                                 Throw New OperationCanceledException(ct)
                             Catch ex As TaskCanceledException When Not ct.IsCancellationRequested
                                 If Not Hidesplash Then splash.Close()
@@ -748,7 +954,6 @@ Namespace SharedLibrary
                                     )
                 End If
                 If context.INI_Clean Then
-                    'Returnvalue = Returnvalue.Replace("  ", " ").Replace("  ", " ")
                     Returnvalue = System.Text.RegularExpressions.Regex.Replace(
                                     Returnvalue,
                                     "(?<=\S) {2,}",
@@ -781,6 +986,15 @@ Namespace SharedLibrary
                 Return Returnvalue
 
             Catch ex As System.Exception
+
+#If DEBUG Then
+                Debug.WriteLine("Error: " & ex.Message)
+                Debug.WriteLine("Stacktrace: " & ex.StackTrace)
+
+                System.Diagnostics.Debugger.Break()
+#End If
+
+
                 If Not Hidesplash Then ShowCustomMessageBox($"An unexpected error occurred when accessing the LLM endpoint: {ex.Message}") Else Return $"An unexpected error occurred when accessing the LLM endpoint: {ex.Message}"
                 Return ""
             Finally
@@ -790,17 +1004,22 @@ Namespace SharedLibrary
             End Try
         End Function
 
-
+        ''' <summary>
+        ''' Generates a GUID-based unique id string without separators (32 hex characters).
+        ''' </summary>
+        ''' <returns>A GUID string in "N" format; returns XdatetimeX if GUID generation fails.</returns>
         Public Shared Function GenerateUniqueId() As String
             Try
-                ' System.Guid aus dem Namespace System
                 Return System.Guid.NewGuid().ToString("N")
             Catch ex As System.Exception
-                ' Handle error silently
+                ' Fallback: timestamp + random (extremely unlikely path)
+                Return DateTime.UtcNow.Ticks.ToString("X") & (New Random()).Next().ToString("X")
             End Try
         End Function
 
-
+        ''' <summary>
+        ''' Opens an editor window for the prompt log stored in settings and saves edits back to settings.
+        ''' </summary>
         Public Shared Sub ShowAndEditPromptLog()
             Const MaxItems As Integer = PromptLogCap
             Const SepLine As String = "----- Prompt Entry Separator -----"
@@ -858,10 +1077,14 @@ Namespace SharedLibrary
             End Try
         End Sub
 
-
         ''' <summary>
-        ''' Logs token usage and optional cost to a desktop file in a thread‑safe, retry‑enabled manner.
+        ''' Logs prompt text to settings and extracts token usage metrics from the JSON response using <paramref name="tokenCountString"/>.
         ''' </summary>
+        ''' <param name="root">Parsed JSON response token used for SelectToken reads.</param>
+        ''' <param name="tokenCountString">
+        ''' Semicolon-separated list of token usage segment names, optionally extended with a numeric multiplier and currency code.
+        ''' </param>
+        ''' <param name="prompt">Prompt/instruction text recorded in the prompt log and in the cost log (when configured).</param>
         Private Shared Sub LogTokenSpending(ByRef root As JToken, tokenCountString As String, prompt As String)
 
             ' 0) only run if there's something to log
@@ -1026,8 +1249,15 @@ Namespace SharedLibrary
             End If
         End Sub
 
-
-        Private Shared Function HandleObject(jsonObject As Newtonsoft.Json.Linq.JObject, ResponseKey As String, ResponseText As String, RKMode As Integer) As String
+        ''' <summary>
+        ''' Extracts response content from a JSON object using the configured response key/template and handles error payloads.
+        ''' </summary>
+        ''' <param name="jsonObject">Parsed JSON object returned by the endpoint.</param>
+        ''' <param name="ResponseKey">Response key/template used by <c>JsonTemplateFormatter</c> or the literal string "JSON".</param>
+        ''' <param name="ResponseText">Original response text used for error messages and "JSON" passthrough.</param>
+        ''' <param name="RKMode">Response extraction mode passed through to <c>JsonTemplateFormatter</c>.</param>
+        ''' <returns>Extracted response text; empty string on handled error.</returns>
+        Private Shared Function HandleObject(jsonObject As Newtonsoft.Json.Linq.JObject, ResponseKey As String, ResponseText As String, RKMode As Integer, DetectToolCall As String) As String
 
             ' Extract the "error" segment
             Dim text As String = FindJsonProperty(jsonObject, "error")
@@ -1046,10 +1276,12 @@ Namespace SharedLibrary
                     text = text.Replace("\", "\\")
                 End If
 
-                If ResponseKey = "JSON" Then
+                If ResponseKey = "JSON" OrElse
+                  (Not String.IsNullOrWhiteSpace(DetectToolCall) AndAlso
+                   Regex.IsMatch(ResponseText, DetectToolCall, RegexOptions.Singleline Or RegexOptions.CultureInvariant)) Then
+
                     text = ResponseText
                 Else
-                    'text = text & FindJsonProperty(jsonObject, ResponseKey)
                     text = text & JsonTemplateFormatter.FormatJsonWithTemplate(jsonObject, ResponseKey, RKMode)
                     Dim hasLoop = Regex.IsMatch(ResponseKey, "\{\%\s*for\s+([^\s\%]+)\s*\%\}", RegexOptions.Singleline)
                     Dim hasPh = Regex.IsMatch(ResponseKey, "\{([^}]+)\}")
@@ -1060,6 +1292,12 @@ Namespace SharedLibrary
             End If
         End Function
 
+        ''' <summary>
+        ''' Removes selected Unicode control/format/separator characters from <paramref name="text"/> while preserving spaces and CR/LF.
+        ''' </summary>
+        ''' <param name="text">Input text.</param>
+        ''' <returns>Text with hidden marker categories removed.</returns>
+        ''' <exception cref="System.Exception">Thrown when <paramref name="text"/> is <c>Nothing</c>.</exception>
         Public Shared Function RemoveHiddenMarkers(text As String) As String
             If text Is Nothing Then
                 Throw New System.Exception("Cannot remove hidden markers from a null string.")
@@ -1069,7 +1307,7 @@ Namespace SharedLibrary
             For Each ch As Char In text
                 Dim uc As UnicodeCategory = Char.GetUnicodeCategory(ch)
 
-                ' Erlaube gewöhnliches Space plus CR (U+000D) und LF (U+000A):
+                ' Allow ordinary space plus CR (U+000D) and LF (U+000A).
                 If ch = " "c OrElse
                    ch = ChrW(13) OrElse      ' Carriage Return
                    ch = ChrW(10) OrElse      ' Line Feed
@@ -1086,6 +1324,11 @@ Namespace SharedLibrary
             Return sb.ToString()
         End Function
 
+        ''' <summary>
+        ''' Extracts citations/references from known JSON response shapes and formats them into a human-readable list.
+        ''' </summary>
+        ''' <param name="jsonObj">JSON object to inspect.</param>
+        ''' <returns>Formatted citations text; returns an empty string if no citations are found.</returns>
         Public Shared Function ExtractCitations(ByRef jsonObj As JObject) As String
             Try
                 Dim OriginalJsonObj As JObject = CType(jsonObj.DeepClone(), JObject)
@@ -1141,17 +1384,15 @@ Namespace SharedLibrary
                     Next
                 End If
 
-                ' 3b. Google-Grounding-Supports auswerten
+                ' 3b. Evaluate Google grounding supports.
                 ProcessGroundingSupports(jsonObj, citationList, sourceUris)
-
 
                 ' 4. Check legacy formats
                 ExtractLegacyCitations(jsonObj, citationList, sourceUris)
 
                 Debug.WriteLine("Total citations count: " & citationList.Count.ToString())
 
-                ' 5. Build output: if any citation was found, format them;
-                ' otherwise, fall back to the simple citations extractor.
+                ' 5. Build output: if any citation was found, format them; otherwise fall back.
                 If citationList.Count > 0 Then
                     Debug.WriteLine("Citations: " & String.Join(", ", citationList))
                     Return FormatCitations(citationList)
@@ -1168,6 +1409,12 @@ Namespace SharedLibrary
             Return String.Empty
         End Function
 
+        ''' <summary>
+        ''' Interprets a citation object and appends extracted citation text/URLs to the output lists.
+        ''' </summary>
+        ''' <param name="citation">Citation object.</param>
+        ''' <param name="citationList">List that receives formatted citation entries.</param>
+        ''' <param name="sourceUris">Set used to deduplicate source URLs.</param>
         Private Shared Sub ProcessCitationObject(citation As JObject, ByRef citationList As List(Of String), ByRef sourceUris As HashSet(Of String))
             Try
                 ' Format 1: Check for a "source" property (MLA/Chicago style)
@@ -1223,6 +1470,12 @@ Namespace SharedLibrary
             End Try
         End Sub
 
+        ''' <summary>
+        ''' Extracts citation metadata from a <c>citationSources</c> entry and appends a formatted line to <paramref name="citationList"/>.
+        ''' </summary>
+        ''' <param name="source">Citation source JSON object.</param>
+        ''' <param name="citationList">List that receives formatted citation entries.</param>
+        ''' <param name="sourceUris">Set used to deduplicate source URLs.</param>
         Private Shared Sub ProcessMetadataSource(source As JObject, ByRef citationList As List(Of String), ByRef sourceUris As HashSet(Of String))
             Try
                 Dim uri As String = source("uri")?.ToString()
@@ -1238,6 +1491,12 @@ Namespace SharedLibrary
             End Try
         End Sub
 
+        ''' <summary>
+        ''' Extracts and formats citation details from a <c>source</c> token and appends it to <paramref name="citationList"/>.
+        ''' </summary>
+        ''' <param name="source">Source token containing citation details.</param>
+        ''' <param name="citationList">List that receives formatted citation entries.</param>
+        ''' <param name="sourceUris">Set used to deduplicate source URLs.</param>
         Private Shared Sub AddSource(source As JToken, ByRef citationList As List(Of String), ByRef sourceUris As HashSet(Of String))
             Try
                 Dim uri As String = source("uri")?.ToString()
@@ -1291,6 +1550,12 @@ Namespace SharedLibrary
             End Try
         End Sub
 
+        ''' <summary>
+        ''' Extracts legacy citation URLs from older JSON response shapes.
+        ''' </summary>
+        ''' <param name="jsonObj">JSON object to inspect.</param>
+        ''' <param name="citationList">List that receives formatted citation entries.</param>
+        ''' <param name="sourceUris">Set used to deduplicate source URLs.</param>
         Private Shared Sub ExtractLegacyCitations(jsonObj As JObject, ByRef citationList As List(Of String), ByRef sourceUris As HashSet(Of String))
             Try
                 ' Old format v0.9 compatibility: look for any "sources" with a URL.
@@ -1306,6 +1571,11 @@ Namespace SharedLibrary
             End Try
         End Sub
 
+        ''' <summary>
+        ''' Extracts a DOI from an IEEE reference entry and returns a DOI URL when present.
+        ''' </summary>
+        ''' <param name="refEntry">Reference entry string.</param>
+        ''' <returns>DOI URL when detected; otherwise an empty string.</returns>
         Private Shared Function ExtractIeeeUri(refEntry As String) As String
             Try
                 Dim doiMatch = Regex.Match(refEntry, "doi:\s*(\S+)")
@@ -1319,6 +1589,11 @@ Namespace SharedLibrary
             Return String.Empty
         End Function
 
+        ''' <summary>
+        ''' Extracts a URL from a Harvard-style reference entry when it contains an "Available at:" segment.
+        ''' </summary>
+        ''' <param name="refEntry">Reference entry string.</param>
+        ''' <returns>Extracted URL when detected; otherwise an empty string.</returns>
         Private Shared Function ExtractHarvardUri(refEntry As String) As String
             Try
                 Dim uriMatch = Regex.Match(refEntry, "Available at:\s*(\S+)\s*\(")
@@ -1331,15 +1606,17 @@ Namespace SharedLibrary
             Return String.Empty
         End Function
 
+        ''' <summary>
+        ''' Formats a list of citation strings into a numbered "References:" section and wraps URLs as Markdown links.
+        ''' </summary>
+        ''' <param name="citationList">List of citations to format.</param>
+        ''' <returns>Formatted citations section.</returns>
         Private Shared Function FormatCitations(citationList As List(Of String)) As String
             Dim sb As New StringBuilder()
             sb.AppendLine()
             sb.AppendLine()
             sb.AppendLine(vbCrLf & vbCrLf & "References:")
             For i As Integer = 0 To citationList.Count - 1
-                'sb.AppendLine($"[{i + 1}] {citationList(i)}")
-                ' jede URL im Text als [URL](URL) maskieren
-                'Dim text As String = Regex.Replace(citationList(i), "(https?://\S+)", "[$1]($1)")
                 Dim text As String = System.Text.RegularExpressions.Regex.Replace(
                                         citationList(i),
                                         "(?<!\]\()https?://\S+",
@@ -1349,6 +1626,11 @@ Namespace SharedLibrary
             Return sb.ToString()
         End Function
 
+        ''' <summary>
+        ''' Extracts citations from the simple <c>citations</c> JSON property and formats them as a numbered list.
+        ''' </summary>
+        ''' <param name="jsonObj">JSON object passed by reference.</param>
+        ''' <returns>Formatted citation output; empty string on parse errors or if no citations are present.</returns>
         Private Shared Function ExtractSimpleCitations(ByRef jsonObj As JObject) As String
             Try
                 Dim citations As JToken = jsonObj.SelectToken("citations")
@@ -1360,7 +1642,6 @@ Namespace SharedLibrary
                             If citation.Type = JTokenType.String Then
                                 citationList.Add(citation.ToString())
                             ElseIf citation.Type = JTokenType.Object Then
-                                ' Try to extract URL or fullNote from the object
                                 Dim url As JToken = citation.SelectToken("url")
                                 If url IsNot Nothing Then
                                     citationList.Add(url.ToString())
@@ -1400,13 +1681,18 @@ Namespace SharedLibrary
             Return String.Empty
         End Function
 
-
+        ''' <summary>
+        ''' Extracts and formats citations from Google grounding metadata (<c>groundingSupports</c>/<c>groundingChunks</c>).
+        ''' </summary>
+        ''' <param name="jsonObj">JSON response object.</param>
+        ''' <param name="citationList">List that receives formatted citation entries.</param>
+        ''' <param name="sourceUris">Set used to deduplicate source URLs.</param>
         Private Shared Sub ProcessGroundingSupports(jsonObj As Newtonsoft.Json.Linq.JObject,
                                             ByRef citationList As System.Collections.Generic.List(Of String),
                                             ByRef sourceUris As System.Collections.Generic.HashSet(Of String))
 
             Try
-                ' --- Pfade prüfen ----------------------------------------------------
+                ' Check expected paths.
                 Dim supports As Newtonsoft.Json.Linq.JToken =
             jsonObj.SelectToken("candidates[0].groundingMetadata.groundingSupports")
                 Dim chunks As Newtonsoft.Json.Linq.JToken =
@@ -1416,7 +1702,7 @@ Namespace SharedLibrary
            OrElse supports.Type <> Newtonsoft.Json.Linq.JTokenType.Array _
            OrElse chunks.Type <> Newtonsoft.Json.Linq.JTokenType.Array Then Exit Sub
 
-                ' --- jedes Support-Segment einzeln verarbeiten ----------------------
+                ' Process each support segment.
                 For Each support As Newtonsoft.Json.Linq.JObject In supports
 
                     Dim segText As String = support.SelectToken("segment.text")?.ToString()
@@ -1427,7 +1713,6 @@ Namespace SharedLibrary
                OrElse idxTokens Is Nothing _
                OrElse idxTokens.Type <> Newtonsoft.Json.Linq.JTokenType.Array Then Continue For
 
-                    ' --- Zeile beginnen: Zitat + nachfolgende Quellen ----------------
                     segText = RemoveMarkdownFormatting(segText)
                     Dim sb As New System.Text.StringBuilder()
                     sb.Append("... " &
@@ -1437,7 +1722,7 @@ Namespace SharedLibrary
                              .Trim() &
                       " ...")
 
-                    ' --- Segmentinterne Deduplizierung -------------------------------
+                    ' Segment-level deduplication.
                     Dim localUris As New System.Collections.Generic.HashSet(Of String)(
                                     System.StringComparer.OrdinalIgnoreCase)
 
@@ -1457,11 +1742,9 @@ Namespace SharedLibrary
 
                         If System.String.IsNullOrWhiteSpace(title) Then title = "No title"
 
-                        ' ► Quelle direkt hinter dem Zitat, nur ein Leerzeichen Abstand
                         sb.Append(" ([" & title & "](" & uri & "))")
                     Next
 
-                    ' --- Ergebnisliste füllen ---------------------------------------
                     citationList.Add(sb.ToString())
                 Next
 
@@ -1469,7 +1752,6 @@ Namespace SharedLibrary
                 System.Diagnostics.Debug.WriteLine("Error processing groundingSupports: " & ex.Message)
             End Try
         End Sub
-
 
         ''' <summary>
         ''' Returns a standards-compliant MIME type for a given (possibly legacy or vendor-prefixed) MIME type.
@@ -1479,7 +1761,7 @@ Namespace SharedLibrary
         Public Shared Function FixMimeType(legacyType As String) As String
             If String.IsNullOrWhiteSpace(legacyType) Then Return "application/octet-stream"
             Select Case legacyType.Trim.ToLowerInvariant()
-        ' --- Images ---
+                ' --- Images ---
                 Case "image/x-png", "image/x-citrix-png" : Return "image/png"
                 Case "image/x-jpeg", "image/pjpeg", "image/pjepg", "image/x-pjpeg", "image/x-citrix-jpeg" : Return "image/jpeg"
                 Case "image/jpg" : Return "image/jpeg"
@@ -1491,12 +1773,12 @@ Namespace SharedLibrary
                 Case "image/ico" : Return "image/vnd.microsoft.icon"
                 Case "image/svg" : Return "image/svg+xml"
                 Case "image/x-svg" : Return "image/svg+xml"
-        ' --- Audio/Video ---
+                ' --- Audio/Video ---
                 Case "audio/x-wav" : Return "audio/wav"
                 Case "audio/x-mp3", "audio/mpeg3" : Return "audio/mpeg"
                 Case "audio/x-midi", "audio/midi" : Return "audio/midi"
                 Case "video/x-msvideo" : Return "video/x-msvideo"
-        ' --- Documents ---
+                ' --- Documents ---
                 Case "application/x-pdf", "application/pdfx" : Return "application/pdf"
                 Case "application/x-rtf" : Return "application/rtf"
                 Case "application/x-msword" : Return "application/msword"
@@ -1505,25 +1787,25 @@ Namespace SharedLibrary
                 Case "application/vnd.ms-word.document.macroenabled.12" : Return "application/msword"
                 Case "application/vnd.ms-excel.sheet.macroenabled.12" : Return "application/vnd.ms-excel"
                 Case "application/vnd.ms-powerpoint.presentation.macroenabled.12" : Return "application/vnd.ms-powerpoint"
-        ' --- Office Open XML ---
+                ' --- Office Open XML ---
                 Case "application/x-docx" : Return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                 Case "application/x-xlsx" : Return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 Case "application/x-pptx" : Return "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-        ' --- Archives/Compression ---
+                ' --- Archives/Compression ---
                 Case "application/x-zip-compressed", "application/x-zip" : Return "application/zip"
                 Case "application/x-gzip" : Return "application/gzip"
                 Case "application/x-tar" : Return "application/x-tar"
                 Case "application/x-7z-compressed" : Return "application/x-7z-compressed"
-        ' --- Text/CSV ---
+                ' --- Text/CSV ---
                 Case "text/x-csv" : Return "text/csv"
                 Case "text/x-log" : Return "text/plain"
                 Case "text/x-ini" : Return "text/plain"
-        ' --- Misc ---
+                ' --- Misc ---
                 Case "application/x-shockwave-flash" : Return "application/vnd.adobe.flash.movie"
                 Case "application/x-msdownload" : Return "application/octet-stream"
                 Case "application/x-bittorrent" : Return "application/x-bittorrent"
                 Case "application/x-iso9660-image" : Return "application/x-iso9660-image"
-        ' --- Defaults and unknowns ---
+                ' --- Defaults and unknowns ---
                 Case "" : Return "application/octet-stream"
                 Case Else
                     ' Special handling for some popular typos and aliases:
@@ -1533,7 +1815,12 @@ Namespace SharedLibrary
             End Select
         End Function
 
-
+        ''' <summary>
+        ''' Recursively searches a JSON token for a property name and returns its first string value.
+        ''' </summary>
+        ''' <param name="token">Token to search.</param>
+        ''' <param name="searchtext">Property name to match.</param>
+        ''' <returns>Property value as string when found; otherwise <c>Nothing</c>.</returns>
         Public Shared Function FindJsonProperty(token As JToken, searchtext As String) As String
             If token.Type = JTokenType.Object Then
                 For Each prop As JProperty In CType(token, JObject).Properties()
@@ -1552,7 +1839,17 @@ Namespace SharedLibrary
             Return Nothing
         End Function
 
-
+        ''' <summary>
+        ''' Ensures an OAuth2 access token is available and not expired, refreshing it when needed via <c>GoogleOAuthHelper</c>.
+        ''' </summary>
+        ''' <param name="context">Shared configuration context where decoded API keys and expiry timestamps are stored.</param>
+        ''' <param name="clientEmail">OAuth2 client email passed to <c>GoogleOAuthHelper</c>.</param>
+        ''' <param name="ClientScopes">OAuth2 scopes passed to <c>GoogleOAuthHelper</c>.</param>
+        ''' <param name="PrivateKey">Private key string used to construct a PEM key for <c>GoogleOAuthHelper</c>.</param>
+        ''' <param name="AuthServer">Token endpoint URI passed to <c>GoogleOAuthHelper</c>.</param>
+        ''' <param name="TLife">Lifetime in seconds used to compute expiry timestamps in <paramref name="context"/>.</param>
+        ''' <param name="SecondAPI">If <c>True</c>, updates the secondary token fields in <paramref name="context"/>.</param>
+        ''' <returns>Access token string; returns an empty string on errors.</returns>
         Public Shared Async Function GetFreshAccessToken(context As ISharedContext, ByVal clientEmail As String, ByVal ClientScopes As String, ByVal PrivateKey As String, ByVal AuthServer As String, ByVal TLife As Long, ByVal SecondAPI As Boolean) As Task(Of String)
             Try
 
@@ -1585,7 +1882,7 @@ Namespace SharedLibrary
                 GoogleOAuthHelper.token_life = TLife
 
                 If String.IsNullOrEmpty(accessToken) OrElse DateTime.UtcNow >= currentexpiry Then
-                    ' Token is missing or expired, fetch a new one
+                    ' Token is missing or expired, fetch a new one.
                     accessToken = Await GoogleOAuthHelper.GetAccessToken()
                     If SecondAPI Then
                         context.TokenExpiry_2 = DateTime.UtcNow.AddSeconds(GoogleOAuthHelper.token_life - 300) ' Set expiry 5 minutes before actual
@@ -1610,14 +1907,19 @@ Namespace SharedLibrary
 
         End Function
 
-
+        ''' <summary>
+        ''' Escapes a string for safe injection into JSON or URL templates by encoding control characters and quotes/backslashes.
+        ''' </summary>
+        ''' <param name="input">Input string to escape.</param>
+        ''' <param name="collapseSpaces">If <c>True</c>, collapses repeated spaces within each line while preserving indentation.</param>
+        ''' <returns>Escaped string, or an empty string when <paramref name="input"/> is null/whitespace.</returns>
         Public Shared Function CleanString(ByVal input As String, Optional ByVal collapseSpaces As Boolean = True) As String
-            ' Wenn leer oder nur Whitespace, leeren String zurückgeben
+            ' If empty or whitespace only, return an empty string.
             If System.String.IsNullOrWhiteSpace(input) Then
                 Return ""
             End If
 
-            ' 1) First pass: alles escapen in sbEscaped
+            ' 1) First pass: escape into sbEscaped.
             Dim sbEscaped As New System.Text.StringBuilder(input.Length * 2)
             For Each c As Char In input
                 Select Case AscW(c)
@@ -1642,7 +1944,7 @@ Namespace SharedLibrary
                 End Select
             Next
 
-            ' 2) Zweiter Pass: Leerzeichen-Zusammenfassung nur wenn collapseSpaces = True
+            ' 2) Second pass: collapse spaces only when collapseSpaces = True.
             If collapseSpaces Then
                 Dim raw As String = sbEscaped.ToString()
                 Dim lines As String() = raw.Split(New String() {"\n"}, System.StringSplitOptions.None)
@@ -1650,7 +1952,7 @@ Namespace SharedLibrary
 
                 For i As Integer = 0 To lines.Length - 1
                     Dim line As String = lines(i)
-                    ' Führende Leerzeichen beibehalten
+                    ' Preserve leading spaces.
                     Dim indentLen As Integer = 0
                     While indentLen < line.Length AndAlso line(indentLen) = " "c
                         indentLen += 1
@@ -1658,7 +1960,7 @@ Namespace SharedLibrary
                     Dim prefix As String = line.Substring(0, indentLen)
                     Dim rest As String = line.Substring(indentLen)
 
-                    ' Zusammenfassung mehrerer Spaces in Rest
+                    ' Collapse multiple spaces in the remainder.
                     Dim sbLine As New System.Text.StringBuilder(rest.Length)
                     Dim lastWasSpaceInner As Boolean = False
                     For Each c2 As Char In rest
@@ -1680,11 +1982,15 @@ Namespace SharedLibrary
                 Return sbResult.ToString()
             End If
 
-            ' Wenn collapseSpaces = False, einfach den escaped String zurückgeben
+            ' If collapseSpaces = False, return the escaped string.
             Return sbEscaped.ToString()
         End Function
 
-
+        ''' <summary>
+        ''' Estimates token usage by dividing character count by 4 and rounding up.
+        ''' </summary>
+        ''' <param name="text">Input text.</param>
+        ''' <returns>Estimated token count.</returns>
         Public Shared Function EstimateTokenCount(text As String) As Integer
             ' Trim the text and handle edge cases
             If String.IsNullOrWhiteSpace(text) Then Return 0
@@ -1695,7 +2001,6 @@ Namespace SharedLibrary
 
             Return estimatedTokens
         End Function
-
 
     End Class
 End Namespace

@@ -1,6 +1,28 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
+' =============================================================================
+' File: SharedMethods.TextHandlingExcel.vb
+' Purpose: Provides helper methods for cleaning and decoding text that appears inside
+'          Excel formulas and Excel-style string literals, including decoding of JSON
+'          and HTML escapes and limited normalization/removal of RTF constructs.
+'
+' Architecture:
+'  - Formula Scanner: `CleanExcelFormulaStrings` scans an Excel formula and applies
+'    decoding/cleanup only inside Excel string literals (quoted segments), while optionally
+'    stripping outer CR/LF characters outside literals.
+'  - Literal Decoding: `DecodeTextLiterals` applies a decoding pipeline for malformed
+'    decimal `\u###?` escapes, JSON unescaping (when backslashes are present), HTML entity
+'    decoding, and conversion of some RTF escape sequences to plain text.
+'  - RTF Hyperlink Normalization: `NormalizeRtfHyperlinks` replaces brace-balanced RTF
+'    hyperlink field blocks with a plain-text representation: `url` or `url (display)`.
+'  - RTF Cleanup: `StripRtfInline`, `CleanupRtfRemnants`, and `_CleanRtfLiteral` remove
+'    selected RTF tokens and decode common RTF escape sequences.
+'
+' External Dependencies:
+'  - `Newtonsoft.Json`: Used to deserialize a quoted string to perform JSON unescaping.
+' =============================================================================
+
 Option Strict On
 Option Explicit On
 
@@ -10,6 +32,19 @@ Imports System.Globalization
 
 Namespace SharedLibrary
     Partial Public Class SharedMethods
+
+        ''' <summary>
+        ''' Cleans and decodes string literals inside an Excel formula.
+        ''' </summary>
+        ''' <param name="formula">
+        ''' The Excel formula text. If it does not start with <c>=</c>, the method treats it as plain text and calls
+        ''' <see cref="DecodeTextLiterals(String)"/>.
+        ''' </param>
+        ''' <param name="decodeHtml">If <c>True</c>, HTML entities (for example, <c>&amp;auml;</c>) are decoded inside string literals.</param>
+        ''' <param name="decodeUnicode">If <c>True</c>, selected Unicode escape sequences are decoded inside string literals.</param>
+        ''' <param name="cleanRtf">If <c>True</c>, applies a lightweight RTF cleanup inside string literals.</param>
+        ''' <param name="stripOuterLineBreaks">If <c>True</c>, CR/LF characters outside string literals are removed.</param>
+        ''' <returns>The cleaned formula text.</returns>
         Public Shared Function CleanExcelFormulaStrings(formula As String,
                                                         Optional decodeHtml As Boolean = True,
                                                         Optional decodeUnicode As Boolean = True,
@@ -74,11 +109,24 @@ Namespace SharedLibrary
             Return sb.ToString()
         End Function
 
+        ''' <summary>
+        ''' Matches RTF decimal Unicode escapes of the form <c>\uN?</c> (including negative values).
+        ''' </summary>
         Private Shared ReadOnly _rtfUnicodePattern As New Regex("\\u(-?\d+)\?", RegexOptions.Compiled)
+
+        ''' <summary>
+        ''' Matches JSON-style hex Unicode escapes of the form <c>\uXXXX</c>.
+        ''' </summary>
         Private Shared ReadOnly _jsonUnicodePattern As New Regex("\\u([0-9A-Fa-f]{4})", RegexOptions.Compiled)
 
 
         ' Decode JSON/HTML escapes and normalize RTF hyperlink fields to "URL (display)".
+
+        ''' <summary>
+        ''' Decodes a text string by applying JSON unescaping, HTML entity decoding, and selected RTF normalization steps.
+        ''' </summary>
+        ''' <param name="text">The input text.</param>
+        ''' <returns>The decoded text.</returns>
         Public Shared Function DecodeTextLiterals(ByVal text As String) As String
             If String.IsNullOrEmpty(text) Then Return text
 
@@ -124,16 +172,22 @@ Namespace SharedLibrary
                                         Return ChrW(code)
                                     End Function)
 
-            ' 7) Normalize RTF hyperlink fields (robust, brace-aware)
+            ' 7) Normalize RTF hyperlink fields (brace-aware)
             result = NormalizeRtfHyperlinks(result)
 
-            ' 8) Final cleanup for leftover RTF remnants ({{...}} and font/format switches like \f0 \fs20)
+            ' 8) Cleanup for leftover RTF remnants ({{...}} and font/format switches like \f0 \fs20)
             result = CleanupRtfRemnants(result)
 
             Return result
         End Function
 
         ' Convert {\field ...{\*\fldinst ... HYPERLINK "url"...}{\fldrslt ...display...}} to "url (display)"
+
+        ''' <summary>
+        ''' Converts RTF <c>\field</c> hyperlink blocks into a plain-text representation: <c>url</c> or <c>url (display)</c>.
+        ''' </summary>
+        ''' <param name="s">The input text that may contain RTF hyperlink fields.</param>
+        ''' <returns>The input with recognized RTF hyperlink fields normalized.</returns>
         Private Shared Function NormalizeRtfHyperlinks(ByVal s As String) As String
             If String.IsNullOrEmpty(s) Then Return s
 
@@ -189,6 +243,13 @@ Namespace SharedLibrary
         End Function
 
         ' Strip simple inline RTF (e.g., \ul, \cf1, \fs20, \b) and decode hex escapes like \'e4; drop braces.
+
+        ''' <summary>
+        ''' Removes selected inline RTF control words, decodes <c>\'xx</c> hex escapes using Windows-1252,
+        ''' drops braces, and normalizes whitespace.
+        ''' </summary>
+        ''' <param name="s">The input text.</param>
+        ''' <returns>The stripped text.</returns>
         Private Shared Function StripRtfInline(ByVal s As String) As String
             If String.IsNullOrEmpty(s) Then Return s
 
@@ -213,6 +274,13 @@ Namespace SharedLibrary
         End Function
 
         ' Remove leftover RTF tokens and braces around normalized hyperlinks, e.g. "{{URL (title)}}" and "\f0\fs20".
+
+        ''' <summary>
+        ''' Removes selected RTF remnants (for example, <c>\par</c>, <c>\tab</c>, <c>\fN</c>, <c>\fsN</c>) and
+        ''' normalizes whitespace and line breaks.
+        ''' </summary>
+        ''' <param name="s">The input text.</param>
+        ''' <returns>The cleaned text.</returns>
         Private Shared Function CleanupRtfRemnants(ByVal s As String) As String
             If String.IsNullOrEmpty(s) Then Return s
 
@@ -250,6 +318,11 @@ Namespace SharedLibrary
 
 
         ' Evaluators kept static to avoid repeated allocations.
+
+        ''' <summary>
+        ''' Evaluates <c>\uN?</c> RTF decimal Unicode escapes and replaces them with the corresponding Unicode character
+        ''' when <c>N</c> is within a supported range; otherwise returns an empty string or the original match.
+        ''' </summary>
         Private Shared ReadOnly _rtfUnicodeEvaluator As MatchEvaluator =
     New MatchEvaluator(Function(m As System.Text.RegularExpressions.Match)
                            Dim raw As String = m.Groups(1).Value
@@ -266,6 +339,10 @@ Namespace SharedLibrary
                            Return m.Value
                        End Function)
 
+        ''' <summary>
+        ''' Evaluates JSON-style <c>\uXXXX</c> hex Unicode escapes and replaces them with the corresponding Unicode character
+        ''' when the code point is within a supported range; otherwise returns the original match.
+        ''' </summary>
         Private Shared ReadOnly _jsonUnicodeEvaluator As MatchEvaluator =
     New MatchEvaluator(Function(m As System.Text.RegularExpressions.Match)
                            Dim hex As String = m.Groups(1).Value
@@ -280,6 +357,12 @@ Namespace SharedLibrary
                        End Function)
 
         ' Lightweight RTF cleanup for Excel string literals only (no brace parsing).
+
+        ''' <summary>
+        ''' Performs a lightweight RTF cleanup intended for Excel string literals (without brace-balanced parsing).
+        ''' </summary>
+        ''' <param name="lit">The literal text to clean.</param>
+        ''' <returns>The cleaned literal.</returns>
         Private Shared Function _CleanRtfLiteral(lit As String) As String
             If String.IsNullOrEmpty(lit) Then Return lit
 
@@ -329,6 +412,13 @@ Namespace SharedLibrary
 
 
         ' Find the matching closing brace for the brace at startIdx (or at the next char if not at a brace).
+
+        ''' <summary>
+        ''' Finds the matching closing brace for an opening brace starting at (or before) the specified index.
+        ''' </summary>
+        ''' <param name="s">The input string.</param>
+        ''' <param name="startIdx">An index at or near an opening brace.</param>
+        ''' <returns>The index of the matching closing brace; otherwise <c>-1</c>.</returns>
         Private Shared Function FindMatchingBrace(ByVal s As String, ByVal startIdx As Integer) As Integer
             Dim idx As Integer = startIdx
             If idx >= s.Length Then Return -1
@@ -355,6 +445,13 @@ Namespace SharedLibrary
         End Function
 
         ' Extract the first "...", occurring after a token, case-insensitive.
+
+        ''' <summary>
+        ''' Extracts the first quoted string (<c>"..."</c>) that occurs after the specified token (case-insensitive).
+        ''' </summary>
+        ''' <param name="s">The input string.</param>
+        ''' <param name="token">The token to search for.</param>
+        ''' <returns>The extracted quoted string without quotes; otherwise <c>Nothing</c>.</returns>
         Private Shared Function ExtractQuotedAfter(ByVal s As String, ByVal token As String) As String
             Dim p As Integer = s.IndexOf(token, StringComparison.OrdinalIgnoreCase)
             If p = -1 Then Return Nothing
@@ -366,6 +463,12 @@ Namespace SharedLibrary
         End Function
 
         ' Extract content inside {\fldrslt ...} (handles both {\fldrslt text} and {\fldrslt{...}}).
+
+        ''' <summary>
+        ''' Extracts the content of an RTF <c>\fldrslt</c> block, if present.
+        ''' </summary>
+        ''' <param name="s">An RTF field block string.</param>
+        ''' <returns>The extracted content without the leading <c>\fldrslt</c> token; otherwise <c>Nothing</c>.</returns>
         Private Shared Function ExtractFldrsltBlock(ByVal s As String) As String
             Dim p As Integer = s.IndexOf("{\fldrslt", StringComparison.OrdinalIgnoreCase)
             If p = -1 Then Return Nothing

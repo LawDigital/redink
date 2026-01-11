@@ -1,5 +1,36 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: SharedMethods.VarHelpers.vb
+' Purpose: Provides small shared helper functions for common tasks used across the
+'          library, including default INI path selection, file backup rename,
+'          registry read/write, whitespace/newline normalization, environment
+'          variable expansion for file paths, simple Base64/XOR encoding helpers,
+'          and domain/workgroup checks.
+'
+' Architecture:
+'  - INI path resolution: Selects a default INI path from `DefaultINIPaths` based
+'    on substring matching of the provided key, then expands environment variables.
+'  - File backup: Renames an existing file to the same path with a `.bak` suffix,
+'    overwriting an existing `.bak` by deleting it first.
+'  - Registry helpers: Writes and reads string values under a registry path,
+'    selecting the hive by the path prefix.
+'  - Text normalization: Removes CR/LF characters via `RemoveCR`.
+'  - Path normalization: Expands environment variables and some additional
+'    placeholder tokens, normalizes backslashes, and returns a full path.
+'  - Encoding helpers: Decodes Base64 with URL-safe normalization; provides a
+'    simple XOR encode/decode helper using a caller-provided term.
+'  - Domain checks: Uses WMI (`Win32_ComputerSystem`) to read `Domain` and checks
+'    it against the configured `alloweddomains` list.
+'
+' External Dependencies:
+'  - Microsoft.Win32.Registry (registry access)
+'  - System.Management (WMI query for domain/workgroup)
+'  - System.Windows.Forms.MessageBox (error display)
+'  - Internal helpers used here: `ShowCustomMessageBox`, `DefaultINIPaths`, `AN`,
+'    and `alloweddomains`.
+' =============================================================================
 
 Option Strict On
 Option Explicit On
@@ -9,12 +40,127 @@ Imports System.Management
 Imports System.Text.RegularExpressions
 Imports System.Windows.Forms
 Imports Microsoft.Win32
+Imports SharedLibrary.SharedLibrary.SharedContext
 
 
 Namespace SharedLibrary
     Partial Public Class SharedMethods
 
 
+        ' Standard (dark theme):
+        'Me.Icon = Icon.FromHandle(SharedMethods.GetLogoBitmap(_context, SharedMethods.LogoType.Standard).GetHicon())
+
+        ' Medium (light theme):
+        'Menu1.Image = SharedMethods.GetLogoBitmap(ThisAddIn._context, SharedMethods.LogoType.Medium)
+
+        ' Large:
+        'picLogo.Image = SharedMethods.GetLogoBitmap(_context, SharedMethods.LogoType.Large)
+
+        ' SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)
+
+
+        ''' <summary>
+        ''' Logo types that can be requested.
+        ''' </summary>
+        Public Enum LogoType
+            Standard    ' Red_Ink_Logo (dark theme / default)
+            Medium      ' Red_Ink_Logo_Medium (light theme)
+            Large       ' Red_Ink_Logo_Large
+        End Enum
+
+        ''' <summary>
+        ''' Cached logo path for Standard variant. Set during LoadConfig.
+        ''' Supports file path, UNC path, or URL.
+        ''' </summary>
+        Public Shared INI_LogoPath_Cached As String = ""
+
+        ''' <summary>
+        ''' Cached logo path for Medium variant (light theme). Set during LoadConfig.
+        ''' Supports file path, UNC path, or URL.
+        ''' </summary>
+        Public Shared INI_LogoPathMedium_Cached As String = ""
+
+        ''' <summary>
+        ''' Cached logo path for Large variant. Set during LoadConfig.
+        ''' Supports file path, UNC path, or URL.
+        ''' </summary>
+        Public Shared INI_LogoPathLarge_Cached As String = ""
+
+        ''' <summary>
+        ''' Gets a logo bitmap from an external path (file, UNC, or URL) if configured and valid,
+        ''' otherwise returns the appropriate embedded resource from SharedLibrary.
+        ''' Uses the globally cached logo path values.
+        ''' </summary>
+        ''' <param name="logoType">Which logo type to retrieve.</param>
+        ''' <returns>Valid Bitmap from external source or the embedded resource fallback.</returns>
+        Public Shared Function GetLogoBitmap(logoType As LogoType, Optional RedInkLogo As Boolean = False) As System.Drawing.Bitmap
+
+            If Not RedInkLogo Then
+                Try
+
+                    Dim logoPath As String = Nothing
+                    Select Case logoType
+                        Case LogoType.Standard
+                            logoPath = ExpandEnvironmentVariables(If(INI_LogoPath_Cached, ""))
+                        Case LogoType.Medium
+                            logoPath = ExpandEnvironmentVariables(If(INI_LogoPathMedium_Cached, ""))
+                        Case LogoType.Large
+                            logoPath = ExpandEnvironmentVariables(If(INI_LogoPathLarge_Cached, ""))
+                    End Select
+
+                    If Not String.IsNullOrWhiteSpace(logoPath) Then
+                        Dim bmp = LoadBitmapFromPath(logoPath)
+                        If bmp IsNot Nothing AndAlso bmp.Width > 0 AndAlso bmp.Height > 0 Then
+                            Return bmp
+                        End If
+                        bmp?.Dispose()
+                    End If
+                Catch
+                End Try
+            End If
+
+            ' Fallback to embedded SharedLibrary resources
+            Select Case logoType
+                Case LogoType.Medium
+                    Return My.Resources.Red_Ink_Logo_Medium
+                Case LogoType.Large
+                    Return My.Resources.Red_Ink_Logo_Large
+                Case Else
+                    Return My.Resources.Red_Ink_Logo
+            End Select
+        End Function
+
+        Private Shared Function LoadBitmapFromPath(path As String) As System.Drawing.Bitmap
+            Try
+                ' URL (http/https)
+                If path.StartsWith("http://", StringComparison.OrdinalIgnoreCase) OrElse
+           path.StartsWith("https://", StringComparison.OrdinalIgnoreCase) Then
+                    Using client As New System.Net.WebClient()
+                        Dim bytes = client.DownloadData(path)
+                        Using ms As New System.IO.MemoryStream(bytes)
+                            Return New System.Drawing.Bitmap(ms)
+                        End Using
+                    End Using
+                End If
+
+                ' UNC or local file
+                If path.StartsWith("\\", StringComparison.Ordinal) OrElse System.IO.File.Exists(path) Then
+                    Dim bytes = System.IO.File.ReadAllBytes(path)
+                    Using ms As New System.IO.MemoryStream(bytes)
+                        Return New System.Drawing.Bitmap(ms)
+                    End Using
+                End If
+            Catch
+            End Try
+            Return Nothing
+        End Function
+
+        ''' <summary>
+        ''' Returns the default INI path for a given key by selecting the first matching entry from <c>DefaultINIPaths</c>
+        ''' and expanding environment variables in the resulting path.
+        ''' </summary>
+        ''' <param name="key">A key string used to select the default INI path (substring match).</param>
+        ''' <returns>The expanded default INI path.</returns>
         Public Shared Function GetDefaultINIPath(ByVal key As String) As String
 
             For Each entry In DefaultINIPaths
@@ -26,6 +172,12 @@ Namespace SharedLibrary
         End Function
 
 
+        ''' <summary>
+        ''' Renames the file at <paramref name="filePath"/> to <c>filePath + ".bak"</c>, deleting an existing
+        ''' <c>.bak</c> file first if present.
+        ''' </summary>
+        ''' <param name="filePath">The path of the file to rename.</param>
+        ''' <returns><c>True</c> on success; otherwise <c>False</c>.</returns>
         Public Shared Function RenameFileToBak(filePath As String) As Boolean
             Try
                 ' Rename the file to a .bak file
@@ -43,6 +195,62 @@ Namespace SharedLibrary
         End Function
 
 
+        Public Shared Function GenerateRandomText(ByVal targetLength As Integer) As String
+            If targetLength <= 0 Then
+                Return String.Empty
+            End If
+
+            Dim words As String() = {
+        "the", "and", "to", "of", "a", "in", "that", "is", "for", "on",
+        "with", "as", "by", "this", "from", "or", "be", "are", "it", "an",
+        "which", "at", "we", "can", "has", "have", "will", "not", "one",
+        "all", "their", "more", "about", "when", "there", "use", "used",
+        "such", "other", "some", "time", "each", "many", "these", "may",
+        "like", "well", "very", "into", "over", "after", "before"
+    }
+
+            Dim random As New System.Random()
+            Dim builder As New System.Text.StringBuilder(targetLength + 100)
+
+            Dim currentParagraphLength As Integer = 0
+            Dim paragraphTargetLength As Integer = random.Next(250, 500)
+
+            While builder.Length < targetLength
+                Dim word As String = words(random.Next(words.Length))
+
+                If builder.Length > 0 Then
+                    builder.Append(" ")
+                    currentParagraphLength += 1
+                End If
+
+                builder.Append(word)
+                currentParagraphLength += word.Length
+
+                ' Insert paragraph breaks when paragraph size is reached
+                If currentParagraphLength >= paragraphTargetLength AndAlso builder.Length < targetLength - 2 Then
+                    builder.Append(System.Environment.NewLine)
+                    builder.Append(System.Environment.NewLine)
+
+                    currentParagraphLength = 0
+                    paragraphTargetLength = random.Next(250, 500)
+                End If
+            End While
+
+            ' Trim to exact requested length
+            If builder.Length > targetLength Then
+                builder.Length = targetLength
+            End If
+
+            Return builder.ToString()
+        End Function
+
+
+
+        ''' <summary>
+        ''' Writes a string value to the Windows registry at <paramref name="regPath"/> using the default (unnamed) value.
+        ''' </summary>
+        ''' <param name="regPath">Registry path including hive name (e.g., <c>HKEY_CURRENT_USER\...</c>).</param>
+        ''' <param name="regValue">Value to write; CR/LF is removed via <see cref="RemoveCR"/>.</param>
         Public Shared Sub WriteToRegistry(ByVal regPath As String, ByVal regValue As String)
             Try
                 ' Remove carriage returns from the value
@@ -60,6 +268,12 @@ Namespace SharedLibrary
                         registryHive = Registry.CurrentUser
                     Case "HKEY_LOCAL_MACHINE"
                         registryHive = Registry.LocalMachine
+                    Case "HKEY_CLASSES_ROOT"
+                        registryHive = Registry.ClassesRoot
+                    Case "HKEY_USERS"
+                        registryHive = Registry.Users
+                    Case "HKEY_CURRENT_CONFIG"
+                        registryHive = Registry.CurrentConfig
                     Case Else
                         Throw New ArgumentException("Unsupported registry hive: " & hiveName)
                 End Select
@@ -79,6 +293,14 @@ Namespace SharedLibrary
             End Try
         End Sub
 
+
+        ''' <summary>
+        ''' Reads a value from the Windows registry.
+        ''' </summary>
+        ''' <param name="registryPath">Registry path including hive name (e.g., <c>HKEY_CURRENT_USER\...</c>).</param>
+        ''' <param name="valueName">Name of the value to read.</param>
+        ''' <param name="suppressErrors">If <c>True</c>, suppresses error message boxes and returns an empty string on failure.</param>
+        ''' <returns>The registry value as a string with CR/LF removed, or an empty string on failure/not found.</returns>
         Public Shared Function GetFromRegistry(registryPath As String, valueName As String, Optional suppressErrors As Boolean = False) As String
             Try
                 ' Split the registry path into hive and subkey
@@ -125,6 +347,11 @@ Namespace SharedLibrary
             End Try
         End Function
 
+        ''' <summary>
+        ''' Removes CR/LF characters from a string and trims leading/trailing whitespace.
+        ''' </summary>
+        ''' <param name="inputtext">Input text.</param>
+        ''' <returns>Text with CR/LF removed, or an empty string if <paramref name="inputtext"/> is <c>Nothing</c>.</returns>
         Public Shared Function RemoveCR(ByVal inputtext As String) As String
             If inputtext IsNot Nothing Then
                 inputtext = inputtext.Trim()
@@ -138,11 +365,22 @@ Namespace SharedLibrary
             Return inputtext
         End Function
 
+        ''' <summary>
+        ''' Returns <c>True</c> if <paramref name="str"/> is <c>Nothing</c>, empty, or consists only of whitespace.
+        ''' </summary>
+        ''' <param name="str">Input string.</param>
+        ''' <returns><c>True</c> if the string is <c>Nothing</c>, empty, or whitespace; otherwise <c>False</c>.</returns>
         Public Shared Function IsEmptyOrBlank(ByVal str As String) As Boolean
             ' Check if the string is empty or consists only of whitespace
             Return String.IsNullOrWhiteSpace(str)
         End Function
 
+        ''' <summary>
+        ''' Expands environment variables and selected placeholder tokens in <paramref name="filePath"/>,
+        ''' normalizes the resulting path, and returns its full path.
+        ''' </summary>
+        ''' <param name="filePath">Path that may contain environment variables (e.g., <c>%APPDATA%</c>).</param>
+        ''' <returns>The expanded full path, or an empty string on failure.</returns>
         Public Shared Function ExpandEnvironmentVariables(ByVal filePath As String) As String
             ' Start with the input path
             Dim expandedPath As String = Environment.ExpandEnvironmentVariables(filePath)
@@ -176,6 +414,11 @@ Namespace SharedLibrary
 
 
 
+        ''' <summary>
+        ''' Decodes a Base64 string to bytes, normalizing whitespace and URL-safe Base64 variants.
+        ''' </summary>
+        ''' <param name="base64String">Input Base64 (may contain whitespace/newlines and may be URL-safe).</param>
+        ''' <returns>Decoded bytes, or <c>Nothing</c> on failure.</returns>
         Public Shared Function DecodeBase64(ByVal base64String As String) As Byte()
             Try
                 ' Normalize the input: remove whitespaces and line breaks
@@ -197,6 +440,12 @@ Namespace SharedLibrary
             End Try
         End Function
 
+        ''' <summary>
+        ''' Decodes an XOR-encoded and Base64-encoded string using <paramref name="pTerm"/> as the XOR key material.
+        ''' </summary>
+        ''' <param name="encodedText">The Base64 input text (whitespace/newlines are removed before decoding).</param>
+        ''' <param name="pTerm">XOR key term used for decoding.</param>
+        ''' <returns>Decoded text, or the literal string <c>"Error: Invalid Base64 input"</c> if Base64 decoding fails.</returns>
         Public Shared Function DecodeString(ByVal encodedText As String, ByVal pTerm As String) As String
             ' Remove literal "\n" if present
             encodedText = encodedText.Replace("\n", "")
@@ -226,6 +475,14 @@ Namespace SharedLibrary
             End Try
         End Function
 
+
+
+        ''' <summary>
+        ''' XOR-encodes <paramref name="inputText"/> using <paramref name="pTerm"/> and returns the result as Base64.
+        ''' </summary>
+        ''' <param name="inputText">Plain text to encode.</param>
+        ''' <param name="pTerm">XOR key term used for encoding.</param>
+        ''' <returns>Base64-encoded XOR output.</returns>
         Public Shared Function CodeString(ByVal inputText As String, ByVal pTerm As String) As String
             Dim inputBytes() As Byte = System.Text.Encoding.UTF8.GetBytes(inputText)
             Dim pTermBytes() As Byte = System.Text.Encoding.UTF8.GetBytes(pTerm)
@@ -243,6 +500,10 @@ Namespace SharedLibrary
             Return System.Convert.ToBase64String(encryptedBytes)
         End Function
 
+        ''' <summary>
+        ''' Retrieves the computer's domain/workgroup name via WMI (<c>Win32_ComputerSystem.Domain</c>).
+        ''' </summary>
+        ''' <returns>The domain/workgroup name, or an empty string on failure.</returns>
         Public Shared Function GetDomain() As String
             Try
                 ' Initialize a WMI query to get the Domain property from Win32_ComputerSystem
@@ -269,6 +530,11 @@ Namespace SharedLibrary
             End Try
         End Function
 
+        ''' <summary>
+        ''' Returns <c>True</c> when <c>alloweddomains</c> is configured and the current domain/workgroup name
+        ''' (from <see cref="GetDomain"/>) is not contained in that list.
+        ''' </summary>
+        ''' <returns><c>True</c> if the current domain/workgroup is not allowed; otherwise <c>False</c>.</returns>
         Public Shared Function WrongDomain() As Boolean
 
             Dim strDomain As String = GetDomain() ' Current domain of the computer
@@ -297,6 +563,27 @@ Namespace SharedLibrary
             Else
                 Return False
             End If
+        End Function
+
+
+        ''' <summary>
+        ''' Uppercases the first character of a string (culture-invariant) and leaves the rest unchanged.
+        ''' </summary>
+        Public Shared Function StartWithUpcase(value As String) As String
+            If String.IsNullOrEmpty(value) Then Return If(value, "")
+
+            Dim first As Char = value(0)
+            Dim upperFirst As Char = Char.ToUpperInvariant(first)
+
+            If value.Length = 1 Then
+                Return upperFirst.ToString()
+            End If
+
+            If upperFirst = first Then
+                Return value
+            End If
+
+            Return upperFirst & value.Substring(1)
         End Function
 
     End Class
