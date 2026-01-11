@@ -1940,6 +1940,8 @@ Partial Public Class ThisAddIn
             If OtherPrompt.StartsWith(PurePrefix, StringComparison.OrdinalIgnoreCase) Then
                 OtherPrompt = OtherPrompt.Substring(PurePrefix.Length).Replace("(a file object follows)", "").Replace("(a clipboard object follows)", "").Trim()
                 SysPrompt = OtherPrompt
+                DoClipboard = True
+                DoChunks = False
             Else
                 ' Construct system prompt based on selected feature mode
                 If DoLib Then

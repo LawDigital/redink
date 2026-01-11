@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Excel"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 10.1.2026
+' 11.1.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -55,7 +55,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.100126" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.110126" & SharedMethods.VersionQualifier
 
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
@@ -77,6 +77,7 @@ Partial Public Class ThisAddIn
     Private Const ObjectTrigger As String = "(file)"
     Private Const ObjectTrigger2 As String = "(clip)"
     Private Const ColorTrigger As String = "(color)"
+    Private Const NoFormulasTrigger As String = "(noformulas)"
     Private Const RIMenu = AN
     Private Const MinHelperVersion = 1  ' Minimum version of the helper file that is required
     Public Const LargeWorksheetSize As Integer = 2500

@@ -719,7 +719,7 @@ U. Red Ink functions in Excel
 268 In contrast to Word, the add-in in Excel does not take into account any formatting within the text of a cell, i.e. it is lost. However, the formatting of the entire cell is not changed. 
 269 In the menu, a distinction is made between "(text)" and "(cells)" in the translation functions. The difference concerns the question of whether the function only processes cells that contain text (including numbers) or also those that contain formulae ("(cells)"). If formulae are also included, the add-in will take this into account. The language model is instructed to only translate the texts within formulae, not the words in the formulae, as these would otherwise no longer work. However, the AI can also be asked to adapt formulae using Freestyle. Before this is used productively, this function should be experimented with so that it can be determined what works best and how for the specific case.
 270 In Excel, the similar "Write Neatly" function is available instead of "Improve ". It differs in that it has a slightly different internal prompt, which is designed to convert keywords into complete sentences and, if necessary, to take into account a context (which is queried beforehand, but is optional). The newly formulated sentences replace the previous text in the cell. 
-271 The Freestyle function (see para. 36 above) is also available in Excel. However, the prefixes and triggers familiar from Word do not work here because they do not make sense in Excel or are not normally required. Basically, the add-in will transfer the content of the entire selected cell range, including values and formulae, to the AI together with the command. In this way, the AI can be asked, for example, what the range in question means, how it works or whether it calculates correctly, for example. The AI can also be asked to create a formula for a specific task or to fill out a form ("Fill out C5:C11 like D6:D11 has been filled out, but take into account the use case in C3 and the seven questions on the left."). The result is displayed in a window and can be edited. If formula or cell values are returned, the add-in can also attempt to implement them immediately (they are specially coded with square brackets for this purpose). If you do not want certain of the suggested adjustments, you can delete them in the editor before execution or adjust them manually. The result of the AI is also copied to the clipboard. Adjustments can also be made outside the selected cell range with this command, but the AI only sees the selected cells. If the AI is to include existing content in its considerations, the relevant cells must be selected. If the trigger "(color)" is added, existing color information is also communicated to the AI (e.g. "Fill in all cells with a light blue background with X. (color)"). However, it is also possible to use Freestyle without any selection if the contents of the worksheet are irrelevant. The command "Calculate the mean value of A1:A5 in B3." produces the following result even without any selection (if "OK" is then pressed, Red Ink will insert the relevant formula in B3; if necessary, it will be converted to the local language format): 
+271 The Freestyle function (see para. 36 above) is also available in Excel. However, the prefixes and triggers familiar from Word do not work here because they do not make sense in Excel or are not normally required. Basically, the add-in will transfer the content of the entire selected cell range, including values and formulae, to the AI together with the command. In this way, the AI can be asked, for example, what the range in question means, how it works or whether it calculates correctly, for example. The AI can also be asked to create a formula for a specific task or to fill out a form ("Fill out C5:C11 like D6:D11 has been filled out, but take into account the use case in C3 and the seven questions on the left."). The result is displayed in a window and can be edited. If formula or cell values are returned, the add-in can also attempt to implement them immediately (they are specially coded with square brackets for this purpose). If you do not want certain of the suggested adjustments, you can delete them in the editor before execution or adjust them manually. The result of the AI is also copied to the clipboard. Adjustments can also be made outside the selected cell range with this command, but the AI only sees the selected cells. If the AI is to include existing content in its considerations, the relevant cells must be selected. If the trigger "(color)" is added, existing color information is also communicated to the AI (e.g. "Fill in all cells with a light blue background with X. (color)"). If, in turn, only cell contents without formulas are to be provided to relieve the AI (e.g., for filling out forms), the trigger "(noformulas)" can also be used. Finally, it is also possible to use Freestyle without any selection if the contents of the worksheet are irrelevant. The command "Calculate the mean value of A1:A5 in B3." produces the following result even without any selection (if "OK" is then pressed, Red Ink will insert the relevant formula in B3; if necessary, it will be converted to the local language format): 
 
 272 However, if Freestyle is only to proceed cell by cell, the command must be preceded by the prefix "CellByCell:" or "CBC:". If only cells with text content or a purely numerical value are to be edited, the prefix "TextOnly:" must be used.
 273 In Excel, the Freestyle feature, similar to Word, can output to a pane. For this, either "Pane:" must be prepended, or in the usual output, the "Transfer to Pane" button is used to move the content to a pane. In the pane, it is also possible with the respective button to only apply the selected content with the square brackets in Excel.
@@ -2952,12 +2952,18 @@ Bug fix (hidden window), parameters adjusted (UpdateClients --> UpdateIniClients
 W=1.1.5.200
 E=1.1.5.200
 Introduction of {dir} in Freestyle (Word, Excel) and predefined directories; Discuss this remembers documents on request, also processes directories and can export chats to Word
-6.1.-10.1.2026
+6.1.-11.1.2026
 
-W=1.1.9.200
-E=1.1.8.200
-O=1.1.7.200
-Extended "Discuss this" with the "Sort It Out" function, tooling and various other improvements; option for third-party logos; function for flattening PDFs; extended "Translate", "Correct" and "Freestyle" to process Word documents offline; improved web retriever; "NoLocalConfig" parameter; updated Persona Library
+W=1.1.10.200
+E=1.1.10.200
+O=1.1.10.200
+
+W=1.1.10.0
+E=1.1.10.0
+O=1.1.10.0
+Extended "Discuss this" with the "Sort It Out" function, tooling and various other improvements; option for third-party logos; function for flattening PDFs; extended "Translate", "Correct" and "Freestyle" to process Word documents offline; improved web retriever; "NoLocalConfig" parameter; updated Persona Library; improved Excel cell retriever
+
+Moved to GA
 Note: Version numbers with x.x.x.2nn are Preview-Releases.
 
 
@@ -4042,15 +4048,14 @@ We provide various documents for end-users at https://redink.ai/downloads-site/m
 
 
 
-10 January 2026	1
+11 January 2026	1
 
 
-	10 January 2026 
+	11 January 2026 
 
 
 
 Copyright © LawDigital Ltd., Switzerland. All rights reserved. Info: https://redink.ai
-
 
 
 
