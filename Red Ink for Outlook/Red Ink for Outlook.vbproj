@@ -33,7 +33,7 @@
     <IsWebBootstrapper>True</IsWebBootstrapper>
     <TargetFrameworkProfile />
     <BootstrapperEnabled>true</BootstrapperEnabled>
-    <TargetCulture>en</TargetCulture>    
+    <TargetCulture>en</TargetCulture>
     <AutoIncrementApplicationRevision>true</AutoIncrementApplicationRevision>
     <UpdateEnabled>false</UpdateEnabled>
     <UpdateInterval>0</UpdateInterval>
@@ -43,27 +43,27 @@
     <OfficeApplicationDescription />
     <LoadBehavior>3</LoadBehavior>
   </PropertyGroup>
-	<PropertyGroup Condition="'$(RedInkEnvironment)' == 'Develop'">
-		<ApplicationVersion>1.0.0.700</ApplicationVersion>
-		<PublishUrl>..\clickonce\apps\develop\outlook\</PublishUrl>
-		<InstallUrl>https://redink.ai/apps/develop/outlook/</InstallUrl>
-		<ProductName>Red Ink for Outlook %28Develop%29</ProductName>
-		<FriendlyName>Red Ink for Outlook %28Develop%29</FriendlyName>
-	</PropertyGroup>
-	<PropertyGroup Condition="'$(RedInkEnvironment)' == 'Preview'">
-		<ApplicationVersion>1.0.0.200</ApplicationVersion>
-		<PublishUrl>..\clickonce\apps\preview\outlook\</PublishUrl>
-		<InstallUrl>https://redink.ai/apps/preview/outlook/</InstallUrl>
-		<ProductName>Red Ink for Outlook %28Preview%29</ProductName>
-		<FriendlyName>Red Ink for Outlook %28Preview%29</FriendlyName>
-	</PropertyGroup>
-	<PropertyGroup Condition="'$(RedInkEnvironment)' == 'GA'">
-		<ApplicationVersion>1.0.0.0</ApplicationVersion>
-		<PublishUrl>..\clickonce\apps\ga\outlook\</PublishUrl>
-		<InstallUrl>https://redink.ai/apps/ga/outlook/</InstallUrl>
-		<ProductName>Red Ink for Outlook</ProductName>
-		<FriendlyName>Red Ink for Outlook</FriendlyName>
-	</PropertyGroup>
+  <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Develop'">
+    <ApplicationVersion>1.0.0.700</ApplicationVersion>
+    <PublishUrl>..\clickonce\apps\develop\outlook\</PublishUrl>
+    <InstallUrl>https://redink.ai/apps/develop/outlook/</InstallUrl>
+    <ProductName>Red Ink for Outlook %28Develop%29</ProductName>
+    <FriendlyName>Red Ink for Outlook %28Develop%29</FriendlyName>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Preview'">
+    <ApplicationVersion>1.0.0.200</ApplicationVersion>
+    <PublishUrl>..\clickonce\apps\preview\outlook\</PublishUrl>
+    <InstallUrl>https://redink.ai/apps/preview/outlook/</InstallUrl>
+    <ProductName>Red Ink for Outlook %28Preview%29</ProductName>
+    <FriendlyName>Red Ink for Outlook %28Preview%29</FriendlyName>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(RedInkEnvironment)' == 'GA'">
+    <ApplicationVersion>1.0.0.0</ApplicationVersion>
+    <PublishUrl>..\clickonce\apps\ga\outlook\</PublishUrl>
+    <InstallUrl>https://redink.ai/apps/ga/outlook/</InstallUrl>
+    <ProductName>Red Ink for Outlook</ProductName>
+    <FriendlyName>Red Ink for Outlook</FriendlyName>
+  </PropertyGroup>
   <ItemGroup>
     <BootstrapperPackage Include=".NETFramework,Version=v4.7.2">
       <Visible>False</Visible>
@@ -338,6 +338,7 @@
       <SubType>Component</SubType>
     </Compile>
     <Compile Include="ThisAddIn.Commands.vb" />
+    <Compile Include="ThisAddIn.VarHelpers.vb" />
     <Compile Include="ThisAddIn.Helpers.vb" />
     <Compile Include="ThisAddIn.Processing.vb" />
     <Compile Include="ThisAddIn.Properties.vb" />

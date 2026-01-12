@@ -199,6 +199,7 @@ Namespace SharedLibrary
             Property SP_Add_Bubbles_Format As String
             Property SP_Add_Batch As String
             Property SP_Add_Slides As String
+            Property SP_Add_Chart As String
             Property SP_BubblesExcel As String
             Property SP_Add_Revisions As String
             Property SP_MarkupRegex As String
@@ -474,6 +475,7 @@ Namespace SharedLibrary
         Public Property SP_Add_Bubbles_Format As String Implements ISharedContext.SP_Add_Bubbles_Format
         Public Property SP_Add_Batch As String Implements ISharedContext.SP_Add_Batch
         Public Property SP_Add_Slides As String Implements ISharedContext.SP_Add_Slides
+        Public Property SP_Add_Chart As String Implements ISharedContext.SP_Add_Chart
         Public Property SP_BubblesExcel As String Implements ISharedContext.SP_BubblesExcel
         Public Property SP_Add_Revisions As String Implements ISharedContext.SP_Add_Revisions
         Public Property SP_MarkupRegex As String Implements ISharedContext.SP_MarkupRegex

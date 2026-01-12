@@ -1,30 +1,68 @@
 ﻿' Part of "Red Ink for Word"
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
-
+' Copyright (c) LawDigital Ltd., Switzerland.
+' All rights reserved. For license to use see https://redink.ai.
+'
 ' =============================================================================
 ' File: ThisAddIn.WordHelpers.vb
-' Purpose: Provides Word document helper utilities including document comparison,
-'          revision/comment extraction and analysis, content control management,
-'          regex-based search/replace, and markup time span calculation.
+' Purpose: Word-centric helper utilities for the add-in, including document and
+'          selection comparison workflows, change extraction/analysis for LLM
+'          summarization, markup/time-span analytics, and various editing helpers
+'          (content control removal, regex search/replace, file import/export utilities).
 '
 ' Architecture:
-'  - Document Comparison: Compares active document with another open document using
-'    Word.CompareDocuments API; exports result as filtered HTML with optional LLM summarization.
-'  - Change Extraction: Extracts revisions (insertions, deletions, moves) and comments
-'    with XML-like markup tags (<ins>, <del>, <comment>) for LLM processing.
-'  - LLM Integration: Calls SharedMethods.LLM with SP_Markup system prompt to generate
-'    change summaries; converts Markdown results to HTML via Markdig pipeline.
-'  - Content Control Removal: Removes Word content controls while preserving text/formatting;
-'    handles document-wide or selection-based scope with protection checks.
-'  - Regex Operations: Multi-pattern regex search/replace with validation and persistent
-'    pattern memory across sessions.
-'  - Markup Analysis: Calculates time spans between first/last revision or comment by author;
-'    supports date filtering and selection/document scope.
-'  - UI Threading: Async operations use STA threads for ShowHTMLCustomMessageBox compatibility;
-'    progress feedback via SplashScreen with ESC cancellation.
-'  - Encoding Detection: Filtered HTML encoding detected via BOM or meta charset tag fallback.
-'  - External Dependencies: SharedLibrary.SharedMethods provides LLM, UI dialogs, text editors;
-'    Markdig handles Markdown-to-HTML conversion.
+' - Comparison UI (HTML viewer):
+'     - `CompareActiveDocWithOtherOpenDoc`:
+'         - If a text selection exists, routes to `CompareSelectedTextRanges`.
+'         - Otherwise compares the active document against another open document
+'           chosen by the user.
+'         - Generates a comparison document via `Word.Application.CompareDocuments`,
+'           exports it to Filtered HTML (temp folder), and displays it with
+'           `ShowHTMLCustomMessageBox`.
+'         - Provides post-actions (buttons) such as: summarize changes, export to PDF,
+'           copy result to clipboard (with formatting), open result in Word, and run
+'           further "compare selected" operations.
+'     - `CompareSelectedTextRanges`:
+'         - Captures two user-selected ranges (non-modal prompts so Word stays usable),
+'           compares via `CompareDocuments` on temporary documents, exports to HTML,
+'           and displays with the same action buttons.
+'
+' - Change Extraction + LLM Summarization:
+'     - `ExtractChangesWithMarkupTags`:
+'         - Extracts revisions into XML-like tags (`<ins>`, `<del>`) and captures
+'           comments, footnotes, and endnotes for downstream processing.
+'     - `SummarizeComparisonChangesAsync`:
+'         - Submits extracted markup to `SharedMethods.LLM` with `SP_Markup` and renders
+'           the Markdown result to HTML (Markdig) for display.
+'     - `SummarizeDocumentChanges` / `ExtractRevisionsAndCommentsWithMarkup`:
+'         - Summarizes revisions/comments from a selection or whole document with optional
+'           date filtering and comment cutoffs relative to earliest revision.
+'
+' - Export/IO Helpers:
+'     - `ReadHtmlWithEncodingDetection` detects encoding of Word-generated Filtered HTML
+'       (BOM/meta charset; fallback to Windows-1252), used before displaying in the HTML viewer.
+'     - `ExportComparisonToPdfFromHtml` reopens exported HTML in Word and exports to PDF,
+'       prompting for output path and ensuring unique filenames.
+'     - Additional file conversion helpers (e.g., PDF flattening, content export/import)
+'       live in this file and share the same UI/progress patterns.
+'
+' - Editing Utilities:
+'     - Content control removal helpers (`RemoveContentControlsRespectSelection`,
+'       `RemoveAllContentControlsKeepContents`, `RemoveContentControlsInRangeKeepContents`)
+'       remove controls while preserving text/formatting and safely handling protected docs.
+'     - `RegexSearchReplace` provides multi-pattern regex operations with persistent settings.
+'     - `AcceptFormatting` accepts formatting-only revisions with escape-to-cancel UX.
+'     - `CalculateUserMarkupTimeSpan` calculates markup/comment time spans by author with optional date filter.
+'
+' Threading / UX:
+' - Uses non-modal top-most dialogs for selection capture, enabling the user to interact with Word
+'   while prompts are visible.
+' - Long-running work uses progress/splash patterns, and asynchronous UI rendering uses STA threads
+'   where required by WinForms/embedded browser controls.
+'
+' Dependencies:
+' - Microsoft Office Interop Word (`Microsoft.Office.Interop.Word`)
+' - Markdig (Markdown → HTML rendering)
+' - SharedLibrary (`SharedLibrary.SharedMethods`) for dialogs, clipboard helpers, and LLM access
 ' =============================================================================
 
 Option Explicit On
@@ -58,15 +96,9 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Compares the active Word document with another open document selected by the user.
     ''' Generates a comparison document, exports it to filtered HTML, and displays the result
-    ''' with an optional "Summarize Changes" button that triggers LLM-based analysis.
+    ''' with buttons for summarization, PDF export, Word export, and selection-based comparison.
+    ''' If text is selected, redirects to Compare Selected flow regardless of other open documents.
     ''' </summary>
-    ''' <remarks>
-    ''' Acquires Word application via COM → validates active document → prompts user to select
-    ''' comparison document if multiple are open → creates Word comparison with all tracking options →
-    ''' extracts changes with markup tags → exports to temporary filtered HTML → detects encoding
-    ''' via BOM or meta charset → injects base href and meta charset → displays in custom HTML viewer.
-    ''' Temporary files are deleted after 3 seconds via background thread to avoid file locking issues.
-    ''' </remarks>
     Public Shared Sub CompareActiveDocWithOtherOpenDoc()
         ' Acquire the running Word instance
         Dim wordAppObj As Object = Nothing
@@ -99,6 +131,23 @@ Partial Public Class ThisAddIn
             Exit Sub
         End If
 
+        ' CHECK FOR TEXT SELECTION FIRST - if text is selected, always go to Compare Selected
+        Dim hasSelection As Boolean = False
+        Try
+            Dim sel As Microsoft.Office.Interop.Word.Selection = wordApp.Selection
+            If sel IsNot Nothing AndAlso sel.Range IsNot Nothing AndAlso sel.Start <> sel.End Then
+                hasSelection = True
+            End If
+        Catch
+        End Try
+
+        If hasSelection Then
+            ' Text is selected - redirect to Compare Selected regardless of other documents
+            CompareSelectedTextRanges(wordApp)
+            Exit Sub
+        End If
+
+        ' No text selected - proceed with document comparison
         ' Build the list of other open documents
         Dim otherDocs As New List(Of Microsoft.Office.Interop.Word.Document)()
         For Each d As Microsoft.Office.Interop.Word.Document In wordApp.Documents
@@ -108,7 +157,7 @@ Partial Public Class ThisAddIn
         Next
 
         If otherDocs.Count = 0 Then
-            ShowCustomMessageBox("No other open document found to compare against.", AN)
+            ShowCustomMessageBox("No other open document found to compare against. To compare text selections, first select text in the document.", AN)
             Exit Sub
         End If
 
@@ -137,20 +186,31 @@ Partial Public Class ThisAddIn
             docToCompare = indexToDoc(chosenIdx)
         End If
 
-        ' Compare and export to filtered HTML
+        ' Store document names for PDF naming
+        Dim originalDocName As String = Path.GetFileNameWithoutExtension(If(activeDoc.Name, "Original"))
+        Dim revisedDocName As String = Path.GetFileNameWithoutExtension(If(docToCompare.Name, "Revised"))
+        Dim originalDocPath As String = Nothing
+        Try
+            originalDocPath = activeDoc.Path
+        Catch
+        End Try
+
+        ' Run the comparison and display - NOT on a separate thread since ShowHTMLCustomMessageBox handles threading
         Dim compareDoc As Microsoft.Office.Interop.Word.Document = Nothing
         Dim tempHtmlPath As String = Nothing
         Dim tempFolder As String = Nothing
 
         ' UI suppression to reduce flicker
-        Dim prevScreenUpdating As Boolean = wordApp.ScreenUpdating
-        Dim prevAlerts As Microsoft.Office.Interop.Word.WdAlertLevel = wordApp.DisplayAlerts
+        Dim prevScreenUpdating As Boolean = True
+        Dim prevAlerts As Microsoft.Office.Interop.Word.WdAlertLevel = Microsoft.Office.Interop.Word.WdAlertLevel.wdAlertsAll
         Dim prevWindow As Microsoft.Office.Interop.Word.Window = Nothing
 
         ' Store extracted changes for LLM summarization
         Dim extractedChangesText As String = Nothing
 
         Try
+            prevScreenUpdating = wordApp.ScreenUpdating
+            prevAlerts = wordApp.DisplayAlerts
             wordApp.ScreenUpdating = False
             wordApp.DisplayAlerts = Microsoft.Office.Interop.Word.WdAlertLevel.wdAlertsNone
             prevWindow = wordApp.ActiveWindow
@@ -175,6 +235,8 @@ Partial Public Class ThisAddIn
                 IgnoreAllComparisonWarnings:=False
             )
             If compareDoc Is Nothing Then
+                wordApp.DisplayAlerts = prevAlerts
+                wordApp.ScreenUpdating = prevScreenUpdating
                 ShowCustomMessageBox("Word did not produce a comparison document.", AN)
                 Exit Sub
             End If
@@ -197,137 +259,829 @@ Partial Public Class ThisAddIn
 
             compareDoc.SaveAs2(FileName:=tempHtmlPath, FileFormat:=WdSaveFormat.wdFormatFilteredHTML)
 
-            ' Restore focus ASAP to reduce flicker
-            Try
-                prevWindow?.Activate()
-            Catch
-            End Try
-
-            ' Close the comparison doc to release file locks
+            ' Close the comparison document NOW - we have the HTML
             Try
                 compareDoc.Close(WdSaveOptions.wdDoNotSaveChanges)
             Catch
             End Try
             compareDoc = Nothing
 
-            ' Read bytes with retry to avoid transient locks
-            Dim raw As Byte() = Nothing
-            Dim maxAttempts As Integer = 10
-            Dim delayMs As Integer = 100
-            For attempt As Integer = 1 To maxAttempts
-                Try
-                    raw = File.ReadAllBytes(tempHtmlPath)
-                    Exit For
-                Catch ex As IOException
-                    Threading.Thread.Sleep(delayMs)
-                End Try
-            Next
-            If raw Is Nothing OrElse raw.Length = 0 Then
-                ShowCustomMessageBox($"Comparison failed: could not read '{tempHtmlPath}'.", AN)
-                Exit Sub
-            End If
+            ' Restore focus ASAP to reduce flicker
+            Try
+                prevWindow?.Activate()
+            Catch
+            End Try
 
-            ' Decode using BOM or <meta charset>, else default to Windows-1252
-            Dim enc As System.Text.Encoding = System.Text.Encoding.UTF8
-            If raw.Length >= 3 AndAlso raw(0) = &HEF AndAlso raw(1) = &HBB AndAlso raw(2) = &HBF Then
-                enc = System.Text.Encoding.UTF8
-            Else
-                Dim probe As String = System.Text.Encoding.GetEncoding(28591).GetString(raw) ' ISO-8859-1
-                Dim m As System.Text.RegularExpressions.Match =
-                    System.Text.RegularExpressions.Regex.Match(
-                        probe,
-                        "(?is)<meta[^>]*?(?:charset\s*=\s*[""']?\s*([A-Za-z0-9_\-]+)|http-equiv\s*=\s*[""']?\s*content-type[""'][^>]*?content\s*=\s*[""'][^""']*?;\s*charset\s*=\s*([A-Za-z0-9_\-]+))",
-                        System.Text.RegularExpressions.RegexOptions.IgnoreCase)
-                Dim charset As String = Nothing
-                If m.Success Then
-                    charset = If(m.Groups(1).Success, m.Groups(1).Value, If(m.Groups(2).Success, m.Groups(2).Value, Nothing))
-                End If
-                If Not String.IsNullOrEmpty(charset) Then
-                    Try
-                        enc = System.Text.Encoding.GetEncoding(charset)
-                    Catch
-                        enc = System.Text.Encoding.GetEncoding(1252)
-                    End Try
-                Else
-                    enc = System.Text.Encoding.GetEncoding(1252)
-                End If
-            End If
+            ' Restore UI settings now
+            wordApp.DisplayAlerts = prevAlerts
+            wordApp.ScreenUpdating = prevScreenUpdating
 
-            Dim html As String = enc.GetString(raw)
+            ' Capture references for closures
+            Dim capturedWordApp As Microsoft.Office.Interop.Word.Application = wordApp
+            Dim capturedOriginalDocName As String = originalDocName
+            Dim capturedRevisedDocName As String = revisedDocName
+            Dim capturedOriginalDocPath As String = originalDocPath
+            Dim capturedTempFolder As String = tempFolder
+            Dim capturedTempHtmlPath As String = tempHtmlPath
 
-            ' Ensure proper meta charset and inject base for resources
-            Dim hasHead As Boolean = html.IndexOf("<head", StringComparison.OrdinalIgnoreCase) >= 0
-            Dim metaCharset As String = $"<meta http-equiv=""Content-Type"" content=""text/html; charset={enc.WebName}"">"
-            If hasHead Then
-                Dim rxHead As New System.Text.RegularExpressions.Regex("(<head[^>]*>)", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
-                html = rxHead.Replace(html, "$1" & metaCharset, 1)
-            Else
-                html = "<html><head>" & metaCharset & "</head>" & html.Replace("<html>", "").Replace("</html>", "") & "</html>"
-            End If
+            ' Read HTML with proper encoding detection
+            Dim htmlContent As String = ReadHtmlWithEncodingDetection(capturedTempHtmlPath)
 
-            Dim baseTag As String = $"<base href=""{tempFolder.Replace("\", "/")}/"">"
-            Dim rxMetaEnd As New System.Text.RegularExpressions.Regex("(<head[^>]*>)(.*?)(</head>)", System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.Singleline)
-            html = rxMetaEnd.Replace(html,
-                                     Function(mm)
-                                         Return mm.Groups(1).Value & baseTag & mm.Groups(2).Value & mm.Groups(3).Value
-                                     End Function, 1)
+            ' Inject base href and Mark of the Web for security
+            Dim baseHref As String = $"<base href=""file:///{capturedTempFolder.Replace("\", "/")}/"">"
+            Dim motw As String = "<!-- saved from url=(0016)http://localhost -->"
+            htmlContent = htmlContent.Replace("<head>", "<head>" & vbCrLf & motw & vbCrLf & baseHref)
 
-            ' Show result with optional "Summarize Changes" button
-            Dim extraAction As System.Action = Nothing
+            ' Build additional buttons array
+            Dim additionalButtons As New List(Of System.Tuple(Of String, System.Action, Boolean))()
+
+            ' Summarize Changes button
             If Not String.IsNullOrWhiteSpace(extractedChangesText) Then
-                extraAction = Sub()
-                                  ' This runs on the STA thread of ShowHTMLCustomMessageBox
-                                  SummarizeComparisonChangesAsync(extractedChangesText)
-                              End Sub
+                additionalButtons.Add(New System.Tuple(Of String, System.Action, Boolean)(
+                    "Summarize Changes",
+                    Sub() SummarizeComparisonChangesAsync(extractedChangesText),
+                    False))
             End If
 
-            ShowHTMLCustomMessageBox(html, $"{AN} Word Active Compare",
-                                     extraButtonText:=If(Not String.IsNullOrWhiteSpace(extractedChangesText), "Summarize Changes", Nothing),
-                                     extraButtonAction:=extraAction,
-                                     CloseAfterExtra:=False)
+            ' Send to PDF button
+            Dim pdfDefaultPath As String = If(String.IsNullOrEmpty(capturedOriginalDocPath) OrElse Not Directory.Exists(capturedOriginalDocPath),
+                                              Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+                                              capturedOriginalDocPath)
+            Dim pdfDefaultName As String = $"Compare_{SanitizeFileName(capturedOriginalDocName)}_{SanitizeFileName(capturedRevisedDocName)}"
+            additionalButtons.Add(New System.Tuple(Of String, System.Action, Boolean)(
+                "Send to PDF",
+                Sub()
+                    If Not File.Exists(capturedTempHtmlPath) Then
+                        ShowCustomMessageBox("The comparison file is no longer available.", AN)
+                        Return
+                    End If
+                    ExportComparisonToPdfFromHtml(capturedTempHtmlPath, capturedWordApp, pdfDefaultName, pdfDefaultPath)
+                End Sub,
+                False))
+
+            ' Copy to Clipboard button - copy the comparison WITH formatting/markup
+            additionalButtons.Add(New System.Tuple(Of String, System.Action, Boolean)(
+                "Copy to Clipboard",
+                Sub()
+                    Try
+                        If Not File.Exists(capturedTempHtmlPath) Then
+                            ShowCustomMessageBox("The comparison file is no longer available.", AN)
+                            Return
+                        End If
+                        ' Open the HTML file temporarily in Word and copy the content with formatting
+                        Dim tempDoc As Microsoft.Office.Interop.Word.Document = Nothing
+                        Dim prevScreenUpdating_2nd As Boolean = capturedWordApp.ScreenUpdating
+                        Dim prevAlerts_2nd As Microsoft.Office.Interop.Word.WdAlertLevel = capturedWordApp.DisplayAlerts
+                        Try
+                            capturedWordApp.ScreenUpdating = False
+                            capturedWordApp.DisplayAlerts = Microsoft.Office.Interop.Word.WdAlertLevel.wdAlertsNone
+
+                            tempDoc = capturedWordApp.Documents.Open(
+                                FileName:=capturedTempHtmlPath,
+                                ReadOnly:=True,
+                                Visible:=False)
+
+                            ' Select all content and copy to clipboard (preserves formatting and markup)
+                            tempDoc.Content.Copy()
+
+                            tempDoc.Close(WdSaveOptions.wdDoNotSaveChanges)
+                            tempDoc = Nothing
+
+                            capturedWordApp.DisplayAlerts = prevAlerts_2nd
+                            capturedWordApp.ScreenUpdating = prevScreenUpdating_2nd
+
+                            ShowCustomMessageBox("Comparison copied to clipboard with formatting. You can now paste it into any Word document.", AN)
+                        Finally
+                            If tempDoc IsNot Nothing Then
+                                Try
+                                    tempDoc.Close(WdSaveOptions.wdDoNotSaveChanges)
+                                Catch
+                                End Try
+                            End If
+                            capturedWordApp.DisplayAlerts = prevAlerts_2nd
+                            capturedWordApp.ScreenUpdating = prevScreenUpdating_2nd
+                        End Try
+                    Catch ex As Exception
+                        ShowCustomMessageBox($"Failed to copy to clipboard: {ex.Message}", AN)
+                    End Try
+                End Sub,
+                False))
+
+            ' Send to Document button
+            additionalButtons.Add(New System.Tuple(Of String, System.Action, Boolean)(
+                "Send to Document",
+                Sub()
+                    Try
+                        If Not File.Exists(capturedTempHtmlPath) Then
+                            ShowCustomMessageBox("The comparison file is no longer available.", AN)
+                            Return
+                        End If
+                        ' Open the HTML file in Word as a new document
+                        Dim newDoc As Microsoft.Office.Interop.Word.Document = capturedWordApp.Documents.Open(
+                            FileName:=capturedTempHtmlPath,
+                            ReadOnly:=False,
+                            Visible:=True)
+                        newDoc.Activate()
+                    Catch ex As Exception
+                        ShowCustomMessageBox($"Failed to open in Word: {ex.Message}", AN)
+                    End Try
+                End Sub,
+                False))
+
+            ' Compare Selected button
+            additionalButtons.Add(New System.Tuple(Of String, System.Action, Boolean)(
+                "Compare Selected",
+                Sub() CompareSelectedTextRanges(capturedWordApp),
+                False))
+
+            ' Define cleanup action
+            Dim cleanupAction As System.Action =
+                    Sub()
+                        Try
+                            If Directory.Exists(capturedTempFolder) Then
+                                Directory.Delete(capturedTempFolder, recursive:=True)
+                            End If
+                        Catch
+                            ' Ignore cleanup errors
+                        End Try
+                    End Sub
+
+            ' Show result with all buttons - cleanup happens when dialog closes
+            ShowHTMLCustomMessageBox(htmlContent, $"{AN} Word Active Compare", additionalButtons:=additionalButtons.ToArray(), onClose:=cleanupAction)
 
         Catch ex As System.Exception
-            ShowCustomMessageBox($"Comparison failed: {ex.Message}", AN)
-        Finally
-            ' Safety close
+            ' Safety close on error
             If compareDoc IsNot Nothing Then
                 Try
                     compareDoc.Close(WdSaveOptions.wdDoNotSaveChanges)
                 Catch
                 End Try
-                compareDoc = Nothing
             End If
 
-            ' Restore UI
             wordApp.DisplayAlerts = prevAlerts
             wordApp.ScreenUpdating = prevScreenUpdating
 
-            ' Cleanup temp files (delayed, best effort)
-            If Not String.IsNullOrEmpty(tempFolder) Then
+            ShowCustomMessageBox($"Comparison failed: {ex.Message}", AN)
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Reads an HTML file with proper encoding detection.
+    ''' Word's filtered HTML often uses Windows-1252 encoding.
+    ''' </summary>
+    Private Shared Function ReadHtmlWithEncodingDetection(filePath As String) As String
+        If Not File.Exists(filePath) Then Return String.Empty
+
+        ' First, read as bytes to detect encoding
+        Dim bytes As Byte() = File.ReadAllBytes(filePath)
+
+        ' Check for BOM
+        Dim encoding As System.Text.Encoding = Nothing
+
+        If bytes.Length >= 3 AndAlso bytes(0) = &HEF AndAlso bytes(1) = &HBB AndAlso bytes(2) = &HBF Then
+            encoding = System.Text.Encoding.UTF8
+        ElseIf bytes.Length >= 2 AndAlso bytes(0) = &HFF AndAlso bytes(1) = &HFE Then
+            encoding = System.Text.Encoding.Unicode
+        ElseIf bytes.Length >= 2 AndAlso bytes(0) = &HFE AndAlso bytes(1) = &HFF Then
+            encoding = System.Text.Encoding.BigEndianUnicode
+        End If
+
+        ' If no BOM, try to detect from meta charset tag
+        If encoding Is Nothing Then
+            ' Read first 1024 bytes as ASCII to find charset
+            Dim headerText As String = System.Text.Encoding.ASCII.GetString(bytes, 0, Math.Min(1024, bytes.Length))
+
+            ' Look for charset in meta tag
+            Dim charsetMatch As Match = Regex.Match(headerText, "charset\s*=\s*[""']?([^""'\s>]+)", RegexOptions.IgnoreCase)
+            If charsetMatch.Success Then
+                Dim charsetName As String = charsetMatch.Groups(1).Value.Trim()
                 Try
-                    Dim t As New Threading.Thread(
-                        Sub()
+                    encoding = System.Text.Encoding.GetEncoding(charsetName)
+                Catch
+                    ' Invalid charset name, fall back
+                End Try
+            End If
+        End If
+
+        ' Default to Windows-1252 for Word HTML (common for Western European)
+        If encoding Is Nothing Then
+            Try
+                encoding = System.Text.Encoding.GetEncoding(1252) ' Windows-1252
+            Catch
+                encoding = System.Text.Encoding.UTF8
+            End Try
+        End If
+
+        Return encoding.GetString(bytes)
+    End Function
+
+    ''' <summary>
+    ''' Allows the user to compare two selected text ranges from open documents.
+    ''' First prompts for the first selection, then for the second, and performs a text comparison.
+    ''' Uses non-modal topmost dialogs to allow Word document access during selection.
+    ''' Shows the comparison result in the HTML viewer.
+    ''' </summary>
+    Private Shared Sub CompareSelectedTextRanges(wordApp As Microsoft.Office.Interop.Word.Application)
+        Try
+            ' Check if text is already selected - use it as first selection
+            Dim firstText As String = Nothing
+            Try
+                Dim sel1 As Microsoft.Office.Interop.Word.Selection = wordApp.Selection
+                If sel1 IsNot Nothing AndAlso sel1.Range IsNot Nothing AndAlso sel1.Start <> sel1.End Then
+                    firstText = sel1.Range.Text
+                End If
+            Catch
+            End Try
+
+            ' If no text selected, prompt user to select using non-modal dialog
+            If String.IsNullOrWhiteSpace(firstText) Then
+                Dim step1Result As Integer = ShowCustomYesNoBox(
+                    "Please select the FIRST text range to compare in any open document, then click 'Selection Ready'.",
+                    "Selection Ready",
+                    "Cancel",
+                    $"{AN} Compare Selected - Step 1",
+                    nonModal:=True)
+
+                If step1Result <> 1 Then
+                    Return ' User cancelled
+                End If
+
+                Try
+                    Dim sel1 As Microsoft.Office.Interop.Word.Selection = wordApp.Selection
+                    If sel1 IsNot Nothing AndAlso sel1.Range IsNot Nothing AndAlso sel1.Start <> sel1.End Then
+                        firstText = sel1.Range.Text
+                    End If
+                Catch
+                End Try
+
+                If String.IsNullOrWhiteSpace(firstText) Then
+                    ShowCustomMessageBox("No text was selected for the first range. Operation cancelled.", AN)
+                    Return
+                End If
+
+                ' Now prompt for second selection
+                Dim step2Result As Integer = ShowCustomYesNoBox(
+                    "First selection captured. Now please select the SECOND text range to compare (can be in the same or different document), then click 'Selection Ready'.",
+                    "Selection Ready",
+                    "Cancel",
+                    $"{AN} Compare Selected - Step 2",
+                    nonModal:=True)
+
+                If step2Result <> 1 Then
+                    Return ' User cancelled
+                End If
+            Else
+                ' Inform user that we're using the current selection and ask for second
+                Dim step2Result As Integer = ShowCustomYesNoBox(
+                    $"First selection captured ({firstText.Length} characters).{vbCrLf}{vbCrLf}Now please select the SECOND text range to compare (can be in the same or different document), then click 'Selection Ready'.",
+                    "Selection Ready",
+                    "Cancel",
+                    $"{AN} Compare Selected - Step 2",
+                    nonModal:=True)
+
+                If step2Result <> 1 Then
+                    Return ' User cancelled
+                End If
+            End If
+
+            Dim secondText As String = Nothing
+            Try
+                Dim sel2 As Microsoft.Office.Interop.Word.Selection = wordApp.Selection
+                If sel2 IsNot Nothing AndAlso sel2.Range IsNot Nothing AndAlso sel2.Start <> sel2.End Then
+                    secondText = sel2.Range.Text
+                End If
+            Catch
+            End Try
+
+            If String.IsNullOrWhiteSpace(secondText) Then
+                ShowCustomMessageBox("No text was selected for the second range. Operation cancelled.", AN)
+                Return
+            End If
+
+            ' Check if both texts are identical
+            If firstText = secondText Then
+                ShowCustomMessageBox("The two selected text ranges are identical. No differences to show.", AN)
+                Return
+            End If
+
+            ' Create temporary documents and compare, then show in HTML viewer
+            Dim tempDoc1 As Microsoft.Office.Interop.Word.Document = Nothing
+            Dim tempDoc2 As Microsoft.Office.Interop.Word.Document = Nothing
+            Dim compareDoc As Microsoft.Office.Interop.Word.Document = Nothing
+            Dim tempHtmlPath As String = Nothing
+            Dim tempFolder As String = Nothing
+
+            Dim prevScreenUpdating As Boolean = wordApp.ScreenUpdating
+            Dim prevAlerts As Microsoft.Office.Interop.Word.WdAlertLevel = wordApp.DisplayAlerts
+
+            Try
+                wordApp.ScreenUpdating = False
+                wordApp.DisplayAlerts = Microsoft.Office.Interop.Word.WdAlertLevel.wdAlertsNone
+
+                ' Create temporary documents with the selected text
+                tempDoc1 = wordApp.Documents.Add(Visible:=False)
+                tempDoc1.Content.Text = firstText
+
+                tempDoc2 = wordApp.Documents.Add(Visible:=False)
+                tempDoc2.Content.Text = secondText
+
+                ' Compare the temporary documents
+                compareDoc = wordApp.CompareDocuments(
+                    OriginalDocument:=tempDoc1,
+                    RevisedDocument:=tempDoc2,
+                    Destination:=WdCompareDestination.wdCompareDestinationNew,
+                    Granularity:=WdGranularity.wdGranularityWordLevel,
+                    CompareFormatting:=False,
+                    CompareCaseChanges:=True,
+                    CompareWhitespace:=False,
+                    CompareTables:=True,
+                    CompareHeaders:=False,
+                    CompareFootnotes:=False,
+                    CompareTextboxes:=False,
+                    CompareFields:=False,
+                    CompareComments:=False,
+                    CompareMoves:=True,
+                    RevisedAuthor:=Environment.UserName,
+                    IgnoreAllComparisonWarnings:=True
+                )
+
+                ' Close temp documents immediately
+                Try
+                    tempDoc1.Close(WdSaveOptions.wdDoNotSaveChanges)
+                Catch
+                End Try
+                tempDoc1 = Nothing
+
+                Try
+                    tempDoc2.Close(WdSaveOptions.wdDoNotSaveChanges)
+                Catch
+                End Try
+                tempDoc2 = Nothing
+
+                If compareDoc Is Nothing Then
+                    wordApp.DisplayAlerts = prevAlerts
+                    wordApp.ScreenUpdating = prevScreenUpdating
+                    ShowCustomMessageBox("Word did not produce a comparison result.", AN)
+                    Return
+                End If
+
+                ' Keep comparison doc window hidden
+                Try
+                    If compareDoc.Windows IsNot Nothing AndAlso compareDoc.Windows.Count > 0 Then
+                        compareDoc.Windows(1).Visible = False
+                    End If
+                Catch
+                End Try
+
+                ' Extract changes for summarization
+                Dim extractedChangesText As String = ExtractChangesWithMarkupTags(compareDoc)
+
+                ' Export to filtered HTML
+                tempFolder = Path.Combine(Path.GetTempPath(), $"{AN2}_compare_sel_" & Guid.NewGuid().ToString("N"))
+                Directory.CreateDirectory(tempFolder)
+                tempHtmlPath = Path.Combine(tempFolder, "comparison.htm")
+
+                compareDoc.SaveAs2(FileName:=tempHtmlPath, FileFormat:=WdSaveFormat.wdFormatFilteredHTML)
+
+                ' Close the comparison document NOW - we have the HTML
+                Try
+                    compareDoc.Close(WdSaveOptions.wdDoNotSaveChanges)
+                Catch
+                End Try
+                compareDoc = Nothing
+
+                ' Restore UI
+                wordApp.DisplayAlerts = prevAlerts
+                wordApp.ScreenUpdating = prevScreenUpdating
+
+                ' Capture for closures
+                Dim capturedWordApp As Microsoft.Office.Interop.Word.Application = wordApp
+                Dim capturedTempFolder As String = tempFolder
+                Dim capturedTempHtmlPath As String = tempHtmlPath
+
+                ' Read HTML with proper encoding detection
+                Dim htmlContent As String = ReadHtmlWithEncodingDetection(capturedTempHtmlPath)
+
+                ' Inject base href and Mark of the Web for security
+                Dim baseHref As String = $"<base href=""file:///{capturedTempFolder.Replace("\", "/")}/"">"
+                Dim motw As String = "<!-- saved from url=(0016)http://localhost -->"
+                htmlContent = htmlContent.Replace("<head>", "<head>" & vbCrLf & motw & vbCrLf & baseHref)
+
+                ' Build additional buttons
+                Dim additionalButtons As New List(Of System.Tuple(Of String, System.Action, Boolean))()
+
+                ' Summarize Changes button
+                If Not String.IsNullOrWhiteSpace(extractedChangesText) Then
+                    additionalButtons.Add(New System.Tuple(Of String, System.Action, Boolean)(
+                        "Summarize Changes",
+                        Sub() SummarizeComparisonChangesAsync(extractedChangesText),
+                        False))
+                End If
+
+                ' Send to PDF button
+                Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.Desktop)
+                additionalButtons.Add(New System.Tuple(Of String, System.Action, Boolean)(
+                    "Send to PDF",
+                    Sub()
+                        If Not File.Exists(capturedTempHtmlPath) Then
+                            ShowCustomMessageBox("The comparison file is no longer available.", AN)
+                            Return
+                        End If
+                        ExportComparisonToPdfFromHtml(capturedTempHtmlPath, capturedWordApp, "Compare_Selection", desktopPath)
+                    End Sub,
+                    False))
+
+                ' Copy to Clipboard button - copy the comparison WITH formatting/markup
+                additionalButtons.Add(New System.Tuple(Of String, System.Action, Boolean)(
+                    "Copy to Clipboard",
+                    Sub()
+                        Try
+                            If Not File.Exists(capturedTempHtmlPath) Then
+                                ShowCustomMessageBox("The comparison file is no longer available.", AN)
+                                Return
+                            End If
+                            ' Open the HTML file temporarily in Word and copy the content with formatting
+                            Dim tempDoc As Microsoft.Office.Interop.Word.Document = Nothing
+                            Dim prevScreenUpdating_2nd As Boolean = capturedWordApp.ScreenUpdating
+                            Dim prevAlerts_2nd As Microsoft.Office.Interop.Word.WdAlertLevel = capturedWordApp.DisplayAlerts
                             Try
-                                Threading.Thread.Sleep(3000)
-                                If File.Exists(tempHtmlPath) Then File.Delete(tempHtmlPath)
-                                Dim filesFolder As String = tempHtmlPath & "_files"
-                                If Directory.Exists(filesFolder) Then
+                                capturedWordApp.ScreenUpdating = False
+                                capturedWordApp.DisplayAlerts = Microsoft.Office.Interop.Word.WdAlertLevel.wdAlertsNone
+
+                                tempDoc = capturedWordApp.Documents.Open(
+                                    FileName:=capturedTempHtmlPath,
+                                    ReadOnly:=True,
+                                    Visible:=False)
+
+                                ' Select all content and copy to clipboard (preserves formatting and markup)
+                                tempDoc.Content.Copy()
+
+                                tempDoc.Close(WdSaveOptions.wdDoNotSaveChanges)
+                                tempDoc = Nothing
+
+                                capturedWordApp.DisplayAlerts = prevAlerts_2nd
+                                capturedWordApp.ScreenUpdating = prevScreenUpdating_2nd
+
+                                ShowCustomMessageBox("Comparison copied to clipboard with formatting. You can now paste it into any Word document.", AN)
+                            Finally
+                                If tempDoc IsNot Nothing Then
                                     Try
-                                        Directory.Delete(filesFolder, recursive:=True)
+                                        tempDoc.Close(WdSaveOptions.wdDoNotSaveChanges)
                                     Catch
                                     End Try
                                 End If
-                                Directory.Delete(tempFolder, recursive:=True)
-                            Catch
+                                capturedWordApp.DisplayAlerts = prevAlerts_2nd
+                                capturedWordApp.ScreenUpdating = prevScreenUpdating_2nd
                             End Try
-                        End Sub)
-                    t.IsBackground = True
-                    t.Start()
-                Catch
-                End Try
-            End If
+                        Catch ex As Exception
+                            ShowCustomMessageBox($"Failed to copy to clipboard: {ex.Message}", AN)
+                        End Try
+                    End Sub,
+                    False))
+
+                ' Send to Document button
+                additionalButtons.Add(New System.Tuple(Of String, System.Action, Boolean)(
+                    "Send to Document",
+                    Sub()
+                        Try
+                            If Not File.Exists(capturedTempHtmlPath) Then
+                                ShowCustomMessageBox("The comparison file is no longer available.", AN)
+                                Return
+                            End If
+                            ' Open the HTML file in Word as a new document
+                            Dim newDoc As Microsoft.Office.Interop.Word.Document = capturedWordApp.Documents.Open(
+                                FileName:=capturedTempHtmlPath,
+                                ReadOnly:=False,
+                                Visible:=True)
+                            newDoc.Activate()
+                        Catch ex As Exception
+                            ShowCustomMessageBox($"Failed to open in Word: {ex.Message}", AN)
+                        End Try
+                    End Sub,
+                    False))
+
+                ' Compare Selected button (for another comparison)
+                additionalButtons.Add(New System.Tuple(Of String, System.Action, Boolean)(
+                    "Compare Selected",
+                    Sub() CompareSelectedTextRanges(capturedWordApp),
+                    False))
+
+                ' Define cleanup action
+                Dim cleanupAction As System.Action =
+                    Sub()
+                        Try
+                            If Directory.Exists(capturedTempFolder) Then
+                                Directory.Delete(capturedTempFolder, recursive:=True)
+                            End If
+                        Catch
+                            ' Ignore cleanup errors
+                        End Try
+                    End Sub
+
+                ' Show result in HTML viewer - cleanup happens when dialog closes
+                ShowHTMLCustomMessageBox(htmlContent, $"{AN} Text Selection Compare", additionalButtons:=additionalButtons.ToArray(), onClose:=cleanupAction)
+
+            Catch ex As Exception
+                ' Cleanup on error
+                If compareDoc IsNot Nothing Then
+                    Try
+                        compareDoc.Close(WdSaveOptions.wdDoNotSaveChanges)
+                    Catch
+                    End Try
+                End If
+
+                wordApp.DisplayAlerts = prevAlerts
+                wordApp.ScreenUpdating = prevScreenUpdating
+
+                ShowCustomMessageBox($"Failed to compare selected text: {ex.Message}", AN)
+            Finally
+                ' Cleanup temp documents if still open
+                If tempDoc1 IsNot Nothing Then
+                    Try
+                        tempDoc1.Close(WdSaveOptions.wdDoNotSaveChanges)
+                    Catch
+                    End Try
+                End If
+                If tempDoc2 IsNot Nothing Then
+                    Try
+                        tempDoc2.Close(WdSaveOptions.wdDoNotSaveChanges)
+                    Catch
+                    End Try
+                End If
+            End Try
+
+        Catch ex As Exception
+            ShowCustomMessageBox($"Failed to compare selected text: {ex.Message}", AN)
         End Try
     End Sub
+
+    ''' <summary>
+    ''' Exports a comparison to PDF by reopening the HTML file as a Word document and exporting it.
+    ''' Prompts user for the filename with a default value that can be changed.
+    ''' </summary>
+    Private Shared Sub ExportComparisonToPdfFromHtml(
+        htmlFilePath As String,
+        wordApp As Microsoft.Office.Interop.Word.Application,
+        defaultFileName As String,
+        defaultPath As String)
+
+        If String.IsNullOrEmpty(htmlFilePath) OrElse Not File.Exists(htmlFilePath) Then
+            ShowCustomMessageBox("Comparison HTML file is not available.", AN)
+            Return
+        End If
+
+        Try
+            ' Build proposed full path
+            Dim proposedFullPath As String = Path.Combine(defaultPath, defaultFileName & ".pdf")
+
+            ' Prompt user for filename
+            Dim userInput As String = ShowCustomInputBox(
+                "Enter the full path and filename for the PDF (You can change the filename or the entire path):",
+                $"{AN} Export to PDF",
+                True,
+                proposedFullPath)
+
+            If String.IsNullOrWhiteSpace(userInput) Then
+                Return ' User cancelled
+            End If
+
+            userInput = userInput.Trim()
+
+            ' Ensure it has .pdf extension
+            If Not userInput.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) Then
+                userInput = userInput & ".pdf"
+            End If
+
+            ' Extract directory and ensure it exists
+            Dim outputDir As String = Path.GetDirectoryName(userInput)
+            If String.IsNullOrEmpty(outputDir) Then
+                outputDir = defaultPath
+                userInput = Path.Combine(outputDir, Path.GetFileName(userInput))
+            End If
+
+            If Not Directory.Exists(outputDir) Then
+                Try
+                    Directory.CreateDirectory(outputDir)
+                Catch ex As Exception
+                    ShowCustomMessageBox($"Cannot create directory: {ex.Message}", AN)
+                    Return
+                End Try
+            End If
+
+            Dim outputPath As String = userInput
+
+            ' Ensure unique filename if file exists
+            If File.Exists(outputPath) Then
+                Dim baseName As String = Path.GetFileNameWithoutExtension(outputPath)
+                Dim counter As Integer = 1
+                While File.Exists(outputPath)
+                    outputPath = Path.Combine(outputDir, $"{baseName}_{counter}.pdf")
+                    counter += 1
+                End While
+            End If
+
+            ' Open the HTML file in Word, export to PDF, then close
+            Dim tempDoc As Microsoft.Office.Interop.Word.Document = Nothing
+            Dim prevScreenUpdating As Boolean = wordApp.ScreenUpdating
+            Dim prevAlerts As Microsoft.Office.Interop.Word.WdAlertLevel = wordApp.DisplayAlerts
+
+            Try
+                wordApp.ScreenUpdating = False
+                wordApp.DisplayAlerts = Microsoft.Office.Interop.Word.WdAlertLevel.wdAlertsNone
+
+                ' Open the HTML file
+                tempDoc = wordApp.Documents.Open(
+                    FileName:=htmlFilePath,
+                    ReadOnly:=True,
+                    Visible:=False)
+
+                ' Export to PDF
+                tempDoc.ExportAsFixedFormat(
+                    OutputFileName:=outputPath,
+                    ExportFormat:=WdExportFormat.wdExportFormatPDF,
+                    OpenAfterExport:=False,
+                    OptimizeFor:=WdExportOptimizeFor.wdExportOptimizeForPrint,
+                    Range:=WdExportRange.wdExportAllDocument,
+                    Item:=WdExportItem.wdExportDocumentWithMarkup,
+                    IncludeDocProps:=True,
+                    KeepIRM:=True,
+                    CreateBookmarks:=WdExportCreateBookmarks.wdExportCreateHeadingBookmarks,
+                    DocStructureTags:=True,
+                    BitmapMissingFonts:=True,
+                    UseISO19005_1:=False)
+
+                ' Close the temp document
+                tempDoc.Close(WdSaveOptions.wdDoNotSaveChanges)
+                tempDoc = Nothing
+
+            Finally
+                If tempDoc IsNot Nothing Then
+                    Try
+                        tempDoc.Close(WdSaveOptions.wdDoNotSaveChanges)
+                    Catch
+                    End Try
+                End If
+                wordApp.DisplayAlerts = prevAlerts
+                wordApp.ScreenUpdating = prevScreenUpdating
+            End Try
+
+            ' Ask user if they want to open the PDF
+            Dim openChoice As Integer = ShowCustomYesNoBox(
+                $"PDF exported successfully to:{vbCrLf}{vbCrLf}{outputPath}{vbCrLf}{vbCrLf}Do you want to open it now?",
+                "Yes, open PDF",
+                "No")
+
+            If openChoice = 1 Then
+                Try
+                    System.Diagnostics.Process.Start(New System.Diagnostics.ProcessStartInfo(outputPath) With {.UseShellExecute = True})
+                Catch ex As Exception
+                    ShowCustomMessageBox($"Could not open PDF: {ex.Message}", AN)
+                End Try
+            End If
+
+        Catch ex As Exception
+            ShowCustomMessageBox($"Failed to export PDF: {ex.Message}", AN)
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Exports the comparison document to PDF in the same directory as the original document.
+    ''' Uses naming convention "Compare_OriginalName_RevisedName.pdf".
+    ''' Prompts user for filename.
+    ''' </summary>
+    Private Shared Sub ExportComparisonToPdf(
+        compareDoc As Microsoft.Office.Interop.Word.Document,
+        wordApp As Microsoft.Office.Interop.Word.Application,
+        originalDocName As String,
+        revisedDocName As String,
+        originalDocPath As String)
+
+        If compareDoc Is Nothing Then
+            ShowCustomMessageBox("Comparison document is not available.", AN)
+            Return
+        End If
+
+        Try
+            ' Determine output directory (same as original document, or Documents folder)
+            Dim outputDir As String = originalDocPath
+            If String.IsNullOrEmpty(outputDir) OrElse Not Directory.Exists(outputDir) Then
+                outputDir = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments)
+            End If
+
+            ' Build proposed filename
+            Dim sanitizedOriginal As String = SanitizeFileName(originalDocName)
+            Dim sanitizedRevised As String = SanitizeFileName(revisedDocName)
+            Dim proposedName As String = $"Compare_{sanitizedOriginal}_{sanitizedRevised}.pdf"
+            Dim proposedFullPath As String = Path.Combine(outputDir, proposedName)
+
+            ' Prompt user for filename
+            Dim userInput As String = ShowCustomInputBox(
+                "Enter the full path and filename for the PDF:" & vbCrLf & vbCrLf &
+                "(You can change the filename or the entire path)",
+                $"{AN} Export to PDF",
+                True,
+                proposedFullPath)
+
+            If String.IsNullOrWhiteSpace(userInput) Then
+                Return ' User cancelled
+            End If
+
+            userInput = userInput.Trim()
+
+            ' Ensure it has .pdf extension
+            If Not userInput.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) Then
+                userInput = userInput & ".pdf"
+            End If
+
+            ' Extract directory and ensure it exists
+            Dim finalDir As String = Path.GetDirectoryName(userInput)
+            If String.IsNullOrEmpty(finalDir) Then
+                finalDir = outputDir
+                userInput = Path.Combine(finalDir, Path.GetFileName(userInput))
+            End If
+
+            If Not Directory.Exists(finalDir) Then
+                Try
+                    Directory.CreateDirectory(finalDir)
+                Catch ex As Exception
+                    ShowCustomMessageBox($"Cannot create directory: {ex.Message}", AN)
+                    Return
+                End Try
+            End If
+
+            Dim outputPath As String = userInput
+
+            ' Ensure unique filename if file exists
+            If File.Exists(outputPath) Then
+                Dim baseName As String = Path.GetFileNameWithoutExtension(outputPath)
+                Dim counter As Integer = 1
+                While File.Exists(outputPath)
+                    outputPath = Path.Combine(finalDir, $"{baseName}_{counter}.pdf")
+                    counter += 1
+                End While
+            End If
+
+            ' Export to PDF
+            Dim prevScreenUpdating As Boolean = wordApp.ScreenUpdating
+            Dim prevAlerts As Microsoft.Office.Interop.Word.WdAlertLevel = wordApp.DisplayAlerts
+            Try
+                wordApp.ScreenUpdating = False
+                wordApp.DisplayAlerts = Microsoft.Office.Interop.Word.WdAlertLevel.wdAlertsNone
+
+                compareDoc.ExportAsFixedFormat(
+                    OutputFileName:=outputPath,
+                    ExportFormat:=WdExportFormat.wdExportFormatPDF,
+                    OpenAfterExport:=False,
+                    OptimizeFor:=WdExportOptimizeFor.wdExportOptimizeForPrint,
+                    Range:=WdExportRange.wdExportAllDocument,
+                    Item:=WdExportItem.wdExportDocumentWithMarkup,
+                    IncludeDocProps:=True,
+                    KeepIRM:=True,
+                    CreateBookmarks:=WdExportCreateBookmarks.wdExportCreateHeadingBookmarks,
+                    DocStructureTags:=True,
+                    BitmapMissingFonts:=True,
+                    UseISO19005_1:=False)
+            Finally
+                wordApp.DisplayAlerts = prevAlerts
+                wordApp.ScreenUpdating = prevScreenUpdating
+            End Try
+
+            ' Ask user if they want to open the PDF
+            Dim openChoice As Integer = ShowCustomYesNoBox(
+                $"PDF exported successfully to:{vbCrLf}{vbCrLf}{outputPath}{vbCrLf}{vbCrLf}Do you want to open it now?",
+                "Yes, open PDF",
+                "No")
+
+            If openChoice = 1 Then
+                Try
+                    System.Diagnostics.Process.Start(New System.Diagnostics.ProcessStartInfo(outputPath) With {.UseShellExecute = True})
+                Catch ex As Exception
+                    ShowCustomMessageBox($"Could not open PDF: {ex.Message}", AN)
+                End Try
+            End If
+
+        Catch ex As Exception
+            ShowCustomMessageBox($"Failed to export PDF: {ex.Message}", AN)
+        End Try
+    End Sub
+
+
+    ''' <summary>
+    ''' Sanitizes a filename by removing invalid characters.
+    ''' </summary>
+    Private Shared Function SanitizeFileName(name As String) As String
+        If String.IsNullOrEmpty(name) Then Return "Document"
+        Dim invalidChars As Char() = Path.GetInvalidFileNameChars()
+        Dim result As String = name
+        For Each c In invalidChars
+            result = result.Replace(c, "_"c)
+        Next
+        ' Also remove spaces for cleaner filenames
+        result = result.Replace(" "c, "_"c)
+        ' Limit length
+        If result.Length > 50 Then result = result.Substring(0, 50)
+        Return result
+    End Function
 
 
 
@@ -1191,6 +1945,9 @@ Partial Public Class ThisAddIn
         t.IsBackground = True
         t.Start()
     End Sub
+
+
+
 
 
     ''' <summary>

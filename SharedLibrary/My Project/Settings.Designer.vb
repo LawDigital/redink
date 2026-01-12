@@ -455,6 +455,66 @@ Namespace My
                 Me("IgnoredUpdates_Custom") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property QuickTranslateLanguage() As String
+            Get
+                Return CType(Me("QuickTranslateLanguage"),String)
+            End Get
+            Set
+                Me("QuickTranslateLanguage") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property QuickTranslateX() As Integer
+            Get
+                Return CType(Me("QuickTranslateX"),Integer)
+            End Get
+            Set
+                Me("QuickTranslateX") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property QuickTranslateY() As Integer
+            Get
+                Return CType(Me("QuickTranslateY"),Integer)
+            End Get
+            Set
+                Me("QuickTranslateY") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property QuickTranslateWidth() As Integer
+            Get
+                Return CType(Me("QuickTranslateWidth"),Integer)
+            End Get
+            Set
+                Me("QuickTranslateWidth") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property QuickTranslateHeight() As Integer
+            Get
+                Return CType(Me("QuickTranslateHeight"),Integer)
+            End Get
+            Set
+                Me("QuickTranslateHeight") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

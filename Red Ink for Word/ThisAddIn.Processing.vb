@@ -5,7 +5,8 @@
 ' File: ThisAddIn.Processing.vb
 ' Purpose: Drives the Red Ink for Word text-processing pipeline, including selection
 '          validation, chunk iteration, formatting capture/restoration, LLM invocation,
-'          and routing AI output into Word, panes, clipboard, bubbles, podcasts, or slides.
+'          and routing AI output into Word, panes, clipboard, bubbles, podcasts, slides,
+'          and chart/diagram outputs.
 '
 ' Architecture:
 '  - Entry Points & Undo: `ProcessSelectedText` enforces prerequisites, opens `WordUndoScope`,
@@ -21,6 +22,10 @@
 '    and revision-tag helpers (`AddMarkupTags`, `InsertMarkupText`, `SearchAndReplace`).
 '  - Output & UI Surfaces: dispatches results to clipboard panes, new docs, in-place replacements,
 '    podcast scripts, slide decks, bubbles/pushbacks, with progress/cancellation handling.
+'  - Chart / Diagram Output: when `DoChart` is enabled, the LLM is prompted to return draw.io
+'    XML (mxfile). The response is cleaned (`CleanDrawioXml`), saved as a `.drawio` file
+'    (`ProcessChartResult`), and can be opened in an embedded diagrams.net editor
+'    (`OpenDrawioWithWebView2` / `DrawioEditorForm`) for interactive editing and re-save.
 '  - Story Routing: Detects non-main stories (comments, footnotes/endnotes) and routes processing to
 '    specialized handlers (`ProcessSelectedTextInActiveCommentBubble`, `ProcessSelectedTextInActiveFootnote`).
 '
@@ -29,12 +34,14 @@
 '  - SharedLibrary.SharedMethods for UI, prompt construction, LLM access, formatting utilities.
 '  - DiffPlex for diff building, Markdig + HtmlAgilityPack for Markdown-to-HTML conversion.
 '  - DocumentFormat.OpenXml, MarkdownToRtfConverter, and additional helpers referenced via SharedLibrary.
+'  - Microsoft.Web.WebView2 (via `DrawioEditorForm`) for embedded diagrams.net editor hosting.
 ' =============================================================================
 
 Option Explicit On
 Option Strict Off
 
 Imports System.Diagnostics
+Imports System.Runtime.InteropServices
 Imports System.Text.RegularExpressions
 Imports System.Threading
 Imports System.Threading.Tasks
@@ -174,6 +181,7 @@ Partial Public Class ThisAddIn
     ''' <param name="DoBubblesExtract">Extract text from bubbles.</param>
     ''' <param name="DoPushback">Reply to bubbles.</param>
     ''' <param name="SelectedTools">Tools selected for Tooling</param>
+    ''' <param name="DoChart">Create a chart</param>
     ''' <returns>Empty string on completion.</returns>
     Public Async Function ProcessSelectedText(
      SysCommand As String,
@@ -201,7 +209,8 @@ Partial Public Class ThisAddIn
      Optional DoMyStyle As Boolean = False,
      Optional DoBubblesExtract As Boolean = False,
      Optional DoPushback As Boolean = False,
-     Optional SelectedTools As List(Of ModelConfig) = Nothing) As Task(Of String)
+     Optional SelectedTools As List(Of ModelConfig) = Nothing,
+     Optional DoChart As Boolean = False) As Task(Of String)
 
 
         Dim application As Word.Application = Globals.ThisAddIn.Application
@@ -255,7 +264,7 @@ Partial Public Class ThisAddIn
 
                 If selection.Type = WdSelectionType.wdSelectionIP Or selection.Tables.Count = 0 Or PutInClipboard Or PutInBubbles Or DoPushback Then
 
-                    Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, CreatePodcast, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, AddDocs, DoMyStyle, DoBubblesExtract, False, DoPushback, SelectedTools)
+                    Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, CreatePodcast, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, AddDocs, DoMyStyle, DoBubblesExtract, False, DoPushback, SelectedTools, DoChart)
 
                 Else
 
@@ -460,7 +469,7 @@ Partial Public Class ThisAddIn
 
                     ElseIf userdialog = 1 Then
 
-                        Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, CreatePodcast, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, AddDocs, DoMyStyle, DoBubblesExtract, False, DoPushback, SelectedTools)
+                        Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, CreatePodcast, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, AddDocs, DoMyStyle, DoBubblesExtract, False, DoPushback, SelectedTools, DoChart)
 
                     End If
 
@@ -515,6 +524,7 @@ Partial Public Class ThisAddIn
     ''' <param name="InTable">Processing within table context.</param>
     ''' <param name="DoPushback">Reply to bubbles.</param>
     ''' <param name="SelectedTools">The tools selected for tooling runs</param>
+    ''' <param name="DoChart">Create a chart</param>
     ''' <returns>Empty string on completion.</returns>
     Private Async Function TrueProcessSelectedText(SysCommand As String,
        CheckMaxToken As Boolean,
@@ -542,7 +552,8 @@ Partial Public Class ThisAddIn
        Optional DoBubblesExtract As Boolean = False,
        Optional InTable As Boolean = False,
        Optional DoPushback As Boolean = False,
-       Optional SelectedTools As List(Of ModelConfig) = Nothing) As Task(Of String)
+       Optional SelectedTools As List(Of ModelConfig) = Nothing,
+       Optional DoChart As Boolean = False) As Task(Of String)
 
 
         Dim application As Word.Application = Globals.ThisAddIn.Application
@@ -596,7 +607,8 @@ Partial Public Class ThisAddIn
                     vbCrLf & "DoMyStyle=" & DoMyStyle &
                     vbCrLf & "DoBubblesExtract=" & DoBubblesExtract &
                     vbCrLf & "InTable=" & InTable &
-                    vbCrLf & "DoPushback=" & DoPushback
+                    vbCrLf & "DoPushback=" & DoPushback &
+                    vbCrLf & "DoChart=" & DoChart
                 )
 
         Try
@@ -651,7 +663,7 @@ Partial Public Class ThisAddIn
                 If DoMarkup Then
                     Select Case MarkupMethod
                         Case 1
-                            Dim SilentMarkup As Integer = SLib.ShowCustomYesNoBox($"You have choosen both iterated processing and markups using Word compare. Iteration only works using the Regex method. Continue using Regex markup (the character cap will be ignored) or go without markups?", "Yes, Regex markups", "No, no markups")
+                            Dim SilentMarkup As Integer = SLib.ShowCustomYesNoBox($"You have choosen both iterated processing And markups Using Word compare. Iteration only works Using the Regex method. Continue Using Regex markup (the character cap will be ignored) Or go without markups?", "Yes, Regex markups", "No, no markups")
                             If SilentMarkup = 1 Then
                                 MarkupMethod = 4
                             ElseIf SilentMarkup = 2 Then
@@ -660,7 +672,7 @@ Partial Public Class ThisAddIn
                                 Return ""
                             End If
                         Case 2
-                            Dim SilentMarkup As Integer = SLib.ShowCustomYesNoBox($"You have choosen both iterated processing and markups using Diff compare. Iteration only works using the Regex method. Continue using Diff markup (the character cap will be ignored) or go without markups?", "Yes, Diff markups", "No, no markups")
+                            Dim SilentMarkup As Integer = SLib.ShowCustomYesNoBox($"You have choosen both iterated processing And markups Using Diff compare. Iteration only works Using the Regex method. Continue Using Diff markup (the character cap will be ignored) Or go without markups?", "Yes, Diff markups", "No, no markups")
                             If SilentMarkup = 1 Then
                                 MarkupMethod = 2
                             ElseIf SilentMarkup = 2 Then
@@ -669,7 +681,7 @@ Partial Public Class ThisAddIn
                                 Return ""
                             End If
                         Case 3
-                            Dim SilentMarkup As Integer = SLib.ShowCustomYesNoBox($"You have choosen both iterated processing and markups using DiffW compare. Iteration only works using the Regex method. Continue using Diff markup (the character cap will be ignored) or go without markups?", "Yes, Diff markups", "No, no markups")
+                            Dim SilentMarkup As Integer = SLib.ShowCustomYesNoBox($"You have choosen both iterated processing And markups Using DiffW compare. Iteration only works Using the Regex method. Continue Using Diff markup (the character cap will be ignored) Or go without markups?", "Yes, Diff markups", "No, no markups")
                             If SilentMarkup = 1 Then
                                 MarkupMethod = 2
                             ElseIf SilentMarkup = 2 Then
@@ -678,7 +690,7 @@ Partial Public Class ThisAddIn
                                 Return ""
                             End If
                         Case 4
-                            Dim SilentMarkup As Integer = SLib.ShowCustomYesNoBox($"You have choosen both iterated processing and markups using the Regex method. This works, but may tak a very long time (the character cap will be ignored). Continue with Regex markups or go without markups?", "Yes, Regex markups", "No, no markups")
+                            Dim SilentMarkup As Integer = SLib.ShowCustomYesNoBox($"You have choosen both iterated processing And markups Using the Regex method. This works, but may tak a very Long time (the character cap will be ignored). Continue With Regex markups Or go without markups?", "Yes, Regex markups", "No, no markups")
                             If SilentMarkup = 1 Then
                                 MarkupMethod = 4
                             ElseIf SilentMarkup = 2 Then
@@ -1011,14 +1023,14 @@ Partial Public Class ThisAddIn
                         AddDocs,
                         InsertDocs,
                         SlideInsert,
-                        OtherPrompt)
+                        OtherPrompt, DoChart:=DoChart)
                 Else
 
                     ' Other LLM calls w/o Tooling
 
-                    If SelectedAlternateModels Is Nothing OrElse SelectedAlternateModels.Count = 0 OrElse DoMarkup OrElse PutInBubbles OrElse DoPushback OrElse SlideInsert <> "" Then
+                    If SelectedAlternateModels Is Nothing OrElse SelectedAlternateModels.Count = 0 OrElse DoMarkup OrElse PutInBubbles OrElse DoPushback OrElse SlideInsert <> "" OrElse DoChart Then
 
-                        LLMResult = Await LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText), "", "", 0, UseSecondAPI, False, OtherPrompt, FileObject)
+                        LLMResult = Await LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, "") & If(DoChart, " " & SP_Add_Chart, ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText), "", "", 0, UseSecondAPI, False, OtherPrompt, FileObject)
 
                     Else
 
@@ -1143,6 +1155,11 @@ Partial Public Class ThisAddIn
                                 SLib.PutInClipboard(FinalText)
                             End If
                         End If
+
+                    ElseIf DoChart Then
+
+                        ProcessChartResult(LLMResult)
+
                     ElseIf SlideInsert <> "" Then
 
                         Dim Jsonstring As String = CleanJsonString(LLMResult)
@@ -3087,5 +3104,159 @@ Partial Public Class ThisAddIn
     )
     End Function
 
+    ''' <summary>
+    ''' Processes the LLM chart result by saving it as a draw.io file on the desktop
+    ''' and optionally opening draw.io in a WebView2 editor window.
+    ''' </summary>
+    ''' <param name="xmlContent">The draw.io XML content from the LLM.</param>
+    Private Sub ProcessChartResult(ByVal xmlContent As String)
+        Try
+            If String.IsNullOrWhiteSpace(xmlContent) Then
+                ShowCustomMessageBox("The LLM did not return any chart content.")
+                Return
+            End If
+
+            ' Extract + clean the XML (handles code fences AND extra text around the XML)
+            Dim cleanedXml As String = ExtractAndCleanDrawioXml(xmlContent)
+            If String.IsNullOrWhiteSpace(cleanedXml) Then
+                ShowCustomMessageBox("The chart output did not contain valid draw.io XML.")
+                Return
+            End If
+
+            ' Minimal validation (avoid writing obviously non-draw.io content)
+            Dim looksLikeDrawio As Boolean =
+                cleanedXml.IndexOf("<mxfile", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+                cleanedXml.IndexOf("<mxGraphModel", StringComparison.OrdinalIgnoreCase) >= 0
+
+            If Not looksLikeDrawio Then
+                ShowCustomMessageBox("The chart output did not look like draw.io XML (missing <mxfile> / <mxGraphModel>).")
+                Return
+            End If
+
+            ' Get the desktop path
+            Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.Desktop)
+
+            ' Find the next available file number
+            Dim fileCounter As Integer = 1
+            Dim filePath As String
+            Do
+                filePath = IO.Path.Combine(desktopPath, $"AI_Chart_{fileCounter:D3}.drawio")
+                If Not IO.File.Exists(filePath) Then Exit Do
+                fileCounter += 1
+            Loop
+
+            ' Always save the XML content to the file first
+            IO.File.WriteAllText(filePath, cleanedXml, System.Text.Encoding.UTF8)
+
+            ' Ask user if they want to open draw.io
+            Dim userChoice As Integer = ShowCustomYesNoBox(
+                $"The chart has been saved to your desktop as '{IO.Path.GetFileName(filePath)}'. " &
+                "Would you like to open it in draw.io (web version) for editing?",
+                "Yes, open in draw.io",
+                "No, just keep the file",
+                $"{AN} Chart Created")
+
+            If userChoice = 1 Then
+                ' Open draw.io in WebView2 editor
+                OpenDrawioWithWebView2(cleanedXml, filePath)
+            End If
+
+        Catch ex As Exception
+            Debug.WriteLine($"ProcessChartResult error: {ex.Message}{vbCrLf}{ex.StackTrace}")
+            ShowCustomMessageBox($"Error processing chart result: {ex.Message}")
+        End Try
+    End Sub
+
+
+    ''' <summary>
+    ''' Opens draw.io in a WebView2-based editor form, loading the XML via postMessage.
+    ''' </summary>
+    ''' <param name="xmlContent">The draw.io XML content.</param>
+    ''' <param name="saveFilePath">Path where the .drawio file is saved.</param>
+    Private Sub OpenDrawioWithWebView2(ByVal xmlContent As String, ByVal saveFilePath As String)
+        Try
+            ' Ensure we're on the UI thread
+            If _uiContext IsNot Nothing Then
+                _uiContext.Post(
+                    Sub(state)
+                        ShowDrawioEditor(xmlContent, saveFilePath)
+                    End Sub, Nothing)
+            Else
+                ShowDrawioEditor(xmlContent, saveFilePath)
+            End If
+
+        Catch ex As Exception
+            Debug.WriteLine($"OpenDrawioWithWebView2 error: {ex.Message}")
+            ShowCustomMessageBox(
+                $"Could not open the diagram editor: {ex.Message}{vbCrLf}{vbCrLf}" &
+                $"Your diagram has been saved to:{vbCrLf}{saveFilePath}")
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Shows the draw.io editor form with WebView2.
+    ''' </summary>
+    ''' <param name="xmlContent">The draw.io XML content.</param>
+    ''' <param name="saveFilePath">Path where the .drawio file is saved.</param>
+    Private Sub ShowDrawioEditor(ByVal xmlContent As String, ByVal saveFilePath As String)
+        Try
+            Dim editorForm As New DrawioEditorForm(xmlContent, saveFilePath)
+            editorForm.Show()
+        Catch ex As Exception
+            Debug.WriteLine($"ShowDrawioEditor error: {ex.Message}")
+            ShowCustomMessageBox(
+                $"Could not open the diagram editor: {ex.Message}{vbCrLf}{vbCrLf}" &
+                $"Your diagram has been saved to:{vbCrLf}{saveFilePath}")
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Extracts draw.io XML from an LLM response and cleans it for saving/opening.
+    ''' Handles Markdown code fences and “extra text around the XML” by extracting the first
+    ''' <c>&lt;mxfile&gt;...&lt;/mxfile&gt;</c> (or fallback <c>&lt;mxGraphModel&gt;</c>) block.
+    ''' </summary>
+    ''' <param name="llmResponse">Raw LLM response potentially containing draw.io XML.</param>
+    ''' <returns>
+    ''' The extracted and trimmed draw.io XML, or an empty string if no suitable XML could be found.
+    ''' </returns>
+    Private Function ExtractAndCleanDrawioXml(ByVal llmResponse As String) As String
+        If String.IsNullOrWhiteSpace(llmResponse) Then Return String.Empty
+
+        Dim s As String = llmResponse.Trim()
+
+        ' 1) Remove markdown fences if they wrap the whole payload.
+        ' (This is a best-effort pre-clean; we still do XML extraction below.)
+        If s.StartsWith("```xml", StringComparison.OrdinalIgnoreCase) Then
+            s = s.Substring(6)
+        ElseIf s.StartsWith("```", StringComparison.Ordinal) Then
+            s = s.Substring(3)
+        End If
+        If s.EndsWith("```", StringComparison.Ordinal) Then
+            s = s.Substring(0, s.Length - 3)
+        End If
+        s = s.Trim()
+
+        ' 2) Prefer extracting the full draw.io wrapper (<mxfile>...</mxfile>).
+        Dim mxfileMatch As Match = Regex.Match(
+            s,
+            "<mxfile[\s\S]*?</mxfile>",
+            RegexOptions.IgnoreCase Or RegexOptions.Singleline)
+
+        If mxfileMatch.Success Then
+            Return mxfileMatch.Value.Trim()
+        End If
+
+        ' 3) Fallback: some outputs might contain only the model (<mxGraphModel>...</mxGraphModel>).
+        Dim mxGraphMatch As Match = Regex.Match(
+            s,
+            "<mxGraphModel[\s\S]*?</mxGraphModel>",
+            RegexOptions.IgnoreCase Or RegexOptions.Singleline)
+
+        If mxGraphMatch.Success Then
+            Return mxGraphMatch.Value.Trim()
+        End If
+
+        Return String.Empty
+    End Function
 
 End Class
