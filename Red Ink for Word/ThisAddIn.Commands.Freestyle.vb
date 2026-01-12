@@ -726,6 +726,7 @@ Partial Public Class ThisAddIn
             Dim ChunkSize As Integer = 1
             Dim NoFormatAndFieldSaving As Boolean = False
             Dim DoSlides As Boolean = False
+            Dim DoChart As Boolean = False
             Dim DoMyStyle As Boolean = False
             Dim DoMultiModel As Boolean = True
             Dim DoBubblesExtract As Boolean = False
@@ -738,6 +739,7 @@ Partial Public Class ThisAddIn
             Dim BubblesInstruct As String = $"with '{BubblesPrefix}' for having your text commented"
             Dim PushbackInstruct As String = $"with '{PushbackPrefix}' for responding to comments only"
             Dim SlidesInstruct As String = $"with '{SlidesPrefix}' for adding to a Powerpoint file"
+            Dim ChartInstruct As String = $"with '{ChartPrefix}' for creating a chart"
             Dim ClipboardInstruct As String = $"with '{ClipboardPrefix}', '{NewdocPrefix}' or '{PanePrefix}' for separate output"
             Dim PromptLibInstruct As String = If(INI_PromptLib, " or press 'OK' for the prompt library", "")
             Dim ExtInstruct As String = $"; include '{ExtTrigger}' or '{ExtTriggerFixed}' (multiple times) for including the text of (a) file(s) (txt, docx, pdf), {ExtDirTrigger} for a directory of text files, or '{AddDocTrigger}' for an open Word doc"
@@ -832,14 +834,14 @@ Partial Public Class ThisAddIn
                             System.Tuple.Create("OK, do a markup", $"Use this to automatically insert '{MarkupPrefixDiff}' as a prefix.", MarkupPrefixDiff)
                         }
 
-                    OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute on the selected text ({MarkupInstruct}, {ClipboardInstruct}, {InplaceInstruct}, {BubblesInstruct}, {PushbackInstruct} or {SlidesInstruct}){PromptLibInstruct}{ExtInstruct}{AddOnInstruct}{PureInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle (using " & If(UseSecondAPI, INI_Model_2, INI_Model) & ")", False, "", My.Settings.LastPrompt, OptionalButtons).Trim()
+                    OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute on the selected text ({MarkupInstruct}, {ClipboardInstruct}, {InplaceInstruct}, {BubblesInstruct}, {PushbackInstruct}, {ChartInstruct} or {SlidesInstruct}){PromptLibInstruct}{ExtInstruct}{AddOnInstruct}{PureInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle (using " & If(UseSecondAPI, INI_Model_2, INI_Model) & ")", False, "", My.Settings.LastPrompt, OptionalButtons).Trim()
                 Else
                     ' Offer limited optional buttons when no text is selected
                     Dim OptionalButtons As System.Tuple(Of String, String, String)() = {
                             System.Tuple.Create("OK, use window", $"Use this to automatically insert '{ClipboardPrefix}' as a prefix.", ClipboardPrefix),
                             System.Tuple.Create("OK, use pane", $"Use this to automatically insert '{PanePrefix}' as a prefix.", PanePrefix)
                         }
-                    OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute ({ClipboardInstruct} or {SlidesInstruct}){PromptLibInstruct}{ExtInstruct}{AddOnInstruct}{PureInstruct}{FileInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle (using " & If(UseSecondAPI, INI_Model_2, INI_Model) & ")", False, "", My.Settings.LastPrompt, OptionalButtons).Trim()
+                    OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute ({ClipboardInstruct}, {ChartInstruct} or {SlidesInstruct}){PromptLibInstruct}{ExtInstruct}{AddOnInstruct}{PureInstruct}{FileInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle (using " & If(UseSecondAPI, INI_Model_2, INI_Model) & ")", False, "", My.Settings.LastPrompt, OptionalButtons).Trim()
                 End If
             Else
                 OtherPrompt = LastPrompt
@@ -966,6 +968,7 @@ Partial Public Class ThisAddIn
                 ' TOOLS / SOURCES
                 AddItem("setsources", "Select sources/tools available for tooling-capable models (session scope).")
                 AddItem("loadurl", "Retrieve the text of a particular URL given.")
+                AddItem("translator", "Open a widget that provides you with an on-the-fly translation.")
 
                 ' PRIVACY / TRANSFORMS
                 AddItem("anonymize", "Anonymize/redact the current selection (no LLM call).")
@@ -1211,6 +1214,12 @@ Partial Public Class ThisAddIn
             ' Signature Management for Update INI Key Functionality
             If String.Equals(OtherPrompt.Trim(), "iniupdateignored", StringComparison.OrdinalIgnoreCase) OrElse String.Equals(OtherPrompt.Trim(), "iniupdateignore", StringComparison.OrdinalIgnoreCase) Then
                 ShowIgnoredParametersDialog()
+                Return
+            End If
+
+            ' Signature Management for Update INI Key Functionality
+            If String.Equals(OtherPrompt.Trim(), "translator", StringComparison.OrdinalIgnoreCase) Then
+                ShowQuickTranslate()
                 Return
             End If
 
@@ -1626,6 +1635,11 @@ Partial Public Class ThisAddIn
                 DoSlides = True
                 DoClipboard = True
                 DoChunks = False
+            ElseIf OtherPrompt.StartsWith(ChartPrefix, StringComparison.OrdinalIgnoreCase) Then
+                OtherPrompt = OtherPrompt.Substring(ChartPrefix.Length).Trim()
+                DoChart = True
+                DoClipboard = True
+                DoChunks = False
             ElseIf OtherPrompt.StartsWith(InPlacePrefix, StringComparison.OrdinalIgnoreCase) And Not NoText Then
                 OtherPrompt = OtherPrompt.Substring(InPlacePrefix.Length).Trim()
                 DoInplace = True
@@ -1714,7 +1728,7 @@ Partial Public Class ThisAddIn
             ' {multimodel} trigger: Prompt for multiple model selection
             SelectedAlternateModels = Nothing
             If UseSecondAPI AndAlso Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) AndAlso OtherPrompt.IndexOf(MultiModelTrigger, StringComparison.OrdinalIgnoreCase) >= 0 AndAlso Not DoFiles Then
-                If Not DoMarkup AndAlso Not DoBubbles AndAlso Not DoPushback AndAlso Not DoSlides Then
+                If Not DoMarkup AndAlso Not DoBubbles AndAlso Not DoPushback AndAlso Not DoSlides AndAlso Not DoChart Then
                     If Not ShowMultipleModelSelection(_context, INI_AlternateModelPath) OrElse SelectedAlternateModels Is Nothing OrElse SelectedAlternateModels.Count = 0 Then
                         Return
                     End If
@@ -1976,12 +1990,12 @@ Partial Public Class ThisAddIn
                 ChunkSize = 0
             End If
 
-            Debug.WriteLine("Freestyle Prompt: " & SysPrompt)
+            'Debug.WriteLine("Freestyle Prompt: " & SysPrompt)
 
             ' === Execute LLM processing with configured parameters ===
 
             ' Invoke ProcessSelectedText with all configured options            
-            Dim result As String = Await ProcessSelectedText(InterpolateAtRuntime(SysPrompt), True, DoKeepFormat, DoKeepParaFormat, DoInplace, DoMarkup, MarkupMethod, DoClipboard, DoBubbles, False, UseSecondAPI, KeepFormatCap, DoTPMarkup, TPMarkupName, False, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, InsertDocs <> "", DoMyStyle, DoBubblesExtract, DoPushback, selectedToolsForSession)
+            Dim result As String = Await ProcessSelectedText(InterpolateAtRuntime(SysPrompt), True, DoKeepFormat, DoKeepParaFormat, DoInplace, DoMarkup, MarkupMethod, DoClipboard, DoBubbles, False, UseSecondAPI, KeepFormatCap, DoTPMarkup, TPMarkupName, False, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, InsertDocs <> "", DoMyStyle, DoBubblesExtract, DoPushback, selectedToolsForSession, DoChart)
 
             ' Restore original model configuration if alternate model was used
             If UseSecondAPI And originalConfigLoaded Then

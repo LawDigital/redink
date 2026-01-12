@@ -338,6 +338,7 @@
       <SubType>Component</SubType>
     </Compile>
     <Compile Include="ThisAddIn.Commands.vb" />
+    <Compile Include="ThisAddIn.VarHelpers.vb" />
     <Compile Include="ThisAddIn.Helpers.vb" />
     <Compile Include="ThisAddIn.Processing.vb" />
     <Compile Include="ThisAddIn.Properties.vb" />

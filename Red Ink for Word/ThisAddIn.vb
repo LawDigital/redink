@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 11.1.2026
+' 12.1.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -29,6 +29,8 @@
 ' Includes System.Interactive.Async in unchanged form; Copyright (c) 2025 by .NET Foundation and Contributors; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://github.com/dotnet/reactive
 ' Includes also various Microsoft distributables and libraries copyrighted by Microsoft Corporation and available, among others, under the Microsoft EULA, the Visual Studio Community 2022 License, the Microsoft.Web.WebView2 License (for Microsoft.Web.WebView2, see license on https://www.nuget.org/packages/Microsoft.Web.WebView2/ and below) and the MIT License (including Microsoft.Bcl.*, Microsoft.Extensions.*, System.*, System.Security.*, System.CodeDom, DocumentFormat.OpenXml.*, Microsoft.ml.*, CommunityToolkit.HighPerformance licensed under MIT License) (https://licenses.nuget.org/MIT); Copyright (c) 2016- Microsoft Corp.
 
+' The Word add-in calls the Draw.io online diagramming service/app (https://www.draw.io) via embed.diagrams.net for diagram editing (https://github.com/jgraph/drawio); copyright (c) 2026 by draw.io Ltd and draw.io AG (made available under Apache 2.0 license [https://github.com/jgraph/drawio?tab=Apache-2.0-1-ov-file])
+
 ' Licenses of Red Ink and of third-party components and further legal terms/notices are available in the installation folder and via https://redink.ai.
 '
 ' Documentation for developers: See at the end of this file, throughout the code and the manual (https://redink.ai).
@@ -47,7 +49,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.110126" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.120126" & SharedMethods.VersionQualifier
 
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
@@ -102,6 +104,7 @@ Partial Public Class ThisAddIn
     Private Const PushbackPrefix As String = "Reply:"
     Private Const PushbackPrefix2 As String = "Pushback:"
     Private Const SlidesPrefix As String = "Slides:"
+    Private Const ChartPrefix As String = "Chart:"
     Private Const BubbleCutText As String = " (" & ChrW(&H2702) & ")"
     Private Const SearchNextTrigger As String = "Next:"
     Private Const BoWTrigger As String = "(bow)"
@@ -483,9 +486,9 @@ Partial Public Class ThisAddIn
     Public Shared Async Function PostCorrection(inputText As String, Optional ByVal UseSecondAPI As Boolean = False) As Task(Of String)
         Return Await SharedMethods.PostCorrection(_context, inputText, UseSecondAPI)
     End Function
-    Public Shared Async Function LLM(ByVal promptSystem As String, ByVal promptUser As String, Optional ByVal Model As String = "", Optional ByVal Temperature As String = "", Optional ByVal Timeout As Long = 0, Optional ByVal UseSecondAPI As Boolean = False, Optional ByVal Hidesplash As Boolean = False, Optional ByVal AddUserPrompt As String = "", Optional ByVal FileObject As String = "", Optional ByVal ToolExecution As Boolean = False) As Task(Of String)
-        Dim Response = Await SharedMethods.LLM(_context, promptSystem, promptUser, Model, Temperature, Timeout, UseSecondAPI, Hidesplash, AddUserPrompt, FileObject, ToolExecution:=ToolExecution)
-        Await EnsureUIThread().ConfigureAwait(False)
+    Public Shared Async Function LLM(ByVal promptSystem As String, ByVal promptUser As String, Optional ByVal Model As String = "", Optional ByVal Temperature As String = "", Optional ByVal Timeout As Long = 0, Optional ByVal UseSecondAPI As Boolean = False, Optional ByVal Hidesplash As Boolean = False, Optional ByVal AddUserPrompt As String = "", Optional ByVal FileObject As String = "", Optional ByVal ToolExecution As Boolean = False, Optional cancellationToken As Threading.CancellationToken = Nothing, Optional EnsureUI As Boolean = True) As Task(Of String)
+        Dim Response = Await SharedMethods.LLM(_context, promptSystem, promptUser, Model, Temperature, Timeout, UseSecondAPI, Hidesplash, AddUserPrompt, FileObject, cancellationToken, ToolExecution:=ToolExecution)
+        If EnsureUI Then Await EnsureUIThread().ConfigureAwait(False)
         Return Response
     End Function
     Private Sub ShowSettingsWindow(Settings As Dictionary(Of String, String), SettingsTips As Dictionary(Of String, String))

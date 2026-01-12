@@ -135,6 +135,13 @@ Public Class Ribbon1
         Globals.ThisAddIn.MainMenu("Translate")
     End Sub
 
+    Private Sub RI_QuickTranslate_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_QuickTranslate.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_QuickTranslate_Click invoked")
+        Globals.ThisAddIn.ShowQuickTranslate()
+    End Sub
+
+
+
     Private Sub Settings_Click(sender As Object, e As RibbonControlEventArgs) Handles Settings.Click
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Settings_Click invoked")
         Globals.ThisAddIn.ShowSettings()
@@ -183,6 +190,11 @@ Public Class Ribbon1
     Private Sub RI_HelpMe_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_HelpMe.Click
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_HelpMe_Click invoked")
         Globals.ThisAddIn.HelpMeInky()
+    End Sub
+
+    Private Sub RI_CompareSelected_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_CompareSelected.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_CompareSelected_Click invoked")
+        Globals.ThisAddIn.CompareSelectedTextRangesOutlook()
     End Sub
 
 End Class
@@ -316,6 +328,12 @@ Public Class Ribbon2
         Globals.ThisAddIn.MainMenu("Translate")
     End Sub
 
+    Private Sub RI_QuickTranslate_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_QuickTranslate.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_QuickTranslate_Click invoked")
+        Globals.ThisAddIn.ShowQuickTranslate()
+    End Sub
+
+
     Private Sub Settings_Click(sender As Object, e As RibbonControlEventArgs) Handles Settings.Click
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Settings_Click invoked")
         Globals.ThisAddIn.ShowSettings()
@@ -364,6 +382,11 @@ Public Class Ribbon2
     Private Sub RI_HelpMe_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_HelpMe.Click
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_HelpMe_Click invoked")
         Globals.ThisAddIn.HelpMeInky()
+    End Sub
+
+    Private Sub RI_CompareSelected_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_CompareSelected.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_CompareSelected_Click invoked")
+        Globals.ThisAddIn.CompareSelectedTextRangesOutlook()
     End Sub
 
 End Class
