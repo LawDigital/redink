@@ -1724,6 +1724,8 @@ Namespace SharedLibrary
                     {"SP_Add_Batch", context.SP_Add_Batch},
                     {"SP_Add_Tooling", context.SP_Add_Tooling},
                     {"SP_Add_Slides", context.SP_Add_Slides},
+                    {"SP_Add_Chart", context.SP_Add_Chart},
+                    {"SP_Add_Chart", context.SP_Add_Chart},
                     {"SP_BubblesExcel", context.SP_BubblesExcel},
                     {"SP_Add_Revisions", context.SP_Add_Revisions},
                     {"SP_MarkupRegex", context.SP_MarkupRegex},
@@ -1816,6 +1818,7 @@ Namespace SharedLibrary
                     {"SP_Add_Batch", Default_SP_Add_Batch},
                     {"SP_Add_Tooling", Default_SP_Add_Tooling},
                     {"SP_Add_Slides", Default_SP_Add_Slides},
+                    {"SP_Add_Chart", Default_SP_Add_Chart},
                     {"SP_BubblesExcel", Default_SP_BubblesExcel},
                     {"SP_Add_Revisions", Default_SP_Add_Revisions},
                     {"SP_MarkupRegex", Default_SP_MarkupRegex},
@@ -2829,6 +2832,7 @@ Namespace SharedLibrary
             variableValues.Add("SP_Add_Batch", context.SP_Add_Batch)
             variableValues.Add("SP_Add_Tooling", context.SP_Add_Tooling)
             variableValues.Add("SP_Add_Slides", context.SP_Add_Slides)
+            variableValues.Add("SP_Add_Chart", context.SP_Add_Chart)
             variableValues.Add("SP_BubblesExcel", context.SP_BubblesExcel)
             variableValues.Add("SP_Add_Revisions", context.SP_Add_Revisions)
             variableValues.Add("SP_MarkupRegex", context.SP_MarkupRegex)
@@ -2994,6 +2998,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_Add_Batch") Then context.SP_Add_Batch = CStr(updatedValues("SP_Add_Batch"))
                 If updatedValues.ContainsKey("SP_Add_Tooling") Then context.SP_Add_Tooling = CStr(updatedValues("SP_Add_Tooling"))
                 If updatedValues.ContainsKey("SP_Add_Slides") Then context.SP_Add_Slides = CStr(updatedValues("SP_Add_Slides"))
+                If updatedValues.ContainsKey("SP_Add_Chart") Then context.SP_Add_Chart = CStr(updatedValues("SP_Add_Chart"))
                 If updatedValues.ContainsKey("SP_BubblesExcel") Then context.SP_BubblesExcel = CStr(updatedValues("SP_BubblesExcel"))
                 If updatedValues.ContainsKey("SP_Add_Revisions") Then context.SP_Add_Revisions = CStr(updatedValues("SP_Add_Revisions"))
                 If updatedValues.ContainsKey("SP_MarkupRegex") Then context.SP_MarkupRegex = CStr(updatedValues("SP_MarkupRegex"))

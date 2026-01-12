@@ -55,7 +55,7 @@
     <FriendlyName>Red Ink for Word %28Develop%29</FriendlyName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Preview'">
-    <ApplicationVersion>1.1.10.200</ApplicationVersion>
+    <ApplicationVersion>1.1.11.200</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\preview\word\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/preview/word/</InstallUrl>
     <ProductName>Red Ink for Word %28Preview%29</ProductName>
@@ -582,6 +582,9 @@
   <ItemGroup>
     <AppDesigner Include="My Project\" />
     <Compile Include="BridgeSubs.vb" />
+    <Compile Include="DrawioEditorForm.vb">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="LogWindow.vb">
       <SubType>Form</SubType>
     </Compile>

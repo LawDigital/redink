@@ -51,7 +51,7 @@
     <FriendlyName>Red Ink for Outlook %28Develop%29</FriendlyName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Preview'">
-    <ApplicationVersion>1.1.10.200</ApplicationVersion>
+    <ApplicationVersion>1.1.11.200</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\preview\outlook\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/preview/outlook/</InstallUrl>
     <ProductName>Red Ink for Outlook %28Preview%29</ProductName>
@@ -338,6 +338,7 @@
       <SubType>Component</SubType>
     </Compile>
     <Compile Include="ThisAddIn.Commands.vb" />
+    <Compile Include="ThisAddIn.VarHelpers.vb" />
     <Compile Include="ThisAddIn.Helpers.vb" />
     <Compile Include="ThisAddIn.Processing.vb" />
     <Compile Include="ThisAddIn.Properties.vb" />

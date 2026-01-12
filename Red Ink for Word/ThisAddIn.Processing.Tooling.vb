@@ -46,6 +46,7 @@ Imports System.Diagnostics
 Imports System.IO
 Imports System.Net.Http
 Imports System.Reflection
+Imports System.Runtime.InteropServices
 Imports System.Text
 Imports System.Text.RegularExpressions
 Imports System.Threading.Tasks
@@ -577,6 +578,7 @@ Partial Public Class ThisAddIn
     ''' This ensures tooling calls receive the same context as non-tooling LLM calls.</param>
     ''' <param name="hideSplash">When True, suppresses the splash/progress indicator during LLM calls.</param>
     ''' <param name="hideLogWindow">When True, suppresses the tooling log window (useful for chat integration).</param>
+    ''' <param name="DoChart">When True, adds charting instructions to the system prompt.</param>
     ''' <returns>The final LLM response string returned by the last iteration.</returns>
     Public Async Function ExecuteToolingLoop(
         sysCommand As String,
@@ -597,7 +599,8 @@ Partial Public Class ThisAddIn
         Optional otherPrompt As String = "",
         Optional fullPromptOverride As String = "",
         Optional hideSplash As Boolean = False,
-        Optional hideLogWindow As Boolean = False) As Task(Of String)
+        Optional hideLogWindow As Boolean = False,
+        Optional DoChart As Boolean = False) As Task(Of String)
 
 
         ToolingFileLogger.StartSession()
@@ -666,6 +669,11 @@ Partial Public Class ThisAddIn
             ' Add MyStyle insert if enabled
             If doMyStyle AndAlso Not String.IsNullOrWhiteSpace(myStyleInsert) Then
                 baseSysPrompt &= " " & myStyleInsert
+            End If
+
+            ' Add DoChart insert if enabled
+            If DoChart Then
+                baseSysPrompt &= " " & SP_Add_Chart
             End If
 
             ' Add tool instructions on top of the standard prompt additions

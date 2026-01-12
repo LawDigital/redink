@@ -944,6 +944,26 @@ Partial Public Class ThisAddIn
     End Sub
 
 
+    Private _quickTranslateWidget As SharedLibrary.SharedLibrary.QuickTranslateWidget = Nothing
+
+    Public Sub ShowQuickTranslate()
+        If _quickTranslateWidget Is Nothing OrElse _quickTranslateWidget.IsDisposed Then
+            _quickTranslateWidget = New SharedLibrary.SharedLibrary.QuickTranslateWidget(
+            Async Function(text, lang, token)
+                TranslateLanguage = lang
+                Return Await LLM(InterpolateAtRuntime(SP_Translate),
+                                "<TEXTTOPROCESS>" & text & "</TEXTTOPROCESS>",
+                                "", "", 0,
+                                UseSecondAPI:=False,
+                                Hidesplash:=True,
+                                cancellationToken:=token,
+                                EnsureUI:=False)
+            End Function,
+            INI_Language1)
+        End If
+        _quickTranslateWidget.ShowWidget()
+    End Sub
+
     Private _win As HelpMeInky = Nothing
 
     ''' <summary>
