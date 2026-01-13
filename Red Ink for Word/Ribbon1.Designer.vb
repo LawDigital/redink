@@ -101,6 +101,8 @@ Partial Class Ribbon1
         Me.RI_FreestyleNM = Me.Factory.CreateRibbonButton
         Me.RI_FreestyleAM = Me.Factory.CreateRibbonButton
         Me.RI_FreestyleRepeat = Me.Factory.CreateRibbonButton
+        Me.RI_Chat2 = Me.Factory.CreateRibbonButton
+        Me.RI_DiscussInky = Me.Factory.CreateRibbonButton
         Me.RI_Search = Me.Factory.CreateRibbonButton
         Me.Menu2 = Me.Factory.CreateRibbonMenu
         Me.RI_Halves = Me.Factory.CreateRibbonButton
@@ -108,14 +110,13 @@ Partial Class Ribbon1
         Me.RI_AcceptFormat = Me.Factory.CreateRibbonButton
         Me.RI_TimeSpan = Me.Factory.CreateRibbonButton
         Me.RI_Regex = Me.Factory.CreateRibbonButton
+        Me.RI_Charting = Me.Factory.CreateRibbonButton
         Me.RI_Import = Me.Factory.CreateRibbonButton
         Me.RI_FlattenPDF = Me.Factory.CreateRibbonButton
         Me.RI_ConvertDocToTxt = Me.Factory.CreateRibbonButton
         Me.RI_Markdown = Me.Factory.CreateRibbonButton
         Me.RI_ContentControls = Me.Factory.CreateRibbonButton
         Me.RI_InsertClipboard = Me.Factory.CreateRibbonButton
-        Me.RI_Chat2 = Me.Factory.CreateRibbonButton
-        Me.RI_DiscussInky = Me.Factory.CreateRibbonButton
         Me.RI_Transcriptor = Me.Factory.CreateRibbonButton
         Me.RI_HelpMe = Me.Factory.CreateRibbonButton
         Me.Settings = Me.Factory.CreateRibbonButton
@@ -195,7 +196,8 @@ Partial Class Ribbon1
         Me.RI_Translate.Label = "Translate Text/Files"
         Me.RI_Translate.Name = "RI_Translate"
         Me.RI_Translate.OfficeImageId = "TranslateMenu"
-        Me.RI_Translate.ScreenTip = "Translates the selected text into a language you choose or files if you do not select text"
+        Me.RI_Translate.ScreenTip = "Translates the selected text into a language you choose or files if you do not se" &
+    "lect text"
         Me.RI_Translate.ShowImage = True
         '
         'RI_Correct
@@ -204,7 +206,8 @@ Partial Class Ribbon1
         Me.RI_Correct.Label = "Correct Text/Files"
         Me.RI_Correct.Name = "RI_Correct"
         Me.RI_Correct.OfficeImageId = "SpellingAndGrammar"
-        Me.RI_Correct.ScreenTip = "Will correct the language the selected text or files (with a markup) if you do not select text"
+        Me.RI_Correct.ScreenTip = "Will correct the language the selected text or files (with a markup) if you do no" &
+    "t select text"
         Me.RI_Correct.ShowImage = True
         '
         'Menu4
@@ -579,6 +582,24 @@ Partial Class Ribbon1
         Me.RI_FreestyleRepeat.ScreenTip = "Will repeat the last Freestyle command without prompting"
         Me.RI_FreestyleRepeat.ShowImage = True
         '
+        'RI_Chat2
+        '
+        Me.RI_Chat2.Label = "Word Chatbot"
+        Me.RI_Chat2.Name = "RI_Chat2"
+        Me.RI_Chat2.OfficeImageId = "ContactUs"
+        Me.RI_Chat2.ScreenTip = "Will open a window where you can chat with the LLM about your document and have i" &
+    "t modified"
+        Me.RI_Chat2.ShowImage = True
+        '
+        'RI_DiscussInky
+        '
+        Me.RI_DiscussInky.Label = "Discuss this, Inky"
+        Me.RI_DiscussInky.Name = "RI_DiscussInky"
+        Me.RI_DiscussInky.OfficeImageId = "ShareWithPeopleFromSharePane"
+        Me.RI_DiscussInky.ScreenTip = "Have Inky take the role of your chosen persona to discuss with you materials you " &
+    "provide it; you can also have two bots chat with each other"
+        Me.RI_DiscussInky.ShowImage = True
+        '
         'RI_Search
         '
         Me.RI_Search.Label = "Context Search"
@@ -594,6 +615,7 @@ Partial Class Ribbon1
         Me.Menu2.Items.Add(Me.RI_AcceptFormat)
         Me.Menu2.Items.Add(Me.RI_TimeSpan)
         Me.Menu2.Items.Add(Me.RI_Regex)
+        Me.Menu2.Items.Add(Me.RI_Charting)
         Me.Menu2.Items.Add(Me.RI_Import)
         Me.Menu2.Items.Add(Me.RI_FlattenPDF)
         Me.Menu2.Items.Add(Me.RI_ConvertDocToTxt)
@@ -646,6 +668,15 @@ Partial Class Ribbon1
         Me.RI_Regex.ScreenTip = "Will perform a RegEx search (and replace)"
         Me.RI_Regex.ShowImage = True
         '
+        'RI_Charting
+        '
+        Me.RI_Charting.Label = "Edit Diagrams (draw.io)"
+        Me.RI_Charting.Name = "RI_Charting"
+        Me.RI_Charting.OfficeImageId = "DeveloperDrawingTools"
+        Me.RI_Charting.ScreenTip = "Opens the online diagram tool draw.io (with the ability to run it entirely local)" &
+    ""
+        Me.RI_Charting.ShowImage = True
+        '
         'RI_Import
         '
         Me.RI_Import.Label = "Import Text File"
@@ -668,8 +699,8 @@ Partial Class Ribbon1
         Me.RI_ConvertDocToTxt.Label = "Convert PDFs To Txt"
         Me.RI_ConvertDocToTxt.Name = "RI_ConvertDocToTxt"
         Me.RI_ConvertDocToTxt.OfficeImageId = "ConvertInkMenu"
-        Me.RI_ConvertDocToTxt.ScreenTip = "Will convert PDFs and other documents in a directory (and subdirectories) to TXT f" &
-    "iles for easier analysis by AI (will do OCR, if available)"
+        Me.RI_ConvertDocToTxt.ScreenTip = "Will convert PDFs and other documents in a directory (and subdirectories) to TXT " &
+    "files for easier analysis by AI (will do OCR, if available)"
         Me.RI_ConvertDocToTxt.ShowImage = True
         '
         'RI_Markdown
@@ -697,23 +728,6 @@ Partial Class Ribbon1
         Me.RI_InsertClipboard.ScreenTip = "Will convert to text what is contained in the clipboard (e.g., screenshot, video," &
     " audio, image)"
         Me.RI_InsertClipboard.ShowImage = True
-        '
-        'RI_Chat2
-        '
-        Me.RI_Chat2.Label = "Word Chatbot"
-        Me.RI_Chat2.Name = "RI_Chat2"
-        Me.RI_Chat2.OfficeImageId = "ContactUs"
-        Me.RI_Chat2.ScreenTip = "Will open a window where you can chat with the LLM about your document and have it modified"
-        Me.RI_Chat2.ShowImage = True
-        '
-        'RI_DiscussInky
-        '
-        Me.RI_DiscussInky.Label = "Discuss this, Inky"
-        Me.RI_DiscussInky.Name = "RI_DiscussInky"
-        Me.RI_DiscussInky.OfficeImageId = "ShareWithPeopleFromSharePane"
-        Me.RI_DiscussInky.ScreenTip = "Have Inky take the role of your chosen persona to discuss with you materials you provide it;" &
-    " you can also have two bots chat with each other"
-        Me.RI_DiscussInky.ShowImage = True
         '
         'RI_Transcriptor
         '
@@ -1052,6 +1066,7 @@ Partial Class Ribbon1
     Friend WithEvents RI_LearnDocStyle As RibbonButton
     Friend WithEvents RI_ConvertDocToTxt As RibbonButton
     Friend WithEvents RI_FlattenPDF As RibbonButton
+    Friend WithEvents RI_Charting As RibbonButton
 End Class
 
 Partial Class ThisRibbonCollection

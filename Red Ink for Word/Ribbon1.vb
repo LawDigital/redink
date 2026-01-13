@@ -395,4 +395,9 @@ Public Class Ribbon1
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_FlattenPDF_Click invoked")
         Globals.ThisAddIn.FlattenPdfToImages()
     End Sub
+
+    Private Sub RI_Charting_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Charting.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_Charting_Click invoked")
+        Globals.ThisAddIn.OpenExistingDrawioFileForEditing()
+    End Sub
 End Class

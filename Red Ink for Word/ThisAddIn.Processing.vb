@@ -3104,6 +3104,44 @@ Partial Public Class ThisAddIn
     )
     End Function
 
+    ' ========================== Chart Processing ==========================
+
+    ' Add this helper enum somewhere in ThisAddIn (same file is fine)
+    Private Enum DrawioOpenChoice
+        None = 0
+        OfflineAfterLoad = 1
+        Online = 2
+    End Enum
+
+    Private Function AskHowToOpenDrawio(prompt As String, caption As String) As DrawioOpenChoice
+        Dim chosen As DrawioOpenChoice = DrawioOpenChoice.None
+
+        ' Two main buttons return 1/2.
+        ' Third button is implemented via extraButtonText+extraButtonAction and we set chosen inside.
+        Dim r As Integer = ShowCustomYesNoBox(
+        bodyText:=prompt,
+        button1Text:="Open draw.io (local processing after load)",
+        button2Text:="Open draw.io (with internet access)",
+        header:=caption,
+        autoCloseSeconds:=Nothing,
+        Defaulttext:="",
+        extraButtonText:="Do not open",
+        extraButtonAction:=Sub()
+                               chosen = DrawioOpenChoice.None
+                           End Sub,
+        CloseAfterExtra:=True,
+        nonModal:=False)
+
+        If chosen = DrawioOpenChoice.None Then
+            ' If user clicked the extra button it already set chosen=None and dialog closed.
+            ' If user clicked X / Esc, r will be 0 and chosen remains None.
+        End If
+
+        If r = 1 Then Return DrawioOpenChoice.OfflineAfterLoad
+        If r = 2 Then Return DrawioOpenChoice.Online
+        Return DrawioOpenChoice.None
+    End Function
+
     ''' <summary>
     ''' Processes the LLM chart result by saving it as a draw.io file on the desktop
     ''' and optionally opening draw.io in a WebView2 editor window.
@@ -3148,18 +3186,20 @@ Partial Public Class ThisAddIn
             ' Always save the XML content to the file first
             IO.File.WriteAllText(filePath, cleanedXml, System.Text.Encoding.UTF8)
 
-            ' Ask user if they want to open draw.io
-            Dim userChoice As Integer = ShowCustomYesNoBox(
-                $"The chart has been saved to your desktop as '{IO.Path.GetFileName(filePath)}'. " &
-                "Would you like to open it in draw.io (web version) for editing?",
-                "Yes, open in draw.io",
-                "No, just keep the file",
-                $"{AN} Chart Created")
+            Dim choice As DrawioOpenChoice =
+            AskHowToOpenDrawio(
+                prompt:=$"The chart has been saved to your desktop as '{IO.Path.GetFileName(filePath)}'." & vbCrLf & vbCrLf &
+                        "How do you want to continue?",
+                caption:=$"{AN}")
 
-            If userChoice = 1 Then
-                ' Open draw.io in WebView2 editor
-                OpenDrawioWithWebView2(cleanedXml, filePath)
-            End If
+            Select Case choice
+                Case DrawioOpenChoice.OfflineAfterLoad
+                    OpenDrawioWithWebView2(cleanedXml, filePath, disableInternetAfterLoad:=True)
+                Case DrawioOpenChoice.Online
+                    OpenDrawioWithWebView2(cleanedXml, filePath, disableInternetAfterLoad:=False)
+                Case Else
+                    Return
+            End Select
 
         Catch ex As Exception
             Debug.WriteLine($"ProcessChartResult error: {ex.Message}{vbCrLf}{ex.StackTrace}")
@@ -3167,22 +3207,22 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
-
     ''' <summary>
     ''' Opens draw.io in a WebView2-based editor form, loading the XML via postMessage.
     ''' </summary>
     ''' <param name="xmlContent">The draw.io XML content.</param>
     ''' <param name="saveFilePath">Path where the .drawio file is saved.</param>
-    Private Sub OpenDrawioWithWebView2(ByVal xmlContent As String, ByVal saveFilePath As String)
+    ''' <param name="disableInternetAfterLoad">When true, blocks http/https requests after initial load.</param>
+    Private Sub OpenDrawioWithWebView2(ByVal xmlContent As String, ByVal saveFilePath As String, Optional ByVal disableInternetAfterLoad As Boolean = False)
         Try
             ' Ensure we're on the UI thread
             If _uiContext IsNot Nothing Then
                 _uiContext.Post(
                     Sub(state)
-                        ShowDrawioEditor(xmlContent, saveFilePath)
+                        ShowDrawioEditor(xmlContent, saveFilePath, disableInternetAfterLoad)
                     End Sub, Nothing)
             Else
-                ShowDrawioEditor(xmlContent, saveFilePath)
+                ShowDrawioEditor(xmlContent, saveFilePath, disableInternetAfterLoad)
             End If
 
         Catch ex As Exception
@@ -3196,11 +3236,9 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Shows the draw.io editor form with WebView2.
     ''' </summary>
-    ''' <param name="xmlContent">The draw.io XML content.</param>
-    ''' <param name="saveFilePath">Path where the .drawio file is saved.</param>
-    Private Sub ShowDrawioEditor(ByVal xmlContent As String, ByVal saveFilePath As String)
+    Private Sub ShowDrawioEditor(ByVal xmlContent As String, ByVal saveFilePath As String, ByVal disableInternetAfterLoad As Boolean)
         Try
-            Dim editorForm As New DrawioEditorForm(xmlContent, saveFilePath)
+            Dim editorForm As New DrawioEditorForm(xmlContent, saveFilePath, disableInternetAfterLoad:=disableInternetAfterLoad)
             editorForm.Show()
         Catch ex As Exception
             Debug.WriteLine($"ShowDrawioEditor error: {ex.Message}")
@@ -3209,6 +3247,195 @@ Partial Public Class ThisAddIn
                 $"Your diagram has been saved to:{vbCrLf}{saveFilePath}")
         End Try
     End Sub
+
+    ''' <summary>
+    ''' Opens an existing .drawio file using the application's drag & drop picker,
+    ''' then asks whether to open draw.io offline-after-load, with internet, or not at all.
+    ''' If the user cancels the file picker, offers to create a new empty diagram instead.
+    ''' </summary>
+    Public Sub OpenExistingDrawioFileForEditing()
+        Try
+            ' Configure DragDropForm for draw.io files
+            Globals.ThisAddIn.DragDropFormFilter = "draw.io files (*.drawio)|*.drawio|All files (*.*)|*.*"
+            Globals.ThisAddIn.DragDropFormLabel = "Drop a .drawio file here (or click Browse) to open it in the embedded draw.io editor."
+            Dim selectedPath As String = Nothing
+
+            Using f As New DragDropForm(DragDropMode.FileOnly)
+                If f.ShowDialog() <> DialogResult.OK Then
+                    ' User cancelled the file picker - ask if they want to create a new empty diagram
+                    Dim createNew As String = ShowCustomInputBox(
+    "You did not select a file. Do you want to create a new empty diagram instead?" & vbCrLf & vbCrLf &
+    "Enter a file name (or full path) for the new diagram (without extension), or leave empty to cancel:",
+    $"{AN} - Create New Diagram",
+    SimpleInput:=True,
+    DefaultValue:="AI_Chart_New")
+
+                    If String.IsNullOrWhiteSpace(createNew) Then
+                        Return ' User cancelled or left empty
+                    End If
+
+                    Dim newFilePath As String
+                    Dim userInput As String = createNew.Trim()
+
+                    ' Check if user provided a full path (contains directory separator or drive letter)
+                    If IO.Path.IsPathRooted(userInput) OrElse userInput.Contains(IO.Path.DirectorySeparatorChar) OrElse userInput.Contains(IO.Path.AltDirectorySeparatorChar) Then
+                        ' User provided a path - use it directly
+                        ' Ensure .drawio extension
+                        If Not userInput.EndsWith(".drawio", StringComparison.OrdinalIgnoreCase) Then
+                            userInput &= ".drawio"
+                        End If
+
+                        ' Validate the directory exists
+                        Dim directory As String = IO.Path.GetDirectoryName(userInput)
+                        If Not String.IsNullOrWhiteSpace(directory) AndAlso Not IO.Directory.Exists(directory) Then
+                            Dim createDir As Integer = ShowCustomYesNoBox(
+                                $"The directory '{directory}' does not exist. Create it?",
+                                "Yes", "No",
+                                $"{AN} - Create Directory")
+                            If createDir = 1 Then
+                                Try
+                                    IO.Directory.CreateDirectory(directory)
+                                Catch ex As Exception
+                                    ShowCustomMessageBox($"Could not create directory: {ex.Message}")
+                                    Return
+                                End Try
+                            Else
+                                Return
+                            End If
+                        End If
+
+                        newFilePath = userInput
+                    Else
+                        ' User provided just a file name - save to desktop
+                        Dim sanitizedName As String = SanitizeFileName2(userInput)
+                        If String.IsNullOrWhiteSpace(sanitizedName) Then
+                            ShowCustomMessageBox("Invalid file name. Operation cancelled.")
+                            Return
+                        End If
+
+                        Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.Desktop)
+                        newFilePath = IO.Path.Combine(desktopPath, sanitizedName & ".drawio")
+                    End If
+
+                    ' Check if file already exists and find unique name
+                    Dim counter As Integer = 1
+                    Dim basePath As String = IO.Path.Combine(IO.Path.GetDirectoryName(newFilePath), IO.Path.GetFileNameWithoutExtension(newFilePath))
+                    While IO.File.Exists(newFilePath)
+                        newFilePath = $"{basePath}_{counter:D3}.drawio"
+                        counter += 1
+                    End While
+
+                    ' Create empty draw.io XML
+                    Dim emptyXml As String = CreateEmptyDrawioXml()
+
+                    ' Save the empty file
+                    IO.File.WriteAllText(newFilePath, emptyXml, System.Text.Encoding.UTF8)
+
+                    ' Ask how to open
+                    Dim choice As DrawioOpenChoice =
+                        AskHowToOpenDrawio(
+                            prompt:=$"A new empty diagram has been created at '{IO.Path.GetFileName(newFilePath)}'.{vbCrLf}{vbCrLf}" &
+                                    "Choose how to open the draw.io editor:",
+                            caption:=$"{AN} - New Diagram Created")
+
+                    Select Case choice
+                        Case DrawioOpenChoice.OfflineAfterLoad
+                            OpenDrawioWithWebView2(emptyXml, newFilePath, disableInternetAfterLoad:=True)
+
+                        Case DrawioOpenChoice.Online
+                            OpenDrawioWithWebView2(emptyXml, newFilePath, disableInternetAfterLoad:=False)
+
+                        Case Else
+                            ShowCustomMessageBox($"The empty diagram has been saved to:{vbCrLf}{newFilePath}")
+                            Return
+                    End Select
+
+                    Return
+                End If
+                selectedPath = f.SelectedFilePath
+            End Using
+
+            If String.IsNullOrWhiteSpace(selectedPath) OrElse Not IO.File.Exists(selectedPath) Then
+                ShowCustomMessageBox("No valid .drawio file was selected.")
+                Return
+            End If
+
+            Dim xmlContent As String = IO.File.ReadAllText(selectedPath, System.Text.Encoding.UTF8)
+
+            ' Use the shared 3-button chooser based on ShowCustomYesNoBox(extraButtonText,...)
+            Dim choiceExisting As DrawioOpenChoice =
+                AskHowToOpenDrawio(
+                    prompt:=$"Open '{IO.Path.GetFileName(selectedPath)}' in the embedded draw.io editor?" & vbCrLf & vbCrLf &
+                            "Choose the mode:",
+                    caption:=$"{AN} Open draw.io")
+
+            Select Case choiceExisting
+                Case DrawioOpenChoice.OfflineAfterLoad
+                    OpenDrawioWithWebView2(xmlContent, selectedPath, disableInternetAfterLoad:=True)
+
+                Case DrawioOpenChoice.Online
+                    OpenDrawioWithWebView2(xmlContent, selectedPath, disableInternetAfterLoad:=False)
+
+                Case Else
+                    Return
+            End Select
+
+        Catch ex As Exception
+            Debug.WriteLine($"OpenExistingDrawioFileForEditing error: {ex.Message}")
+            ShowCustomMessageBox($"Could not open the .drawio file: {ex.Message}")
+        Finally
+            ' Best-effort: reset global drag-drop customization so other uses are unaffected
+            Try
+                Globals.ThisAddIn.DragDropFormFilter = ""
+                Globals.ThisAddIn.DragDropFormLabel = ""
+            Catch
+            End Try
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Creates an empty draw.io XML structure that can be used as a starting point for new diagrams.
+    ''' </summary>
+    ''' <returns>A valid empty draw.io XML string.</returns>
+    Private Function CreateEmptyDrawioXml() As String
+        Dim timestamp As String = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+        Return $"<?xml version=""1.0"" encoding=""UTF-8""?>
+<mxfile host=""embed.diagrams.net"" modified=""{timestamp}"" agent=""{AN}"" version=""21.0.0"" etag=""empty"" type=""device"">
+  <diagram name=""Page-1"" id=""page1"">
+    <mxGraphModel dx=""800"" dy=""600"" grid=""1"" gridSize=""10"" guides=""1"" tooltips=""1"" connect=""1"" arrows=""1"" fold=""1"" page=""1"" pageScale=""1"" pageWidth=""827"" pageHeight=""1169"" math=""0"" shadow=""0"">
+      <root>
+        <mxCell id=""0""/>
+        <mxCell id=""1"" parent=""0""/>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>"
+    End Function
+
+    ''' <summary>
+    ''' Sanitizes a file name by removing invalid characters.
+    ''' </summary>
+    ''' <param name="fileName">The file name to sanitize.</param>
+    ''' <returns>A sanitized file name safe for use in the file system.</returns>
+    Private Function SanitizeFileName2(fileName As String) As String
+        If String.IsNullOrWhiteSpace(fileName) Then Return String.Empty
+
+        ' Remove invalid file name characters
+        Dim invalidChars As Char() = IO.Path.GetInvalidFileNameChars()
+        Dim sanitized As String = fileName
+
+        For Each c As Char In invalidChars
+            sanitized = sanitized.Replace(c.ToString(), "")
+        Next
+
+        ' Also remove any path separators that might have slipped through
+        sanitized = sanitized.Replace("/", "").Replace("\", "")
+
+        ' Trim whitespace and dots from start/end
+        sanitized = sanitized.Trim().Trim("."c)
+
+        Return sanitized
+    End Function
 
     ''' <summary>
     ''' Extracts draw.io XML from an LLM response and cleans it for saving/opening.
