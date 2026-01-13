@@ -969,6 +969,7 @@ Partial Public Class ThisAddIn
                 AddItem("setsources", "Select sources/tools available for tooling-capable models (session scope).")
                 AddItem("loadurl", "Retrieve the text of a particular URL given.")
                 AddItem("translator", "Open a widget that provides you with an on-the-fly translation.")
+                AddItem("drawio", "Open a draw.io for editing chart files, optionally with Internet blocking.")
 
                 ' PRIVACY / TRANSFORMS
                 AddItem("anonymize", "Anonymize/redact the current selection (no LLM call).")
@@ -1222,6 +1223,13 @@ Partial Public Class ThisAddIn
                 ShowQuickTranslate()
                 Return
             End If
+
+            ' Signature Management for Update INI Key Functionality
+            If String.Equals(OtherPrompt.Trim(), "drawio", StringComparison.OrdinalIgnoreCase) Or String.Equals(OtherPrompt.Trim(), "chart", StringComparison.OrdinalIgnoreCase) Then
+                OpenExistingDrawioFileForEditing()
+                Return
+            End If
+
 
             ' Signature Management for importing INI keys            
             If String.Equals(OtherPrompt.Trim(), "iniload", StringComparison.OrdinalIgnoreCase) Or String.Equals(OtherPrompt.Trim(), "iniupdateignore", StringComparison.OrdinalIgnoreCase) Then
