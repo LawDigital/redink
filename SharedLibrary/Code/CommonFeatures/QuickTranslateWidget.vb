@@ -80,8 +80,8 @@ Namespace SharedLibrary
             Me.ShowInTaskbar = True
             Me.TopMost = True
             Me.StartPosition = FormStartPosition.Manual
-            Me.MinimumSize = New Size(500, 180)
-            Me.Size = New Size(600, 220)
+            Me.MinimumSize = New Size(500, 155)
+            Me.Size = New Size(600, 175)
             Me.KeyPreview = True
 
             ' Set icon
@@ -223,6 +223,15 @@ Namespace SharedLibrary
             rightFlow.Controls.Add(btnClear)
 
             Me.Controls.Add(mainTable)
+
+            ' Calculate DPI-aware minimum size based on actual control heights
+            Dim oneLineHeight As Integer = txtInput.Font.Height + 6 ' Single line + padding
+            Dim bottomRowHeight As Integer = btnClose.Height + 10   ' Button + padding
+            Dim chromeHeight As Integer = Me.Height - Me.ClientSize.Height ' Title bar + borders
+            Dim minHeight As Integer = chromeHeight + oneLineHeight + bottomRowHeight + 25 ' +25 for TableLayoutPanel padding
+
+            Me.MinimumSize = New Size(CInt(500 * Me.DeviceDpi / 96.0F), minHeight)
+            Me.Size = New Size(CInt(600 * Me.DeviceDpi / 96.0F), minHeight)
 
             ' Debounce timer
             debounceTimer = New System.Windows.Forms.Timer() With {.Interval = DEBOUNCE_MS}
