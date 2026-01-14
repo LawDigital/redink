@@ -126,6 +126,8 @@ Namespace SharedLibrary
             Property InitialConfigFailed As Boolean
             Property INI_ContextMenu As Boolean
             Property INI_NoLocalConfig As Boolean
+
+            Property INI_ForceDrawioLocal As Boolean
             Property INI_UpdateCheckInterval As Integer
             Property INI_UpdatePath As String
             Property INI_HelpMeInkyPath As String
@@ -398,6 +400,7 @@ Namespace SharedLibrary
         Public Property InitialConfigFailed As Boolean Implements ISharedContext.InitialConfigFailed
         Public Property INI_ContextMenu As Boolean Implements ISharedContext.INI_ContextMenu
         Public Property INI_NoLocalConfig As Boolean Implements ISharedContext.INI_NoLocalConfig
+        Public Property INI_ForceDrawioLocal As Boolean Implements ISharedContext.INI_ForceDrawioLocal
         Public Property INI_UpdateCheckInterval As Integer Implements ISharedContext.INI_UpdateCheckInterval
         Public Property INI_UpdatePath As String Implements ISharedContext.INI_UpdatePath
         Public Property INI_HelpMeInkyPath As String Implements ISharedContext.INI_HelpMeInkyPath

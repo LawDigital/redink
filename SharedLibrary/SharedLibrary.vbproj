@@ -336,7 +336,7 @@
     <Compile Include="Code\Core\Clipboard\SharedMethods.PutInClipboard.vb" />
     <Compile Include="Code\Core\Clipboard\SharedMethods.StoreAndRestoreClipboard.vb" />
     <Compile Include="Code\Core\Config\IniImportManager.vb" />
-    <Compile Include="Code\Core\Config\QuickTranslateWidget.vb">
+    <Compile Include="Code\CommonFeatures\QuickTranslateWidget.vb">
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Code\Core\Config\SharedMethods.UpdateIni.vb" />
