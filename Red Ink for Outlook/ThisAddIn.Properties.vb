@@ -1640,6 +1640,15 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_ForceDrawioLocal As Boolean
+        Get
+            Return _context.INI_ForceDrawioLocal
+        End Get
+        Set(value As Boolean)
+            _context.INI_ForceDrawioLocal = value
+        End Set
+    End Property
+
     Public Shared Property INI_UpdateCheckInterval As Integer
         Get
             Return _context.INI_UpdateCheckInterval

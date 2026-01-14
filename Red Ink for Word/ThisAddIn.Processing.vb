@@ -3114,32 +3114,48 @@ Partial Public Class ThisAddIn
     End Enum
 
     Private Function AskHowToOpenDrawio(prompt As String, caption As String) As DrawioOpenChoice
+
+        ' If local-only is enforced, do not offer the online option.
+        If _context IsNot Nothing AndAlso _context.INI_ForceDrawioLocal Then
+            Dim rLocalOnly As Integer = ShowCustomYesNoBox(
+                bodyText:=prompt,
+                button1Text:="Open draw.io (local processing after load)",
+                button2Text:="Do not open",
+                header:=caption,
+                autoCloseSeconds:=Nothing,
+                Defaulttext:="",
+                extraButtonText:="",
+                extraButtonAction:=Nothing,
+                CloseAfterExtra:=True,
+                nonModal:=False)
+
+            If rLocalOnly = 1 Then Return DrawioOpenChoice.OfflineAfterLoad
+            Return DrawioOpenChoice.None ' 0 abort or 2 do not open
+        End If
+
+        ' Default behavior: offer local + online + do-not-open.
         Dim chosen As DrawioOpenChoice = DrawioOpenChoice.None
 
         ' Two main buttons return 1/2.
         ' Third button is implemented via extraButtonText+extraButtonAction and we set chosen inside.
         Dim r As Integer = ShowCustomYesNoBox(
-        bodyText:=prompt,
-        button1Text:="Open draw.io (local processing after load)",
-        button2Text:="Open draw.io (with internet access)",
-        header:=caption,
-        autoCloseSeconds:=Nothing,
-        Defaulttext:="",
-        extraButtonText:="Do not open",
-        extraButtonAction:=Sub()
-                               chosen = DrawioOpenChoice.None
-                           End Sub,
-        CloseAfterExtra:=True,
-        nonModal:=False)
-
-        If chosen = DrawioOpenChoice.None Then
-            ' If user clicked the extra button it already set chosen=None and dialog closed.
-            ' If user clicked X / Esc, r will be 0 and chosen remains None.
-        End If
+            bodyText:=prompt,
+            button1Text:="Open draw.io (local processing after load)",
+            button2Text:="Open draw.io (with internet access)",
+            header:=caption,
+            autoCloseSeconds:=Nothing,
+            Defaulttext:="",
+            extraButtonText:="Do not open",
+            extraButtonAction:=Sub()
+                                   chosen = DrawioOpenChoice.None
+                               End Sub,
+            CloseAfterExtra:=True,
+            nonModal:=False)
 
         If r = 1 Then Return DrawioOpenChoice.OfflineAfterLoad
         If r = 2 Then Return DrawioOpenChoice.Online
         Return DrawioOpenChoice.None
+
     End Function
 
     ''' <summary>
@@ -3239,6 +3255,12 @@ Partial Public Class ThisAddIn
     Private Sub ShowDrawioEditor(ByVal xmlContent As String, ByVal saveFilePath As String, ByVal disableInternetAfterLoad As Boolean)
         Try
             Dim editorForm As New DrawioEditorForm(xmlContent, saveFilePath, disableInternetAfterLoad:=disableInternetAfterLoad)
+
+            ' For Custom PDF export on form 
+            'AddHandler editorForm.Shown, Sub()            
+            '                                editorForm.ExportPdfToDevice()
+            '                            End Sub
+
             editorForm.Show()
         Catch ex As Exception
             Debug.WriteLine($"ShowDrawioEditor error: {ex.Message}")

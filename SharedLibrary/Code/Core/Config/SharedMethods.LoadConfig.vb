@@ -258,6 +258,7 @@ Namespace SharedLibrary
                 context.INI_ShortcutsWordExcel = If(configDict.ContainsKey("ShortcutsWordExcel"), configDict("ShortcutsWordExcel"), "")
                 context.INI_ContextMenu = ParseBoolean(configDict, "ContextMenu", DEFAULT_BOOL_CONTEXTMENU)
                 context.INI_NoLocalConfig = ParseBoolean(configDict, "NoLocalConfig")
+                context.INI_ForceDrawioLocal = ParseBoolean(configDict, "ForceDrawioLocal")
 
                 ' Tooling settings
 

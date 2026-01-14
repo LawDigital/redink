@@ -67,7 +67,7 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Default maximum outline level treated as "heading-like" when rule-based numbering reset is enabled.
     ''' </summary>
-    Private Const DefaultRuleHeadingOutlineLevelMax As Integer = 4
+    Private Const DefaultRuleHeadingOutlineLevelMax As Integer = 5
 
     ''' <summary>
     ''' Prompt snippet describing the JSON response format expected from the LLM during style application.
@@ -117,6 +117,7 @@ Partial Public Class ThisAddIn
         Public Property RuleHeadingOutlineLevelMax As Integer = DefaultRuleHeadingOutlineLevelMax
         Public Property LastStyleTemplateDisplay As String = ""
         Public Property RestoreInlineFormatting As Boolean = False
+        Public Property RemoveEmptyLines As Boolean = False
 
         ''' <summary>
         ''' Loads DocStyle settings from <c>My.Settings</c> and clamps numeric values to valid ranges.
@@ -139,6 +140,7 @@ Partial Public Class ThisAddIn
 
             LastStyleTemplateDisplay = If(My.Settings.DocStyle_LastStyleTemplateDisplay, "")
             RestoreInlineFormatting = My.Settings.DocStyle_RestoreInlineFormatting
+            RemoveEmptyLines = My.Settings.DocStyle_RemoveEmptyLines
 
             ' Clamps
             If ConfidenceThreshold < 0 Then ConfidenceThreshold = 0
@@ -171,6 +173,7 @@ Partial Public Class ThisAddIn
 
             My.Settings.DocStyle_LastStyleTemplateDisplay = If(LastStyleTemplateDisplay, "")
             My.Settings.DocStyle_RestoreInlineFormatting = RestoreInlineFormatting
+            My.Settings.DocStyle_RemoveEmptyLines = RemoveEmptyLines
 
             My.Settings.Save()
         End Sub
@@ -803,13 +806,14 @@ Partial Public Class ThisAddIn
 
             Dim p1 As New SLib.InputParameter("Apply in Track Changes", settings.TrackChanges)
 
-            ' Seeds the UI option from the persisted setting value.
+            ' Seeds the UI option from the persisted setting value.            
             Dim p1b As New SLib.InputParameter("Restore in-para formatting (requires Track Changes)", settings.RestoreInlineFormatting)
+
+            Dim p1c As New SLib.InputParameter("Remove empty paragraphs after styling", settings.RemoveEmptyLines)
 
             Dim p9 As New SLib.InputParameter("Show report at end", settings.ShowReport)
 
-            Dim params() As SLib.InputParameter = {p0, p2, p3, p4, p5, p6, p7, p8b, p8c, p10, p11, p1, p1b, p9}
-
+            Dim params() As SLib.InputParameter = {p0, p2, p3, p4, p5, p6, p7, p8b, p8c, p10, p11, p1, p1b, p1c, p9}
             If Not ShowCustomVariableInputForm("Configure Style Template Application:", $"{AN} - Apply Style Template", params) Then
                 Return
             End If
@@ -846,7 +850,8 @@ Partial Public Class ThisAddIn
 
             settings.TrackChanges = System.Convert.ToBoolean(params(11).Value)
             settings.RestoreInlineFormatting = System.Convert.ToBoolean(params(12).Value)
-            settings.ShowReport = System.Convert.ToBoolean(params(13).Value)
+            settings.RemoveEmptyLines = System.Convert.ToBoolean(params(13).Value)
+            settings.ShowReport = System.Convert.ToBoolean(params(14).Value)
 
             settings.Save()
 
@@ -914,6 +919,12 @@ Partial Public Class ThisAddIn
                         SLib.PutInClipboard(report)
                     End If
                 End Using
+
+                ' Remove empty paragraphs if requested (done after styling, respects Track Changes setting)
+                If settings.RemoveEmptyLines Then
+                    Dim removedCount As Integer = RemoveEmptyParagraphs(targetRange)
+                    Debug.WriteLine($"[DocStyle] Removed {removedCount} empty paragraph(s)")
+                End If
 
                 If settings.TrackChanges AndAlso settings.RestoreInlineFormatting Then
                     UndoInlineFormattingRevisions(doc)
@@ -3116,6 +3127,60 @@ Partial Public Class ThisAddIn
 #End Region
 
 #Region "Helper Classes and Functions"
+
+    ''' <summary>
+    ''' Removes empty paragraphs (containing only whitespace or paragraph marks) from the specified range.
+    ''' Iterates in reverse order to avoid index shifting issues during deletion.
+    ''' </summary>
+    ''' <param name="targetRange">Range from which to remove empty paragraphs.</param>
+    ''' <returns>Number of paragraphs removed.</returns>
+    Private Function RemoveEmptyParagraphs(targetRange As Word.Range) As Integer
+        Dim removedCount As Integer = 0
+
+        Try
+            ' Build a list of paragraph ranges to delete (iterate forward, delete in reverse)
+            Dim parasToDelete As New List(Of Word.Range)()
+
+            For Each para As Word.Paragraph In targetRange.Paragraphs
+                Try
+                    Dim text As String = para.Range.Text
+                    ' Remove paragraph mark and check if remaining content is empty/whitespace
+                    text = text.TrimEnd(vbCr, vbLf, ChrW(13), ChrW(10))
+
+                    If String.IsNullOrWhiteSpace(text) Then
+                        ' Don't delete if it's in a table cell (could break table structure)
+                        Dim isInTable As Boolean = False
+                        Try
+                            isInTable = (para.Range.Tables.Count > 0 OrElse para.Range.Cells.Count > 0)
+                        Catch
+                        End Try
+
+                        If Not isInTable Then
+                            parasToDelete.Add(para.Range.Duplicate)
+                        End If
+                    End If
+                Catch
+                    ' Skip paragraphs that can't be processed
+                End Try
+            Next
+
+            ' Delete in reverse order to preserve range integrity
+            For i As Integer = parasToDelete.Count - 1 To 0 Step -1
+                Try
+                    parasToDelete(i).Delete()
+                    removedCount += 1
+                Catch ex As Exception
+                    Debug.WriteLine($"[DocStyle] Could not delete empty paragraph: {ex.Message}")
+                End Try
+            Next
+
+        Catch ex As Exception
+            Debug.WriteLine($"[DocStyle] RemoveEmptyParagraphs error: {ex.Message}")
+        End Try
+
+        Return removedCount
+    End Function
+
 
     ''' <summary>
     ''' Represents a style template file.
