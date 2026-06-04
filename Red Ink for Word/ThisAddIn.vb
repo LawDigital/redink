@@ -217,33 +217,6 @@ Partial Public Class ThisAddIn
     Private Shared TTS_GoogleEndpoint As String = ""
     Private Shared TTS_OpenAIEndpoint As String = ""
 
-    Public Shared GoogleSTT_Desc As String = "Google STT V1 (run in EU)"
-    Public Shared STTEndpoint As String = "eu-speech.googleapis.com"
-
-
-    Public Shared OpenAISTTModel As String = "gpt-4o-realtime-preview"
-    Public Shared OpenAISTT_Desc As String = $"OpenAI Streaming"
-    Public Shared STTEndpoint_OpenAI As String = $"wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
-
-    Public Shared GoogleSTTsupportedLanguages As String() = {
-    "en-US", "de-DE",
-    "de-AT", "de-CH", "es-AR", "es-BO", "es-CL", "es-CO", "es-CR", "es-DO", "es-EC", "es-ES", "es-GT",
-    "es-HN", "es-MX", "es-NI", "es-PA", "es-PE", "es-PR", "es-PY", "es-SV", "es-UY", "es-VE",
-    "fr-BE", "fr-CA", "fr-CH", "fr-FR", "it-CH", "it-IT", "nl-BE", "nl-NL",
-    "af-ZA", "am-ET", "ar-BH", "ar-DZ", "ar-EG", "ar-IQ", "ar-IL", "ar-JO", "ar-KW", "ar-LB", "ar-MA",
-    "ar-MR", "ar-OM", "ar-PS", "ar-QA", "ar-SA", "ar-SY", "ar-TN", "ar-AE", "ar-YE", "az-AZ", "bg-BG",
-    "bn-BD", "bn-IN", "bs-BA", "ca-ES", "cmn-Hans-CN", "cmn-Hans-HK", "cmn-Hant-TW", "cs-CZ",
-    "da-DK", "el-GR", "en-AU", "en-CA", "en-GH", "en-HK", "en-IE", "en-IN", "en-KE", "en-NG",
-    "en-NZ", "en-PH", "en-PK", "en-SG", "en-TZ", "en-ZA", "et-EE", "eu-ES", "fa-IR", "fi-FI",
-    "fil-PH", "gl-ES", "gu-IN", "hi-IN", "hr-HR", "hu-HU", "hy-AM", "id-ID", "is-IS", "iw-IL",
-    "ja-JP", "jv-ID", "ka-GE", "kk-KZ", "km-KH", "kn-IN", "ko-KR", "lo-LA", "lt-LT", "lv-LV",
-    "ml-IN", "mn-MN", "mr-IN", "ms-MY", "my-MM", "ne-NP", "no-NO", "pa-Guru-IN", "pl-PL",
-    "pt-BR", "pt-PT", "ro-RO", "rw-RW", "si-LK", "sk-SK", "sl-SI", "sr-RS", "ss-Latn-ZA", "st-ZA",
-    "su-ID", "sv-SE", "sw-KE", "sw-TZ", "ta-IN", "ta-LK", "ta-MY", "ta-SG", "te-IN", "th-TH",
-    "tn-Latn-ZA", "tr-TR", "uk-UA", "ur-IN", "ur-PK", "uz-UZ", "ve-ZA", "vi-VN", "xh-ZA",
-    "yue-Hant-HK", "zu-ZA"
-        }
-
     ' Tooling
 
     Public Const ToolingLog_AutoCloseDefaultSeconds As Integer = 20
