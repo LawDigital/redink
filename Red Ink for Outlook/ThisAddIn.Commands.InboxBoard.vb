@@ -519,6 +519,107 @@ Partial Public Class ThisAddIn
 
 #Region "InboxBoard Mail Collection"
 
+    Private NotInheritable Class InboxBoardProgressScope
+        Implements IDisposable
+
+        Private ReadOnly _cts As New CancellationTokenSource()
+        Private _uiThread As Thread
+        Private _form As Form
+        Private _closed As Integer = 0
+
+        Public Sub New(headerText As String,
+                       initialLabel As String,
+                       Optional max As Integer = 100)
+
+            ProgressBarModule.CancelOperation = False
+            ProgressBarModule.GlobalProgressMax = Math.Max(1, max)
+            ProgressBarModule.GlobalProgressValue = 0
+            ProgressBarModule.GlobalProgressLabel = If(initialLabel, "")
+
+            _uiThread = New Thread(
+                Sub()
+                    Try
+                        System.Windows.Forms.Application.EnableVisualStyles()
+                        _form = CType(New Global.SharedLibrary.SharedLibrary.DPIProgressForm(headerText, initialLabel), System.Windows.Forms.Form)
+                        System.Windows.Forms.Application.Run(_form)
+                    Catch
+                    End Try
+                End Sub)
+
+            _uiThread.IsBackground = True
+            _uiThread.SetApartmentState(ApartmentState.STA)
+            _uiThread.Start()
+        End Sub
+
+        Public Shared Sub Report(current As Integer,
+                                 Optional max As Integer = -1,
+                                 Optional label As String = Nothing)
+            If max >= 1 Then ProgressBarModule.GlobalProgressMax = max
+            If label IsNot Nothing Then ProgressBarModule.GlobalProgressLabel = label
+            ProgressBarModule.GlobalProgressValue =
+                Math.Max(0, Math.Min(current, ProgressBarModule.GlobalProgressMax))
+        End Sub
+
+        Public ReadOnly Property CancelRequested As Boolean
+            Get
+                Return ProgressBarModule.CancelOperation OrElse _cts.IsCancellationRequested
+            End Get
+        End Property
+
+        Public Sub Dispose() Implements IDisposable.Dispose
+            If Interlocked.Exchange(_closed, 1) <> 0 Then Return
+
+            Try
+                ProgressBarModule.CancelOperation = True
+
+                Dim f = _form
+                If f IsNot Nothing Then
+                    Try
+                        If f.IsHandleCreated AndAlso Not f.IsDisposed Then
+                            f.BeginInvoke(New System.Action(
+                                Sub()
+                                    Try
+                                        If Not f.IsDisposed Then f.Close()
+                                    Catch
+                                    End Try
+                                End Sub))
+                        End If
+                    Catch
+                    End Try
+                End If
+            Finally
+                Try
+                    If _uiThread IsNot Nothing AndAlso _uiThread.IsAlive Then
+                        If Not _uiThread.Join(1000) Then
+                            Try : _uiThread.Interrupt() : Catch : End Try
+                        End If
+                    End If
+                Catch
+                End Try
+            End Try
+        End Sub
+    End Class
+
+    Private Class InboxBoardScanProgressState
+        Public Property ExpectedItems As Integer
+        Public Property ProcessedItems As Integer
+    End Class
+
+    Private Shared Function ShouldReportInboxBoardProgress(current As Integer, total As Integer) As Boolean
+        If total <= 0 Then Return False
+        If current <= 1 OrElse current >= total Then Return True
+        If total <= 100 Then Return True
+        Return (current Mod 25) = 0
+    End Function
+
+    Private Shared Sub ReportInboxBoardProgress(progress As InboxBoardProgressScope,
+                                                current As Integer,
+                                                max As Integer,
+                                                label As String)
+        If progress Is Nothing Then Return
+        InboxBoardProgressScope.Report(current, Math.Max(1, max), label)
+    End Sub
+
     ''' <summary>
     ''' Scans the configured target folder (defaulting to default Inbox) for mails that
     ''' have at least one category assigned, and optionally mails that are flagged for follow-up.
@@ -549,32 +650,68 @@ Partial Public Class ThisAddIn
         Try : loadThreshold = My.Settings.InboxBoardLoadThreshold : Catch : End Try
         If loadThreshold <= 0 Then loadThreshold = InboxBoard_DefaultLoadThreshold
 
-        ' Collect all mail items from target folder (+ subfolders)
-        Dim allMailItems As List(Of MailItem) = CollectMailItemsFromFolder(targetFolder, includeSubfolders)
-
-        ' Count qualifying mails
+        Dim allMailItems As List(Of MailItem) = Nothing
         Dim totalQualifying As Integer = 0
-        For Each mi In allMailItems
-            Try
-                Dim cats As String = ""
-                Try : cats = ComRetry(Of String)(Function() If(mi.Categories, "")) : Catch : End Try
-                Dim hasCats As Boolean = Not String.IsNullOrWhiteSpace(cats)
 
-                Dim qualifies As Boolean = hasCats
-                If Not qualifies Then
-                    Dim flagStatus As Integer = 0
-                    Try : flagStatus = ComRetry(Of Integer)(Function() CInt(mi.FlagStatus)) : Catch : End Try
-                    If flagStatus = 2 Then
-                        qualifies = True
-                    ElseIf flagStatus = 1 AndAlso Not hideDoneFlags Then
-                        qualifies = True
+        ' Stage 1: scan mailbox + count qualifying mails
+        Using progress As New InboxBoardProgressScope(
+            "Inbox Board",
+            $"Scanning ""{_inboxBoardTrackedFolderLabel}""…",
+            1)
+
+            ReportInboxBoardProgress(
+                progress,
+                0,
+                1,
+                $"Scanning ""{_inboxBoardTrackedFolderLabel}""…")
+
+            Dim scanState As New InboxBoardScanProgressState()
+            allMailItems = CollectMailItemsFromFolder(targetFolder, includeSubfolders, progress, scanState)
+            If progress.CancelRequested Then Return Nothing
+
+            Dim scanStageMax As Integer = Math.Max(1, allMailItems.Count * 2)
+
+            ReportInboxBoardProgress(
+                progress,
+                allMailItems.Count,
+                scanStageMax,
+                $"Checking {allMailItems.Count:N0} mails…")
+
+            Dim countIndex As Integer = 0
+            For Each mi In allMailItems
+                If progress.CancelRequested Then Return Nothing
+
+                countIndex += 1
+
+                Try
+                    Dim cats As String = ""
+                    Try : cats = ComRetry(Of String)(Function() If(mi.Categories, "")) : Catch : End Try
+                    Dim hasCats As Boolean = Not String.IsNullOrWhiteSpace(cats)
+
+                    Dim qualifies As Boolean = hasCats
+                    If Not qualifies Then
+                        Dim flagStatus As Integer = 0
+                        Try : flagStatus = ComRetry(Of Integer)(Function() CInt(mi.FlagStatus)) : Catch : End Try
+                        If flagStatus = 2 Then
+                            qualifies = True
+                        ElseIf flagStatus = 1 AndAlso Not hideDoneFlags Then
+                            qualifies = True
+                        End If
                     End If
-                End If
 
-                If qualifies Then totalQualifying += 1
-            Catch
-            End Try
-        Next
+                    If qualifies Then totalQualifying += 1
+                Catch
+                End Try
+
+                If ShouldReportInboxBoardProgress(countIndex, allMailItems.Count) Then
+                    ReportInboxBoardProgress(
+                        progress,
+                        allMailItems.Count + countIndex,
+                        scanStageMax,
+                        $"Checking qualifying mails… {countIndex:N0}/{allMailItems.Count:N0}")
+                End If
+            Next
+        End Using
 
         If totalQualifying = 0 Then
             Dim hasPinnedColumns As Boolean = False
@@ -600,9 +737,11 @@ Partial Public Class ThisAddIn
         End If
 
         Dim maxToLoad As Integer = totalQualifying
+        If maxOverride > 0 Then maxToLoad = Math.Min(maxOverride, totalQualifying)
 
-        ' Prompt user if qualifying mails exceed the threshold
-        If totalQualifying > loadThreshold Then
+        ' Prompt user if qualifying mails exceed the threshold.
+        ' Do this outside the progress scope so the topmost progress window does not cover the prompt.
+        If maxOverride <= 0 AndAlso totalQualifying > loadThreshold Then
             If _inboxBoardLastMaxToLoad > 0 Then
                 maxToLoad = _inboxBoardLastMaxToLoad
             Else
@@ -635,58 +774,102 @@ Partial Public Class ThisAddIn
         Catch
         End Try
 
-        ' Build the category color map from Outlook
-        Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
-        Dim ns As Outlook.NameSpace = outlookApp.GetNamespace("MAPI")
-        Dim categoryColors As Dictionary(Of String, String) = GetOutlookCategoryColors(ns)
+        ' Stage 2: build board entries
+        Using progress As New InboxBoardProgressScope(
+            "Inbox Board",
+            "Building inbox board…",
+            Math.Max(1, allMailItems.Count + 4))
 
-        ' Extract entries
-        Dim entries As New List(Of InboxBoardEntry)()
-        For Each mi In allMailItems
-            Try
-                Dim entry As InboxBoardEntry = BuildInboxBoardEntry(mi, categoryColors, includeFlagged, hideDoneFlags)
-                If entry IsNot Nothing Then entries.Add(entry)
-            Catch
-            End Try
-        Next
+            Dim buildStageMax As Integer = Math.Max(1, allMailItems.Count + 4)
 
-        ' Sort by received time descending
-        entries.Sort(Function(a, b) b.ReceivedTime.CompareTo(a.ReceivedTime))
+            ' Build the category color map from Outlook
+            ReportInboxBoardProgress(progress, 0, buildStageMax, "Loading Outlook categories…")
 
-        ' Cap to maxToLoad
-        If entries.Count > maxToLoad Then
-            entries.RemoveRange(maxToLoad, entries.Count - maxToLoad)
-        End If
+            Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
+            Dim ns As Outlook.NameSpace = outlookApp.GetNamespace("MAPI")
+            Dim categoryColors As Dictionary(Of String, String) = GetOutlookCategoryColors(ns)
 
-        ' Apply conversation grouping if enabled
-        Dim groupConversations As Boolean = False
-        Try : groupConversations = My.Settings.InboxBoardGroupConversations : Catch : End Try
-        If groupConversations Then
-            entries = GroupByConversation(entries)
-        End If
+            ' Extract entries
+            Dim entries As New List(Of InboxBoardEntry)()
+            Dim extractIndex As Integer = 0
 
-        ' Apply cached summaries
-        For Each entry In entries
-            Dim cached As String = GetCachedSummary(entry.EntryID)
-            If Not String.IsNullOrEmpty(cached) Then
-                entry.Summary = cached
-            End If
-        Next
+            For Each mi In allMailItems
+                If progress.CancelRequested Then Return Nothing
 
-        ' Auto-register any orphaned board folder names found on mails
-        Dim knownFolders = GetBoardFolderNames()
-        Dim foldersChanged As Boolean = False
-        For Each entry In entries
-            If Not String.IsNullOrEmpty(entry.BoardFolder) Then
-                If Not knownFolders.Any(Function(f) f.Equals(entry.BoardFolder, StringComparison.OrdinalIgnoreCase)) Then
-                    knownFolders.Add(entry.BoardFolder)
-                    foldersChanged = True
+                extractIndex += 1
+
+                Try
+                    Dim entry As InboxBoardEntry = BuildInboxBoardEntry(mi, categoryColors, includeFlagged, hideDoneFlags)
+                    If entry IsNot Nothing Then entries.Add(entry)
+                Catch
+                End Try
+
+                If ShouldReportInboxBoardProgress(extractIndex, allMailItems.Count) Then
+                    ReportInboxBoardProgress(
+                        progress,
+                        extractIndex,
+                        buildStageMax,
+                        $"Building inbox board… {extractIndex:N0}/{allMailItems.Count:N0}")
                 End If
-            End If
-        Next
-        If foldersChanged Then SaveBoardFolderNames(knownFolders)
+            Next
 
-        Return entries
+            If progress.CancelRequested Then Return Nothing
+
+            ' Sort by received time descending
+            ReportInboxBoardProgress(progress, allMailItems.Count + 1, buildStageMax, "Sorting mails…")
+            entries.Sort(Function(a, b) b.ReceivedTime.CompareTo(a.ReceivedTime))
+
+            ' Cap to maxToLoad
+            If entries.Count > maxToLoad Then
+                entries.RemoveRange(maxToLoad, entries.Count - maxToLoad)
+            End If
+
+            If progress.CancelRequested Then Return Nothing
+
+            ' Apply conversation grouping if enabled
+            ReportInboxBoardProgress(progress, allMailItems.Count + 2, buildStageMax, "Grouping conversations…")
+
+            Dim groupConversations As Boolean = False
+            Try : groupConversations = My.Settings.InboxBoardGroupConversations : Catch : End Try
+            If groupConversations Then
+                entries = GroupByConversation(entries)
+            End If
+
+            If progress.CancelRequested Then Return Nothing
+
+            ' Apply cached summaries
+            ReportInboxBoardProgress(progress, allMailItems.Count + 3, buildStageMax, "Applying cached summaries…")
+
+            For Each entry In entries
+                If progress.CancelRequested Then Return Nothing
+
+                Dim cached As String = GetCachedSummary(entry.EntryID)
+                If Not String.IsNullOrEmpty(cached) Then
+                    entry.Summary = cached
+                End If
+            Next
+
+            If progress.CancelRequested Then Return Nothing
+
+            ' Auto-register any orphaned board folder names found on mails
+            ReportInboxBoardProgress(progress, allMailItems.Count + 4, buildStageMax, "Finalizing inbox board…")
+
+            Dim knownFolders = GetBoardFolderNames()
+            Dim foldersChanged As Boolean = False
+            For Each entry In entries
+                If progress.CancelRequested Then Return Nothing
+
+                If Not String.IsNullOrEmpty(entry.BoardFolder) Then
+                    If Not knownFolders.Any(Function(f) f.Equals(entry.BoardFolder, StringComparison.OrdinalIgnoreCase)) Then
+                        knownFolders.Add(entry.BoardFolder)
+                        foldersChanged = True
+                    End If
+                End If
+            Next
+            If foldersChanged Then SaveBoardFolderNames(knownFolders)
+
+            Return entries
+        End Using
     End Function
 
 
@@ -1473,17 +1656,36 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Collects all MailItems from a folder, optionally including subfolders.
-    ''' Returns the aggregated Items-like list of (index, MailItem) pairs for
-    ''' the caller to iterate.
+    ''' Reports progress and supports cancellation while scanning.
     ''' </summary>
-    Private Function CollectMailItemsFromFolder(folder As MAPIFolder, includeSubfolders As Boolean) As List(Of MailItem)
+    Private Function CollectMailItemsFromFolder(folder As MAPIFolder,
+                                            includeSubfolders As Boolean,
+                                            progress As InboxBoardProgressScope,
+                                            state As InboxBoardScanProgressState) As List(Of MailItem)
+
         Dim result As New List(Of MailItem)()
         If folder Is Nothing Then Return result
+        If progress IsNot Nothing AndAlso progress.CancelRequested Then Return result
+
+        Dim folderLabel As String = GetFolderDisplayLabel(folder)
 
         Try
             Dim folderItems As Outlook.Items = ComRetry(Of Outlook.Items)(Function() folder.Items)
-            Dim totalItems As Integer = ComRetry(Of Integer)(Function() folderItems.Count)
+            Dim totalItems As Integer = 0
+            Try : totalItems = ComRetry(Of Integer)(Function() folderItems.Count) : Catch : End Try
+
+            If totalItems > 0 Then
+                state.ExpectedItems += totalItems
+                ReportInboxBoardProgress(
+                    progress,
+                    state.ProcessedItems,
+                    state.ExpectedItems,
+                    $"Scanning {folderLabel}…")
+            End If
+
             For i As Integer = 1 To totalItems
+                If progress IsNot Nothing AndAlso progress.CancelRequested Then Exit For
+
                 Try
                     Dim idx As Integer = i
                     Dim item As Object = ComRetry(Function() folderItems.Item(idx))
@@ -1491,15 +1693,28 @@ Partial Public Class ThisAddIn
                     If mi IsNot Nothing Then result.Add(mi)
                 Catch
                 End Try
+
+                state.ProcessedItems += 1
+
+                If ShouldReportInboxBoardProgress(state.ProcessedItems, state.ExpectedItems) Then
+                    ReportInboxBoardProgress(
+                        progress,
+                        state.ProcessedItems,
+                        state.ExpectedItems,
+                        $"Scanning {folderLabel}… {state.ProcessedItems:N0}/{state.ExpectedItems:N0}")
+                End If
             Next
         Catch
         End Try
+
+        If progress IsNot Nothing AndAlso progress.CancelRequested Then Return result
 
         If includeSubfolders Then
             Try
                 Dim subFolders As Outlook.Folders = folder.Folders
                 For Each subF As MAPIFolder In subFolders
-                    result.AddRange(CollectMailItemsFromFolder(subF, True))
+                    If progress IsNot Nothing AndAlso progress.CancelRequested Then Exit For
+                    result.AddRange(CollectMailItemsFromFolder(subF, True, progress, state))
                 Next
             Catch
             End Try
