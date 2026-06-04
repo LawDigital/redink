@@ -7,6 +7,9 @@ Imports System.Net.Http.Headers
 Imports System.Threading
 Imports NAudio.Wave
 Imports Newtonsoft.Json.Linq
+Imports System.Text
+Imports System.Net
+Imports System.Security.Authentication
 
 Namespace Transcription
 
@@ -77,12 +80,59 @@ Namespace Transcription
 
         Private ReadOnly _endpoint As String
         Private ReadOnly _apiKey As String
-        Private ReadOnly _http As New System.Net.Http.HttpClient() With {.Timeout = System.TimeSpan.FromMinutes(10)}
+        Private ReadOnly _http As System.Net.Http.HttpClient
         Private _opts As TranscriptionOptions
+
+
+        Private Shared Sub EnsureTls12()
+            Try
+                AppContext.SetSwitch("Switch.System.Net.DontEnableSchUseStrongCrypto", False)
+            Catch
+            End Try
+
+            Try
+                AppContext.SetSwitch("Switch.System.Net.DontEnableSystemDefaultTlsVersions", False)
+            Catch
+            End Try
+
+            Try
+                ServicePointManager.Expect100Continue = False
+            Catch
+            End Try
+
+            Try
+                ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12
+            Catch
+                Try
+                    ServicePointManager.SecurityProtocol = CType(3072, SecurityProtocolType)
+                Catch
+                End Try
+            End Try
+        End Sub
 
         Public Sub New(apiKey As String)
             _endpoint = DefaultOpenAiRestUrl
             _apiKey = apiKey
+
+            EnsureTls12()
+
+            Dim handler As New System.Net.Http.HttpClientHandler() With {
+        .AllowAutoRedirect = True,
+        .AutomaticDecompression = System.Net.DecompressionMethods.GZip Or System.Net.DecompressionMethods.Deflate
+    }
+
+            Try
+                handler.SslProtocols = System.Security.Authentication.SslProtocols.Tls12
+            Catch
+            End Try
+
+            _http = New System.Net.Http.HttpClient(handler) With {
+        .Timeout = System.TimeSpan.FromMinutes(30)
+    }
+        End Sub
+
+        Private Sub RaiseStatusMessage(message As String)
+            RaiseEvent Status(Me, New TranscriptionStatusEventArgs(message))
         End Sub
 
         Public Function StartLiveAsync(opts As TranscriptionOptions, ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task Implements ITranscriptionEngine.StartLiveAsync
@@ -100,21 +150,59 @@ Namespace Transcription
         Public Async Function TranscribeFileAsync(filePath As String, opts As TranscriptionOptions, ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task Implements ITranscriptionEngine.TranscribeFileAsync
             _opts = opts
 
-            Using fs As New System.IO.FileStream(filePath, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read)
-                Await PostMultipartAsync(fs, System.IO.Path.GetFileName(filePath), opts, ct)
+            RaiseStatusMessage("Preparing file for OpenAI REST…")
+
+            Using payload As System.IO.Stream = CreateUploadStream(filePath)
+                Await PostMultipartAsync(payload, System.IO.Path.GetFileNameWithoutExtension(filePath) & ".wav", opts, ct)
             End Using
+        End Function
+
+        Private Shared Function CreateUploadStream(filePath As String) As System.IO.Stream
+            Dim pcm As Byte() = VoskEngine.LoadAudioToPcm16Mono16k(filePath)
+            Dim wavStream As New System.IO.MemoryStream()
+
+            Using raw As New RawSourceWaveStream(New System.IO.MemoryStream(pcm, False), New WaveFormat(16000, 16, 1))
+                WaveFileWriter.WriteWavFileToStream(wavStream, raw)
+            End Using
+
+            wavStream.Position = 0
+            Return wavStream
+        End Function
+
+        Private Shared Function GetDetailedExceptionMessage(ex As System.Exception) As String
+            If ex Is Nothing Then
+                Return ""
+            End If
+
+            Dim sb As New StringBuilder()
+            Dim current As System.Exception = ex
+
+            While current IsNot Nothing
+                If sb.Length > 0 Then
+                    sb.Append(" -> ")
+                End If
+
+                sb.Append(current.Message)
+                current = current.InnerException
+            End While
+
+            Return sb.ToString()
         End Function
 
         Private Async Function PostMultipartAsync(payload As System.IO.Stream, fileName As String, opts As TranscriptionOptions, ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task
             Dim model As String = NormalizeModel(opts)
             ValidateOptions(model, opts)
 
+            EnsureTls12()
+
             Using req As New System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Post, _endpoint)
                 req.Headers.Authorization = New System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _apiKey)
+                req.Headers.ExpectContinue = False
+                req.Version = New System.Version(1, 1)
 
                 Using form As New System.Net.Http.MultipartFormDataContent()
                     Dim sc As New System.Net.Http.StreamContent(payload)
-                    sc.Headers.ContentType = New System.Net.Http.Headers.MediaTypeHeaderValue(GetContentTypeForFileName(fileName))
+                    sc.Headers.ContentType = New System.Net.Http.Headers.MediaTypeHeaderValue("audio/wav")
                     form.Add(sc, "file", fileName)
                     form.Add(New System.Net.Http.StringContent(model), "model")
 
@@ -135,16 +223,34 @@ Namespace Transcription
 
                     req.Content = form
 
-                    Using resp As System.Net.Http.HttpResponseMessage = Await _http.SendAsync(req, ct)
-                        Dim body As String = Await resp.Content.ReadAsStringAsync()
+                    RaiseStatusMessage("Uploading audio to OpenAI REST…")
 
-                        If Not resp.IsSuccessStatusCode Then
-                            RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs("OpenAI REST HTTP " & CInt(resp.StatusCode).ToString(System.Globalization.CultureInfo.InvariantCulture) & " " & resp.StatusCode.ToString() & ": " & body, Nothing, False))
-                            Return
-                        End If
+                    Try
+                        Using resp As System.Net.Http.HttpResponseMessage = Await _http.SendAsync(req, System.Net.Http.HttpCompletionOption.ResponseContentRead, ct)
+                            Dim body As String = Await resp.Content.ReadAsStringAsync()
 
-                        HandleResponseBody(model, body)
-                    End Using
+                            If Not resp.IsSuccessStatusCode Then
+                                Dim detail As String = "OpenAI REST HTTP " &
+                            CInt(resp.StatusCode).ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                            " " & resp.StatusCode.ToString() &
+                            ": " & body
+
+                                RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs(detail, Nothing, False))
+                                Throw New System.InvalidOperationException(detail)
+                            End If
+
+                            RaiseStatusMessage("Parsing OpenAI REST response…")
+                            HandleResponseBody(model, body)
+                            RaiseStatusMessage("OpenAI REST file transcription completed.")
+                        End Using
+                    Catch ex As System.OperationCanceledException When ct.IsCancellationRequested
+                        RaiseStatusMessage("OpenAI REST canceled.")
+                        Throw
+                    Catch ex As System.Net.Http.HttpRequestException
+                        Dim detail As String = "OpenAI REST request failed: " & GetDetailedExceptionMessage(ex)
+                        RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs(detail, ex, False))
+                        Throw New System.InvalidOperationException(detail, ex)
+                    End Try
                 End Using
             End Using
         End Function
@@ -182,11 +288,17 @@ Namespace Transcription
                 Dim textValue As String = If(jo("text")?.ToString(), "")
                 If Not System.String.IsNullOrWhiteSpace(textValue) Then
                     RaiseEvent FinalResult(Me, New TranscriptionEventArgs(textValue.Trim(), True))
+                    Return
                 End If
+
+                Throw New System.InvalidOperationException("OpenAI REST returned no transcription text.")
             Catch ex As Newtonsoft.Json.JsonException
                 If Not System.String.IsNullOrWhiteSpace(body) Then
                     RaiseEvent FinalResult(Me, New TranscriptionEventArgs(body.Trim(), True))
+                    Return
                 End If
+
+                Throw
             End Try
         End Sub
 

@@ -45,6 +45,7 @@ Imports System.Windows.Forms
 Imports SharedLibrary.SharedLibrary
 Imports System.Globalization
 Imports SharedLibrary.SharedLibrary.SharedMethods
+Imports System.Net
 
 
 Partial Public Class ThisAddIn
@@ -410,6 +411,32 @@ Partial Public Class ThisAddIn
     Public Shared UiThreadId As Integer
 
 
+    Private Shared Sub EnsureModernTls()
+        Try
+            AppContext.SetSwitch("Switch.System.Net.DontEnableSchUseStrongCrypto", False)
+        Catch
+        End Try
+
+        Try
+            AppContext.SetSwitch("Switch.System.Net.DontEnableSystemDefaultTlsVersions", False)
+        Catch
+        End Try
+
+        Try
+            ServicePointManager.Expect100Continue = False
+        Catch
+        End Try
+
+        Try
+            ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12
+        Catch
+            Try
+                ServicePointManager.SecurityProtocol = CType(3072, SecurityProtocolType)
+            Catch
+            End Try
+        End Try
+    End Sub
+
     Private Sub ThisAddIn_Startup() Handles Me.Startup
 
         ' Necessary for Update Handler to work correctly
@@ -447,6 +474,8 @@ Partial Public Class ThisAddIn
         UpdateHandler.HostHandle = hwnd
 
         ' Other tasks that need to be done at startup
+
+        EnsureModernTls()
 
         SharedMethods.Initialize(Me.CustomTaskPanes)
 

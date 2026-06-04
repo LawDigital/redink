@@ -66,6 +66,8 @@ Partial Public Class ThisAddIn
         Private _alternateOpenAiConfig As ModelConfig = Nothing
         Private _alternateGoogleConfig As ModelConfig = Nothing
 
+        Private _fileTranscribing As Boolean = False
+
         Private Class EngineDescriptor
             Public DisplayName As String
             Public Kind As EngineKind
@@ -260,6 +262,7 @@ Partial Public Class ThisAddIn
             tt.SetToolTip(cbo, text)
         End Sub
 
+
         Private Sub LoadEngines()
             _engines.Clear()
             cboEngine.Items.Clear()
@@ -300,10 +303,41 @@ Partial Public Class ThisAddIn
             End If
 
             If HasConfiguredOpenAiProvider() Then
-                _engines.Add(New EngineDescriptor With {.DisplayName = OpenAiRestEngine.DisplayNameWhisper1, .Kind = EngineKind.OpenAiRest, .ModelOrTag = "whisper-1"})
-                _engines.Add(New EngineDescriptor With {.DisplayName = OpenAiRestEngine.DisplayNameGpt4o, .Kind = EngineKind.OpenAiRest, .ModelOrTag = "gpt-4o-transcribe"})
-                _engines.Add(New EngineDescriptor With {.DisplayName = OpenAiRestEngine.DisplayNameGpt4oMini, .Kind = EngineKind.OpenAiRest, .ModelOrTag = "gpt-4o-mini-transcribe"})
-                _engines.Add(New EngineDescriptor With {.DisplayName = OpenAiRealtimeEngine.DisplayNameValue, .Kind = EngineKind.OpenAiRealtime, .ModelOrTag = "gpt-4o-mini-transcribe"})
+                _engines.Add(New EngineDescriptor With {
+                    .DisplayName = "OpenAI gpt-4o-transcribe (REST)",
+                    .Kind = EngineKind.OpenAiRest,
+                    .ModelOrTag = "gpt-4o-transcribe"
+                })
+
+                _engines.Add(New EngineDescriptor With {
+                    .DisplayName = "OpenAI gpt-4o-mini-transcribe (REST)",
+                    .Kind = EngineKind.OpenAiRest,
+                    .ModelOrTag = "gpt-4o-mini-transcribe"
+                })
+
+                _engines.Add(New EngineDescriptor With {
+                    .DisplayName = "OpenAI gpt-4o-mini-transcribe-2025-12-15 (REST)",
+                    .Kind = EngineKind.OpenAiRest,
+                    .ModelOrTag = "gpt-4o-mini-transcribe-2025-12-15"
+                })
+
+                _engines.Add(New EngineDescriptor With {
+                    .DisplayName = "OpenAI gpt-4o-transcribe-diarize (REST)",
+                    .Kind = EngineKind.OpenAiRest,
+                    .ModelOrTag = "gpt-4o-transcribe-diarize"
+                })
+
+                _engines.Add(New EngineDescriptor With {
+                    .DisplayName = "OpenAI whisper-1 (REST legacy)",
+                    .Kind = EngineKind.OpenAiRest,
+                    .ModelOrTag = "whisper-1"
+                })
+
+                _engines.Add(New EngineDescriptor With {
+                    .DisplayName = "OpenAI Realtime gpt-realtime-2 / gpt-realtime-whisper (streaming)",
+                    .Kind = EngineKind.OpenAiRealtime,
+                    .ModelOrTag = "gpt-realtime-whisper"
+                })
             End If
 
             For Each e In _engines
@@ -574,7 +608,7 @@ Partial Public Class ThisAddIn
             UpdateComboToolTip(cboEngine)
             UpdateComboToolTip(cboLang)
 
-            If Not _capturing Then
+            If Not _capturing AndAlso Not _fileTranscribing Then
                 SetLiveState(GetIdleLiveState())
             End If
         End Sub
@@ -764,7 +798,7 @@ Partial Public Class ThisAddIn
                         Throw New InvalidOperationException("No OpenAI API key is available.")
                     End If
 
-                    _opts.Model = d.ModelOrTag
+                    _opts.Model = "gpt-realtime-whisper"
                     Return New OpenAiRealtimeEngine(key)
             End Select
 
@@ -846,6 +880,31 @@ Partial Public Class ThisAddIn
             Return "-----BEGIN PRIVATE KEY-----" & vbLf & sb.ToString() & "-----END PRIVATE KEY-----" & vbLf
         End Function
 
+
+        Private Function GetFileTranscribingState() As String
+            If String.IsNullOrWhiteSpace(_currentEngineDisplayName) Then
+                Return "Transcribing file…"
+            End If
+
+            Return _currentEngineDisplayName & ": Transcribing file…"
+        End Function
+
+        Private Sub CancelCurrentFileTranscription()
+            If Not _fileTranscribing Then
+                Return
+            End If
+
+            SetLiveState(_currentEngineDisplayName & ": Canceling file transcription…")
+
+            If _cts IsNot Nothing Then
+                Try
+                    _cts.Cancel()
+                Catch
+                End Try
+            End If
+        End Sub
+
+
         Private Function GetIdleLiveState() As String
             If String.IsNullOrWhiteSpace(_currentEngineDisplayName) Then
                 Return "Ready."
@@ -890,12 +949,17 @@ Partial Public Class ThisAddIn
         End Sub
 
         Private Async Sub OnStart(sender As Object, e As EventArgs)
-            If _capturing OrElse _isStopping Then
+            If _capturing OrElse _fileTranscribing OrElse _isStopping Then
                 Return
             End If
 
             Dim d As EngineDescriptor = CurrentDescriptor()
             If d Is Nothing Then
+                Return
+            End If
+
+            If d.Kind = EngineKind.OpenAiRest Then
+                ShowCustomMessageBox("OpenAI REST is file/request-response transcription only. Use Load for an audio file, or select OpenAI Realtime for live microphone transcription.")
                 Return
             End If
 
@@ -919,30 +983,57 @@ Partial Public Class ThisAddIn
             _currentEngineDisplayName = d.DisplayName
             SetLiveState(_currentEngineDisplayName & ": Starting…")
 
+            Dim startException As Exception = Nothing
+            Dim engineToDisposeAfterStartFailure As ITranscriptionEngine = Nothing
+            Dim ctsToDisposeAfterStartFailure As CancellationTokenSource = Nothing
+
             Try
                 _engine = Await CreateEngineAsync(d)
                 AttachEngineEvents(_engine)
                 _cts = New CancellationTokenSource()
                 Await _engine.StartLiveAsync(_opts, _cts.Token)
             Catch ex As Exception
-                SetLiveState(_currentEngineDisplayName & ": Error.")
-                ShowCustomMessageBox("Failed to start engine: " & ex.Message)
-                Return
+                startException = ex
+                engineToDisposeAfterStartFailure = _engine
+                ctsToDisposeAfterStartFailure = _cts
+
+                _engine = Nothing
+                _cts = Nothing
             End Try
 
+            If ctsToDisposeAfterStartFailure IsNot Nothing Then
+                Try
+                    ctsToDisposeAfterStartFailure.Dispose()
+                Catch
+                End Try
+            End If
+
+            If engineToDisposeAfterStartFailure IsNot Nothing Then
+                Try
+                    Await engineToDisposeAfterStartFailure.DisposeAsync()
+                Catch
+                End Try
+            End If
+
+            If startException IsNot Nothing Then
+                SetLiveState(_currentEngineDisplayName & ": Error.")
+                ShowCustomMessageBox("Failed to start engine: " & startException.Message)
+                Return
+            End If
+
             _capture = New AudioCaptureService With {
-                .MicDeviceIndex = micDeviceIndex,
-                .SourceMode = sourceMode,
-                .SystemAudioRenderDeviceId = GetConfiguredOutputDeviceId(),
-                .MultiChannelStereo = _opts.MultiChannelDiarization AndAlso _engine.SupportsMultiChannelDiarization,
-                .AudioDebugDump = _opts.AudioDebugDump OrElse INI_APIDebug
-            }
+        .MicDeviceIndex = micDeviceIndex,
+        .SourceMode = sourceMode,
+        .SystemAudioRenderDeviceId = GetConfiguredOutputDeviceId(),
+        .MultiChannelStereo = _opts.MultiChannelDiarization AndAlso _engine.SupportsMultiChannelDiarization,
+        .AudioDebugDump = _opts.AudioDebugDump OrElse INI_APIDebug
+    }
 
             AddHandler _capture.Frame, AddressOf OnCaptureFrame
             AddHandler _capture.CaptureError,
-                Sub(s, ev)
-                    SetLiveState(_currentEngineDisplayName & ": Capture error: " & ev.Message)
-                End Sub
+        Sub(s, ev)
+            SetLiveState(_currentEngineDisplayName & ": Capture error: " & ev.Message)
+        End Sub
 
             _capture.Start()
             AcquireSleepLock()
@@ -1031,6 +1122,7 @@ Partial Public Class ThisAddIn
 
             ReleaseSleepLock()
             _isStopping = False
+            ToggleCaptureUi(False)
             SetLiveState(GetIdleLiveState())
 
             If _closeAfterStop Then
@@ -1045,20 +1137,29 @@ Partial Public Class ThisAddIn
         End Function
 
         Private Async Sub OnStop(sender As Object, e As EventArgs)
+            If _fileTranscribing Then
+                CancelCurrentFileTranscription()
+                Return
+            End If
+
             Await StopCurrentSessionAsync()
         End Sub
+
 
         Private Async Sub OnQuit(sender As Object, e As EventArgs)
             If _capturing Then
                 _closeAfterStop = True
                 Await StopCurrentSessionAsync()
+            ElseIf _fileTranscribing Then
+                _closeAfterStop = True
+                CancelCurrentFileTranscription()
             Else
                 Me.Close()
             End If
         End Sub
 
         Private Async Sub OnLoadFile(sender As Object, e As EventArgs)
-            If _capturing OrElse _isStopping Then
+            If _capturing OrElse _fileTranscribing OrElse _isStopping Then
                 Return
             End If
 
@@ -1077,14 +1178,16 @@ Partial Public Class ThisAddIn
 
             Dim filePath As String = ""
 
-            Using f As New DragDropForm()
-                If f.ShowDialog() = DialogResult.OK Then
-                    filePath = f.SelectedFilePath
-                End If
-            End Using
-
-            DragDropFormLabel = ""
-            DragDropFormFilter = ""
+            Try
+                Using f As New DragDropForm()
+                    If f.ShowDialog() = DialogResult.OK Then
+                        filePath = f.SelectedFilePath
+                    End If
+                End Using
+            Finally
+                DragDropFormLabel = ""
+                DragDropFormFilter = ""
+            End Try
 
             If String.IsNullOrEmpty(filePath) OrElse Not File.Exists(filePath) Then
                 Return
@@ -1095,27 +1198,45 @@ Partial Public Class ThisAddIn
             End If
 
             _currentEngineDisplayName = d.DisplayName
-            SetLiveState(_currentEngineDisplayName & ": Transcribing file…")
-
-            Dim splash As New SLib.SplashScreen("Transcribing file…")
-            splash.Show()
-            splash.Refresh()
+            _lastPartialText = ""
+            _fileTranscribing = True
+            ToggleCaptureUi(False)
+            PersistSettings()
+            SetLiveState(GetFileTranscribingState())
 
             Dim engineToDispose As ITranscriptionEngine = Nothing
+            Dim ctsToDispose As CancellationTokenSource = Nothing
+            Dim failed As Boolean = False
+            Dim canceled As Boolean = False
+            Dim fileTranscriptionException As Exception = Nothing
 
             Try
                 _engine = Await CreateEngineAsync(d)
                 AttachEngineEvents(_engine)
                 _cts = New CancellationTokenSource()
                 Await _engine.TranscribeFileAsync(filePath, _opts, _cts.Token)
+                canceled = (_cts IsNot Nothing AndAlso _cts.IsCancellationRequested)
+            Catch ex As OperationCanceledException
+                canceled = True
             Catch ex As Exception
-                SetLiveState(_currentEngineDisplayName & ": File transcription failed.")
-                ShowCustomMessageBox("File transcription failed: " & ex.Message)
+                failed = True
+                fileTranscriptionException = ex
             Finally
-                splash.Close()
                 engineToDispose = _engine
+                ctsToDispose = _cts
+
                 _engine = Nothing
+                _cts = Nothing
+                _fileTranscribing = False
+                ToggleCaptureUi(False)
             End Try
+
+            If ctsToDispose IsNot Nothing Then
+                Try
+                    ctsToDispose.Dispose()
+                Catch
+                End Try
+            End If
 
             If engineToDispose IsNot Nothing Then
                 Try
@@ -1124,8 +1245,27 @@ Partial Public Class ThisAddIn
                 End Try
             End If
 
-            SetLiveState(_currentEngineDisplayName & ": File transcription complete.")
-            ShowCustomMessageBox("File transcription complete.")
+            If fileTranscriptionException IsNot Nothing Then
+                SetLiveState(_currentEngineDisplayName & ": File transcription failed.")
+                ShowCustomMessageBox("File transcription failed: " & fileTranscriptionException.Message)
+            End If
+
+            If canceled Then
+                SetLiveState(_currentEngineDisplayName & ": File transcription canceled.")
+            ElseIf Not failed Then
+                SetLiveState(_currentEngineDisplayName & ": File transcription complete.")
+                ShowCustomMessageBox("File transcription complete.")
+            End If
+
+            If _closeAfterStop Then
+                _closeAfterStop = False
+                If Not Me.IsDisposed Then
+                    Try
+                        Me.BeginInvoke(New System.Action(Sub() Me.Close()))
+                    Catch
+                    End Try
+                End If
+            End If
         End Sub
 
         Private Sub SafeAppendTranscript(text As String)
@@ -1152,42 +1292,44 @@ Partial Public Class ThisAddIn
 
         Private Sub AttachEngineEvents(eng As ITranscriptionEngine)
             AddHandler eng.PartialResult,
-                Sub(s, ev)
-                    Dim msg As String = If(String.IsNullOrEmpty(ev.Speaker), ev.Text, ev.Speaker & ": " & ev.Text)
-                    If Not String.IsNullOrWhiteSpace(msg) Then
-                        _lastPartialText = msg.Trim()
-                        SetLiveState(_currentEngineDisplayName & ": " & _lastPartialText)
-                    End If
-                End Sub
+        Sub(s, ev)
+            Dim msg As String = If(String.IsNullOrEmpty(ev.Speaker), ev.Text, ev.Speaker & ": " & ev.Text)
+            If Not String.IsNullOrWhiteSpace(msg) Then
+                _lastPartialText = msg.Trim()
+                SetLiveState(_currentEngineDisplayName & ": " & _lastPartialText)
+            End If
+        End Sub
 
             AddHandler eng.FinalResult,
-                Sub(s, ev)
-                    Dim line As String = If(String.IsNullOrEmpty(ev.Speaker), ev.Text, ev.Speaker & ": " & ev.Text)
-                    SafeAppendTranscript(line)
-                    _lastPartialText = ""
+        Sub(s, ev)
+            Dim line As String = If(String.IsNullOrEmpty(ev.Speaker), ev.Text, ev.Speaker & ": " & ev.Text)
+            SafeAppendTranscript(line)
+            _lastPartialText = ""
 
-                    If Not _capturing Then
-                        SetLiveState(GetIdleLiveState())
-                    Else
-                        SetLiveState(GetListeningLiveState())
-                    End If
-                End Sub
+            If _capturing Then
+                SetLiveState(GetListeningLiveState())
+            ElseIf _fileTranscribing Then
+                SetLiveState(GetFileTranscribingState())
+            Else
+                SetLiveState(GetIdleLiveState())
+            End If
+        End Sub
 
             AddHandler eng.EngineError,
-                Sub(s, ev)
-                    LogSttError(_currentEngineDisplayName, ev.Message)
-                    SetLiveState(GetFriendlySttErrorText(_currentEngineDisplayName, ev.Message))
-                End Sub
+        Sub(s, ev)
+            LogSttError(_currentEngineDisplayName, ev.Message, ev.Exception)
+            SetLiveState(GetFriendlySttErrorText(_currentEngineDisplayName, ev.Message))
+        End Sub
 
             AddHandler eng.Status,
-                Sub(s, ev)
-                    If String.IsNullOrWhiteSpace(_lastPartialText) Then
-                        Dim friendly As String = GetFriendlyStatusText(_currentEngineDisplayName, ev.Message)
-                        If Not String.IsNullOrWhiteSpace(friendly) Then
-                            SetLiveState(friendly)
-                        End If
-                    End If
-                End Sub
+        Sub(s, ev)
+            If String.IsNullOrWhiteSpace(_lastPartialText) Then
+                Dim friendly As String = GetFriendlyStatusText(_currentEngineDisplayName, ev.Message)
+                If Not String.IsNullOrWhiteSpace(friendly) Then
+                    SetLiveState(friendly)
+                End If
+            End If
+        End Sub
         End Sub
 
         Private Sub ToggleCaptureUi(capturing As Boolean)
@@ -1203,13 +1345,16 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
-            btnStart.Enabled = Not capturing
-            btnStop.Enabled = capturing
-            btnLoad.Enabled = Not capturing
-            btnOptions.Enabled = Not capturing
-            cboEngine.Enabled = Not capturing
-            cboLang.Enabled = Not capturing
-            cboDevice.Enabled = Not capturing
+            Dim busy As Boolean = capturing OrElse _capturing OrElse _fileTranscribing OrElse _isStopping
+
+            btnStart.Enabled = Not busy
+            btnStop.Enabled = _capturing OrElse _fileTranscribing
+            btnStop.Text = If(_fileTranscribing, "Cancel", "Stop")
+            btnLoad.Enabled = Not busy
+            btnOptions.Enabled = Not busy
+            cboEngine.Enabled = Not busy
+            cboLang.Enabled = Not busy
+            cboDevice.Enabled = Not busy
         End Sub
 
         Private Sub AcquireSleepLock()
@@ -1283,6 +1428,10 @@ Partial Public Class ThisAddIn
                 e.Cancel = True
                 _closeAfterStop = True
                 Await StopCurrentSessionAsync()
+            ElseIf _fileTranscribing Then
+                e.Cancel = True
+                _closeAfterStop = True
+                CancelCurrentFileTranscription()
             End If
         End Sub
 
@@ -1355,7 +1504,15 @@ Partial Public Class ThisAddIn
         End Sub
 
         Private Function GetFriendlySttErrorText(engineDisplayName As String, rawMessage As String) As String
-            Dim m As String = If(rawMessage, "").ToLowerInvariant()
+            Dim original As String = If(rawMessage, "").Trim()
+            Dim m As String = original.ToLowerInvariant()
+
+            If m.StartsWith("openai realtime error:") OrElse
+       m.StartsWith("openai realtime ws send failed:") OrElse
+       m.StartsWith("openai realtime ws read failed:") OrElse
+       m.StartsWith("openai rest request failed:") Then
+                Return engineDisplayName & ": " & original
+            End If
 
             If m.Contains("permissiondenied") OrElse m.Contains("permission denied") Then
                 Return engineDisplayName & ": Access was denied. Please check the configured account and permissions."
@@ -1388,15 +1545,41 @@ Partial Public Class ThisAddIn
 
             Dim ml As String = m.ToLowerInvariant()
 
-            If ml.Contains("stream configured") OrElse ml.Contains("streaming session opened") Then
+            If ml.Contains("preparing") OrElse
+       ml.Contains("uploading") OrElse
+       ml.Contains("streaming file") OrElse
+       ml.Contains("transcribing file") OrElse
+       ml.Contains("processing") OrElse
+       ml.Contains("parsing") OrElse
+       ml.Contains("finalizing") Then
+                Return engineDisplayName & ": " & m
+            End If
+
+            If ml.Contains("cancel") Then
+                Return engineDisplayName & ": Canceling…"
+            End If
+
+            If ml.Contains("stream configured") OrElse
+       ml.Contains("streaming session opened") OrElse
+       ml.Contains("session configured") Then
+                If _fileTranscribing Then
+                    Return GetFileTranscribingState()
+                End If
+
                 Return engineDisplayName & ": Listening…"
             End If
 
-            If ml.Contains("starting") OrElse ml.Contains("opening") Then
+            If ml.Contains("starting") OrElse
+       ml.Contains("opening") OrElse
+       ml.Contains("connecting") Then
                 Return engineDisplayName & ": Starting…"
             End If
 
             If ml.Contains("stopped") Then
+                If _fileTranscribing Then
+                    Return engineDisplayName & ": Finalizing file transcription…"
+                End If
+
                 Return engineDisplayName & ": Ready."
             End If
 
