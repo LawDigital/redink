@@ -492,23 +492,35 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Public Sub InboxBoard()
         Try
-            ' _inboxBoardLastMaxToLoad starts at 0 each session so the user is
-            ' always prompted on first launch when mails exceed the threshold.
-            ' It is only set after the user makes a selection, allowing in-session
-            ' reloads (Refresh button) to reuse the choice without re-prompting.
+            Using progress As New InboxBoardProgressScope(
+                "Inbox Board",
+                "Preparing inbox board…",
+                1)
 
-            ' Ensure summary cache is loaded
-            LoadSummaryCache()
-            ' 1. Collect categorized mails from Inbox
-            Dim mails As List(Of InboxBoardEntry) = CollectCategorizedInboxMails()
-            If mails Is Nothing Then Return
+                ReportInboxBoardProgress(progress, 0, 1, "Preparing inbox board…")
+                If progress.CancelRequested Then Return
 
-            ' 2. Build column definitions from Outlook categories
-            Dim columns As List(Of InboxBoardColumn) = BuildBoardColumns(mails)
-            If columns Is Nothing Then columns = New List(Of InboxBoardColumn)()
+                ' _inboxBoardLastMaxToLoad starts at 0 each session so the user is
+                ' always prompted on first launch when mails exceed the threshold.
+                ' It is only set after the user makes a selection, allowing in-session
+                ' reloads (Refresh button) to reuse the choice without re-prompting.
 
-            ' 3. Show the board
-            ShowInboxBoardForm(mails, columns)
+                ReportInboxBoardProgress(progress, 0, 1, "Loading summary cache…")
+                LoadSummaryCache()
+                If progress.CancelRequested Then Return
+
+                Dim mails As List(Of InboxBoardEntry) = CollectCategorizedInboxMails(0, progress)
+                If mails Is Nothing Then Return
+                If progress.CancelRequested Then Return
+
+                ReportInboxBoardProgress(progress, 1, 1, "Building board columns…")
+                Dim columns As List(Of InboxBoardColumn) = BuildBoardColumns(mails)
+                If columns Is Nothing Then columns = New List(Of InboxBoardColumn)()
+
+                If progress.CancelRequested Then Return
+
+                ShowInboxBoardForm(mails, columns)
+            End Using
 
         Catch ex As System.Exception
             ShowCustomMessageBox($"Inbox Board error: {ex.Message}", $"{AN} - Inbox Board")
@@ -523,6 +535,7 @@ Partial Public Class ThisAddIn
         Implements IDisposable
 
         Private ReadOnly _cts As New CancellationTokenSource()
+        Private ReadOnly _ready As New ManualResetEventSlim(False)
         Private _uiThread As Thread
         Private _form As Form
         Private _closed As Integer = 0
@@ -540,15 +553,37 @@ Partial Public Class ThisAddIn
                 Sub()
                     Try
                         System.Windows.Forms.Application.EnableVisualStyles()
-                        _form = CType(New Global.SharedLibrary.SharedLibrary.DPIProgressForm(headerText, initialLabel), System.Windows.Forms.Form)
-                        System.Windows.Forms.Application.Run(_form)
+
+                        Dim frm As System.Windows.Forms.Form =
+                            CType(New Global.SharedLibrary.SharedLibrary.DPIProgressForm(headerText, initialLabel), System.Windows.Forms.Form)
+
+                        _form = frm
+
+                        AddHandler frm.Shown,
+                            Sub()
+                                Try
+                                    _ready.Set()
+                                Catch
+                                End Try
+                            End Sub
+
+                        System.Windows.Forms.Application.Run(frm)
                     Catch
+                        Try
+                            _ready.Set()
+                        Catch
+                        End Try
                     End Try
                 End Sub)
 
             _uiThread.IsBackground = True
             _uiThread.SetApartmentState(ApartmentState.STA)
             _uiThread.Start()
+
+            Try
+                _ready.Wait(750)
+            Catch
+            End Try
         End Sub
 
         Public Shared Sub Report(current As Integer,
@@ -596,9 +631,15 @@ Partial Public Class ThisAddIn
                     End If
                 Catch
                 End Try
+
+                Try
+                    _ready.Dispose()
+                Catch
+                End Try
             End Try
         End Sub
     End Class
+
 
     Private Class InboxBoardScanProgressState
         Public Property ExpectedItems As Integer
@@ -626,39 +667,49 @@ Partial Public Class ThisAddIn
     ''' If qualifying mails exceed the user's load threshold, asks how many to load.
     ''' When "include subfolders" is enabled, recursively scans child folders as well.
     ''' </summary>
-    Private Function CollectCategorizedInboxMails(Optional maxOverride As Integer = 0) As List(Of InboxBoardEntry)
-        ' Resolve target folder from My.Settings (StoreId + FolderPath)
-        Dim targetFolder As MAPIFolder = GetInboxBoardTargetFolder()
+    Private Function CollectCategorizedInboxMails(Optional maxOverride As Integer = 0,
+                                                  Optional progress As InboxBoardProgressScope = Nothing) As List(Of InboxBoardEntry)
 
-        If targetFolder Is Nothing Then
-            ShowCustomMessageBox("Could not access the target folder.", $"{AN} - Inbox Board")
-            Return Nothing
+        Dim ownsProgress As Boolean = (progress Is Nothing)
+        If ownsProgress Then
+            progress = New InboxBoardProgressScope(
+                "Inbox Board",
+                "Preparing inbox board…",
+                1)
         End If
 
-        ' Read subfolder setting
-        Dim includeSubfolders As Boolean = True
-        Try : includeSubfolders = My.Settings.InboxBoardIncludeSubfolders : Catch : End Try
+        Try
+            ReportInboxBoardProgress(progress, 0, 1, "Resolving target folder…")
 
-        ' Read flag-related settings
-        Dim includeFlagged As Boolean = False
-        Dim hideDoneFlags As Boolean = True
-        Try : includeFlagged = My.Settings.InboxBoardIncludeFlagged : Catch : End Try
-        Try : hideDoneFlags = My.Settings.InboxBoardHideDoneFlags : Catch : End Try
+            ' Resolve target folder from My.Settings (StoreId + FolderPath)
+            Dim targetFolder As MAPIFolder = GetInboxBoardTargetFolder()
 
-        ' Read user-configurable load threshold (0 = use default)
-        Dim loadThreshold As Integer = 0
-        Try : loadThreshold = My.Settings.InboxBoardLoadThreshold : Catch : End Try
-        If loadThreshold <= 0 Then loadThreshold = InboxBoard_DefaultLoadThreshold
+            If progress IsNot Nothing AndAlso progress.CancelRequested Then Return Nothing
 
-        Dim allMailItems As List(Of MailItem) = Nothing
-        Dim totalQualifying As Integer = 0
+            If targetFolder Is Nothing Then
+                ShowCustomMessageBox("Could not access the target folder.", $"{AN} - Inbox Board")
+                Return Nothing
+            End If
 
-        ' Stage 1: scan mailbox + count qualifying mails
-        Using progress As New InboxBoardProgressScope(
-            "Inbox Board",
-            $"Scanning ""{_inboxBoardTrackedFolderLabel}""…",
-            1)
+            ' Read subfolder setting
+            Dim includeSubfolders As Boolean = True
+            Try : includeSubfolders = My.Settings.InboxBoardIncludeSubfolders : Catch : End Try
 
+            ' Read flag-related settings
+            Dim includeFlagged As Boolean = False
+            Dim hideDoneFlags As Boolean = True
+            Try : includeFlagged = My.Settings.InboxBoardIncludeFlagged : Catch : End Try
+            Try : hideDoneFlags = My.Settings.InboxBoardHideDoneFlags : Catch : End Try
+
+            ' Read user-configurable load threshold (0 = use default)
+            Dim loadThreshold As Integer = 0
+            Try : loadThreshold = My.Settings.InboxBoardLoadThreshold : Catch : End Try
+            If loadThreshold <= 0 Then loadThreshold = InboxBoard_DefaultLoadThreshold
+
+            Dim allMailItems As List(Of MailItem) = Nothing
+            Dim totalQualifying As Integer = 0
+
+            ' Stage 1: scan mailbox + count qualifying mails
             ReportInboxBoardProgress(
                 progress,
                 0,
@@ -711,85 +762,77 @@ Partial Public Class ThisAddIn
                         $"Checking qualifying mails… {countIndex:N0}/{allMailItems.Count:N0}")
                 End If
             Next
-        End Using
 
-        If totalQualifying = 0 Then
-            Dim hasPinnedColumns As Boolean = False
+            If totalQualifying = 0 Then
+                Dim hasPinnedColumns As Boolean = False
+                Try
+                    Dim pinned As String = If(My.Settings.InboxBoardColumns, "")
+                    If Not String.IsNullOrEmpty(pinned) Then hasPinnedColumns = True
+                Catch
+                End Try
+
+                Dim hasPinnedFlagColumns As Boolean = False
+                Try
+                    Dim pinnedFlags As String = If(My.Settings.InboxBoardPinnedFlagColumns, "")
+                    If Not String.IsNullOrEmpty(pinnedFlags) Then hasPinnedFlagColumns = True
+                Catch
+                End Try
+
+                If Not hasPinnedColumns AndAlso Not hasPinnedFlagColumns Then
+                    ShowCustomMessageBox($"No categorized or flagged mails found in ""{_inboxBoardTrackedFolderLabel}"".", $"{AN} - Inbox Board")
+                    Return Nothing
+                End If
+
+                Return New List(Of InboxBoardEntry)()
+            End If
+
+            Dim maxToLoad As Integer = totalQualifying
+            If maxOverride > 0 Then maxToLoad = Math.Min(maxOverride, totalQualifying)
+
+            ' Prompt user if qualifying mails exceed the threshold.
+            ' Keep the existing behavior: reuse the remembered choice if available.
+            If maxOverride <= 0 AndAlso totalQualifying > loadThreshold Then
+                If _inboxBoardLastMaxToLoad > 0 Then
+                    maxToLoad = _inboxBoardLastMaxToLoad
+                Else
+                    Dim items As New List(Of SelectionItem)()
+                    items.Add(New SelectionItem($"{loadThreshold} mails", loadThreshold))
+                    If loadThreshold * 2 < totalQualifying Then
+                        items.Add(New SelectionItem($"{loadThreshold * 2} mails", loadThreshold * 2))
+                    End If
+                    If loadThreshold * 5 < totalQualifying Then
+                        items.Add(New SelectionItem($"{loadThreshold * 5} mails", loadThreshold * 5))
+                    End If
+                    If loadThreshold * 10 < totalQualifying Then
+                        items.Add(New SelectionItem($"{loadThreshold * 10} mails", loadThreshold * 10))
+                    End If
+                    items.Add(New SelectionItem($"All ({totalQualifying} mails)", totalQualifying))
+
+                    Dim chosen As Integer = SelectValue(items, loadThreshold,
+                        $"Found {totalQualifying} qualifying mails in ""{_inboxBoardTrackedFolderLabel}"" (threshold: {loadThreshold})." & vbCrLf &
+                        "How many should be loaded?",
+                        $"{AN} - Inbox Board")
+                    If chosen = 0 Then Return Nothing
+                    maxToLoad = chosen
+                End If
+            End If
+
+            _inboxBoardLastMaxToLoad = maxToLoad
             Try
-                Dim pinned As String = If(My.Settings.InboxBoardColumns, "")
-                If Not String.IsNullOrEmpty(pinned) Then hasPinnedColumns = True
+                My.Settings.InboxBoardLastLoadCount = maxToLoad
+                My.Settings.Save()
             Catch
             End Try
 
-            Dim hasPinnedFlagColumns As Boolean = False
-            Try
-                Dim pinnedFlags As String = If(My.Settings.InboxBoardPinnedFlagColumns, "")
-                If Not String.IsNullOrEmpty(pinnedFlags) Then hasPinnedFlagColumns = True
-            Catch
-            End Try
-
-            If Not hasPinnedColumns AndAlso Not hasPinnedFlagColumns Then
-                ShowCustomMessageBox($"No categorized or flagged mails found in ""{_inboxBoardTrackedFolderLabel}"".", $"{AN} - Inbox Board")
-                Return Nothing
-            End If
-
-            Return New List(Of InboxBoardEntry)()
-        End If
-
-        Dim maxToLoad As Integer = totalQualifying
-        If maxOverride > 0 Then maxToLoad = Math.Min(maxOverride, totalQualifying)
-
-        ' Prompt user if qualifying mails exceed the threshold.
-        ' Do this outside the progress scope so the topmost progress window does not cover the prompt.
-        If maxOverride <= 0 AndAlso totalQualifying > loadThreshold Then
-            If _inboxBoardLastMaxToLoad > 0 Then
-                maxToLoad = _inboxBoardLastMaxToLoad
-            Else
-                Dim items As New List(Of SelectionItem)()
-                items.Add(New SelectionItem($"{loadThreshold} mails", loadThreshold))
-                If loadThreshold * 2 < totalQualifying Then
-                    items.Add(New SelectionItem($"{loadThreshold * 2} mails", loadThreshold * 2))
-                End If
-                If loadThreshold * 5 < totalQualifying Then
-                    items.Add(New SelectionItem($"{loadThreshold * 5} mails", loadThreshold * 5))
-                End If
-                If loadThreshold * 10 < totalQualifying Then
-                    items.Add(New SelectionItem($"{loadThreshold * 10} mails", loadThreshold * 10))
-                End If
-                items.Add(New SelectionItem($"All ({totalQualifying} mails)", totalQualifying))
-
-                Dim chosen As Integer = SelectValue(items, loadThreshold,
-                    $"Found {totalQualifying} qualifying mails in ""{_inboxBoardTrackedFolderLabel}"" (threshold: {loadThreshold})." & vbCrLf &
-                    "How many should be loaded?",
-                    $"{AN} - Inbox Board")
-                If chosen = 0 Then Return Nothing
-                maxToLoad = chosen
-            End If
-        End If
-
-        _inboxBoardLastMaxToLoad = maxToLoad
-        Try
-            My.Settings.InboxBoardLastLoadCount = maxToLoad
-            My.Settings.Save()
-        Catch
-        End Try
-
-        ' Stage 2: build board entries
-        Using progress As New InboxBoardProgressScope(
-            "Inbox Board",
-            "Building inbox board…",
-            Math.Max(1, allMailItems.Count + 4))
-
+            ' Stage 2: build board entries
             Dim buildStageMax As Integer = Math.Max(1, allMailItems.Count + 4)
 
-            ' Build the category color map from Outlook
             ReportInboxBoardProgress(progress, 0, buildStageMax, "Loading Outlook categories…")
 
             Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
             Dim ns As Outlook.NameSpace = outlookApp.GetNamespace("MAPI")
             Dim categoryColors As Dictionary(Of String, String) = GetOutlookCategoryColors(ns)
 
-            ' Extract entries
             Dim entries As New List(Of InboxBoardEntry)()
             Dim extractIndex As Integer = 0
 
@@ -815,18 +858,15 @@ Partial Public Class ThisAddIn
 
             If progress.CancelRequested Then Return Nothing
 
-            ' Sort by received time descending
             ReportInboxBoardProgress(progress, allMailItems.Count + 1, buildStageMax, "Sorting mails…")
             entries.Sort(Function(a, b) b.ReceivedTime.CompareTo(a.ReceivedTime))
 
-            ' Cap to maxToLoad
             If entries.Count > maxToLoad Then
                 entries.RemoveRange(maxToLoad, entries.Count - maxToLoad)
             End If
 
             If progress.CancelRequested Then Return Nothing
 
-            ' Apply conversation grouping if enabled
             ReportInboxBoardProgress(progress, allMailItems.Count + 2, buildStageMax, "Grouping conversations…")
 
             Dim groupConversations As Boolean = False
@@ -837,7 +877,6 @@ Partial Public Class ThisAddIn
 
             If progress.CancelRequested Then Return Nothing
 
-            ' Apply cached summaries
             ReportInboxBoardProgress(progress, allMailItems.Count + 3, buildStageMax, "Applying cached summaries…")
 
             For Each entry In entries
@@ -851,7 +890,6 @@ Partial Public Class ThisAddIn
 
             If progress.CancelRequested Then Return Nothing
 
-            ' Auto-register any orphaned board folder names found on mails
             ReportInboxBoardProgress(progress, allMailItems.Count + 4, buildStageMax, "Finalizing inbox board…")
 
             Dim knownFolders = GetBoardFolderNames()
@@ -869,9 +907,13 @@ Partial Public Class ThisAddIn
             If foldersChanged Then SaveBoardFolderNames(knownFolders)
 
             Return entries
-        End Using
-    End Function
 
+        Finally
+            If ownsProgress AndAlso progress IsNot Nothing Then
+                progress.Dispose()
+            End If
+        End Try
+    End Function
 
     ''' <summary>
     ''' Groups entries by ConversationTopic. For each conversation with 2+ mails,
