@@ -1,4 +1,24 @@
-﻿Option Explicit On
+﻿' Part of "Red Ink for Word"
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: ThisAddIn.Transcriptor.vb
+' Purpose: Manages the real-time transcription workflow within Microsoft Word.
+'          It integrates audio capture, transcription engine management, and
+'          the insertion of transcribed text into the active document.
+'
+' Architecture:
+'  - Engine Management: Dynamically loads and initializes the selected
+'    transcription engine (e.g., OpenAI, Google, Vosk, Whisper).
+'  - Audio Handling: Coordinates with the AudioCaptureService to start and
+'    stop audio recording and stream data to the transcription engine.
+'  - UI Integration: Manages the transcription lifecycle, including starting,
+'    stopping, and displaying status updates to the user.
+'  - Text Insertion: Handles the insertion of real-time and final transcription
+'    results into the Word document at the current cursor position.
+' =============================================================================
+
+Option Explicit On
 Option Strict Off
 
 Imports System.Diagnostics
@@ -68,6 +88,8 @@ Partial Public Class ThisAddIn
 
         Private _fileTranscribing As Boolean = False
 
+        Private _dialogOwnerScope As IDisposable
+
         Private Class EngineDescriptor
             Public DisplayName As String
             Public Kind As EngineKind
@@ -92,6 +114,28 @@ Partial Public Class ThisAddIn
             Finally
                 _suspendSettingsPersistence = False
             End Try
+        End Sub
+
+        Protected Overrides Sub OnHandleCreated(e As EventArgs)
+            MyBase.OnHandleCreated(e)
+
+            If _dialogOwnerScope Is Nothing Then
+                _dialogOwnerScope = SLib.PushDialogOwner(Me)
+            End If
+        End Sub
+
+        Protected Overrides Sub OnHandleDestroyed(e As EventArgs)
+            Dim scope As IDisposable = _dialogOwnerScope
+            _dialogOwnerScope = Nothing
+
+            If scope IsNot Nothing Then
+                Try
+                    scope.Dispose()
+                Catch
+                End Try
+            End If
+
+            MyBase.OnHandleDestroyed(e)
         End Sub
 
         Private Sub InitializeComponents()
@@ -297,9 +341,20 @@ Partial Public Class ThisAddIn
 
             LoadAlternateProviderFallbacks()
 
-            If HasConfiguredGoogleProvider() Then
-                _engines.Add(New EngineDescriptor With {.DisplayName = GoogleV1Engine.DisplayName, .Kind = EngineKind.GoogleV1})
-                _engines.Add(New EngineDescriptor With {.DisplayName = GoogleV2Engine.DisplayName, .Kind = EngineKind.GoogleV2})
+            If HasConfiguredGoogleV1Provider() Then
+                _engines.Add(New EngineDescriptor With {
+                    .DisplayName = GoogleV1Engine.DisplayName,
+                    .Kind = EngineKind.GoogleV1,
+                    .ModelOrTag = "google-v1"
+                })
+            End If
+
+            If HasConfiguredGoogleV2Provider() Then
+                _engines.Add(New EngineDescriptor With {
+                    .DisplayName = GoogleV2Engine.DisplayName,
+                    .Kind = EngineKind.GoogleV2,
+                    .ModelOrTag = "google-v2"
+                })
             End If
 
             If HasConfiguredOpenAiProvider() Then
@@ -334,9 +389,23 @@ Partial Public Class ThisAddIn
                 })
 
                 _engines.Add(New EngineDescriptor With {
-                    .DisplayName = "OpenAI Realtime gpt-realtime-2 / gpt-realtime-whisper (streaming)",
+                    .DisplayName = "OpenAI Realtime Whisper (streaming)",
                     .Kind = EngineKind.OpenAiRealtime,
                     .ModelOrTag = "gpt-realtime-whisper"
+                })
+            End If
+
+            If HasConfiguredAzureProvider() Then
+                _engines.Add(New EngineDescriptor With {
+                    .DisplayName = AzureSpeechRealtimeEngine.DisplayNameValue,
+                    .Kind = EngineKind.AzureSpeechRealtime,
+                    .ModelOrTag = "azure-speech-realtime"
+                })
+
+                _engines.Add(New EngineDescriptor With {
+                    .DisplayName = AzureSpeechFastRestEngine.DisplayNameValue,
+                    .Kind = EngineKind.AzureSpeechFastRest,
+                    .ModelOrTag = "azure-speech-fast-rest"
                 })
             End If
 
@@ -345,12 +414,12 @@ Partial Public Class ThisAddIn
             Next
 
             If cboEngine.Items.Count = 0 Then
-                ShowCustomMessageBox("No transcription engines available. Install Vosk/Whisper models or configure a Google/OpenAI endpoint.")
+                ShowCustomMessageBox("No transcription engines available. Install Vosk/Whisper models or configure Google/OpenAI/Azure transcription.")
                 Me.BeginInvoke(Sub() Me.Close())
                 Return
             End If
 
-            cboEngine.SelectedIndex = 0
+            RestoreLastEngineSelection()
         End Sub
 
         Private Shared Function EndpointMatchesProvider(endpoint As String, providerIdentifier As String) As Boolean
@@ -389,16 +458,47 @@ Partial Public Class ThisAddIn
             End Try
         End Sub
 
-        Private Function HasConfiguredGoogleProvider() As Boolean
+        Private Function HasConfiguredGoogleV1Provider() As Boolean
             Return (EndpointMatchesProvider(INI_Endpoint, GoogleIdentifier) AndAlso INI_OAuth2) OrElse
                    (EndpointMatchesProvider(INI_Endpoint_2, GoogleIdentifier) AndAlso INI_OAuth2_2) OrElse
                    IsUsableGoogleConfig(_alternateGoogleConfig)
+        End Function
+
+        Private Function HasConfiguredGoogleV2Provider() As Boolean
+            Return HasConfiguredGoogleV1Provider() AndAlso
+                   Not String.IsNullOrWhiteSpace(ResolveGoogleProjectId())
+        End Function
+
+        Private Function HasConfiguredAzureProvider() As Boolean
+            Return Not String.IsNullOrWhiteSpace(ResolveAzureSpeechKey())
         End Function
 
         Private Function HasConfiguredOpenAiProvider() As Boolean
             Return EndpointMatchesProvider(INI_Endpoint, OpenAIIdentifier) OrElse
                    EndpointMatchesProvider(INI_Endpoint_2, OpenAIIdentifier) OrElse
                    IsUsableOpenAiConfig(_alternateOpenAiConfig)
+        End Function
+
+        Private Function ResolveAzureRegionForHeader(modelOrTag As String) As String
+            Return ResolveAzureSttSetting(modelOrTag, "region", "")
+        End Function
+
+        Private Function ResolveAzureRealtimeLocation(modelOrTag As String) As String
+            Dim region As String = ResolveAzureRegionForHeader(modelOrTag)
+            If Not String.IsNullOrWhiteSpace(region) Then
+                Return region
+            End If
+
+            Return ResolveAzureSttSetting(modelOrTag, "endpoint", "")
+        End Function
+
+        Private Function ResolveAzureFastRestLocation(modelOrTag As String) As String
+            Dim endpoint As String = ResolveAzureSttSetting(modelOrTag, "endpoint", "")
+            If Not String.IsNullOrWhiteSpace(endpoint) Then
+                Return endpoint
+            End If
+
+            Return ResolveAzureSttSetting(modelOrTag, "region", "")
         End Function
 
         Private Function BuildConfiguredGoogleModelConfig(useSecond As Boolean) As ModelConfig
@@ -595,6 +695,27 @@ Partial Public Class ThisAddIn
                         If cboLang.Items.Count > 0 Then
                             cboLang.SelectedIndex = 0
                         End If
+
+                    Case EngineKind.AzureSpeechRealtime
+                        cboLang.Items.AddRange(
+                            AzureSpeechRealtimeEngine.SupportedLanguages.
+                                OrderBy(Function(x) x, StringComparer.OrdinalIgnoreCase).
+                                Select(Function(x) CObj(x)).
+                                ToArray())
+                        If cboLang.Items.Count > 0 Then
+                            cboLang.SelectedIndex = 0
+                        End If
+
+                    Case EngineKind.AzureSpeechFastRest
+                        cboLang.Items.AddRange(
+                            AzureSpeechFastRestEngine.SupportedLanguages.
+                                OrderBy(Function(x) x, StringComparer.OrdinalIgnoreCase).
+                                Select(Function(x) CObj(x)).
+                                ToArray())
+                        If cboLang.Items.Count > 0 Then
+                            cboLang.SelectedIndex = 0
+                        End If
+
                 End Select
 
                 Dim savedLanguage As String = GetSavedLanguageForDescriptor(d)
@@ -611,6 +732,114 @@ Partial Public Class ThisAddIn
             If Not _capturing AndAlso Not _fileTranscribing Then
                 SetLiveState(GetIdleLiveState())
             End If
+        End Sub
+
+        Private Shared Function IsAzureSpeechLocation(value As String) As Boolean
+            Dim normalized As String = If(value, "").Trim()
+
+            If String.IsNullOrWhiteSpace(normalized) Then
+                Return False
+            End If
+
+            If normalized.IndexOf(".cognitiveservices.azure.com", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                Return True
+            End If
+
+            If normalized.IndexOf(".api.cognitive.microsoft.com", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                Return True
+            End If
+
+            If normalized.StartsWith("http://", StringComparison.OrdinalIgnoreCase) OrElse
+               normalized.StartsWith("https://", StringComparison.OrdinalIgnoreCase) Then
+                Return False
+            End If
+
+            For Each ch As Char In normalized
+                If Not Char.IsLetterOrDigit(ch) AndAlso ch <> "-"c Then
+                    Return False
+                End If
+            Next
+
+            Return True
+        End Function
+
+        Private Function IsUsableAzureConfig(config As ModelConfig) As Boolean
+            If config Is Nothing Then
+                Return False
+            End If
+
+            If Not IsAzureSpeechLocation(config.Endpoint) Then
+                Return False
+            End If
+
+            Return Not String.IsNullOrWhiteSpace(GetApiKeyFromModelConfig(config))
+        End Function
+
+        Private Function BuildConfiguredAzureModelConfig(useSecond As Boolean) As ModelConfig
+            Dim endpointOrRegion As String = If(useSecond, INI_Endpoint_2, INI_Endpoint)
+
+            If Not IsAzureSpeechLocation(endpointOrRegion) Then
+                Return Nothing
+            End If
+
+            Return New ModelConfig With {
+                .Endpoint = endpointOrRegion,
+                .APIKey = If(useSecond, INI_APIKey_2, INI_APIKey),
+                .DecodedAPI = If(useSecond, DecodedAPI_2, DecodedAPI)
+            }
+        End Function
+
+        Private Function ResolveAzureConfig() As ModelConfig
+            Dim primaryConfig As ModelConfig = BuildConfiguredAzureModelConfig(False)
+            If IsUsableAzureConfig(primaryConfig) Then
+                Return primaryConfig
+            End If
+
+            Dim secondaryConfig As ModelConfig = BuildConfiguredAzureModelConfig(True)
+            If IsUsableAzureConfig(secondaryConfig) Then
+                Return secondaryConfig
+            End If
+
+            Return Nothing
+        End Function
+
+
+        Private Function FindEngineIndexByDisplayName(displayName As String) As Integer
+            If String.IsNullOrWhiteSpace(displayName) Then
+                Return -1
+            End If
+
+            Dim normalized As String = displayName.Trim()
+
+            For i As Integer = 0 To _engines.Count - 1
+                If String.Equals(_engines(i).DisplayName, normalized, StringComparison.OrdinalIgnoreCase) Then
+                    Return i
+                End If
+            Next
+
+            Return -1
+        End Function
+
+        Private Sub RestoreLastEngineSelection()
+            Dim engineIndex As Integer = FindEngineIndexByDisplayName(My.Settings.LastEngineName)
+
+            If engineIndex >= 0 Then
+                cboEngine.SelectedIndex = engineIndex
+                Return
+            End If
+
+            If cboEngine.Items.Count > 0 AndAlso cboEngine.SelectedIndex < 0 Then
+                cboEngine.SelectedIndex = 0
+            End If
+        End Sub
+
+        Private Sub SaveCurrentEngineSelection()
+            Dim d As EngineDescriptor = CurrentDescriptor()
+            If d Is Nothing Then
+                Return
+            End If
+
+            My.Settings.LastEngineName = d.DisplayName
         End Sub
 
         Private Function CurrentDescriptor() As EngineDescriptor
@@ -663,12 +892,7 @@ Partial Public Class ThisAddIn
 
         Private Sub RestoreSettings()
             Try
-                If Not String.IsNullOrEmpty(My.Settings.LastEngineName) Then
-                    Dim i As Integer = cboEngine.Items.IndexOf(My.Settings.LastEngineName)
-                    If i >= 0 Then
-                        cboEngine.SelectedIndex = i
-                    End If
-                End If
+                RestoreLastEngineSelection()
 
                 RefreshEngineUi()
 
@@ -706,7 +930,7 @@ Partial Public Class ThisAddIn
             End If
 
             Try
-                My.Settings.LastEngineName = CStr(cboEngine.SelectedItem)
+                SaveCurrentEngineSelection()
                 My.Settings.LastAudioInputDeviceIndex = cboDevice.SelectedIndex
                 My.Settings.LastEngineOptionsJson = JsonConvert.SerializeObject(_opts)
                 SaveCurrentLanguageForCurrentEngine()
@@ -714,6 +938,7 @@ Partial Public Class ThisAddIn
             Catch
             End Try
         End Sub
+
 
         Private Sub OnOptions(sender As Object, e As EventArgs)
             Dim d As EngineDescriptor = CurrentDescriptor()
@@ -765,6 +990,8 @@ Partial Public Class ThisAddIn
                         Throw New InvalidOperationException("No Google transcription credentials are available.")
                     End If
 
+                    _opts.Model = ResolveGoogleSttSetting(d.ModelOrTag, "model", "")
+
                     Dim tf As Func(Of System.Threading.Tasks.Task(Of String)) =
                         Function() GetFreshGoogleTokenAsync(googleConfig, googleCacheSlot)
 
@@ -778,10 +1005,20 @@ Partial Public Class ThisAddIn
                         Throw New InvalidOperationException("No Google transcription credentials are available.")
                     End If
 
+                    If String.IsNullOrWhiteSpace(ResolveGoogleProjectId()) Then
+                        Throw New InvalidOperationException("INI_STT_Google_ProjectID is missing.")
+                    End If
+
                     Return New GoogleV2Engine(
                         googleConfig.OAuth2ClientMail,
                         googleConfig.APIKey,
-                        googleConfig.OAuth2Endpoint)
+                        googleConfig.OAuth2Endpoint,
+                        ResolveGoogleProjectId(),
+                        ResolveGoogleSttSetting(d.ModelOrTag, "endpoint", ""),
+                        ResolveGoogleSttSetting(d.ModelOrTag, "location", ""),
+                        ResolveGoogleSttSetting(d.ModelOrTag, "recognizer", ""),
+                        ResolveGoogleSttSetting(d.ModelOrTag, "model", ""),
+                        ResolveGoogleSttSetting(d.ModelOrTag, "language", ""))
 
                 Case EngineKind.OpenAiRest
                     Dim key As String = ResolveOpenAiKey()
@@ -789,7 +1026,7 @@ Partial Public Class ThisAddIn
                         Throw New InvalidOperationException("No OpenAI API key is available.")
                     End If
 
-                    _opts.Model = d.ModelOrTag
+                    _opts.Model = ResolveOpenAiSttSetting(d.ModelOrTag, "model", d.ModelOrTag)
                     Return New OpenAiRestEngine(key)
 
                 Case EngineKind.OpenAiRealtime
@@ -798,8 +1035,31 @@ Partial Public Class ThisAddIn
                         Throw New InvalidOperationException("No OpenAI API key is available.")
                     End If
 
-                    _opts.Model = "gpt-realtime-whisper"
+                    _opts.Model = ResolveOpenAiSttSetting(d.ModelOrTag, "model", "gpt-realtime-whisper")
                     Return New OpenAiRealtimeEngine(key)
+
+                Case EngineKind.AzureSpeechRealtime
+                    Dim azureSpeechKey As String = ResolveAzureSpeechKey()
+                    If String.IsNullOrWhiteSpace(azureSpeechKey) Then
+                        Throw New InvalidOperationException("INI_STT_Azure_SpeechKey is missing.")
+                    End If
+
+                    Return New AzureSpeechRealtimeEngine(
+                        azureSpeechKey,
+                        ResolveAzureRealtimeLocation(d.ModelOrTag),
+                        ResolveAzureRegionForHeader(d.ModelOrTag))
+
+                Case EngineKind.AzureSpeechFastRest
+                    Dim azureSpeechKey As String = ResolveAzureSpeechKey()
+                    If String.IsNullOrWhiteSpace(azureSpeechKey) Then
+                        Throw New InvalidOperationException("INI_STT_Azure_SpeechKey is missing.")
+                    End If
+
+                    Return New AzureSpeechFastRestEngine(
+                        azureSpeechKey,
+                        ResolveAzureFastRestLocation(d.ModelOrTag),
+                        ResolveAzureSttSetting(d.ModelOrTag, "api-version", ""),
+                        ResolveAzureRegionForHeader(d.ModelOrTag))
             End Select
 
             Throw New NotSupportedException(d.Kind.ToString())
@@ -958,8 +1218,8 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
-            If d.Kind = EngineKind.OpenAiRest Then
-                ShowCustomMessageBox("OpenAI REST is file/request-response transcription only. Use Load for an audio file, or select OpenAI Realtime for live microphone transcription.")
+            If IsFileOnlyEngine(d.Kind) Then
+                ShowCustomMessageBox("Selected engine is file/request-response transcription only. Use Load for an audio file, or select a live engine for microphone transcription.")
                 Return
             End If
 
@@ -1017,7 +1277,7 @@ Partial Public Class ThisAddIn
 
             If startException IsNot Nothing Then
                 SetLiveState(_currentEngineDisplayName & ": Error.")
-                ShowCustomMessageBox("Failed to start engine: " & startException.Message)
+                ShowTranscriptorMessageBox("Failed to start engine: " & startException.Message)
                 Return
             End If
 
@@ -1060,13 +1320,21 @@ Partial Public Class ThisAddIn
         End Function
 
         Private Async Sub OnCaptureFrame(sender As Object, e As AudioCaptureService.FrameEventArgs)
-            If _engine Is Nothing OrElse Not _capturing Then
+            Dim eng As ITranscriptionEngine = _engine
+            Dim ctsLocal As CancellationTokenSource = _cts
+
+            If eng Is Nothing OrElse Not _capturing OrElse ctsLocal Is Nothing Then
                 Return
             End If
 
             Try
-                Await _engine.PushAudioAsync(e.Pcm, e.BytesValid, _cts.Token)
-            Catch
+                Await eng.PushAudioAsync(e.Pcm, e.BytesValid, ctsLocal.Token)
+            Catch ex As OperationCanceledException
+            Catch ex As ObjectDisposedException
+            Catch ex As Exception
+                If Not _isStopping Then
+                    SetLiveState(_currentEngineDisplayName & ": Audio push failed: " & ex.Message)
+                End If
             End Try
         End Sub
 
@@ -1079,7 +1347,7 @@ Partial Public Class ThisAddIn
 
             Dim captureToStop As AudioCaptureService = _capture
             Dim engineToStop As ITranscriptionEngine = _engine
-            Dim ctsToCancel As CancellationTokenSource = _cts
+            Dim ctsToDispose As CancellationTokenSource = _cts
 
             _capture = Nothing
             _engine = Nothing
@@ -1090,22 +1358,17 @@ Partial Public Class ThisAddIn
             ToggleCaptureUi(False)
 
             Try
-                If ctsToCancel IsNot Nothing Then
-                    Try
-                        ctsToCancel.Cancel()
-                    Catch
-                    End Try
-                End If
-
                 If captureToStop IsNot Nothing Then
                     Try
                         RemoveHandler captureToStop.Frame, AddressOf OnCaptureFrame
                     Catch
                     End Try
+
                     Try
                         captureToStop.Stop()
                     Catch
                     End Try
+
                     Try
                         captureToStop.Dispose()
                     Catch
@@ -1116,25 +1379,40 @@ Partial Public Class ThisAddIn
                     Await engineToStop.StopLiveAsync()
                     Await engineToStop.DisposeAsync()
                 End If
+            Catch ex As OperationCanceledException
             Catch ex As Exception
                 SetLiveState(_currentEngineDisplayName & ": Stop error: " & ex.Message)
-            End Try
-
-            ReleaseSleepLock()
-            _isStopping = False
-            ToggleCaptureUi(False)
-            SetLiveState(GetIdleLiveState())
-
-            If _closeAfterStop Then
-                _closeAfterStop = False
-                If Not Me.IsDisposed Then
+            Finally
+                If ctsToDispose IsNot Nothing Then
                     Try
-                        Me.BeginInvoke(New System.Action(Sub() Me.Close()))
+                        ctsToDispose.Cancel()
+                    Catch
+                    End Try
+
+                    Try
+                        ctsToDispose.Dispose()
                     Catch
                     End Try
                 End If
-            End If
+
+                ReleaseSleepLock()
+                _isStopping = False
+                ToggleCaptureUi(False)
+                SetLiveState(GetIdleLiveState())
+
+                If _closeAfterStop Then
+                    _closeAfterStop = False
+                    If Not Me.IsDisposed Then
+                        Try
+                            Me.BeginInvoke(New System.Action(Sub() Me.Close()))
+                        Catch
+                        End Try
+                    End If
+                End If
+            End Try
         End Function
+
+
 
         Private Async Sub OnStop(sender As Object, e As EventArgs)
             If _fileTranscribing Then
@@ -1168,8 +1446,8 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
-            If d.Kind = EngineKind.OpenAiRealtime Then
-                ShowCustomMessageBox("Realtime engine is live-only; pick another engine for file mode.")
+            If IsLiveOnlyEngine(d.Kind) Then
+                ShowTranscriptorMessageBox("Realtime engine is live-only; pick another engine for file mode.")
                 Return
             End If
 
@@ -1247,14 +1525,14 @@ Partial Public Class ThisAddIn
 
             If fileTranscriptionException IsNot Nothing Then
                 SetLiveState(_currentEngineDisplayName & ": File transcription failed.")
-                ShowCustomMessageBox("File transcription failed: " & fileTranscriptionException.Message)
+                ShowTranscriptorMessageBox("File transcription failed: " & fileTranscriptionException.Message)
             End If
 
             If canceled Then
                 SetLiveState(_currentEngineDisplayName & ": File transcription canceled.")
             ElseIf Not failed Then
                 SetLiveState(_currentEngineDisplayName & ": File transcription complete.")
-                ShowCustomMessageBox("File transcription complete.")
+                ShowTranscriptorMessageBox("File transcription complete.")
             End If
 
             If _closeAfterStop Then
@@ -1407,8 +1685,64 @@ Partial Public Class ThisAddIn
 
             Dim prompt As String = _promptBodies(cboProcess.SelectedIndex)
             Dim payload As String = If(String.IsNullOrWhiteSpace(rtb.SelectedText), rtb.Text, rtb.SelectedText)
+            Dim contextDocumentText As String = ""
+            Dim contextDocumentPath As String = ""
+
+            Dim askContext As Integer = ShowCustomYesNoBox(
+                "Do you want to add a document as additional context for processing the transcript?",
+                "Yes",
+                "No",
+                Me.Text,
+                extraButtonText:="Cancel",
+                extraButtonAction:=Sub()
+                                   End Sub,
+                CloseAfterExtra:=True)
+
+            If askContext = 0 Then
+                Return
+            End If
+
+            If askContext = 1 Then
+                DragDropFormLabel = "Context document"
+                DragDropFormFilter = "Supported|*.txt;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.yaml;*.yml;*.vb;*.cs;*.js;*.ts;*.py;*.java;*.cpp;*.c;*.h;*.sql;*.rtf;*.doc;*.docx;*.xlsx;*.pptx;*.pdf;*.eml;*.msg|All|*.*"
+
+                Try
+                    Using f As New DragDropForm()
+                        If f.ShowDialog() = DialogResult.OK Then
+                            contextDocumentPath = f.SelectedFilePath
+                        End If
+                    End Using
+                Finally
+                    DragDropFormLabel = ""
+                    DragDropFormFilter = ""
+                End Try
+
+                If Not String.IsNullOrWhiteSpace(contextDocumentPath) Then
+                    Dim fileResult = Await Globals.ThisAddIn.GetFileContentEx(
+                        contextDocumentPath,
+                        Silent:=True,
+                        DoOCR:=True,
+                        AskUser:=True,
+                        AskWorksheetSelection:=True)
+
+                    contextDocumentText = If(fileResult.Content, "").Trim()
+
+                    If String.IsNullOrWhiteSpace(contextDocumentText) Then
+                        ShowTranscriptorMessageBox("The selected context document could not be read or returned no usable text.")
+                    End If
+                End If
+            End If
+
+            Dim combinedPayload As String = payload.Trim()
+
+            If Not String.IsNullOrWhiteSpace(contextDocumentText) Then
+                combinedPayload &= vbCrLf & vbCrLf &
+                    "=== Additional Context Document: " & Path.GetFileName(contextDocumentPath) & " ===" & vbCrLf &
+                    contextDocumentText
+            End If
+
             Dim suffix As String = " (Current Date: " & DateTime.Now.ToString("dd MMM yyyy", CultureInfo.GetCultureInfo("en-US")) & ")"
-            Dim result As String = Await LLM(prompt & suffix, payload, "", "", 0, False)
+            Dim result As String = Await LLM(prompt & suffix, combinedPayload, "", "", 0, False)
 
             Dim wordApp = Globals.ThisAddIn.Application
             If wordApp.Documents.Count > 0 Then
@@ -1614,6 +1948,160 @@ Partial Public Class ThisAddIn
             Catch
             End Try
         End Sub
+
+        Private Shared Function NormalizeIniValue(value As String) As String
+            Dim result As String = If(value, "").Trim()
+
+            If result.Length >= 2 AndAlso result.StartsWith("""", StringComparison.Ordinal) AndAlso result.EndsWith("""", StringComparison.Ordinal) Then
+                result = result.Substring(1, result.Length - 2).Trim()
+            End If
+
+            Return result
+        End Function
+
+        Private Shared Function ParseSttSettings(raw As String) As Dictionary(Of String, String)
+            Dim result As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+
+            For Each part As String In If(raw, "").Split(";"c)
+                Dim trimmed As String = part.Trim()
+                If trimmed.Length = 0 Then
+                    Continue For
+                End If
+
+                Dim pos As Integer = trimmed.IndexOf("="c)
+                If pos <= 0 Then
+                    Continue For
+                End If
+
+                Dim key As String = trimmed.Substring(0, pos).Trim()
+                Dim value As String = trimmed.Substring(pos + 1).Trim()
+
+                If key.Length > 0 Then
+                    result(key) = value
+                End If
+            Next
+
+            Return result
+        End Function
+
+        Private Shared Function ResolveSttSetting(raw As String, modelOrTag As String, settingName As String, defaultValue As String) As String
+            Dim settings As Dictionary(Of String, String) = ParseSttSettings(raw)
+            Dim value As String = ""
+
+            If Not String.IsNullOrWhiteSpace(modelOrTag) AndAlso
+               settings.TryGetValue(modelOrTag & "." & settingName, value) Then
+                Return value
+            End If
+
+            If settings.TryGetValue("default." & settingName, value) Then
+                Return value
+            End If
+
+            If settings.TryGetValue(settingName, value) Then
+                Return value
+            End If
+
+            Return defaultValue
+        End Function
+
+        Private Function ResolveGoogleProjectId() As String
+            Return If(INI_STT_Google_ProjectID, "").Trim()
+        End Function
+
+        Private Function ResolveGoogleSttSetting(modelOrTag As String, settingName As String, defaultValue As String) As String
+            Return ResolveSttSetting(INI_STT_Google, modelOrTag, settingName, defaultValue)
+        End Function
+
+        Private Function ResolveOpenAiSttSetting(modelOrTag As String, settingName As String, defaultValue As String) As String
+            Return ResolveSttSetting(INI_STT_OpenAI, modelOrTag, settingName, defaultValue)
+        End Function
+
+        Private Function ResolveAzureSpeechKey() As String
+            Return NormalizeIniValue(INI_STT_Azure_SpeechKey)
+        End Function
+
+        Private Function ResolveAzureSttSetting(modelOrTag As String, settingName As String, defaultValue As String) As String
+            Return NormalizeIniValue(ResolveSttSetting(INI_STT_Azure, modelOrTag, settingName, defaultValue))
+        End Function
+
+        Private Function ResolveAzureSpeechLocation(modelOrTag As String) As String
+            Dim endpoint As String = ResolveAzureSttSetting(modelOrTag, "endpoint", "")
+            If Not String.IsNullOrWhiteSpace(endpoint) Then
+                Return endpoint
+            End If
+
+            Return ResolveAzureSttSetting(modelOrTag, "region", "")
+        End Function
+
+        Private Shared Function IsLiveOnlyEngine(kind As EngineKind) As Boolean
+            Select Case kind
+                Case EngineKind.OpenAiRealtime, EngineKind.AzureSpeechRealtime
+                    Return True
+                Case Else
+                    Return False
+            End Select
+        End Function
+
+        Private Shared Function IsFileOnlyEngine(kind As EngineKind) As Boolean
+            Select Case kind
+                Case EngineKind.OpenAiRest, EngineKind.AzureSpeechFastRest
+                    Return True
+                Case Else
+                    Return False
+            End Select
+        End Function
+
+        Private Sub ShowTranscriptorMessageBox(
+    bodyText As String,
+    Optional header As String = Nothing,
+    Optional autoCloseSeconds As Integer? = Nothing,
+    Optional defaultText As String = " - execution continues meanwhile",
+    Optional separateThread As Boolean = False,
+    Optional extraButtonText As String = Nothing,
+    Optional extraButtonAction As System.Action = Nothing,
+    Optional closeAfterExtra As Boolean = False)
+
+            If Me.IsDisposed Then
+                Return
+            End If
+
+            If Me.InvokeRequired Then
+                Try
+                    Me.Invoke(
+                        New Action(Of String, String, Integer?, String, Boolean, String, System.Action, Boolean)(
+                            AddressOf ShowTranscriptorMessageBox),
+                        bodyText,
+                        header,
+                        autoCloseSeconds,
+                        defaultText,
+                        separateThread,
+                        extraButtonText,
+                        extraButtonAction,
+                        closeAfterExtra)
+                Catch
+                End Try
+                Return
+            End If
+
+            Using SLib.PushDialogOwner(Me)
+                ShowCustomMessageBox(
+                    bodyText,
+                    If(String.IsNullOrWhiteSpace(header), Me.Text, header),
+                    autoCloseSeconds,
+                    defaultText,
+                    separateThread,
+                    extraButtonText,
+                    extraButtonAction,
+                    closeAfterExtra)
+            End Using
+
+            Try
+                Me.Activate()
+                Me.BringToFront()
+            Catch
+            End Try
+        End Sub
+
 
     End Class
 

@@ -1,4 +1,24 @@
-﻿Option Explicit On
+﻿' Part of "Red Ink for Word"
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: TranscriptionOptionsDialog.vb
+' Purpose: Provides a user interface for configuring transcription settings.
+'          This includes selecting the transcription engine, audio input
+'          device, and other engine-specific options.
+'
+' Architecture:
+'  - UI Design: A Windows Form that presents transcription options to the user
+'    in an organized manner.
+'  - Configuration Loading/Saving: Loads the current settings upon opening and
+'    saves any changes made by the user.
+'  - Control Binding: Binds UI controls (e.g., dropdowns, checkboxes) to the
+'    underlying configuration properties.
+'  - User Interaction: Handles user input to update settings and provides
+'    mechanisms to confirm or cancel changes.
+' =============================================================================
+
+Option Explicit On
 Option Strict Off
 
 Imports System.Drawing

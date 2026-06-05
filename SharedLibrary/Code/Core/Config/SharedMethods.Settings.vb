@@ -1008,6 +1008,16 @@ Namespace SharedLibrary
                     Return context.INI_SpeechModelPath
                 Case "LocalModelPath"
                     Return context.INI_LocalModelPath
+                Case "STT_Google"
+                    Return context.INI_STT_Google
+                Case "STT_Google_ProjectID"
+                    Return context.INI_STT_Google_ProjectID
+                Case "STT_OpenAI"
+                    Return context.INI_STT_OpenAI
+                Case "STT_Azure"
+                    Return context.INI_STT_Azure
+                Case "STT_Azure_SpeechKey"
+                    Return context.INI_STT_Azure_SpeechKey
                 Case "BrandingName"
                     Return context.INI_BrandingName
                 Case "LogoPath"
@@ -1368,6 +1378,16 @@ Namespace SharedLibrary
                     context.INI_SpeechModelPath = value
                 Case "LocalModelPath"
                     context.INI_LocalModelPath = value
+                Case "STT_Google"
+                    context.INI_STT_Google = value
+                Case "STT_Google_ProjectID"
+                    context.INI_STT_Google_ProjectID = value
+                Case "STT_OpenAI"
+                    context.INI_STT_OpenAI = value
+                Case "STT_Azure"
+                    context.INI_STT_Azure = value
+                Case "STT_Azure_SpeechKey"
+                    context.INI_STT_Azure_SpeechKey = value
                 Case "BrandingName"
                     context.INI_BrandingName = value
                 Case "LogoPath"
@@ -1818,6 +1838,11 @@ Namespace SharedLibrary
                     {"MailMoverPathLocal", context.INI_MailMoverPathLocal},
                     {"SpeechModelPath", context.INI_SpeechModelPath},
                     {"LocalModelPath", context.INI_LocalModelPath},
+                    {"STT_Google", context.INI_STT_Google},
+                    {"STT_Google_ProjectID", context.INI_STT_Google_ProjectID},
+                    {"STT_OpenAI", context.INI_STT_OpenAI},
+                    {"STT_Azure", context.INI_STT_Azure},
+                    {"STT_Azure_SpeechKey", context.INI_STT_Azure_SpeechKey},
                     {"TTSEndpoint", context.INI_TTSEndpoint},
                     {"PromptLib", context.INI_PromptLibPath},
                     {"PromptLibLocal", context.INI_PromptLibPathLocal},
@@ -2428,6 +2453,11 @@ Namespace SharedLibrary
                     {"OAuth2ATExpiry_2", context.INI_OAuth2ATExpiry_2.ToString()},
                     {"SpeechModelPath", context.INI_SpeechModelPath},
                     {"LocalModelPath", context.INI_LocalModelPath},
+                    {"STT_Google", context.INI_STT_Google},
+                    {"STT_Google_ProjectID", context.INI_STT_Google_ProjectID},
+                    {"STT_OpenAI", context.INI_STT_OpenAI},
+                    {"STT_Azure", context.INI_STT_Azure},
+                    {"STT_Azure_SpeechKey", context.INI_STT_Azure_SpeechKey},
                     {"TTSEndpoint", context.INI_TTSEndpoint},
                     {"PromptLib", context.INI_PromptLibPath},
                     {"PromptLibLocal", context.INI_PromptLibPathLocal},
@@ -3262,6 +3292,11 @@ Namespace SharedLibrary
             variableValues.Add("MailMoverPathLocal", context.INI_MailMoverPathLocal)
             variableValues.Add("SpeechModelPath", context.INI_SpeechModelPath)
             variableValues.Add("LocalModelPath", context.INI_LocalModelPath)
+            variableValues.Add("STT_Google", context.INI_STT_Google)
+            variableValues.Add("STT_Google_ProjectID", context.INI_STT_Google_ProjectID)
+            variableValues.Add("STT_OpenAI", context.INI_STT_OpenAI)
+            variableValues.Add("STT_Azure", context.INI_STT_Azure)
+            variableValues.Add("STT_Azure_SpeechKey", context.INI_STT_Azure_SpeechKey)
             variableValues.Add("TTSEndpoint", context.INI_TTSEndpoint)
             variableValues.Add("BrandingName", context.INI_BrandingName)
             variableValues.Add("LogoPath", context.INI_LogoPath)
@@ -3638,6 +3673,11 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("MailMoverPathLocal") Then context.INI_MailMoverPathLocal = CStr(updatedValues("MailMoverPathLocal"))
                 If updatedValues.ContainsKey("SpeechModelPath") Then context.INI_SpeechModelPath = CStr(updatedValues("SpeechModelPath"))
                 If updatedValues.ContainsKey("LocalModelPath") Then context.INI_LocalModelPath = CStr(updatedValues("LocalModelPath"))
+                If updatedValues.ContainsKey("STT_Google") Then context.INI_STT_Google = CStr(updatedValues("STT_Google"))
+                If updatedValues.ContainsKey("STT_Google_ProjectID") Then context.INI_STT_Google_ProjectID = CStr(updatedValues("STT_Google_ProjectID"))
+                If updatedValues.ContainsKey("STT_OpenAI") Then context.INI_STT_OpenAI = CStr(updatedValues("STT_OpenAI"))
+                If updatedValues.ContainsKey("STT_Azure") Then context.INI_STT_Azure = CStr(updatedValues("STT_Azure"))
+                If updatedValues.ContainsKey("STT_Azure_SpeechKey") Then context.INI_STT_Azure_SpeechKey = CStr(updatedValues("STT_Azure_SpeechKey"))
                 If updatedValues.ContainsKey("TTSEndpoint") Then context.INI_TTSEndpoint = CStr(updatedValues("TTSEndpoint"))
                 If updatedValues.ContainsKey("PromptLib") Then context.INI_PromptLibPath = CStr(updatedValues("PromptLib"))
                 If updatedValues.ContainsKey("PromptLibLocal") Then context.INI_PromptLibPathLocal = CStr(updatedValues("PromptLibLocal"))

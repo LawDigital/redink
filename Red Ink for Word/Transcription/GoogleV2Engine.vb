@@ -1,4 +1,26 @@
-﻿Option Explicit On
+﻿' Part of "Red Ink for Word"
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: GoogleV2Engine.vb
+' Purpose: Implements the ITranscriptionEngine interface using the Google
+'          Cloud Speech-to-Text API v2. This engine likely provides access to
+'          newer features or improved performance over the v1 implementation.
+'
+' Architecture:
+'  - ITranscriptionEngine Implementation: Provides the core transcription
+'    functionality as defined by the interface.
+'  - API v2 Integration: Specifically targets the v2 version of the Google
+'    Speech-to-Text API, managing any differences in authentication, features,
+'    or data formats compared to v1.
+'  - Advanced Features: May implement features unique to the v2 API, such as
+'    improved recognition models, speaker diarization, or word-level confidence.
+'  - Error Handling: Manages API-specific errors and provides appropriate
+'    feedback to the user.
+' =============================================================================
+
+
+Option Explicit On
 Option Strict Off
 
 Imports System.Collections.Concurrent
@@ -22,7 +44,6 @@ Namespace Transcription
         Public Const DisplayName As String = "Google Chirp 2 (V2)"
         Private Const GoogleV2Endpoint As String = "europe-west4-speech.googleapis.com:443"
         Private Const GoogleV2Location As String = "europe-west4"
-        Private Const GoogleV2ProjectNumber As String = "1092163392692"
         Private Const GoogleV2RecognizerId As String = "_"   ' Replace with a real recognizer id if "_" still fails
         Private Const GoogleV2DefaultModel As String = "chirp_2"
         Private Const GoogleV2DefaultLanguage As String = "de-DE"
@@ -77,6 +98,12 @@ Namespace Transcription
         Private ReadOnly _serviceAccountEmail As String
         Private ReadOnly _serviceAccountPrivateKeyRaw As String
         Private ReadOnly _serviceAccountTokenUri As String
+        Private ReadOnly _projectId As String
+        Private ReadOnly _endpoint As String
+        Private ReadOnly _location As String
+        Private ReadOnly _recognizerId As String
+        Private ReadOnly _defaultModel As String
+        Private ReadOnly _defaultLanguage As String
 
         Private _client As SpeechV2.SpeechClient
         Private _stream As SpeechV2.SpeechClient.StreamingRecognizeStream
@@ -88,17 +115,94 @@ Namespace Transcription
         Private _firstResponseSeen As Boolean
 
         Public Sub New(serviceAccountEmail As String, serviceAccountPrivateKeyRaw As String, serviceAccountTokenUri As String)
+            Me.New(serviceAccountEmail, serviceAccountPrivateKeyRaw, serviceAccountTokenUri, "", "", "", "", "", "")
+        End Sub
+
+        Public Sub New(serviceAccountEmail As String,
+                       serviceAccountPrivateKeyRaw As String,
+                       serviceAccountTokenUri As String,
+                       projectId As String,
+                       endpoint As String,
+                       location As String,
+                       recognizerId As String,
+                       defaultModel As String,
+                       defaultLanguage As String)
+
             _serviceAccountEmail = serviceAccountEmail
             _serviceAccountPrivateKeyRaw = serviceAccountPrivateKeyRaw
             _serviceAccountTokenUri = serviceAccountTokenUri
+            _projectId = If(projectId, "").Trim()
+            _endpoint = If(endpoint, "").Trim()
+            _location = If(location, "").Trim()
+            _recognizerId = If(recognizerId, "").Trim()
+            _defaultModel = If(defaultModel, "").Trim()
+            _defaultLanguage = If(defaultLanguage, "").Trim()
         End Sub
+
+        Private Function GetEffectiveProjectId() As String
+            If Not String.IsNullOrWhiteSpace(_projectId) Then
+                Return _projectId
+            End If
+
+            Throw New InvalidOperationException("Google V2 project id is missing.")
+        End Function
+
+        Private Function GetEffectiveEndpoint() As String
+            If Not String.IsNullOrWhiteSpace(_endpoint) Then
+                Return _endpoint
+            End If
+
+            Return GoogleV2Endpoint
+        End Function
+
+        Private Function GetEffectiveLocation() As String
+            If Not String.IsNullOrWhiteSpace(_location) Then
+                Return _location
+            End If
+
+            Return GoogleV2Location
+        End Function
+
+        Private Function GetEffectiveRecognizerId() As String
+            If Not String.IsNullOrWhiteSpace(_recognizerId) Then
+                Return _recognizerId
+            End If
+
+            Return GoogleV2RecognizerId
+        End Function
+
+        Private Function GetEffectiveDefaultModel() As String
+            If Not String.IsNullOrWhiteSpace(_defaultModel) Then
+                Return _defaultModel
+            End If
+
+            Return GoogleV2DefaultModel
+        End Function
+
+        Private Function GetEffectiveDefaultLanguage() As String
+            If Not String.IsNullOrWhiteSpace(_defaultLanguage) Then
+                Return _defaultLanguage
+            End If
+
+            Return GoogleV2DefaultLanguage
+        End Function
+
+        Private Function NormalizeConfiguredLanguage(rawLanguage As String) As String
+            Dim normalized As String = If(rawLanguage, "").Trim()
+
+            If normalized.Length = 0 OrElse String.Equals(normalized, "auto", StringComparison.OrdinalIgnoreCase) Then
+                Return GetEffectiveDefaultLanguage()
+            End If
+
+            Return normalized
+        End Function
 
         Private Sub RaiseStatusMessage(message As String)
             RaiseEvent Status(Me, New TranscriptionStatusEventArgs(message))
         End Sub
 
         Private Function GetRecognizerName() As String
-            Return "projects/" & GoogleV2ProjectNumber & "/locations/" & GoogleV2Location & "/recognizers/" & GoogleV2RecognizerId
+            Return "projects/" & GetEffectiveProjectId() & "/locations/" & GetEffectiveLocation() & "/recognizers/" & GetEffectiveRecognizerId()
         End Function
 
         Private Shared Function FormatPrivateKey(rawKey As String) As String
@@ -159,7 +263,7 @@ Namespace Transcription
                                         _serviceAccountTokenUri)
 
             Dim escapedMail As String = Uri.EscapeDataString(_serviceAccountEmail)
-            Dim projectId As String = ExtractProjectIdFromServiceAccountEmail(_serviceAccountEmail)
+            Dim projectId As String = GetEffectiveProjectId()
 
             Dim json As New JObject From {
                 {"type", "service_account"},
@@ -179,7 +283,7 @@ Namespace Transcription
 
         Private Async Function BuildClient() As Task
             Dim builder As New SpeechV2.SpeechClientBuilder() With {
-                .Endpoint = GoogleV2Endpoint,
+                .Endpoint = GetEffectiveEndpoint(),
                 .JsonCredentials = BuildServiceAccountJson(),
                 .GrpcAdapter = GrpcCoreAdapter.Instance
             }
@@ -193,8 +297,16 @@ Namespace Transcription
         End Function
 
         Private Function BuildRecognitionConfig(opts As TranscriptionOptions) As SpeechV2.RecognitionConfig
-            Dim effectiveModel As String = If(String.IsNullOrWhiteSpace(opts.Model), GoogleV2DefaultModel, opts.Model)
-            Dim effectiveLanguage As String = If(String.IsNullOrWhiteSpace(opts.LanguageCode), GoogleV2DefaultLanguage, opts.LanguageCode)
+            Dim effectiveModel As String = GetEffectiveDefaultModel()
+            Dim effectiveLanguage As String = GetEffectiveDefaultLanguage()
+
+            If opts IsNot Nothing Then
+                If Not String.IsNullOrWhiteSpace(opts.Model) Then
+                    effectiveModel = opts.Model.Trim()
+                End If
+
+                effectiveLanguage = NormalizeConfiguredLanguage(opts.LanguageCode)
+            End If
 
             Dim cfg As New SpeechV2.RecognitionConfig With {
                 .Model = effectiveModel,
@@ -225,7 +337,7 @@ Namespace Transcription
             _firstResponseSeen = False
 
             RaiseStatusMessage("Starting Google V2…")
-            RaiseStatusMessage("Project=" & GoogleV2ProjectNumber & ", Location=" & GoogleV2Location & ", Endpoint=" & GoogleV2Endpoint)
+            RaiseStatusMessage("Project=" & GetEffectiveProjectId() & ", Location=" & GetEffectiveLocation() & ", Endpoint=" & GetEffectiveEndpoint())
 
             Try
                 Await BuildClient()

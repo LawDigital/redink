@@ -783,6 +783,8 @@
     <Compile Include="ThisAddIn.WordHelpers.vb" />
     <Compile Include="ThisAddIn.WordSearchHelper.vb" />
     <Compile Include="Transcription\AudioCaptureService.vb" />
+    <Compile Include="Transcription\AzureSpeechFastRestEngine.vb" />
+    <Compile Include="Transcription\AzureSpeechRealtimeEngine.vb" />
     <Compile Include="Transcription\GoogleV1Engine.vb" />
     <Compile Include="Transcription\GoogleV2Engine.vb" />
     <Compile Include="Transcription\ITranscriptionEngine.vb" />

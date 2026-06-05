@@ -1,4 +1,24 @@
-﻿Option Explicit On
+﻿' Part of "Red Ink for Word"
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: OpenAiRestEngine.vb
+' Purpose: Implements the ITranscriptionEngine interface for transcription
+'          using the OpenAI REST API. This is typically used for non-real-time
+'          transcription of audio files or chunks.
+'
+' Architecture:
+'  - ITranscriptionEngine Implementation: Provides methods for transcription
+'    that may be better suited for batch processing than real-time streaming.
+'  - REST API Communication: Manages HTTP requests to the OpenAI transcription
+'    endpoint, including authentication and handling of multipart/form-data.
+'  - File-based Processing: Likely designed to take an entire audio file, send
+'    it to the API, and wait for the full transcription to be returned.
+'  - JSON Parsing: Parses the JSON response from the OpenAI API to extract the
+'    transcribed text and any other relevant information.
+' =============================================================================
+
+Option Explicit On
 Option Strict Off
 
 Imports System.IO

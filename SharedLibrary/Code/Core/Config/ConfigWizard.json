@@ -770,6 +770,41 @@
           "type": "path",
           "default": "",
           "description": "Directory that stores locally hosted models or related runtime data used by Red Ink features that work with local models (such as the integrated vector search in 'Context Search'). Example: X:\\Models\\. [LocalModelPath]"
+        },
+        {
+          "key": "STT_Google",
+          "label": "Google STT Settings",
+          "type": "string",
+          "default": "",
+          "description": "Optional advanced settings for Google Speech-to-Text engines, in 'key=value;key=value' format. [STT_Google]"
+        },
+        {
+          "key": "STT_Google_ProjectID",
+          "label": "Google STT Project ID",
+          "type": "string",
+          "default": "",
+          "description": "Google Cloud project ID used for Google Speech-to-Text. Required to enable Google transcription engines. [STT_Google_ProjectID]"
+        },
+        {
+          "key": "STT_OpenAI",
+          "label": "OpenAI STT Settings",
+          "type": "string",
+          "default": "",
+          "description": "Optional advanced settings for OpenAI speech-to-text engines, in 'key=value;key=value' format. [STT_OpenAI]"
+        },
+        {
+          "key": "STT_Azure",
+          "label": "Azure STT Settings",
+          "type": "string",
+          "default": "",
+          "description": "Optional advanced settings for Azure Speech-to-Text engines, in 'key=value;key=value' format. [STT_Azure]"
+        },
+        {
+          "key": "STT_Azure_SpeechKey",
+          "label": "Azure Speech Subscription Key",
+          "type": "password",
+          "default": "",
+          "description": "Azure Speech subscription key. Required to enable Azure transcription engines. [STT_Azure_SpeechKey]"
         }
       ]
     },

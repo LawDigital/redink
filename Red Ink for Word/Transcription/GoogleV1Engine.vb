@@ -1,4 +1,24 @@
-﻿Option Explicit On
+﻿' Part of "Red Ink for Word"
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: GoogleV1Engine.vb
+' Purpose: Implements the ITranscriptionEngine interface using the Google
+'          Cloud Speech-to-Text API v1. This engine is responsible for sending
+'          audio data to Google's service and processing the transcription results.
+'
+' Architecture:
+'  - ITranscriptionEngine Implementation: Fulfills the contract for starting
+'    and stopping transcription.
+'  - API Integration: Interacts with the Google Cloud Speech-to-Text v1 API,
+'    handling authentication, request formation, and response parsing.
+'  - Audio Handling: Prepares audio data in a format compatible with the API,
+'    potentially handling different encodings and sample rates.
+'  - Asynchronous Operations: Manages asynchronous calls to the Google API to
+'    avoid blocking the UI thread during transcription.
+' =============================================================================
+
+Option Explicit On
 Option Strict Off
 
 Imports System.Collections.Concurrent

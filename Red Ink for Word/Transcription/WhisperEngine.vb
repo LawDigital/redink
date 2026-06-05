@@ -1,4 +1,24 @@
-﻿Option Explicit On
+﻿' Part of "Red Ink for Word"
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: WhisperEngine.vb
+' Purpose: Implements the ITranscriptionEngine interface using a local
+'          instance of OpenAI's Whisper model. This provides high-quality,
+'          on-device transcription.
+'
+' Architecture:
+'  - ITranscriptionEngine Implementation: Fulfills the transcription contract
+'    for use with the Whisper model.
+'  - Local Whisper Integration: Manages the interaction with a local Whisper
+'    implementation (e.g., whisper.cpp), including model loading and execution.
+'  - Audio Processing: Prepares audio data in the format required by the
+'    Whisper model (e.g., 16kHz, 16-bit mono PCM).
+'  - Resource Management: Handles the potentially significant memory and CPU/GPU
+'    resources required to run the Whisper model locally.
+' =============================================================================
+
+Option Explicit On
 Option Strict Off
 
 Imports System.IO

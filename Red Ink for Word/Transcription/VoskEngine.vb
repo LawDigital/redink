@@ -1,4 +1,24 @@
-﻿Option Explicit On
+﻿' Part of "Red Ink for Word"
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: VoskEngine.vb
+' Purpose: Implements the ITranscriptionEngine interface using the Vosk
+'          offline speech recognition toolkit. This allows for local,
+'          on-device transcription without needing an internet connection.
+'
+' Architecture:
+'  - ITranscriptionEngine Implementation: Provides the standard interface for
+'    transcription, adapted for the Vosk library.
+'  - Local Model Management: Manages the loading and initialization of Vosk's
+'    language models, which are stored locally on the user's machine.
+'  - Offline Processing: Processes audio data entirely on the local device,
+'    ensuring privacy and offline capability.
+'  - Library Interop: Interacts with the Vosk library, likely through P/Invoke
+'    or a .NET wrapper, to perform speech recognition.
+' =============================================================================
+
+Option Explicit On
 Option Strict Off
 
 Imports System.IO

@@ -1,4 +1,25 @@
-﻿Option Explicit On
+﻿' Part of "Red Ink for Word"
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: ITranscriptionEngine.vb
+' Purpose: Defines the common interface for all transcription engines. This
+'          ensures that different transcription services (e.g., OpenAI, Google,
+'          Vosk) can be used interchangeably by the application.
+'
+' Architecture:
+'  - Contract Definition: Specifies the methods, properties, and events that
+'    each transcription engine must implement.
+'  - Core Methods: Includes methods for initializing the engine, starting and
+'    stopping the transcription process, and processing audio data.
+'  - Events: Defines events for communicating transcription results (e.g.,
+'    partial, final) and errors back to the consuming components.
+'  - Abstraction: Decouples the main application logic from the specific
+'    details of any single transcription service.
+' =============================================================================
+
+
+Option Explicit On
 Option Strict Off
 
 Imports System.Threading
@@ -19,6 +40,8 @@ Namespace Transcription
         GoogleV2
         OpenAiRest
         OpenAiRealtime
+        AzureSpeechRealtime
+        AzureSpeechFastRest
     End Enum
 
     Public Class TranscriptionOptions
