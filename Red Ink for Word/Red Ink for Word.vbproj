@@ -110,7 +110,7 @@
     <FriendlyName>Red Ink for Word %28Develop%29</FriendlyName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Preview'">
-    <ApplicationVersion>1.5.7.201</ApplicationVersion>
+    <ApplicationVersion>1.5.8.200</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\preview\word\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/preview/word/</InstallUrl>
     <ProductName>Red Ink for Word %28Preview%29</ProductName>
@@ -250,9 +250,15 @@
     <Reference Include="Google.Apis.Core, Version=1.74.0.0, Culture=neutral, PublicKeyToken=4b01fa6e34db77ab, processorArchitecture=MSIL">
       <HintPath>..\packages\Google.Apis.Core.1.74.0\lib\net462\Google.Apis.Core.dll</HintPath>
     </Reference>
+    <Reference Include="Google.Cloud.Location, Version=2.4.0.0, Culture=neutral, PublicKeyToken=185c282632e132a0, processorArchitecture=MSIL">
+      <HintPath>..\packages\Google.Cloud.Location.2.4.0\lib\net462\Google.Cloud.Location.dll</HintPath>
+    </Reference>
     <Reference Include="Google.Cloud.Speech.V1, Version=3.9.0.0, Culture=neutral, PublicKeyToken=185c282632e132a0, processorArchitecture=MSIL">
       <HintPath>..\packages\Google.Cloud.Speech.V1.3.9.0\lib\net462\Google.Cloud.Speech.V1.dll</HintPath>
       <Private>True</Private>
+    </Reference>
+    <Reference Include="Google.Cloud.Speech.V2, Version=1.8.0.0, Culture=neutral, PublicKeyToken=185c282632e132a0, processorArchitecture=MSIL">
+      <HintPath>..\packages\Google.Cloud.Speech.V2.1.8.0\lib\net462\Google.Cloud.Speech.V2.dll</HintPath>
     </Reference>
     <Reference Include="Google.LongRunning, Version=3.5.0.0, Culture=neutral, PublicKeyToken=185c282632e132a0, processorArchitecture=MSIL">
       <HintPath>..\packages\Google.LongRunning.3.5.0\lib\net462\Google.LongRunning.dll</HintPath>
@@ -776,6 +782,20 @@
     <Compile Include="ThisAddIn.WordHelpers.Stamper.vb" />
     <Compile Include="ThisAddIn.WordHelpers.vb" />
     <Compile Include="ThisAddIn.WordSearchHelper.vb" />
+    <Compile Include="Transcription\AudioCaptureService.vb" />
+    <Compile Include="Transcription\AzureSpeechFastRestEngine.vb" />
+    <Compile Include="Transcription\AzureSpeechRealtimeEngine.vb" />
+    <Compile Include="Transcription\GoogleV1Engine.vb" />
+    <Compile Include="Transcription\GoogleV2Engine.vb" />
+    <Compile Include="Transcription\ITranscriptionEngine.vb" />
+    <Compile Include="Transcription\OpenAiRealtimeEngine.vb" />
+    <Compile Include="Transcription\OpenAiRestEngine.vb" />
+    <Compile Include="Transcription\TeamsAcsRealtimeEngine.vb" />
+    <Compile Include="Transcription\TranscriptionOptionsDialog.vb">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="Transcription\VoskEngine.vb" />
+    <Compile Include="Transcription\WhisperEngine.vb" />
     <Compile Include="WordWorkspaceForm.vb">
       <SubType>Form</SubType>
     </Compile>

@@ -3,3312 +3,2229 @@
 
 ' =============================================================================
 ' File: ThisAddIn.Transcriptor.vb
-' Purpose: Provides real-time speech-to-text transcription using Vosk, Whisper, 
-'          or Google Cloud Speech-to-Text APIs with speaker identification support.
+' Purpose: Manages the real-time transcription workflow within Microsoft Word.
+'          It integrates audio capture, transcription engine management, and
+'          the insertion of transcribed text into the active document.
 '
 ' Architecture:
-'  - Multi-Engine Support: Vosk (local), Whisper (local), Google STT (cloud)
-'  - Audio Input: Microphone capture via NAudio with optional system audio mixing
-'  - Real-Time Processing: Streaming transcription with partial/final results
-'  - Speaker Identification: Vosk embeddings (cosine similarity), Google diarization,
-'    Whisper translation option
-'  - File Transcription: Batch processing of audio files (WAV, MP3, AAC, M4A, WMA)
-'  - Stream Management: Google STT uses resilient streaming with automatic recovery,
-'    watchdog timer, and ring buffer for seamless reconnection
-'  - OAuth2 Authentication: Token caching and refresh for Google Cloud APIs
-'  - Sleep Prevention: Prevents system sleep during active transcription
-'  - Post-Processing: Optional LLM-based text processing via prompt library
-'
-' External Dependencies:
-'  - Vosk: Local speech recognition models
-'  - Whisper.net: Local GGML models  
-'  - Google.Cloud.Speech.V1: Cloud-based STT with diarization
-'  - NAudio: Audio capture and format conversion
-'  - SharedLibrary.SharedMethods: UI helpers, LLM integration, OAuth2
+'  - Engine Management: Dynamically loads and initializes the selected
+'    transcription engine (e.g., OpenAI, Google, Vosk, Whisper).
+'  - Audio Handling: Coordinates with the AudioCaptureService to start and
+'    stop audio recording and stream data to the transcription engine.
+'  - UI Integration: Manages the transcription lifecycle, including starting,
+'    stopping, and displaying status updates to the user.
+'  - Text Insertion: Handles the insertion of real-time and final transcription
+'    results into the Word document at the current cursor position.
 ' =============================================================================
 
 Option Explicit On
 Option Strict Off
 
-Imports System.Collections.Concurrent
-Imports System.Data
 Imports System.Diagnostics
 Imports System.Drawing
 Imports System.Globalization
 Imports System.IO
+Imports System.Linq
 Imports System.Runtime.InteropServices
-Imports System.Text.Json.Serialization
-Imports System.Text.RegularExpressions
+Imports System.Text
 Imports System.Threading
-Imports System.Windows
+Imports System.Threading.Tasks
 Imports System.Windows.Forms
-Imports System.Windows.Forms.VisualStyles.VisualStyleElement
-Imports DiffPlex
-Imports DiffPlex.DiffBuilder
-Imports DocumentFormat.OpenXml
-Imports Google.Cloud.Speech.V1
-Imports Google.Protobuf
-Imports Grpc.Core
-Imports Microsoft.Office.Interop.Word
+Imports Word = Microsoft.Office.Interop.Word
 Imports NAudio.CoreAudioApi
 Imports NAudio.Wave
-Imports Newtonsoft.Json.Linq
-Imports SharedLibrary.SharedLibrary.SharedMethods
-Imports Vosk
-Imports Whisper.net
-Imports SLib = SharedLibrary.SharedLibrary.SharedMethods
+Imports Newtonsoft.Json
+Imports Red_Ink_for_Word.Transcription
 Imports SharedLibrary.SharedLibrary
-
+Imports SharedLibrary.SharedLibrary.SharedMethods
+Imports SLib = SharedLibrary.SharedLibrary.SharedMethods
 
 Partial Public Class ThisAddIn
 
-    ''' <summary>
-    ''' Main form for speech-to-text transcription supporting multiple engines (Vosk, Whisper, Google STT).
-    ''' Provides real-time audio capture, speaker identification, and optional post-processing.
-    ''' </summary>
     Public Class TranscriptionForm
-
         Inherits Form
 
-        ' ============================================================================
-        ' P/Invoke: Sleep Prevention
-        ' Prevents Windows from entering sleep mode during active transcription
-        ' ============================================================================
-
-        ''' <summary>
-        ''' Win32 API function to prevent system sleep during transcription.
-        ''' </summary>
         <DllImport("kernel32.dll", CharSet:=CharSet.Auto, SetLastError:=True)>
-        Private Shared Function SetThreadExecutionState(ByVal esFlags As UInteger) As UInteger
+        Private Shared Function SetThreadExecutionState(esFlags As UInteger) As UInteger
         End Function
 
-        ' Constants for sleep prevention
         Private Const ES_CONTINUOUS As UInteger = &H80000000UI
         Private Const ES_SYSTEM_REQUIRED As UInteger = &H1UI
-        Private Const ES_DISPLAY_REQUIRED As UInteger = &H2UI ' Optional: keeps the display on too
 
-        ''' <summary>
-        ''' Tracks whether this form instance set the system sleep lock.
-        ''' True = this form is responsible for releasing; False = another component owns it.
-        ''' </summary>
-        Private _iSetTheSleepLock As Boolean = False
+        Private _setSleepLock As Boolean = False
+        Private _isStopping As Boolean = False
+        Private _closeAfterStop As Boolean = False
 
-        ' ============================================================================
-        ' UI Components
-        ' ============================================================================
-        Private RichTextBox1 As Forms.RichTextBox
-        Private StartButton As Forms.Button
-        Private StopButton As Forms.Button
-        Private ClearButton As Forms.Button
-        Private LoadButton As Forms.Button
-        Private AudioButton As Forms.Button
-        Private QuitButton As Forms.Button
-        Private ProcessButton As Forms.Button
-        Private cultureComboBox As Forms.ComboBox
-        Private deviceComboBox As Forms.ComboBox
-        Private processCombobox As Forms.ComboBox
-        Private SpeakerIdent As System.Windows.Forms.CheckBox
-        Private SpeakerDistance As Forms.TextBox
-        Private Label1 As Label
-        Private Label2 As Label
-        Private StatusLabel As Label
-        Private PartialTextLabel As Label
-        Private ButtonPanel As Panel
+        Private rtb As RichTextBox
+        Private cboEngine As ComboBox
+        Private cboLang As ComboBox
+        Private cboDevice As ComboBox
+        Private cboProcess As ComboBox
+        Private btnStart As Button
+        Private btnStop As Button
+        Private btnLoad As Button
+        Private btnClear As Button
+        Private btnOptions As Button
+        Private btnProcess As Button
+        Private btnQuit As Button
+        Private lblLiveState As Label
+        Private tt As New ToolTip()
 
-        ' ============================================================================
-        ' Prompt Library for Post-Processing
-        ' ============================================================================
-        ''' <summary>
-        ''' Stores titles of available transcript processing prompts.
-        ''' </summary>
-        Private TranscriptPromptsTitles As New List(Of String)
+        Private _engine As ITranscriptionEngine
+        Private _capture As AudioCaptureService
+        Private _opts As New TranscriptionOptions()
+        Private _capturing As Boolean
+        Private _cts As CancellationTokenSource
+        Private _currentEngineDisplayName As String = ""
 
-        ''' <summary>
-        ''' Stores the actual prompt content for transcript processing.
-        ''' </summary>
-        Private TranscriptPromptsLibrary As New List(Of String)
+        Private _lastLiveStateText As String = ""
+        Private _lastLiveStateUtc As DateTime = DateTime.MinValue
+        Private _lastPartialText As String = ""
 
-        ' ============================================================================
-        ' Vosk STT Engine Variables
-        ' ============================================================================
-        ''' <summary>
-        ''' Vosk speech recognizer instance for local speech recognition.
-        ''' </summary>
-        Private recognizer As VoskRecognizer
+        Private _suspendSettingsPersistence As Boolean = False
+        Private _alternateOpenAiConfig As ModelConfig = Nothing
+        Private _alternateGoogleConfig As ModelConfig = Nothing
 
-        ''' <summary>
-        ''' Tooltip text for Vosk speaker identification feature.
-        ''' </summary>
-        Private Const VoskTooltip = "Only for Vosk: Set similarity threshold for speaker identification (0.5-0.7 for real-time speaker tracking, 1.0-1.5 for meetings/interviews)"
+        Private _fileTranscribing As Boolean = False
 
-        ''' <summary>
-        ''' Toggle button text for Vosk speaker identification.
-        ''' </summary>
-        Private Const VoskToggle = "Iden"
+        Private _dialogOwnerScope As IDisposable
 
-        ' ============================================================================
-        ' Whisper STT Engine Variables
-        ' ============================================================================
-        ''' <summary>
-        ''' Whisper speech processor instance for local speech recognition with translation support.
-        ''' </summary>
-        Private WhisperRecognizer As WhisperProcessor
+        Public Const ACS_Bridge_Address As String = ""
 
-        ''' <summary>
-        ''' Audio buffer for accumulating samples before Whisper processing.
-        ''' </summary>
-        Private audioBuffer As New List(Of Single)
+        Private Class EngineDescriptor
+            Public DisplayName As String
+            Public Kind As EngineKind
+            Public ModelOrTag As String
+        End Class
 
-        ''' <summary>
-        ''' Tooltip text for Whisper translation and voice detection threshold.
-        ''' </summary>
-        Private Const WhisperTooltip = "Only for Whisper: Select if text shall be translated to English and the threshold for detecting voice (default = 0.6, increase for noisy environments)"
+        Private _engines As New List(Of EngineDescriptor)()
+        Private _promptTitles As New List(Of String)()
+        Private _promptBodies As New List(Of String)()
 
-        ''' <summary>
-        ''' Toggle button text for Whisper translation feature.
-        ''' </summary>
-        Private Const WhisperToggle = "Trans"
-
-        ' ============================================================================
-        ' Google Cloud STT Engine Variables
-        ' ============================================================================
-        ''' <summary>
-        ''' Indicates whether Google Cloud Speech-to-Text is available and configured.
-        ''' </summary>
-        Private GoogleSpeech As Boolean = False
-
-        ''' <summary>
-        ''' Indicates whether to use secondary API credentials for Google STT.
-        ''' </summary>
-        Private STTSecondAPI As Boolean = False
-
-        ''' <summary>
-        ''' Indicates whether Google STT is the selected engine.
-        ''' </summary>
-        Private IsGoogle As Boolean = False
-
-        ''' <summary>
-        ''' Tooltip text for Google speaker diarization feature.
-        ''' </summary>
-        Private Const GoogleTooltip = "Only for Google: Set the maximum number of speakers expected for diarization (speaker tracking)"
-
-        ''' <summary>
-        ''' Toggle button text for Google speaker diarization.
-        ''' </summary>
-        Private Const GoogleToggle = "Iden"
-
-        ''' <summary>
-        ''' Background task that reads responses from Google's bidirectional gRPC stream.
-        ''' </summary>
-        Private googleReaderTask As System.Threading.Tasks.Task
-
-        ''' <summary>
-        ''' Cancellation token source for the Google reader task.
-        ''' </summary>
-        Private readerCts As CancellationTokenSource = New CancellationTokenSource()
-
-        ''' <summary>
-        ''' Bidirectional gRPC stream for Google Cloud Speech-to-Text.
-        ''' </summary>
-        Private _stream As SpeechClient.StreamingRecognizeStream
-
-        ''' <summary>
-        ''' Character position in RichTextBox where current Google transcription session started.
-        ''' </summary>
-        Private googleTranscriptStart As Integer = 0
-
-        ''' <summary>
-        ''' Google Cloud Speech client instance.
-        ''' </summary>
-        Private client As SpeechClient
-
-        ''' <summary>
-        ''' Language code for Google STT (e.g., "en-US", "de-DE").
-        ''' </summary>
-        Private GoogleLanguageCode As String = ""
-
-        ''' <summary>
-        ''' Thread-safe queue for audio chunks sent to Google STT stream.
-        ''' </summary>
-        Private audioQueue As New System.Collections.Concurrent.BlockingCollection(Of ByteString)()
-
-        ''' <summary>
-        ''' Flag indicating whether Google stream has completed writing.
-        ''' </summary>
-        Private _googleStreamCompleted As Boolean = False
-
-        ''' <summary>
-        ''' Maximum streaming duration in milliseconds (4 minutes 50 seconds) before forcing reconnection.
-        ''' </summary>
-        Private Const STREAMING_LIMIT_MS As Integer = 290000
-
-        ''' <summary>
-        ''' Timestamp when current Google streaming session started.
-        ''' </summary>
-        Private streamingStartTime As DateTime
-
-        ' ============================================================================
-        ' Google STT Stream Recovery Components
-        ' ============================================================================
-        ''' <summary>
-        ''' Ring buffer holding last 50 audio chunks for stream recovery after timeout or error.
-        ''' </summary>
-        Private ReadOnly ringBuffer As New Queue(Of Google.Protobuf.ByteString)()
-
-        ''' <summary>
-        ''' Maximum number of audio chunks stored in ring buffer.
-        ''' </summary>
-        Private Const RING_BUFFER_SIZE As Integer = 50
-
-        ''' <summary>
-        ''' Semaphore ensuring only one stream recovery operation executes at a time.
-        ''' </summary>
-        Private ReadOnly recoverySemaphore As New System.Threading.SemaphoreSlim(1, 1)
-
-        ''' <summary>
-        ''' Background task that writes audio chunks from queue to Google stream.
-        ''' </summary>
-        Private writerTask As System.Threading.Tasks.Task
-
-        ' ============================================================================
-        ' Google STT Watchdog Timer Components
-        ' ============================================================================
-        ''' <summary>
-        ''' Watchdog timer that monitors API responsiveness and triggers recovery if needed.
-        ''' </summary>
-        Private _apiWatchdogTimer As System.Threading.Timer
-
-        ''' <summary>
-        ''' Tracks last API response time (Ticks) for watchdog monitoring.
-        ''' Thread-safe via Interlocked operations.
-        ''' </summary>
-        Private _lastApiResponseTicks As Long
-
-        ''' <summary>
-        ''' Number of seconds of API silence before triggering stream recovery.
-        ''' </summary>
-        Private Const API_RESPONSE_TIMEOUT_SECONDS As Integer = 3
-
-        ''' <summary>
-        ''' Last known partial result from Google API, committed during recovery if stream fails.
-        ''' </summary>
-        Private _lastKnownPartialResult As String = ""
-
-        ''' <summary>
-        ''' Partial text that was just committed during recovery, used to detect duplicate final results.
-        ''' </summary>
-        Private _justCommittedPartialText As String = ""
-
-        ' ============================================================================
-        ' Google STT Speaker Diarization Components
-        ' ============================================================================
-        ''' <summary>
-        ''' Maps temporary Google speaker tags to consistent human-readable labels (Speaker 1, Speaker 2, etc.).
-        ''' Maintains session-wide speaker identity across stream recoveries.
-        ''' </summary>
-        Private _speakerTagToLabelMap As New Dictionary(Of Integer, String)
-
-        ''' <summary>
-        ''' Counter for assigning unique speaker numbers.
-        ''' </summary>
-        Private _nextSpeakerNumber As Integer = 1
-
-        ' ============================================================================
-        ' Audio Capture & Processing
-        ' ============================================================================
-        ''' <summary>
-        ''' NAudio microphone capture instance.
-        ''' </summary>
-        Private waveIn As WaveInEvent
-
-        ''' <summary>
-        ''' Flag indicating whether transcription is currently active.
-        ''' </summary>
-        Private capturing As Boolean = False
-
-        ''' <summary>
-        ''' Current partial transcription text (before finalization).
-        ''' </summary>
-        Private partialText As String = ""
-
-        ''' <summary>
-        ''' Accumulates all finalized transcription text.
-        ''' </summary>
-        Private finalText As New StringBuilder()
-
-        ''' <summary>
-        ''' Flag indicating whether transcription was canceled by user.
-        ''' </summary>
-        Private STTCanceled As Boolean = False
-
-        ''' <summary>
-        ''' Cancellation token source for async operations.
-        ''' </summary>
-        Private cts As CancellationTokenSource = New CancellationTokenSource()
-
-        ''' <summary>
-        ''' Currently selected STT model ("vosk", "whisper", or "google").
-        ''' </summary>
-        Private STTModel As String = "whisper"
-
-        ' ============================================================================
-        ' System Audio Loopback Capture (for mixing mic + system audio)
-        ' ============================================================================
-        ''' <summary>
-        ''' Unused placeholder for loopback capture.
-        ''' </summary>
-        Private loopback As WasapiLoopbackCapture
-
-        ''' <summary>
-        ''' Unused placeholder for loopback buffer.
-        ''' </summary>
-        Private loopbackBuffer As BufferedWaveProvider
-
-        ''' <summary>
-        ''' WASAPI loopback capture instance for system audio.
-        ''' </summary>
-        Private loopbackCapture As WasapiLoopbackCapture
-
-        ''' <summary>
-        ''' Buffer provider for raw loopback audio in native format.
-        ''' </summary>
-        Private loopbackRawProvider As BufferedWaveProvider
-
-        ''' <summary>
-        ''' Resampler converting loopback audio to microphone format (16 kHz mono).
-        ''' </summary>
-        Private loopbackResampler As MediaFoundationResampler
-
-        ''' <summary>
-        ''' Flag indicating whether user selected multi-source capture (mic + system audio).
-        ''' </summary>
-        Private _multiSourceSelected As Boolean = False
-
-        ''' <summary>
-        ''' Gets whether multi-source audio capture (mic + system audio) is enabled.
-        ''' </summary>
-        Private ReadOnly Property MultiSourceEnabled As Boolean
-            Get
-                Return _multiSourceSelected
-            End Get
-        End Property
-
-        ' ============================================================================
-        ' OAuth2 Token Management for Google STT
-        ' ============================================================================
-        ''' <summary>
-        ''' Cached OAuth2 access token for primary Google STT API.
-        ''' </summary>
-        Private sttAccessToken1 As String = String.Empty
-
-        ''' <summary>
-        ''' Expiry time for primary OAuth2 token.
-        ''' </summary>
-        Private sttTokenExpiry1 As DateTime = DateTime.MinValue
-
-        ''' <summary>
-        ''' Cached OAuth2 access token for secondary Google STT API.
-        ''' </summary>
-        Private sttAccessToken2 As String = String.Empty
-
-        ''' <summary>
-        ''' Expiry time for secondary OAuth2 token.
-        ''' </summary>
-        Private sttTokenExpiry2 As DateTime = DateTime.MinValue
-
-        ''' <summary>
-        ''' Formats a raw private key string into PEM format with 64-character line breaks.
-        ''' </summary>
-        ''' <param name="rawKey">The raw private key string (may contain \n escapes)</param>
-        ''' <returns>Properly formatted PEM private key with header and footer</returns>
-        Public Shared Function FormatPrivateKey(rawKey As String) As String
-            Dim noEscapes = rawKey.Replace("\n", "")
-            Dim sb As New System.Text.StringBuilder()
-            For i As Integer = 0 To noEscapes.Length - 1 Step 64
-                Dim chunk = If(i + 64 <= noEscapes.Length,
-                  noEscapes.Substring(i, 64),
-                  noEscapes.Substring(i))
-                sb.AppendLine(chunk)
-            Next
-            Return "-----BEGIN PRIVATE KEY-----" & vbLf &
-       sb.ToString() &
-       "-----END PRIVATE KEY-----" & vbLf
-        End Function
-
-        ''' <summary>
-        ''' Retrieves a fresh OAuth2 access token for STT API, using cached token if still valid.
-        ''' </summary>
-        ''' <param name="useSecond">True to use secondary API credentials, False for primary</param>
-        ''' <returns>Valid access token or empty string on error</returns>
-        Private Async Function GetFreshSTTToken(useSecond As Boolean) As System.Threading.Tasks.Task(Of String)
+        Public Sub New()
+            _suspendSettingsPersistence = True
 
             Try
-                Dim token As String
-                Dim expiry As DateTime
+                InitializeComponents()
+                WireHandlers()
+                LoadEngines()
+                LoadAudioInputDevices()
+                LoadAndPopulatePrompts(Globals.ThisAddIn.INI_PromptLibPath_Transcript, cboProcess)
+                RestoreSettings()
+                RefreshEngineUi()
+            Finally
+                _suspendSettingsPersistence = False
+            End Try
+        End Sub
 
-                If useSecond Then
-                    token = sttAccessToken2
-                    expiry = sttTokenExpiry2
-                Else
-                    token = sttAccessToken1
-                    expiry = sttTokenExpiry1
-                End If
+        Protected Overrides Sub OnHandleCreated(e As EventArgs)
+            MyBase.OnHandleCreated(e)
 
-                If String.IsNullOrEmpty(token) OrElse DateTime.UtcNow >= expiry Then
-                    ' Select API parameters based on which credential set to use
-                    Dim clientEmail = If(useSecond, INI_OAuth2ClientMail_2, INI_OAuth2ClientMail)
-                    Dim scopes = If(useSecond, INI_OAuth2Scopes_2, INI_OAuth2Scopes)
-                    Dim rawKey = If(useSecond, INI_APIKey_2, INI_APIKey)
-                    Dim authServer = If(useSecond, INI_OAuth2Endpoint_2, INI_OAuth2Endpoint)
-                    Dim life = If(useSecond, INI_OAuth2ATExpiry_2, INI_OAuth2ATExpiry)
+            If _dialogOwnerScope Is Nothing Then
+                _dialogOwnerScope = SLib.PushDialogOwner(Me)
+            End If
+        End Sub
 
-                    ' Configure GoogleOAuthHelper
-                    GoogleOAuthHelper.client_email = clientEmail
-                    GoogleOAuthHelper.private_key = FormatPrivateKey(rawKey)
-                    GoogleOAuthHelper.scopes = scopes
-                    GoogleOAuthHelper.token_uri = authServer
-                    GoogleOAuthHelper.token_life = life
+        Protected Overrides Sub OnHandleDestroyed(e As EventArgs)
+            Dim scope As IDisposable = _dialogOwnerScope
+            _dialogOwnerScope = Nothing
 
-                    ' Fetch new token
-                    Dim newToken As String = Await GoogleOAuthHelper.GetAccessToken()
-                    Dim newExpiry As DateTime = DateTime.UtcNow.AddSeconds(life - 300)
+            If scope IsNot Nothing Then
+                Try
+                    scope.Dispose()
+                Catch
+                End Try
+            End If
 
-                    If useSecond Then
-                        sttAccessToken2 = newToken
-                        sttTokenExpiry2 = newExpiry
-                    Else
-                        sttAccessToken1 = newToken
-                        sttTokenExpiry1 = newExpiry
+            MyBase.OnHandleDestroyed(e)
+        End Sub
+
+        Private Sub InitializeComponents()
+            Me.Text = $"{AN} Transcriptor (audio is not persisted)"
+            Me.MinimumSize = New Size(1280, 560)
+            Me.AutoScaleMode = AutoScaleMode.Dpi
+            Me.Font = New Font("Segoe UI", 9.0F, FontStyle.Regular, GraphicsUnit.Point)
+
+            rtb = New RichTextBox() With {
+                .Dock = DockStyle.Fill,
+                .Font = New Font("Segoe UI", 10.0F, FontStyle.Regular, GraphicsUnit.Point)
+            }
+
+            lblLiveState = New Label() With {
+                .Dock = DockStyle.Top,
+                .AutoSize = False,
+                .Height = 56,
+                .Text = "Ready.",
+                .Padding = New Padding(0, 4, 0, 4)
+            }
+
+            cboEngine = NewCombo(360)
+            cboLang = NewCombo(220)
+            cboDevice = NewCombo(360)
+            cboProcess = NewCombo(320)
+
+            btnStart = NewBtn("Start")
+            btnStop = NewBtn("Stop")
+            btnStop.Enabled = False
+            btnLoad = NewBtn("Load")
+            btnClear = NewBtn("Clear")
+            btnOptions = NewBtn("Options…")
+            btnQuit = NewBtn("Quit")
+            btnProcess = NewBtn("Process:")
+
+            Dim root As New TableLayoutPanel() With {
+                .Dock = DockStyle.Fill,
+                .ColumnCount = 1,
+                .RowCount = 3,
+                .Padding = New Padding(10)
+            }
+            root.RowStyles.Add(New RowStyle(SizeType.AutoSize))
+            root.RowStyles.Add(New RowStyle(SizeType.Percent, 100))
+            root.RowStyles.Add(New RowStyle(SizeType.AutoSize))
+
+            Dim top As New TableLayoutPanel() With {
+                .Dock = DockStyle.Top,
+                .AutoSize = True,
+                .ColumnCount = 7,
+                .RowCount = 1
+            }
+            top.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
+            top.ColumnStyles.Add(New ColumnStyle(SizeType.Absolute, 370))
+            top.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
+            top.ColumnStyles.Add(New ColumnStyle(SizeType.Absolute, 230))
+            top.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
+            top.ColumnStyles.Add(New ColumnStyle(SizeType.Absolute, 370))
+            top.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
+
+            top.Controls.Add(New Label With {.Text = "Engine:", .AutoSize = True, .Anchor = AnchorStyles.Left, .Margin = New Padding(0, 8, 6, 0)}, 0, 0)
+            top.Controls.Add(cboEngine, 1, 0)
+            top.Controls.Add(New Label With {.Text = "Lang/Model:", .AutoSize = True, .Anchor = AnchorStyles.Left, .Margin = New Padding(0, 8, 6, 0)}, 2, 0)
+            top.Controls.Add(cboLang, 3, 0)
+            top.Controls.Add(New Label With {.Text = "Input:", .AutoSize = True, .Anchor = AnchorStyles.Left, .Margin = New Padding(0, 8, 6, 0)}, 4, 0)
+            top.Controls.Add(cboDevice, 5, 0)
+            top.Controls.Add(btnOptions, 6, 0)
+
+            Dim mid As New TableLayoutPanel() With {
+                .Dock = DockStyle.Fill,
+                .ColumnCount = 1,
+                .RowCount = 2
+            }
+            mid.RowStyles.Add(New RowStyle(SizeType.AutoSize))
+            mid.RowStyles.Add(New RowStyle(SizeType.Percent, 100))
+            mid.Controls.Add(lblLiveState, 0, 0)
+            mid.Controls.Add(rtb, 0, 1)
+
+            Dim bottom As New TableLayoutPanel() With {
+                .Dock = DockStyle.Bottom,
+                .ColumnCount = 8,
+                .RowCount = 1,
+                .AutoSize = True,
+                .Padding = New Padding(0, 10, 0, 0)
+            }
+            bottom.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
+            bottom.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
+            bottom.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
+            bottom.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
+            bottom.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
+            bottom.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
+            bottom.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
+            bottom.ColumnStyles.Add(New ColumnStyle(SizeType.Percent, 100))
+
+            cboProcess.Dock = DockStyle.Fill
+
+            bottom.Controls.Add(btnStart, 0, 0)
+            bottom.Controls.Add(btnStop, 1, 0)
+            bottom.Controls.Add(btnLoad, 2, 0)
+            bottom.Controls.Add(btnClear, 3, 0)
+            bottom.Controls.Add(btnQuit, 4, 0)
+            bottom.Controls.Add(btnOptions, 5, 0)
+            bottom.Controls.Add(btnProcess, 6, 0)
+            bottom.Controls.Add(cboProcess, 7, 0)
+
+            root.Controls.Add(top, 0, 0)
+            root.Controls.Add(mid, 0, 1)
+            root.Controls.Add(bottom, 0, 2)
+
+            Me.Controls.Add(root)
+
+            Try
+                Dim bmp As New Bitmap(SLib.GetLogoBitmap(SLib.LogoType.Standard))
+                Me.Icon = Icon.FromHandle(bmp.GetHicon())
+            Catch
+            End Try
+        End Sub
+
+        Private Function NewCombo(width As Integer) As ComboBox
+            Return New ComboBox With {
+                .Width = width,
+                .DropDownStyle = ComboBoxStyle.DropDownList,
+                .Margin = New Padding(0, 3, 10, 3)
+            }
+        End Function
+
+        Private Function NewBtn(text As String) As Button
+            Return New Button With {
+                .Text = text,
+                .AutoSize = True,
+                .Margin = New Padding(0, 3, 10, 3)
+            }
+        End Function
+
+        Private Sub WireHandlers()
+            AddHandler btnStart.Click, AddressOf OnStart
+            AddHandler btnStop.Click, AddressOf OnStop
+            AddHandler btnLoad.Click, AddressOf OnLoadFile
+            AddHandler btnClear.Click, Sub() rtb.Clear()
+            AddHandler btnOptions.Click, AddressOf OnOptions
+            AddHandler btnQuit.Click, AddressOf OnQuit
+            AddHandler btnProcess.Click, AddressOf OnProcess
+            AddHandler Me.FormClosing, AddressOf OnClosing
+            AddHandler cboEngine.SelectedIndexChanged, AddressOf OnEngineChanged
+
+            AddHandler cboEngine.SelectedIndexChanged, Sub() UpdateComboToolTip(cboEngine)
+            AddHandler cboLang.SelectedIndexChanged, Sub() UpdateComboToolTip(cboLang)
+            AddHandler cboDevice.SelectedIndexChanged, Sub() UpdateComboToolTip(cboDevice)
+            AddHandler cboProcess.SelectedIndexChanged, Sub() UpdateComboToolTip(cboProcess)
+
+            AddHandler cboEngine.MouseMove, Sub() UpdateComboToolTip(cboEngine)
+            AddHandler cboLang.MouseMove, Sub() UpdateComboToolTip(cboLang)
+            AddHandler cboDevice.MouseMove, Sub() UpdateComboToolTip(cboDevice)
+            AddHandler cboProcess.MouseMove, Sub() UpdateComboToolTip(cboProcess)
+
+            AddHandler cboLang.SelectedIndexChanged, Sub() PersistSettings()
+
+            AddHandler cboEngine.SelectedIndexChanged, Sub() PersistSettings()
+            AddHandler cboDevice.SelectedIndexChanged, Sub() PersistSettings()
+
+        End Sub
+
+        Private Sub UpdateComboToolTip(cbo As ComboBox)
+            If cbo Is Nothing Then
+                Return
+            End If
+
+            Dim text As String = If(cbo.SelectedItem IsNot Nothing, cbo.SelectedItem.ToString(), cbo.Text)
+            tt.SetToolTip(cbo, text)
+        End Sub
+
+
+        Private Sub LoadEngines()
+            _engines.Clear()
+            cboEngine.Items.Clear()
+
+            Dim modelRoot As String = ExpandEnvironmentVariables(Globals.ThisAddIn.INI_SpeechModelPath)
+
+            If Directory.Exists(modelRoot) Then
+                For Each d In Directory.GetDirectories(modelRoot).
+                    OrderBy(Function(p) Path.GetFileName(p), StringComparer.OrdinalIgnoreCase)
+
+                    Dim name As String = Path.GetFileName(d)
+                    If name.StartsWith("vosk-model", StringComparison.OrdinalIgnoreCase) Then
+                        _engines.Add(New EngineDescriptor With {
+                            .DisplayName = "Vosk: " & name,
+                            .Kind = EngineKind.Vosk,
+                            .ModelOrTag = name
+                        })
                     End If
+                Next
 
-                    token = newToken
+                For Each f In Directory.GetFiles(modelRoot, "ggml*").
+                    OrderBy(Function(p) Path.GetFileName(p), StringComparer.OrdinalIgnoreCase)
+
+                    Dim name As String = Path.GetFileName(f)
+                    _engines.Add(New EngineDescriptor With {
+                        .DisplayName = "Whisper: " & name,
+                        .Kind = EngineKind.WhisperLocal,
+                        .ModelOrTag = name
+                    })
+                Next
+            End If
+
+            LoadAlternateProviderFallbacks()
+
+            If HasConfiguredGoogleV1Provider() Then
+                _engines.Add(New EngineDescriptor With {
+                    .DisplayName = GoogleV1Engine.DisplayName,
+                    .Kind = EngineKind.GoogleV1,
+                    .ModelOrTag = "google-v1"
+                })
+            End If
+
+            If HasConfiguredGoogleV2Provider() Then
+                _engines.Add(New EngineDescriptor With {
+                    .DisplayName = GoogleV2Engine.DisplayName,
+                    .Kind = EngineKind.GoogleV2,
+                    .ModelOrTag = "google-v2"
+                })
+            End If
+
+            If HasConfiguredOpenAiProvider() Then
+                _engines.Add(New EngineDescriptor With {
+                    .DisplayName = "OpenAI gpt-4o-transcribe (REST)",
+                    .Kind = EngineKind.OpenAiRest,
+                    .ModelOrTag = "gpt-4o-transcribe"
+                })
+
+                _engines.Add(New EngineDescriptor With {
+                    .DisplayName = "OpenAI gpt-4o-mini-transcribe (REST)",
+                    .Kind = EngineKind.OpenAiRest,
+                    .ModelOrTag = "gpt-4o-mini-transcribe"
+                })
+
+                _engines.Add(New EngineDescriptor With {
+                    .DisplayName = "OpenAI gpt-4o-mini-transcribe-2025-12-15 (REST)",
+                    .Kind = EngineKind.OpenAiRest,
+                    .ModelOrTag = "gpt-4o-mini-transcribe-2025-12-15"
+                })
+
+                _engines.Add(New EngineDescriptor With {
+                    .DisplayName = "OpenAI gpt-4o-transcribe-diarize (REST)",
+                    .Kind = EngineKind.OpenAiRest,
+                    .ModelOrTag = "gpt-4o-transcribe-diarize"
+                })
+
+                _engines.Add(New EngineDescriptor With {
+                    .DisplayName = "OpenAI whisper-1 (REST legacy)",
+                    .Kind = EngineKind.OpenAiRest,
+                    .ModelOrTag = "whisper-1"
+                })
+
+                _engines.Add(New EngineDescriptor With {
+                    .DisplayName = "OpenAI Realtime Whisper (streaming)",
+                    .Kind = EngineKind.OpenAiRealtime,
+                    .ModelOrTag = "gpt-realtime-whisper"
+                })
+            End If
+
+            If HasConfiguredAzureProvider() Then
+                _engines.Add(New EngineDescriptor With {
+                    .DisplayName = AzureSpeechRealtimeEngine.DisplayNameValue,
+                    .Kind = EngineKind.AzureSpeechRealtime,
+                    .ModelOrTag = "azure-speech-realtime"
+                })
+
+                _engines.Add(New EngineDescriptor With {
+                    .DisplayName = AzureSpeechFastRestEngine.DisplayNameValue,
+                    .Kind = EngineKind.AzureSpeechFastRest,
+                    .ModelOrTag = "azure-speech-fast-rest"
+                })
+            End If
+
+            If HasConfiguredTeamsAcsProvider() Then
+                _engines.Add(New EngineDescriptor With {
+                    .DisplayName = TeamsAcsRealtimeEngine.DisplayNameValue,
+                    .Kind = EngineKind.TeamsAcsRealtime,
+                    .ModelOrTag = "teams-acs-realtime"
+                })
+            End If
+
+            For Each e In _engines
+                cboEngine.Items.Add(e.DisplayName)
+            Next
+
+            If cboEngine.Items.Count = 0 Then
+                ShowCustomMessageBox("No transcription engines available. Install Vosk/Whisper models or configure Google/OpenAI/Azure transcription.")
+                Me.BeginInvoke(Sub() Me.Close())
+                Return
+            End If
+
+            RestoreLastEngineSelection()
+        End Sub
+
+        Private Shared Function EndpointMatchesProvider(endpoint As String, providerIdentifier As String) As Boolean
+            If String.IsNullOrWhiteSpace(endpoint) OrElse String.IsNullOrWhiteSpace(providerIdentifier) Then
+                Return False
+            End If
+
+            Return endpoint.IndexOf(providerIdentifier, StringComparison.OrdinalIgnoreCase) >= 0
+        End Function
+
+        Private Sub LoadAlternateProviderFallbacks()
+            _alternateOpenAiConfig = Nothing
+            _alternateGoogleConfig = Nothing
+
+            Try
+                Dim altPath As String = ExpandEnvironmentVariables(Globals.ThisAddIn.INI_AlternateModelPath)
+
+                If String.IsNullOrWhiteSpace(altPath) OrElse Not File.Exists(altPath) Then
+                    Return
                 End If
 
-                Return token
+                Dim models As List(Of ModelConfig) = SLib.LoadAlternativeModels(
+                    altPath,
+                    ThisAddIn._context,
+                    "Transcriptor Fallback",
+                    includeToolOnly:=True,
+                    toolsOnly:=False)
 
-            Catch ex As System.Exception
-                System.Windows.Forms.MessageBox.Show(
-        $"Error fetching STT token: {ex.Message}",
-        "Transcription Error",
-        System.Windows.Forms.MessageBoxButtons.OK,
-        System.Windows.Forms.MessageBoxIcon.Error)
-                Return String.Empty
+                If models Is Nothing OrElse models.Count = 0 Then
+                    Return
+                End If
+
+                _alternateOpenAiConfig = models.FirstOrDefault(Function(m) IsUsableOpenAiConfig(m))
+                _alternateGoogleConfig = models.FirstOrDefault(Function(m) IsUsableGoogleConfig(m))
+            Catch
+            End Try
+        End Sub
+
+        Private Function HasConfiguredGoogleV1Provider() As Boolean
+            Return (EndpointMatchesProvider(INI_Endpoint, GoogleIdentifier) AndAlso INI_OAuth2) OrElse
+                   (EndpointMatchesProvider(INI_Endpoint_2, GoogleIdentifier) AndAlso INI_OAuth2_2) OrElse
+                   IsUsableGoogleConfig(_alternateGoogleConfig)
+        End Function
+
+        Private Function HasConfiguredGoogleV2Provider() As Boolean
+            Return HasConfiguredGoogleV1Provider() AndAlso
+                   Not String.IsNullOrWhiteSpace(ResolveGoogleProjectId())
+        End Function
+
+        Private Function HasConfiguredAzureProvider() As Boolean
+            Return Not String.IsNullOrWhiteSpace(ResolveAzureSpeechKey())
+        End Function
+
+        Private Function HasConfiguredTeamsAcsProvider() As Boolean
+            Return Not String.IsNullOrWhiteSpace(ResolveTeamsAcsBridgeWebSocketUri())
+        End Function
+
+        Private Function ResolveTeamsAcsBridgeWebSocketUri() As String
+            Return NormalizeIniValue(If(ACS_Bridge_Address, ""))
+        End Function
+
+        Private Function ResolveTeamsMeetingJoinUrl() As String
+            Return NormalizeIniValue(If(ACS_Bridge_Address, ""))
+        End Function
+
+        Private Function ResolveTeamsAcsBridgeBearerToken() As String
+            Return DecodeWrappedEncryptedValue(
+                NormalizeIniValue(INI_Model_Parameter3),
+                "Teams ACS bridge bearer token")
+        End Function
+
+        Private Shared Function EngineNeedsLocalAudioCapture(kind As EngineKind) As Boolean
+            Select Case kind
+                Case EngineKind.TeamsAcsRealtime
+                    Return False
+                Case Else
+                    Return True
+            End Select
+        End Function
+
+        Private Function HasConfiguredOpenAiProvider() As Boolean
+            Return EndpointMatchesProvider(INI_Endpoint, OpenAIIdentifier) OrElse
+                   EndpointMatchesProvider(INI_Endpoint_2, OpenAIIdentifier) OrElse
+                   IsUsableOpenAiConfig(_alternateOpenAiConfig)
+        End Function
+
+        Private Function ResolveAzureRegionForHeader(modelOrTag As String) As String
+            Return ResolveAzureSttSetting(modelOrTag, "region", "")
+        End Function
+
+        Private Function ResolveAzureRealtimeLocation(modelOrTag As String) As String
+            Dim region As String = ResolveAzureRegionForHeader(modelOrTag)
+            If Not String.IsNullOrWhiteSpace(region) Then
+                Return region
+            End If
+
+            Return ResolveAzureSttSetting(modelOrTag, "endpoint", "")
+        End Function
+
+        Private Function ResolveAzureFastRestLocation(modelOrTag As String) As String
+            Dim endpoint As String = ResolveAzureSttSetting(modelOrTag, "endpoint", "")
+            If Not String.IsNullOrWhiteSpace(endpoint) Then
+                Return endpoint
+            End If
+
+            Return ResolveAzureSttSetting(modelOrTag, "region", "")
+        End Function
+
+        Private Function BuildConfiguredGoogleModelConfig(useSecond As Boolean) As ModelConfig
+            Dim endpoint As String = If(useSecond, INI_Endpoint_2, INI_Endpoint)
+            Dim oauthEnabled As Boolean = If(useSecond, INI_OAuth2_2, INI_OAuth2)
+
+            If Not EndpointMatchesProvider(endpoint, GoogleIdentifier) OrElse Not oauthEnabled Then
+                Return Nothing
+            End If
+
+            Return New ModelConfig With {
+                .Endpoint = endpoint,
+                .OAuth2 = oauthEnabled,
+                .OAuth2ClientMail = If(useSecond, INI_OAuth2ClientMail_2, INI_OAuth2ClientMail),
+                .OAuth2Scopes = If(useSecond, INI_OAuth2Scopes_2, INI_OAuth2Scopes),
+                .OAuth2Endpoint = If(useSecond, INI_OAuth2Endpoint_2, INI_OAuth2Endpoint),
+                .OAuth2ATExpiry = If(useSecond, INI_OAuth2ATExpiry_2, INI_OAuth2ATExpiry),
+                .APIKey = If(useSecond, INI_APIKey_2, INI_APIKey)
+            }
+        End Function
+
+        Private Function BuildConfiguredOpenAiModelConfig(useSecond As Boolean) As ModelConfig
+            Dim endpoint As String = If(useSecond, INI_Endpoint_2, INI_Endpoint)
+
+            If Not EndpointMatchesProvider(endpoint, OpenAIIdentifier) Then
+                Return Nothing
+            End If
+
+            Return New ModelConfig With {
+                .Endpoint = endpoint,
+                .APIKey = If(useSecond, INI_APIKey_2, INI_APIKey),
+                .DecodedAPI = If(useSecond, DecodedAPI_2, DecodedAPI)
+            }
+        End Function
+
+        Private Function GetApiKeyFromModelConfig(config As ModelConfig) As String
+            If config Is Nothing Then
+                Return ""
+            End If
+
+            If Not String.IsNullOrWhiteSpace(config.DecodedAPI) Then
+                Return config.DecodedAPI.Trim()
+            End If
+
+            Return If(config.APIKey, "").Trim()
+        End Function
+
+        Private Function IsUsableOpenAiConfig(config As ModelConfig) As Boolean
+            If config Is Nothing Then
+                Return False
+            End If
+
+            If Not EndpointMatchesProvider(config.Endpoint, OpenAIIdentifier) Then
+                Return False
+            End If
+
+            Return Not String.IsNullOrWhiteSpace(GetApiKeyFromModelConfig(config))
+        End Function
+
+        Private Function IsUsableGoogleConfig(config As ModelConfig) As Boolean
+            If config Is Nothing Then
+                Return False
+            End If
+
+            If Not EndpointMatchesProvider(config.Endpoint, GoogleIdentifier) Then
+                Return False
+            End If
+
+            If Not config.OAuth2 Then
+                Return False
+            End If
+
+            If String.IsNullOrWhiteSpace(config.OAuth2ClientMail) Then
+                Return False
+            End If
+
+            If String.IsNullOrWhiteSpace(config.OAuth2Endpoint) Then
+                Return False
+            End If
+
+            Return Not String.IsNullOrWhiteSpace(config.APIKey)
+        End Function
+
+        Private Function ResolveGoogleTranscriptionConfig(ByRef cacheSlot As String) As ModelConfig
+            Dim primaryConfig As ModelConfig = BuildConfiguredGoogleModelConfig(False)
+            If IsUsableGoogleConfig(primaryConfig) Then
+                cacheSlot = "primary"
+                Return primaryConfig
+            End If
+
+            Dim secondaryConfig As ModelConfig = BuildConfiguredGoogleModelConfig(True)
+            If IsUsableGoogleConfig(secondaryConfig) Then
+                cacheSlot = "secondary"
+                Return secondaryConfig
+            End If
+
+            If IsUsableGoogleConfig(_alternateGoogleConfig) Then
+                cacheSlot = "alternate"
+                Return _alternateGoogleConfig
+            End If
+
+            cacheSlot = ""
+            Return Nothing
+        End Function
+
+        Private Function ResolveOpenAiConfig() As ModelConfig
+            Dim primaryConfig As ModelConfig = BuildConfiguredOpenAiModelConfig(False)
+            If IsUsableOpenAiConfig(primaryConfig) Then
+                Return primaryConfig
+            End If
+
+            Dim secondaryConfig As ModelConfig = BuildConfiguredOpenAiModelConfig(True)
+            If IsUsableOpenAiConfig(secondaryConfig) Then
+                Return secondaryConfig
+            End If
+
+            If IsUsableOpenAiConfig(_alternateOpenAiConfig) Then
+                Return _alternateOpenAiConfig
+            End If
+
+            Return Nothing
+        End Function
+
+        Private Sub RefreshEngineUi()
+            OnEngineChanged(Me, EventArgs.Empty)
+        End Sub
+
+        Private Sub OnEngineChanged(sender As Object, e As EventArgs)
+            _suspendSettingsPersistence = True
+
+            Try
+                cboLang.Items.Clear()
+
+                Dim d As EngineDescriptor = CurrentDescriptor()
+                If d Is Nothing Then
+                    Return
+                End If
+
+                _currentEngineDisplayName = d.DisplayName
+
+                Select Case d.Kind
+                    Case EngineKind.Vosk
+                        cboLang.Items.Add("(language comes from selected Vosk model)")
+                        cboLang.SelectedIndex = 0
+
+                    Case EngineKind.WhisperLocal
+                        cboLang.Items.AddRange(
+                            WhisperEngine.SupportedLanguages.
+                                OrderBy(Function(x) If(String.Equals(x, "auto", StringComparison.OrdinalIgnoreCase), "", x), StringComparer.OrdinalIgnoreCase).
+                                Select(Function(x) CObj(x)).
+                                ToArray())
+                        If cboLang.Items.Contains("auto") Then
+                            cboLang.SelectedItem = "auto"
+                        ElseIf cboLang.Items.Count > 0 Then
+                            cboLang.SelectedIndex = 0
+                        End If
+
+                    Case EngineKind.GoogleV1
+                        cboLang.Items.AddRange(
+                            GoogleV1Engine.SupportedLanguages.
+                                OrderBy(Function(x) x, StringComparer.OrdinalIgnoreCase).
+                                Select(Function(x) CObj(x)).
+                                ToArray())
+                        If cboLang.Items.Count > 0 Then
+                            cboLang.SelectedIndex = 0
+                        End If
+
+                    Case EngineKind.GoogleV2
+                        cboLang.Items.AddRange(
+                            GoogleV2Engine.SupportedLanguages.
+                                OrderBy(Function(x) x, StringComparer.OrdinalIgnoreCase).
+                                Select(Function(x) CObj(x)).
+                                ToArray())
+                        If cboLang.Items.Count > 0 Then
+                            cboLang.SelectedIndex = 0
+                        End If
+
+                    Case EngineKind.OpenAiRest
+                        cboLang.Items.AddRange(
+                            OpenAiRestEngine.SupportedLanguages.
+                                OrderBy(Function(x) x, StringComparer.OrdinalIgnoreCase).
+                                Select(Function(x) CObj(x)).
+                                ToArray())
+                        If cboLang.Items.Count > 0 Then
+                            cboLang.SelectedIndex = 0
+                        End If
+
+                    Case EngineKind.OpenAiRealtime
+                        cboLang.Items.AddRange(
+                            OpenAiRealtimeEngine.SupportedLanguages.
+                                OrderBy(Function(x) x, StringComparer.OrdinalIgnoreCase).
+                                Select(Function(x) CObj(x)).
+                                ToArray())
+                        If cboLang.Items.Count > 0 Then
+                            cboLang.SelectedIndex = 0
+                        End If
+
+                    Case EngineKind.AzureSpeechRealtime
+                        cboLang.Items.AddRange(
+                            AzureSpeechRealtimeEngine.SupportedLanguages.
+                                OrderBy(Function(x) x, StringComparer.OrdinalIgnoreCase).
+                                Select(Function(x) CObj(x)).
+                                ToArray())
+                        If cboLang.Items.Count > 0 Then
+                            cboLang.SelectedIndex = 0
+                        End If
+
+                    Case EngineKind.AzureSpeechFastRest
+                        cboLang.Items.AddRange(
+                            AzureSpeechFastRestEngine.SupportedLanguages.
+                                OrderBy(Function(x) x, StringComparer.OrdinalIgnoreCase).
+                                Select(Function(x) CObj(x)).
+                                ToArray())
+                        If cboLang.Items.Count > 0 Then
+                            cboLang.SelectedIndex = 0
+                        End If
+
+                    Case EngineKind.TeamsAcsRealtime
+                        cboLang.Items.AddRange(
+                            TeamsAcsRealtimeEngine.SupportedLanguages.
+                                OrderBy(Function(x) x, StringComparer.OrdinalIgnoreCase).
+                                Select(Function(x) CObj(x)).
+                                ToArray())
+                        If cboLang.Items.Count > 0 Then
+                            cboLang.SelectedIndex = 0
+                        End If
+
+                End Select
+
+                Dim savedLanguage As String = GetSavedLanguageForDescriptor(d)
+                If Not String.IsNullOrWhiteSpace(savedLanguage) AndAlso cboLang.Items.Contains(savedLanguage) Then
+                    cboLang.SelectedItem = savedLanguage
+                End If
+            Finally
+                _suspendSettingsPersistence = False
+            End Try
+
+            UpdateComboToolTip(cboEngine)
+            UpdateComboToolTip(cboLang)
+
+            If Not _capturing AndAlso Not _fileTranscribing Then
+                SetLiveState(GetIdleLiveState())
+            End If
+        End Sub
+
+        Private Shared Function IsAzureSpeechLocation(value As String) As Boolean
+            Dim normalized As String = If(value, "").Trim()
+
+            If String.IsNullOrWhiteSpace(normalized) Then
+                Return False
+            End If
+
+            If normalized.IndexOf(".cognitiveservices.azure.com", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                Return True
+            End If
+
+            If normalized.IndexOf(".api.cognitive.microsoft.com", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                Return True
+            End If
+
+            If normalized.StartsWith("http://", StringComparison.OrdinalIgnoreCase) OrElse
+               normalized.StartsWith("https://", StringComparison.OrdinalIgnoreCase) Then
+                Return False
+            End If
+
+            For Each ch As Char In normalized
+                If Not Char.IsLetterOrDigit(ch) AndAlso ch <> "-"c Then
+                    Return False
+                End If
+            Next
+
+            Return True
+        End Function
+
+        Private Function IsUsableAzureConfig(config As ModelConfig) As Boolean
+            If config Is Nothing Then
+                Return False
+            End If
+
+            If Not IsAzureSpeechLocation(config.Endpoint) Then
+                Return False
+            End If
+
+            Return Not String.IsNullOrWhiteSpace(GetApiKeyFromModelConfig(config))
+        End Function
+
+        Private Function BuildConfiguredAzureModelConfig(useSecond As Boolean) As ModelConfig
+            Dim endpointOrRegion As String = If(useSecond, INI_Endpoint_2, INI_Endpoint)
+
+            If Not IsAzureSpeechLocation(endpointOrRegion) Then
+                Return Nothing
+            End If
+
+            Return New ModelConfig With {
+                .Endpoint = endpointOrRegion,
+                .APIKey = If(useSecond, INI_APIKey_2, INI_APIKey),
+                .DecodedAPI = If(useSecond, DecodedAPI_2, DecodedAPI)
+            }
+        End Function
+
+        Private Function ResolveAzureConfig() As ModelConfig
+            Dim primaryConfig As ModelConfig = BuildConfiguredAzureModelConfig(False)
+            If IsUsableAzureConfig(primaryConfig) Then
+                Return primaryConfig
+            End If
+
+            Dim secondaryConfig As ModelConfig = BuildConfiguredAzureModelConfig(True)
+            If IsUsableAzureConfig(secondaryConfig) Then
+                Return secondaryConfig
+            End If
+
+            Return Nothing
+        End Function
+
+
+        Private Function FindEngineIndexByDisplayName(displayName As String) As Integer
+            If String.IsNullOrWhiteSpace(displayName) Then
+                Return -1
+            End If
+
+            Dim normalized As String = displayName.Trim()
+
+            For i As Integer = 0 To _engines.Count - 1
+                If String.Equals(_engines(i).DisplayName, normalized, StringComparison.OrdinalIgnoreCase) Then
+                    Return i
+                End If
+            Next
+
+            Return -1
+        End Function
+
+        Private Sub RestoreLastEngineSelection()
+            Dim engineIndex As Integer = FindEngineIndexByDisplayName(My.Settings.LastEngineName)
+
+            If engineIndex >= 0 Then
+                cboEngine.SelectedIndex = engineIndex
+                Return
+            End If
+
+            If cboEngine.Items.Count > 0 AndAlso cboEngine.SelectedIndex < 0 Then
+                cboEngine.SelectedIndex = 0
+            End If
+        End Sub
+
+        Private Sub SaveCurrentEngineSelection()
+            Dim d As EngineDescriptor = CurrentDescriptor()
+            If d Is Nothing Then
+                Return
+            End If
+
+            My.Settings.LastEngineName = d.DisplayName
+        End Sub
+
+        Private Function CurrentDescriptor() As EngineDescriptor
+            If cboEngine.SelectedIndex < 0 Then
+                Return Nothing
+            End If
+            Return _engines(cboEngine.SelectedIndex)
+        End Function
+
+        Private Sub LoadAudioInputDevices()
+            cboDevice.Items.Clear()
+
+            For i As Integer = 0 To WaveInEvent.DeviceCount - 1
+                cboDevice.Items.Add($"{i}: {WaveInEvent.GetCapabilities(i).ProductName}")
+            Next
+
+            If cboDevice.Items.Count > 0 Then
+                cboDevice.SelectedIndex = 0
+            End If
+        End Sub
+
+        Private Function GetAudioOutputDeviceChoices() As List(Of KeyValuePair(Of String, String))
+            Dim result As New List(Of KeyValuePair(Of String, String)) From {
+                New KeyValuePair(Of String, String)("Default Audio Output Device", "")
+            }
+
+            Dim enumr As New MMDeviceEnumerator()
+            Dim devs = enumr.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)
+
+            For Each d In devs
+                result.Add(New KeyValuePair(Of String, String)(d.FriendlyName, d.ID))
+            Next
+
+            Return result
+        End Function
+
+        Private Function GetConfiguredSourceMode() As AudioSourceMode
+            Dim raw As String = If(String.IsNullOrWhiteSpace(My.Settings.LastAudioSourceMode), "MicrophoneOnly", My.Settings.LastAudioSourceMode)
+
+            Try
+                Return CType([Enum].Parse(GetType(AudioSourceMode), raw), AudioSourceMode)
+            Catch
+                Return AudioSourceMode.MicrophoneOnly
             End Try
         End Function
 
-        ''' <summary>
-        ''' Initializes the transcription form UI and loads available speech recognition models.
-        ''' Detects Google STT availability based on OAuth2 configuration.
-        ''' </summary>
-        Public Sub New()
-            ' Initialize UI Components
-            InitializeComponents()
+        Private Function GetConfiguredOutputDeviceId() As String
+            Return If(My.Settings.LastAudioOutputDeviceId, "")
+        End Function
 
-            Me.AutoScaleMode = AutoScaleMode.Dpi
+        Private Sub RestoreSettings()
+            Try
+                RestoreLastEngineSelection()
 
-            ' Load available speech recognition models
-            Dim modelPath As String = Globals.ThisAddIn.INI_SpeechModelPath
-            Dim modelsexist As Boolean = False
+                RefreshEngineUi()
 
-            Dim Endpoint As String = INI_Endpoint
-            Dim Endpoint_2 As String = INI_Endpoint_2
+                If cboLang.Items.Count > 0 AndAlso cboLang.SelectedIndex < 0 Then
+                    cboLang.SelectedIndex = 0
+                End If
 
-            ' Detect Google STT configuration
-            If Endpoint.Contains(GoogleIdentifier) And INI_OAuth2 Then
-                STTSecondAPI = False
-                IsGoogle = True
-            ElseIf Endpoint_2.Contains(GoogleIdentifier) And INI_OAuth2_2 Then
-                STTSecondAPI = True
-                IsGoogle = True
+                If My.Settings.LastAudioInputDeviceIndex >= 0 AndAlso My.Settings.LastAudioInputDeviceIndex < cboDevice.Items.Count Then
+                    cboDevice.SelectedIndex = My.Settings.LastAudioInputDeviceIndex
+                End If
+
+                If Not String.IsNullOrEmpty(My.Settings.LastEngineOptionsJson) Then
+                    Try
+                        _opts = JsonConvert.DeserializeObject(Of TranscriptionOptions)(My.Settings.LastEngineOptionsJson)
+                    Catch
+                    End Try
+                End If
+            Catch
+            End Try
+
+            SetLiveState(GetIdleLiveState())
+        End Sub
+
+        Private Sub PersistSettings()
+            If Me.IsDisposed OrElse _suspendSettingsPersistence Then
+                Return
             End If
 
-            If IsGoogle And Not String.IsNullOrWhiteSpace(STTEndpoint) Then
-                GoogleSpeech = True
-                cultureComboBox.Items.Add(GoogleSTT_Desc)
-                modelsexist = True
+            If Me.InvokeRequired Then
+                Try
+                    Me.BeginInvoke(New System.Action(AddressOf PersistSettings))
+                Catch
+                End Try
+                Return
             End If
 
-            ' Enumerate Vosk and Whisper models from configured path
-            If Directory.Exists(modelPath) Then
-                For Each dir As String In Directory.GetDirectories(modelPath)
-                    Dim dirName As String = System.IO.Path.GetFileName(dir)
-                    If dirName.StartsWith("vosk-model") Then
-                        cultureComboBox.Items.Add(dirName)
-                        modelsexist = True
+            Try
+                SaveCurrentEngineSelection()
+                My.Settings.LastAudioInputDeviceIndex = cboDevice.SelectedIndex
+                My.Settings.LastEngineOptionsJson = JsonConvert.SerializeObject(_opts)
+                SaveCurrentLanguageForCurrentEngine()
+                My.Settings.Save()
+            Catch
+            End Try
+        End Sub
+
+
+        Private Sub OnOptions(sender As Object, e As EventArgs)
+            Dim d As EngineDescriptor = CurrentDescriptor()
+            If d Is Nothing Then
+                Return
+            End If
+
+            Dim langs As String() = (From o In cboLang.Items Select CStr(o)).ToArray()
+
+            Using dlg As New TranscriptionOptionsDialog(
+                d.Kind,
+                d.DisplayName,
+                _opts,
+                langs,
+                If(String.IsNullOrWhiteSpace(My.Settings.LastAudioSourceMode), "MicrophoneOnly", My.Settings.LastAudioSourceMode),
+                GetConfiguredOutputDeviceId(),
+                GetAudioOutputDeviceChoices())
+
+                If dlg.ShowDialog(Me) = DialogResult.OK Then
+                    _opts = dlg.Options
+
+                    If Not String.IsNullOrWhiteSpace(_opts.LanguageCode) AndAlso cboLang.Items.Contains(_opts.LanguageCode) Then
+                        cboLang.SelectedItem = _opts.LanguageCode
                     End If
-                Next
 
-                For Each file As String In Directory.GetFiles(modelPath)
-                    Dim fileName As String = System.IO.Path.GetFileName(file)
-                    If fileName.StartsWith("ggml") Then
-                        cultureComboBox.Items.Add(fileName)
-                        modelsexist = True
+                    My.Settings.LastAudioSourceMode = dlg.SelectedSourceMode
+                    My.Settings.LastAudioOutputDeviceId = dlg.SelectedOutputDeviceId
+                    PersistSettings()
+                    SetLiveState(GetIdleLiveState())
+                End If
+            End Using
+        End Sub
+
+        Private Async Function CreateEngineAsync(d As EngineDescriptor) As Task(Of ITranscriptionEngine)
+            Dim modelRoot As String = ExpandEnvironmentVariables(Globals.ThisAddIn.INI_SpeechModelPath)
+
+            Select Case d.Kind
+                Case EngineKind.Vosk
+                    Return New VoskEngine(modelRoot, d.ModelOrTag)
+
+                Case EngineKind.WhisperLocal
+                    Return New WhisperEngine(modelRoot, d.ModelOrTag)
+
+                Case EngineKind.GoogleV1
+                    Dim googleCacheSlot As String = ""
+                    Dim googleConfig As ModelConfig = ResolveGoogleTranscriptionConfig(googleCacheSlot)
+
+                    If googleConfig Is Nothing Then
+                        Throw New InvalidOperationException("No Google transcription credentials are available.")
                     End If
-                Next
 
+                    _opts.Model = ResolveGoogleSttSetting(d.ModelOrTag, "model", "")
+
+                    Dim tf As Func(Of System.Threading.Tasks.Task(Of String)) =
+                        Function() GetFreshGoogleTokenAsync(googleConfig, googleCacheSlot)
+
+                    Return New GoogleV1Engine("", tf)
+
+                Case EngineKind.GoogleV2
+                    Dim googleCacheSlot As String = ""
+                    Dim googleConfig As ModelConfig = ResolveGoogleTranscriptionConfig(googleCacheSlot)
+
+                    If googleConfig Is Nothing Then
+                        Throw New InvalidOperationException("No Google transcription credentials are available.")
+                    End If
+
+                    If String.IsNullOrWhiteSpace(ResolveGoogleProjectId()) Then
+                        Throw New InvalidOperationException("INI_STT_Google_ProjectID is missing.")
+                    End If
+
+                    Return New GoogleV2Engine(
+                        googleConfig.OAuth2ClientMail,
+                        googleConfig.APIKey,
+                        googleConfig.OAuth2Endpoint,
+                        ResolveGoogleProjectId(),
+                        ResolveGoogleSttSetting(d.ModelOrTag, "endpoint", ""),
+                        ResolveGoogleSttSetting(d.ModelOrTag, "location", ""),
+                        ResolveGoogleSttSetting(d.ModelOrTag, "recognizer", ""),
+                        ResolveGoogleSttSetting(d.ModelOrTag, "model", ""),
+                        ResolveGoogleSttSetting(d.ModelOrTag, "language", ""))
+
+                Case EngineKind.OpenAiRest
+                    Dim key As String = ResolveOpenAiKey()
+                    If String.IsNullOrWhiteSpace(key) Then
+                        Throw New InvalidOperationException("No OpenAI API key is available.")
+                    End If
+
+                    _opts.Model = ResolveOpenAiSttSetting(d.ModelOrTag, "model", d.ModelOrTag)
+                    Return New OpenAiRestEngine(key)
+
+                Case EngineKind.OpenAiRealtime
+                    Dim key As String = ResolveOpenAiKey()
+                    If String.IsNullOrWhiteSpace(key) Then
+                        Throw New InvalidOperationException("No OpenAI API key is available.")
+                    End If
+
+                    _opts.Model = ResolveOpenAiSttSetting(d.ModelOrTag, "model", "gpt-realtime-whisper")
+                    Return New OpenAiRealtimeEngine(key)
+
+                Case EngineKind.AzureSpeechRealtime
+                    Dim azureSpeechKey As String = ResolveAzureSpeechKey()
+                    If String.IsNullOrWhiteSpace(azureSpeechKey) Then
+                        Throw New InvalidOperationException("INI_STT_Azure_SpeechKey is missing.")
+                    End If
+
+                    Return New AzureSpeechRealtimeEngine(
+                        azureSpeechKey,
+                        ResolveAzureRealtimeLocation(d.ModelOrTag),
+                        ResolveAzureRegionForHeader(d.ModelOrTag))
+
+                Case EngineKind.AzureSpeechFastRest
+                    Dim azureSpeechKey As String = ResolveAzureSpeechKey()
+                    If String.IsNullOrWhiteSpace(azureSpeechKey) Then
+                        Throw New InvalidOperationException("INI_STT_Azure_SpeechKey is missing.")
+                    End If
+
+                    Return New AzureSpeechFastRestEngine(
+                        azureSpeechKey,
+                        ResolveAzureFastRestLocation(d.ModelOrTag),
+                        ResolveAzureSttSetting(d.ModelOrTag, "api-version", ""),
+                        ResolveAzureRegionForHeader(d.ModelOrTag))
+
+                Case EngineKind.TeamsAcsRealtime
+                    Return New TeamsAcsRealtimeEngine(
+                        ResolveTeamsAcsBridgeWebSocketUri(),
+                        ResolveTeamsMeetingJoinUrl(),
+                        ResolveTeamsAcsBridgeBearerToken())
+
+            End Select
+
+            Throw New NotSupportedException(d.Kind.ToString())
+        End Function
+
+        Private Function ResolveOpenAiKey() As String
+            Dim config As ModelConfig = ResolveOpenAiConfig()
+            Return GetApiKeyFromModelConfig(config)
+        End Function
+
+        Private _g1Token As String = ""
+        Private _g2Token As String = ""
+        Private _gAltToken As String = ""
+        Private _g1Exp As DateTime = DateTime.MinValue
+        Private _g2Exp As DateTime = DateTime.MinValue
+        Private _gAltExp As DateTime = DateTime.MinValue
+
+        Private Async Function GetFreshGoogleTokenAsync(config As ModelConfig, cacheSlot As String) As Task(Of String)
+            If config Is Nothing Then
+                Return ""
             End If
 
-            ' Pre-select the last used model if it exists in the list
-            Dim lastModel As String = My.Settings.LastSpeechModel
-            If Not String.IsNullOrEmpty(lastModel) AndAlso cultureComboBox.Items.Contains(lastModel) Then
-                cultureComboBox.SelectedItem = lastModel
+            Dim token As String = ""
+            Dim exp As DateTime = DateTime.MinValue
+
+            Select Case cacheSlot
+                Case "secondary"
+                    token = _g2Token
+                    exp = _g2Exp
+
+                Case "alternate"
+                    token = _gAltToken
+                    exp = _gAltExp
+
+                Case Else
+                    token = _g1Token
+                    exp = _g1Exp
+            End Select
+
+            If String.IsNullOrEmpty(token) OrElse DateTime.UtcNow >= exp Then
+                Dim life As Long = If(config.OAuth2ATExpiry > 0, config.OAuth2ATExpiry, 3600)
+
+                GoogleOAuthHelper.client_email = config.OAuth2ClientMail
+                GoogleOAuthHelper.private_key = FormatPrivateKey(config.APIKey)
+                GoogleOAuthHelper.scopes = config.OAuth2Scopes
+                GoogleOAuthHelper.token_uri = config.OAuth2Endpoint
+                GoogleOAuthHelper.token_life = life
+
+                token = Await GoogleOAuthHelper.GetAccessToken()
+                Dim newExp As DateTime = DateTime.UtcNow.AddSeconds(Math.Max(60L, life - 300L))
+
+                Select Case cacheSlot
+                    Case "secondary"
+                        _g2Token = token
+                        _g2Exp = newExp
+
+                    Case "alternate"
+                        _gAltToken = token
+                        _gAltExp = newExp
+
+                    Case Else
+                        _g1Token = token
+                        _g1Exp = newExp
+                End Select
             End If
 
-            ' Wire up event handlers for dynamic UI updates
-            AddHandler Me.cultureComboBox.MouseMove, AddressOf cultureComboBox_MouseMove
+            Return token
+        End Function
 
-            LoadAudioDevices()
+        Public Shared Function FormatPrivateKey(rawKey As String) As String
+            Dim noEsc As String = rawKey.Replace("\n", "")
+            Dim sb As New StringBuilder()
 
-            AddHandler Me.deviceComboBox.MouseMove, AddressOf deviceComboBox_MouseMove
+            For i As Integer = 0 To noEsc.Length - 1 Step 64
+                sb.AppendLine(If(i + 64 <= noEsc.Length, noEsc.Substring(i, 64), noEsc.Substring(i)))
+            Next
 
-            AddHandler Me.deviceComboBox.SelectedIndexChanged, AddressOf Me.deviceComboBox_SelectedIndexChanged
+            Return "-----BEGIN PRIVATE KEY-----" & vbLf & sb.ToString() & "-----END PRIVATE KEY-----" & vbLf
+        End Function
 
-            LoadAndPopulateProcessComboBox(Globals.ThisAddIn.INI_PromptLibPath_Transcript, processCombobox)
 
-            ' Update tooltips based on selected model
-            Dim index As Integer = Me.cultureComboBox.SelectedIndex
-            If index >= 0 Then
-                If Me.cultureComboBox.Items(index).startswith(GoogleSTT_Desc) Then
-                    Me.SpeakerIdent.Text = GoogleToggle
-                    ToolTip.SetToolTip(Me.SpeakerDistance, GoogleTooltip)
-                    ToolTip.SetToolTip(Me.SpeakerIdent, GoogleTooltip)
+        Private Function GetFileTranscribingState() As String
+            If String.IsNullOrWhiteSpace(_currentEngineDisplayName) Then
+                Return "Transcribing file…"
+            End If
 
-                ElseIf Me.cultureComboBox.Items(index).startswith("ggml") Then
-                    Me.SpeakerIdent.Text = WhisperToggle
-                    ToolTip.SetToolTip(Me.SpeakerDistance, WhisperTooltip)
-                    ToolTip.SetToolTip(Me.SpeakerIdent, WhisperTooltip)
-                Else
-                    Me.SpeakerIdent.Text = VoskToggle
-                    ToolTip.SetToolTip(Me.SpeakerDistance, VoskTooltip)
-                    ToolTip.SetToolTip(Me.SpeakerIdent, VoskTooltip)
+            Return _currentEngineDisplayName & ": Transcribing file…"
+        End Function
+
+        Private Sub CancelCurrentFileTranscription()
+            If Not _fileTranscribing Then
+                Return
+            End If
+
+            SetLiveState(_currentEngineDisplayName & ": Canceling file transcription…")
+
+            If _cts IsNot Nothing Then
+                Try
+                    _cts.Cancel()
+                Catch
+                End Try
+            End If
+        End Sub
+
+
+        Private Function GetIdleLiveState() As String
+            If String.IsNullOrWhiteSpace(_currentEngineDisplayName) Then
+                Return "Ready."
+            End If
+
+            Return _currentEngineDisplayName & ": Ready."
+        End Function
+
+        Private Function GetListeningLiveState() As String
+            If String.IsNullOrWhiteSpace(_currentEngineDisplayName) Then
+                Return "Listening…"
+            End If
+
+            Return _currentEngineDisplayName & ": Listening…"
+        End Function
+
+        Private Sub SetLiveState(text As String)
+            If Me.IsDisposed OrElse lblLiveState Is Nothing Then
+                Return
+            End If
+
+            Dim normalized As String = If(text, "").Trim()
+
+            If String.Equals(_lastLiveStateText, normalized, StringComparison.Ordinal) Then
+                If (DateTime.UtcNow - _lastLiveStateUtc).TotalMilliseconds < 500 Then
+                    Return
                 End If
             End If
 
-            ' Wire up button event handlers
-            AddHandler StartButton.Click, AddressOf StartButton_Click
-            AddHandler StopButton.Click, AddressOf StopButton_Click
-            AddHandler ClearButton.Click, AddressOf ClearButton_Click
-            AddHandler LoadButton.Click, AddressOf LoadButton_Click
-            AddHandler AudioButton.Click, AddressOf AudioButton_Click
-            AddHandler QuitButton.Click, AddressOf QuitButton_Click
-            AddHandler ProcessButton.Click, AddressOf ProcessButton_Click
+            If Me.InvokeRequired Then
+                Try
+                    Me.BeginInvoke(New System.Action(Of String)(AddressOf SetLiveState), normalized)
+                Catch
+                End Try
+                Return
+            End If
 
-            ' Make window resizable
-            Me.MinimumSize = New System.Drawing.Size(800, 440)
+            _lastLiveStateText = normalized
+            _lastLiveStateUtc = DateTime.UtcNow
+            lblLiveState.Text = normalized
+            Debug.WriteLine("[Transcriptor] " & normalized)
+        End Sub
 
-            If Not modelsexist Then
-                ShowCustomMessageBox($"No Vosk or Whisper models have been found at the configured path ('{modelPath}'). A model is necessary for transcribing. You can download models for free at {VoskSource} and {WhisperSource}.", $"{AN} Transcriptor")
+        Private Async Sub OnStart(sender As Object, e As EventArgs)
+            If _capturing OrElse _fileTranscribing OrElse _isStopping Then
+                Return
+            End If
+
+            Dim d As EngineDescriptor = CurrentDescriptor()
+            If d Is Nothing Then
+                Return
+            End If
+
+            If IsFileOnlyEngine(d.Kind) Then
+                ShowCustomMessageBox("Selected engine is file/request-response transcription only. Use Load for an audio file, or select a live engine for microphone transcription.")
+                Return
+            End If
+
+            Dim selectedLanguage As String = ""
+            If cboLang.SelectedItem IsNot Nothing Then
+                selectedLanguage = CStr(cboLang.SelectedItem)
+            End If
+
+            Dim selectedDeviceText As String = ""
+            If cboDevice.SelectedItem IsNot Nothing Then
+                selectedDeviceText = CStr(cboDevice.SelectedItem)
+            End If
+
+            Dim micDeviceIndex As Integer = ParseDeviceIndexFromText(selectedDeviceText)
+            Dim sourceMode As AudioSourceMode = GetConfiguredSourceMode()
+
+            If d.Kind <> EngineKind.Vosk AndAlso Not String.IsNullOrWhiteSpace(selectedLanguage) Then
+                _opts.LanguageCode = selectedLanguage
+            End If
+
+            _currentEngineDisplayName = d.DisplayName
+            SetLiveState(_currentEngineDisplayName & ": Starting…")
+
+            Dim startException As Exception = Nothing
+            Dim engineToDisposeAfterStartFailure As ITranscriptionEngine = Nothing
+            Dim ctsToDisposeAfterStartFailure As CancellationTokenSource = Nothing
+
+            Try
+                _engine = Await CreateEngineAsync(d)
+                AttachEngineEvents(_engine)
+                _cts = New CancellationTokenSource()
+                Await _engine.StartLiveAsync(_opts, _cts.Token)
+            Catch ex As Exception
+                startException = ex
+                engineToDisposeAfterStartFailure = _engine
+                ctsToDisposeAfterStartFailure = _cts
+
+                _engine = Nothing
+                _cts = Nothing
+            End Try
+
+            If ctsToDisposeAfterStartFailure IsNot Nothing Then
+                Try
+                    ctsToDisposeAfterStartFailure.Dispose()
+                Catch
+                End Try
+            End If
+
+            If engineToDisposeAfterStartFailure IsNot Nothing Then
+                Try
+                    Await engineToDisposeAfterStartFailure.DisposeAsync()
+                Catch
+                End Try
+            End If
+
+            If startException IsNot Nothing Then
+                SetLiveState(_currentEngineDisplayName & ": Error.")
+                ShowTranscriptorMessageBox("Failed to start engine: " & startException.Message)
+                Return
+            End If
+
+            If EngineNeedsLocalAudioCapture(d.Kind) Then
+                _capture = New AudioCaptureService With {
+                    .MicDeviceIndex = micDeviceIndex,
+                    .SourceMode = sourceMode,
+                    .SystemAudioRenderDeviceId = GetConfiguredOutputDeviceId(),
+                    .MultiChannelStereo = _opts.MultiChannelDiarization AndAlso _engine.SupportsMultiChannelDiarization,
+                    .AudioDebugDump = _opts.AudioDebugDump OrElse INI_APIDebug
+                }
+
+                AddHandler _capture.Frame, AddressOf OnCaptureFrame
+                AddHandler _capture.CaptureError,
+                    Sub(s, ev)
+                        SetLiveState(_currentEngineDisplayName & ": Capture error: " & ev.Message)
+                    End Sub
+
+                _capture.Start()
+            End If
+
+            AcquireSleepLock()
+
+            _capturing = True
+            ToggleCaptureUi(True)
+            PersistSettings()
+            SetLiveState(GetListeningLiveState())
+        End Sub
+
+        Private Function ParseDeviceIndexFromText(deviceText As String) As Integer
+            If String.IsNullOrWhiteSpace(deviceText) Then
+                Return 0
+            End If
+
+            Dim c As Integer = deviceText.IndexOf(":"c)
+            If c <= 0 Then
+                Return 0
+            End If
+
+            Dim idx As Integer = 0
+            Integer.TryParse(deviceText.Substring(0, c), idx)
+            Return idx
+        End Function
+
+        Private Async Sub OnCaptureFrame(sender As Object, e As AudioCaptureService.FrameEventArgs)
+            Dim eng As ITranscriptionEngine = _engine
+            Dim ctsLocal As CancellationTokenSource = _cts
+
+            If eng Is Nothing OrElse Not _capturing OrElse ctsLocal Is Nothing Then
+                Return
+            End If
+
+            Try
+                Await eng.PushAudioAsync(e.Pcm, e.BytesValid, ctsLocal.Token)
+            Catch ex As OperationCanceledException
+            Catch ex As ObjectDisposedException
+            Catch ex As Exception
+                If Not _isStopping Then
+                    SetLiveState(_currentEngineDisplayName & ": Audio push failed: " & ex.Message)
+                End If
+            End Try
+        End Sub
+
+        Private Async Function StopCurrentSessionAsync() As Task
+            If _isStopping Then
+                Return
+            End If
+
+            _isStopping = True
+
+            Dim captureToStop As AudioCaptureService = _capture
+            Dim engineToStop As ITranscriptionEngine = _engine
+            Dim ctsToDispose As CancellationTokenSource = _cts
+
+            _capture = Nothing
+            _engine = Nothing
+            _cts = Nothing
+            _capturing = False
+
+            SetLiveState(_currentEngineDisplayName & ": Stopping…")
+            ToggleCaptureUi(False)
+
+            Try
+                If captureToStop IsNot Nothing Then
+                    Try
+                        RemoveHandler captureToStop.Frame, AddressOf OnCaptureFrame
+                    Catch
+                    End Try
+
+                    Try
+                        captureToStop.Stop()
+                    Catch
+                    End Try
+
+                    Try
+                        captureToStop.Dispose()
+                    Catch
+                    End Try
+                End If
+
+                If engineToStop IsNot Nothing Then
+                    Await engineToStop.StopLiveAsync()
+                    Await engineToStop.DisposeAsync()
+                End If
+            Catch ex As OperationCanceledException
+            Catch ex As Exception
+                SetLiveState(_currentEngineDisplayName & ": Stop error: " & ex.Message)
+            Finally
+                If ctsToDispose IsNot Nothing Then
+                    Try
+                        ctsToDispose.Cancel()
+                    Catch
+                    End Try
+
+                    Try
+                        ctsToDispose.Dispose()
+                    Catch
+                    End Try
+                End If
+
+                ReleaseSleepLock()
+                _isStopping = False
+                ToggleCaptureUi(False)
+                SetLiveState(GetIdleLiveState())
+
+                If _closeAfterStop Then
+                    _closeAfterStop = False
+                    If Not Me.IsDisposed Then
+                        Try
+                            Me.BeginInvoke(New System.Action(Sub() Me.Close()))
+                        Catch
+                        End Try
+                    End If
+                End If
+            End Try
+        End Function
+
+
+
+        Private Async Sub OnStop(sender As Object, e As EventArgs)
+            If _fileTranscribing Then
+                CancelCurrentFileTranscription()
+                Return
+            End If
+
+            Await StopCurrentSessionAsync()
+        End Sub
+
+
+        Private Async Sub OnQuit(sender As Object, e As EventArgs)
+            If _capturing Then
+                _closeAfterStop = True
+                Await StopCurrentSessionAsync()
+            ElseIf _fileTranscribing Then
+                _closeAfterStop = True
+                CancelCurrentFileTranscription()
+            Else
                 Me.Close()
             End If
         End Sub
 
-        ''' <summary>
-        ''' Tooltip control for displaying context-sensitive help.
-        ''' </summary>
-        Private ToolTip As New Forms.ToolTip()
-
-        ''' <summary>
-        ''' Updates multi-source capture flag when device selection changes.
-        ''' Runs on UI thread—safe to read SelectedItem directly.
-        ''' </summary>
-        Private Sub deviceComboBox_SelectedIndexChanged(sender As Object, e As EventArgs)
-            Dim s As String = TryCast(Me.deviceComboBox.SelectedItem, String)
-            _multiSourceSelected = Not String.IsNullOrEmpty(s) _
-                        AndAlso s.EndsWith("(plus audio output)")
-        End Sub
-
-        ''' <summary>
-        ''' Updates tooltip and speaker identification controls based on selected model.
-        ''' Handles mouse move over culture (model) combo box.
-        ''' </summary>
-        Private Sub cultureComboBox_MouseMove(sender As Object, e As MouseEventArgs)
-            Dim index As Integer = Me.cultureComboBox.SelectedIndex
-            If index >= 0 Then
-                ToolTip.SetToolTip(Me.cultureComboBox, Me.cultureComboBox.Items(index).ToString())
-                If Me.cultureComboBox.Items(index).startswith(GoogleSTT_Desc) Then
-                    Me.SpeakerIdent.Text = GoogleToggle
-                    ToolTip.SetToolTip(Me.SpeakerDistance, GoogleTooltip)
-                    ToolTip.SetToolTip(Me.SpeakerIdent, GoogleTooltip)
-                ElseIf Me.cultureComboBox.Items(index).startswith("ggml") Then
-                    Me.SpeakerIdent.Text = WhisperToggle
-                    ToolTip.SetToolTip(Me.SpeakerDistance, WhisperTooltip)
-                    ToolTip.SetToolTip(Me.SpeakerIdent, WhisperTooltip)
-                Else
-                    Me.SpeakerIdent.Text = VoskToggle
-                    ToolTip.SetToolTip(Me.SpeakerDistance, VoskTooltip)
-                    ToolTip.SetToolTip(Me.SpeakerIdent, VoskTooltip)
-                End If
-            End If
-        End Sub
-
-        ''' <summary>
-        ''' Displays device name tooltip on mouse hover.
-        ''' </summary>
-        Private Sub deviceComboBox_MouseMove(sender As Object, e As MouseEventArgs)
-            Dim index As Integer = Me.deviceComboBox.SelectedIndex
-            If index >= 0 Then
-                ToolTip.SetToolTip(Me.deviceComboBox, Me.deviceComboBox.Items(index).ToString())
-            End If
-        End Sub
-
-        ''' <summary>
-        ''' Configures the audio output device for loopback capture (system audio mixing).
-        ''' Displays device selection dialog and saves choice to settings.
-        ''' </summary>
-        Public Sub ConfigureAudioOutputDevice()
-            ' 1) Enumerate all active audio render endpoints (output devices)
-            Dim enumerator As New MMDeviceEnumerator()
-            Dim devices As MMDeviceCollection =
-enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)
-
-            ' 2) Pack FriendlyNames and IDs into parallel arrays, including Default at index 0
-            Dim totalCount As Integer = devices.Count + 1
-            Dim deviceNames(totalCount - 1) As String
-            Dim deviceIds(totalCount - 1) As String
-
-            ' 2a) Default Audio Output Device (as used by WasapiLoopbackCapture)
-            deviceNames(0) = "Default Audio Output Device"
-            deviceIds(0) = String.Empty
-
-            ' 2b) All other devices starting at index 1
-            For i As Integer = 0 To devices.Count - 1
-                deviceNames(i + 1) = devices(i).FriendlyName
-                deviceIds(i + 1) = devices(i).ID
-            Next
-
-            ' 3) Determine currently saved device from settings (empty ID → Default)
-            Dim currentDeviceId As String = My.Settings.AudioOutputDevice
-            Dim currentDeviceName As String = String.Empty
-            Dim idxSaved As Integer = Array.IndexOf(deviceIds, currentDeviceId)
-            If idxSaved >= 0 Then
-                currentDeviceName = deviceNames(idxSaved)
+        Private Async Sub OnLoadFile(sender As Object, e As EventArgs)
+            If _capturing OrElse _fileTranscribing OrElse _isStopping Then
+                Return
             End If
 
-            ' 4) Build prompt for selection dialog
-            Dim prompt As String = "Choose the audio output device for capturing"
-            If Not String.IsNullOrEmpty(currentDeviceName) Then
-                prompt &= $" (currently: {currentDeviceName})"
+            Dim d As EngineDescriptor = CurrentDescriptor()
+            If d Is Nothing Then
+                Return
             End If
-            prompt &= ":"
 
-            ' 5) Show selection dialog
-            Dim selection As String = ShowSelectionForm(
-prompt,
-$"{AN} Transcriptor",
-deviceNames)
+            If IsLiveOnlyEngine(d.Kind) Then
+                ShowTranscriptorMessageBox("Realtime engine is live-only; pick another engine for file mode.")
+                Return
+            End If
 
-            ' 6) If selection valid, determine index and set/clear settings
-            If Not String.IsNullOrEmpty(selection) AndAlso selection <> "esc" Then
-                Dim chosenIndex As Integer = Array.IndexOf(deviceNames, selection)
-                If chosenIndex >= 0 Then
-                    If chosenIndex = 0 Then
-                        ' Default selected → clear setting
-                        My.Settings.AudioOutputDevice = String.Empty
-                    Else
-                        ' Save specific device ID
-                        My.Settings.AudioOutputDevice = deviceIds(chosenIndex)
+            DragDropFormLabel = "Audio file (*.wav, *.mp3, *.aac, *.m4a, *.mp4, *.wma)"
+            DragDropFormFilter = "Audio|*.wav;*.mp3;*.aac;*.m4a;*.mp4;*.wma|All|*.*"
+
+            Dim filePath As String = ""
+
+            Try
+                Using f As New DragDropForm()
+                    If f.ShowDialog() = DialogResult.OK Then
+                        filePath = f.SelectedFilePath
                     End If
+                End Using
+            Finally
+                DragDropFormLabel = ""
+                DragDropFormFilter = ""
+            End Try
 
+            If String.IsNullOrEmpty(filePath) OrElse Not File.Exists(filePath) Then
+                Return
+            End If
+
+            If cboLang.SelectedItem IsNot Nothing AndAlso d.Kind <> EngineKind.Vosk Then
+                _opts.LanguageCode = CStr(cboLang.SelectedItem)
+            End If
+
+            _currentEngineDisplayName = d.DisplayName
+            _lastPartialText = ""
+            _fileTranscribing = True
+            ToggleCaptureUi(False)
+            PersistSettings()
+            SetLiveState(GetFileTranscribingState())
+
+            Dim engineToDispose As ITranscriptionEngine = Nothing
+            Dim ctsToDispose As CancellationTokenSource = Nothing
+            Dim failed As Boolean = False
+            Dim canceled As Boolean = False
+            Dim fileTranscriptionException As Exception = Nothing
+
+            Try
+                _engine = Await CreateEngineAsync(d)
+                AttachEngineEvents(_engine)
+                _cts = New CancellationTokenSource()
+                Await _engine.TranscribeFileAsync(filePath, _opts, _cts.Token)
+                canceled = (_cts IsNot Nothing AndAlso _cts.IsCancellationRequested)
+            Catch ex As OperationCanceledException
+                canceled = True
+            Catch ex As Exception
+                failed = True
+                fileTranscriptionException = ex
+            Finally
+                engineToDispose = _engine
+                ctsToDispose = _cts
+
+                _engine = Nothing
+                _cts = Nothing
+                _fileTranscribing = False
+                ToggleCaptureUi(False)
+            End Try
+
+            If ctsToDispose IsNot Nothing Then
+                Try
+                    ctsToDispose.Dispose()
+                Catch
+                End Try
+            End If
+
+            If engineToDispose IsNot Nothing Then
+                Try
+                    Await engineToDispose.DisposeAsync()
+                Catch
+                End Try
+            End If
+
+            If fileTranscriptionException IsNot Nothing Then
+                SetLiveState(_currentEngineDisplayName & ": File transcription failed.")
+                ShowTranscriptorMessageBox("File transcription failed: " & fileTranscriptionException.Message)
+            End If
+
+            If canceled Then
+                SetLiveState(_currentEngineDisplayName & ": File transcription canceled.")
+            ElseIf Not failed Then
+                SetLiveState(_currentEngineDisplayName & ": File transcription complete.")
+                ShowTranscriptorMessageBox("File transcription complete.")
+            End If
+
+            If _closeAfterStop Then
+                _closeAfterStop = False
+                If Not Me.IsDisposed Then
                     Try
-                        My.Settings.Save()
-                    Catch ex As System.Exception
-                        ShowCustomMessageBox($"Error saving audio output device setting: {ex.Message}")
+                        Me.BeginInvoke(New System.Action(Sub() Me.Close()))
+                    Catch
                     End Try
                 End If
             End If
         End Sub
 
-        ''' <summary>
-        ''' Initializes all UI controls and builds the form layout using TableLayoutPanel.
-        ''' Sets up a DPI-aware form with three rows: model/source selectors, transcript area, and action buttons.
-        ''' </summary>
-        Private Sub InitializeComponents()
-            ' DPI-aware form setup
-            Me.Font = New System.Drawing.Font("Segoe UI", 9.0F, FontStyle.Regular, GraphicsUnit.Point)
-            Me.AutoScaleMode = AutoScaleMode.Font
-            Me.Text = $"{AN} Transcriptor (editable text, audio will not be stored)"
-            Me.FormBorderStyle = FormBorderStyle.Sizable
+        Private Sub SafeAppendTranscript(text As String)
+            If String.IsNullOrWhiteSpace(text) Then
+                Return
+            End If
 
-            ' Create controls
+            If Me.IsDisposed Then
+                Return
+            End If
 
-            ' Transcript area
-            Me.RichTextBox1 = New RichTextBox() With {
-.Font = New System.Drawing.Font("Segoe UI", 10.0F, FontStyle.Regular, GraphicsUnit.Point),
-.Multiline = True,
-.ScrollBars = RichTextBoxScrollBars.Vertical,
-.Dock = DockStyle.Fill
-}
+            If Me.InvokeRequired Then
+                Try
+                    Me.BeginInvoke(New Action(Of String)(AddressOf SafeAppendTranscript), text)
+                Catch
+                End Try
+                Return
+            End If
 
-            ' Selector labels
-            Me.Label1 = New Label() With {.Text = "Model:", .AutoSize = True}
-            Me.Label2 = New Label() With {.Text = "Source:", .AutoSize = True}
-
-            ' Model / source dropdowns (start 50px wider)
-            Me.cultureComboBox = New System.Windows.Forms.ComboBox() With {
-.DropDownStyle = ComboBoxStyle.DropDownList,
-.Width = 250
-}
-            Me.deviceComboBox = New System.Windows.Forms.ComboBox() With {
-.DropDownStyle = ComboBoxStyle.DropDownList,
-.Width = 450
-}
-
-            ' Speaker toggle + threshold
-            Me.SpeakerIdent = New System.Windows.Forms.CheckBox() With {.Text = VoskToggle, .AutoSize = True}
-            Me.SpeakerDistance = New System.Windows.Forms.TextBox() With {
-.Text = If(My.Settings.LastSpeakerDistance <= 0, "1.0", My.Settings.LastSpeakerDistance.ToString()),
-.Width = 50,
-.AutoSize = False
-}
-
-            ' Status + partial text
-            Me.StatusLabel = New Label() With {
-.Text = "Transcribing:",
-.AutoSize = True,
-.Dock = DockStyle.Top
-}
-            Me.PartialTextLabel = New Label() With {
-.Text = "...",
-.AutoSize = True,
-.MinimumSize = New System.Drawing.Size(0, 70),
-.Dock = DockStyle.Top
-}
-
-            ' Action buttons + bottom combobox
-            Me.StartButton = New System.Windows.Forms.Button() With {.Text = "Start", .AutoSize = True}
-            Me.StopButton = New System.Windows.Forms.Button() With {.Text = "Stop", .AutoSize = True, .Enabled = False}
-            Me.ClearButton = New System.Windows.Forms.Button() With {.Text = "Clear", .AutoSize = True}
-            Me.LoadButton = New System.Windows.Forms.Button() With {.Text = "Load", .AutoSize = True}
-            Me.AudioButton = New System.Windows.Forms.Button() With {.Text = "Dev", .AutoSize = True}
-            Me.QuitButton = New System.Windows.Forms.Button() With {.Text = "Quit", .AutoSize = True}
-            Me.ProcessButton = New System.Windows.Forms.Button() With {.Text = "Process:", .AutoSize = True}
-            Me.processCombobox = New System.Windows.Forms.ComboBox() With {
-.DropDownStyle = ComboBoxStyle.DropDownList,
-.Width = 250
-}
-
-            ' Add right margin to prevent control crowding
-            Dim pad As New Padding(0, 0, 10, 0)
-            For Each ctl In {Label1, cultureComboBox, Label2, deviceComboBox, SpeakerIdent, SpeakerDistance,
-             StartButton, StopButton, ClearButton, LoadButton, AudioButton, QuitButton, ProcessButton}
-                ctl.Margin = pad
-            Next
-            processCombobox.Margin = pad
-
-            ' Build layout
-
-            ' Root: 3 rows—top selectors, middle transcript, bottom actions
-            Dim root As New TableLayoutPanel() With {
-.Dock = DockStyle.Fill,
-.AutoSize = True,
-.AutoSizeMode = AutoSizeMode.GrowAndShrink,
-.ColumnCount = 1,
-.RowCount = 3,
-.Padding = New Padding(10)
-}
-            root.ColumnStyles.Add(New ColumnStyle(SizeType.Percent, 100))
-            root.RowStyles.Add(New RowStyle(SizeType.AutoSize))    ' row0: selectors
-            root.RowStyles.Add(New RowStyle(SizeType.Percent, 100)) ' row1: transcript
-            root.RowStyles.Add(New RowStyle(SizeType.AutoSize))    ' row2: actions
-
-            ' Row 0: selectors laid out in a TableLayoutPanel so combos stretch
-            Dim topRow As New TableLayoutPanel() With {
-.Dock = DockStyle.Top,
-.AutoSize = False,
-.Height = cultureComboBox.PreferredHeight + 10,
-.ColumnCount = 6,
-.RowCount = 1,
-.Padding = New Padding(0, 0, 0, 10)
-}
-            topRow.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
-            topRow.ColumnStyles.Add(New ColumnStyle(SizeType.Percent, 50))
-            topRow.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
-            topRow.ColumnStyles.Add(New ColumnStyle(SizeType.Percent, 50))
-            topRow.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
-            topRow.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
-
-            cultureComboBox.Dock = DockStyle.Fill
-            deviceComboBox.Dock = DockStyle.Fill
-
-            topRow.Controls.Add(Label1, 0, 0)
-            topRow.Controls.Add(cultureComboBox, 1, 0)
-            topRow.Controls.Add(Label2, 2, 0)
-            topRow.Controls.Add(deviceComboBox, 3, 0)
-            topRow.Controls.Add(SpeakerIdent, 4, 0)
-            topRow.Controls.Add(SpeakerDistance, 5, 0)
-
-            root.Controls.Add(topRow, 0, 0)
-
-            ' Row 1: status, partial, then main RichTextBox
-            Dim mid As New TableLayoutPanel() With {
-.Dock = DockStyle.Fill,
-.AutoSize = True,
-.AutoSizeMode = AutoSizeMode.GrowAndShrink,
-.ColumnCount = 1,
-.RowCount = 3
-}
-            mid.ColumnStyles.Add(New ColumnStyle(SizeType.Percent, 100))
-            mid.RowStyles.Add(New RowStyle(SizeType.AutoSize))
-            mid.RowStyles.Add(New RowStyle(SizeType.AutoSize))
-            mid.RowStyles.Add(New RowStyle(SizeType.Percent, 100))
-
-            mid.Controls.Add(StatusLabel, 0, 0)
-            mid.Controls.Add(PartialTextLabel, 0, 1)
-            mid.Controls.Add(RichTextBox1, 0, 2)
-
-            root.Controls.Add(mid, 0, 1)
-
-            ' Row 2: bottom actions in a stretchy TableLayoutPanel
-            Dim bottomRow As New TableLayoutPanel() With {
-.Dock = DockStyle.Bottom,
-.AutoSize = False,
-.Height = StartButton.PreferredSize.Height + 20,
-.ColumnCount = 8,
-.RowCount = 1,
-.Padding = New Padding(0, 10, 0, 0)
-}
-            ' First seven columns auto-size, last column (processCombobox) fills
-            For i = 1 To 7
-                bottomRow.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
-            Next
-            bottomRow.ColumnStyles.Add(New ColumnStyle(SizeType.Percent, 100))
-
-            processCombobox.Dock = DockStyle.Fill
-
-            bottomRow.Controls.Add(StartButton, 0, 0)
-            bottomRow.Controls.Add(StopButton, 1, 0)
-            bottomRow.Controls.Add(ClearButton, 2, 0)
-            bottomRow.Controls.Add(LoadButton, 3, 0)
-            bottomRow.Controls.Add(AudioButton, 4, 0)
-            bottomRow.Controls.Add(QuitButton, 5, 0)
-            bottomRow.Controls.Add(ProcessButton, 6, 0)
-            bottomRow.Controls.Add(processCombobox, 7, 0)
-
-            root.Controls.Add(bottomRow, 0, 2)
-
-            ' Swap in our root layout
-            Me.Controls.Clear()
-            Me.Controls.Add(root)
-
-            ' Freeze minimum size once first shown
-            AddHandler Me.Shown, Sub() Me.MinimumSize = Me.Size
-
-            ' Set icon
-            Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-            Me.Icon = Icon.FromHandle(bmp.GetHicon())
+            rtb.AppendText(text.Trim() & vbCrLf)
+            rtb.SelectionStart = rtb.TextLength
+            rtb.ScrollToCaret()
         End Sub
 
-        ''' <summary>
-        ''' Handles form resize events to enforce minimum width based on rightmost control.
-        ''' </summary>
-        Private Sub Form1_Resize(sender As Object, e As EventArgs) Handles Me.Resize
-            Dim minWidth As Integer = SpeakerDistance.Left + SpeakerDistance.Width + 40
-            If Me.Width < minWidth Then
-                Me.Width = minWidth ' Force minimum width dynamically
+        Private Sub AttachEngineEvents(eng As ITranscriptionEngine)
+            AddHandler eng.PartialResult,
+        Sub(s, ev)
+            Dim msg As String = If(String.IsNullOrEmpty(ev.Speaker), ev.Text, ev.Speaker & ": " & ev.Text)
+            If Not String.IsNullOrWhiteSpace(msg) Then
+                _lastPartialText = msg.Trim()
+                SetLiveState(_currentEngineDisplayName & ": " & _lastPartialText)
             End If
         End Sub
 
-        ''' <summary>
-        ''' Stops all active audio recording and transcription engines.
-        ''' Gracefully shuts down loopback capture, microphone input, and selected STT engine.
-        ''' Releases system sleep lock if this form instance was responsible for setting it.
-        ''' </summary>
-        Private Async Function StopRecording() As System.Threading.Tasks.Task
+            AddHandler eng.FinalResult,
+        Sub(s, ev)
+            Dim line As String = If(String.IsNullOrEmpty(ev.Speaker), ev.Text, ev.Speaker & ": " & ev.Text)
+            SafeAppendTranscript(line)
+            _lastPartialText = ""
 
-            If loopbackCapture IsNot Nothing Then
-                RemoveHandler loopbackCapture.DataAvailable, AddressOf OnLoopbackDataAvailable
-                loopbackCapture.StopRecording()
-                loopbackCapture.Dispose()
-                loopbackCapture = Nothing
-            End If
-
-            If loopbackResampler IsNot Nothing Then
-                loopbackResampler.Dispose()
-                loopbackResampler = Nothing
-                loopbackRawProvider = Nothing
-            End If
-
-            If waveIn IsNot Nothing Then
-                RemoveHandler waveIn.DataAvailable, AddressOf OnGoogleDataAvailable
-                RemoveHandler waveIn.DataAvailable, AddressOf OnAudioDataAvailable
-                waveIn.StopRecording()
-                waveIn.Dispose()
-                waveIn = Nothing
-            End If
-
-            CancelTranscription()
-
-            If STTModel = "google" AndAlso _stream IsNot Nothing Then
-                Await SafeCompleteAndDisposeGoogleStreamAsync(readerCts.Token)
-            End If
-
-            If WhisperRecognizer IsNot Nothing Then
-                PartialTextLabel.Invoke(Sub() PartialTextLabel.Text = "Whisper stopped...")
-                Await WhisperRecognizer.DisposeAsync()
-                WhisperRecognizer = Nothing
-            End If
-
-            ' Only release the sleep lock IF we were the ones who set it
-            If _iSetTheSleepLock Then
-                ' We are responsible, so we release the lock
-                SetThreadExecutionState(ES_CONTINUOUS)
-                _iSetTheSleepLock = False
-                Debug.WriteLine("This form released the sleep lock.")
+            If _capturing Then
+                SetLiveState(GetListeningLiveState())
+            ElseIf _fileTranscribing Then
+                SetLiveState(GetFileTranscribingState())
             Else
-                ' We are not responsible, so we do nothing to the execution state
-                Debug.WriteLine("Another component is managing the sleep lock. This form took no action.")
+                SetLiveState(GetIdleLiveState())
             End If
-
-        End Function
-
-        ''' <summary>
-        ''' Handles Stop button click. Disables UI, stops recording asynchronously, and re-enables controls.
-        ''' For Vosk, commits any pending partial text before clearing.
-        ''' </summary>
-        Private Sub StopButton_Click(sender As Object, e As EventArgs)
-
-            If Not capturing Then Return
-
-            STTCanceled = True
-
-            ' Prevent multiple clicks
-            Me.StopButton.Enabled = False
-            If STTModel <> "vosk" Then
-                PartialTextLabel.Text = "Stopping…"
-            End If
-
-            System.Threading.Tasks.Task.Run(Async Function()
-                                                Try
-                                                    Await StopRecording()
-                                                    If STTModel = "google" Then StopApiWatchdogTimer()
-                                                Catch ex As System.Exception
-                                                    ' Silently handle exceptions during cleanup
-                                                End Try
-
-                                                Me.Invoke(Sub()
-                                                              Me.StartButton.Enabled = True
-                                                              Me.LoadButton.Enabled = True
-                                                              Me.AudioButton.Enabled = True
-                                                              Me.cultureComboBox.Enabled = True
-                                                              Me.deviceComboBox.Enabled = True
-                                                              Me.SpeakerIdent.Enabled = True
-                                                              Me.SpeakerDistance.Enabled = True
-
-                                                              If STTModel = "vosk" Then
-                                                                  Addline(PartialTextLabel.Text)
-                                                              End If
-                                                              PartialTextLabel.Text = String.Empty
-                                                          End Sub)
-                                            End Function)
-
-            capturing = False
-
         End Sub
 
-        ''' <summary>
-        ''' Handles Clear button click. Clears all transcript text from RichTextBox.
-        ''' </summary>
-        Private Sub ClearButton_Click(sender As Object, e As EventArgs)
-            RichTextBox1.Invoke(Sub()
-                                    RichTextBox1.Text = ""
-                                    RichTextBox1.SelectionStart = RichTextBox1.Text.Length
-                                    RichTextBox1.ScrollToCaret()
-                                End Sub)
+            AddHandler eng.EngineError,
+        Sub(s, ev)
+            LogSttError(_currentEngineDisplayName, ev.Message, ev.Exception)
+            SetLiveState(GetFriendlySttErrorText(_currentEngineDisplayName, ev.Message))
         End Sub
 
-        ''' <summary>
-        ''' Handles form closing event. If transcription is active, stops recording before closing.
-        ''' </summary>
-        Private Sub FormClosing(sender As Object, e As FormClosingEventArgs) Handles Me.Closing
-
-            If e.CloseReason = CloseReason.UserClosing Then
-                If capturing Then
-
-                    STTCanceled = True
-
-                    Me.StopButton.Enabled = False
-                    Me.AudioButton.Enabled = False
-                    Me.QuitButton.Enabled = False
-                    If STTModel <> "vosk" Then
-                        PartialTextLabel.Text = "Stopping…"
-                    End If
-
-                    System.Threading.Tasks.Task.Run(Async Function()
-                                                        Try
-                                                            Await StopRecording()
-                                                            If STTModel = "google" Then StopApiWatchdogTimer()
-                                                        Catch ex As System.Exception
-                                                            ' Silently handle exceptions during cleanup
-                                                        End Try
-
-                                                        Me.Invoke(Sub()
-                                                                      Me.StartButton.Enabled = False
-                                                                      Me.LoadButton.Enabled = False
-
-                                                                      If STTModel = "vosk" Then
-                                                                          Addline(PartialTextLabel.Text)
-                                                                      End If
-                                                                      PartialTextLabel.Text = String.Empty
-                                                                  End Sub)
-                                                    End Function)
-
-                    capturing = False
-
+            AddHandler eng.Status,
+        Sub(s, ev)
+            If String.IsNullOrWhiteSpace(_lastPartialText) Then
+                Dim friendly As String = GetFriendlyStatusText(_currentEngineDisplayName, ev.Message)
+                If Not String.IsNullOrWhiteSpace(friendly) Then
+                    SetLiveState(friendly)
                 End If
             End If
         End Sub
-
-        ''' <summary>
-        ''' Handles Audio button click. Opens audio output device configuration dialog.
-        ''' </summary>
-        Private Sub AudioButton_Click(sender As Object, e As EventArgs)
-            ConfigureAudioOutputDevice()
         End Sub
 
-        ''' <summary>
-        ''' Handles Quit button click. Stops recording if active and closes the form.
-        ''' </summary>
-        Private Sub QuitButton_Click(sender As Object, e As EventArgs)
-
-            If capturing Then
-
-                STTCanceled = True
-
-                Me.StopButton.Enabled = False
-                Me.AudioButton.Enabled = False
-                Me.QuitButton.Enabled = False
-                If STTModel <> "vosk" Then
-                    PartialTextLabel.Text = "Stopping…"
-                End If
-
-                System.Threading.Tasks.Task.Run(Async Function()
-                                                    Try
-                                                        Await StopRecording()
-                                                    Catch ex As System.Exception
-                                                        ' Silently handle exceptions during cleanup
-                                                    End Try
-
-                                                    Me.Invoke(Sub()
-                                                                  Me.StartButton.Enabled = False
-                                                                  Me.LoadButton.Enabled = False
-
-                                                                  If STTModel = "vosk" Then
-                                                                      Addline(PartialTextLabel.Text)
-                                                                  End If
-                                                                  PartialTextLabel.Text = String.Empty
-                                                              End Sub)
-                                                End Function)
-
-                capturing = False
-
+        Private Sub ToggleCaptureUi(capturing As Boolean)
+            If Me.IsDisposed Then
+                Return
             End If
-            Me.Close()
+
+            If Me.InvokeRequired Then
+                Try
+                    Me.BeginInvoke(New Action(Of Boolean)(AddressOf ToggleCaptureUi), capturing)
+                Catch
+                End Try
+                Return
+            End If
+
+            Dim busy As Boolean = capturing OrElse _capturing OrElse _fileTranscribing OrElse _isStopping
+
+            btnStart.Enabled = Not busy
+            btnStop.Enabled = _capturing OrElse _fileTranscribing
+            btnStop.Text = If(_fileTranscribing, "Cancel", "Stop")
+            btnLoad.Enabled = Not busy
+            btnOptions.Enabled = Not busy
+            cboEngine.Enabled = Not busy
+            cboLang.Enabled = Not busy
+            cboDevice.Enabled = Not busy
         End Sub
 
-        ''' <summary>
-        ''' Handles Load button click. Prompts user to select an audio file and transcribes it using selected STT engine.
-        ''' Supports WAV, MP3, AAC, M4A, MP4, and WMA formats. For Google STT, offers choice between chunked and streaming modes.
-        ''' </summary>
-        Private Async Sub LoadButton_Click(sender As Object, e As EventArgs)
-            If capturing Then Return
+        Private Sub AcquireSleepLock()
+            Dim prev As UInteger = SetThreadExecutionState(ES_CONTINUOUS Or ES_SYSTEM_REQUIRED)
+            _setSleepLock = ((prev And ES_SYSTEM_REQUIRED) = 0)
+        End Sub
 
-            Dim filepath As String = ""
+        Private Sub ReleaseSleepLock()
+            If _setSleepLock Then
+                SetThreadExecutionState(ES_CONTINUOUS)
+                _setSleepLock = False
+            End If
+        End Sub
 
-            DragDropFormLabel = "Supported are audio files (*.wav, *.mp3, *.aac, *.m4a, *.mp4 and *.wma)"
-            DragDropFormFilter = "Supported Files|*.wav;*.mp3;*.aac;*.m4a;*.mp4;*.wma|" &
-                     "Wave files (*.wav)|*.wav|" &
-                     "MP3 files (*.mp3)|*.mp3|" &
-                     "AAC files (*.aac, *.m4a, *.mp4)|*.aac;*.m4a;*.mp4|" &
-                     "WMA files (*.wma)|*.wma|" &
-                     "All files|*.*"
+        Private Sub LoadAndPopulatePrompts(filePath As String, combo As ComboBox)
+            _promptTitles.Clear()
+            _promptBodies.Clear()
+            combo.Items.Clear()
 
-            Using form As New DragDropForm()
-
-                If form.ShowDialog() = DialogResult.OK Then
-                    DragDropFormLabel = ""
-                    DragDropFormFilter = ""
-                    filepath = form.SelectedFilePath
-                    If Not File.Exists(filepath) Then
-                        ShowCustomMessageBox("The selected file was not found.")
-                        Return
-                    End If
-                Else
-                    DragDropFormLabel = ""
-                    DragDropFormFilter = ""
+            Try
+                Dim path As String = ExpandEnvironmentVariables(filePath)
+                If Not File.Exists(path) Then
                     Return
                 End If
-            End Using
-            DragDropFormLabel = ""
-            DragDropFormFilter = ""
 
-            Dim splash As New SLib.SplashScreen($"Loading model...")
-            splash.Show()
-            splash.Refresh()
-
-            cts = New CancellationTokenSource()
-            STTCanceled = False
-            audioBuffer.Clear()
-
-            Try
-                ' Determine STT model from selected combo box item
-                If Me.cultureComboBox.SelectedItem.ToString().StartsWith(GoogleSTT_Desc) Then
-                    STTModel = "google"
-                ElseIf Me.cultureComboBox.SelectedItem.ToString().StartsWith("ggml") Then
-                    STTModel = "whisper"
-                Else
-                    STTModel = "vosk"
-                End If
-
-                Select Case STTModel
-
-                    Case "google"
-
-                        readerCts = New CancellationTokenSource()
-
-                        ' Ask user for language code
-                        Dim language As String = ShowSelectionForm("Select the language code you want to transcribe in:", $"{GoogleSTT_Desc}", GoogleSTTsupportedLanguages)
-
-                        language = language.Trim()
-
-                        If String.IsNullOrWhiteSpace(language) OrElse String.Equals(language, "ESC", StringComparison.OrdinalIgnoreCase) Then
-                            splash.Close()
-                            Return
-                        End If
-
-                        If Not GoogleSTTsupportedLanguages.Any(Function(code) code.Trim().Normalize().IndexOf(language, StringComparison.OrdinalIgnoreCase) = 0) Then
-                            splash.Close()
-                            ShowCustomMessageBox("This language code is not supported. Supported are: " & String.Join(", ", GoogleSTTsupportedLanguages))
-                            Return
-                        End If
-
-                        GoogleLanguageCode = language
-
-                    Case "vosk"
-                        StartVosk()
-
-                    Case "whisper"
-
-                        Dim language As String = ShowCustomInputBox("Enter the language ISO code you want Whisper to transcribe (e.g. en, de, fr, etc.) or go with 'auto':", "Whisper Language Code", True, "auto")
-
-                        language = language.ToLower()
-
-                        If String.IsNullOrWhiteSpace(language) Or language = "esc" Or Not WhisperSupportedLanguages.Contains(language.ToLower()) Then
-                            splash.Close()
-                            If Not WhisperSupportedLanguages.Contains(language.ToLower()) And language <> "esc" Then
-                                ShowCustomMessageBox("This language code is not supported. Supported are: Afrikaans (af), Albanian (sq), Amharic (am), Arabic (ar), Armenian (hy), Assamese (as), Azerbaijani (az), Bashkir (ba), Basque (eu), Belarusian (be), Bengali (bn), Bosnian (bs), Breton (br), Bulgarian (bg), Catalan (ca), Chinese (zh), Croatian (hr), Czech (cs), Danish (da), Dutch (nl), English (en), Estonian (et), Faroese (fo), Finnish (fi), French (fr), Galician (gl), Georgian (ka), German (de), Greek (el), Gujarati (gu), Haitian Creole (ht), Hausa (ha), Hebrew (he), Hindi (hi), Hungarian (hu), Icelandic (is), Indonesian (id), Italian (it), Japanese (ja), Javanese (jv), Kannada (kn), Kazakh (kk), Khmer (km), Kinyarwanda (rw), Kirghiz (ky), Korean (ko), Latvian (lv), Lithuanian (lt), Luxembourgish (lb), Macedonian (mk), Malagasy (mg), Malay (ms), Malayalam (ml), Maltese (mt), Maori (mi), Marathi (mr), Mongolian (mn), Myanmar (my), Nepali (ne), Norwegian (no), Occitan (oc), Pashto (ps), Persian (fa), Polish (pl), Portuguese (pt), Punjabi (pa), Romanian (ro), Russian (ru), Sanskrit (sa), Serbian (sr), Sindhi (sd), Sinhala (si), Slovak (sk), Slovenian (sl), Somali (so), Spanish (es), Sundanese (su), Swahili (sw), Swedish (sv), Tagalog (tl), Tajik (tg), Tamil (ta), Tatar (tt), Telugu (te), Thai (th), Turkish (tr), Ukrainian (uk), Urdu (ur), Uzbek (uz), Vietnamese (vi), Welsh (cy), Yiddish (yi), Yoruba (yo), Zulu (zu)")
-                            End If
-                            STTCanceled = True
-                            Return
-                        End If
-
-                        StartWhisper(language)
-                        STTCanceled = False
-                        PartialTextLabel.Invoke(Sub() PartialTextLabel.Text = "Whisper is listening and working... (no partial results shown, please wait)")
-
-                    Case Else
-                        splash.Close()
-                        ShowCustomMessageBox($"No valid model selected. Please select a model.")
-                        Return
-
-                End Select
-
-                ' Save user preferences
-                My.Settings.LastAudioSource = Me.deviceComboBox.SelectedItem.ToString()
-                My.Settings.LastSpeechModel = Me.cultureComboBox.SelectedItem.ToString()
-                My.Settings.LastSpeakerEnabled = Me.SpeakerIdent.Checked
-                similarityThreshold = Double.Parse(Me.SpeakerDistance.Text)
-                If STTModel = "google" Then
-                    If similarityThreshold < 1 Then similarityThreshold = 1.0
-                Else
-                    If similarityThreshold = 0 Then similarityThreshold = 1.0
-                    If similarityThreshold < 0.2 Then similarityThreshold = 0.2
-                    If similarityThreshold > 2.5 Then similarityThreshold = 2.5
-                End If
-                My.Settings.LastSpeakerDistance = similarityThreshold
-
-                My.Settings.Save()
-
-                capturing = True
-                Me.StartButton.Enabled = False
-                Me.cultureComboBox.Enabled = False
-                Me.deviceComboBox.Enabled = False
-                Me.SpeakerIdent.Enabled = False
-                Me.SpeakerDistance.Enabled = False
-                Me.StopButton.Enabled = True
-                Me.LoadButton.Enabled = False
-                Me.AudioButton.Enabled = False
-                splash.Close()
-
-                Select Case STTModel
-                    Case "google"
-                        googleTranscriptStart = RichTextBox1.TextLength
-                        Dim methodChoice As Integer = ShowCustomYesNoBox("Select your Google transcription method (you may have to try which one works better):", "Send chunks (faster)", "Stream (less gaps)")
-
-                        Debug.WriteLine("Choice = " & methodChoice)
-
-                        If methodChoice = 0 Then
-                            splash.Close()
-                            Return
-                        End If
-
-                        ' Close splash, UI is already disabled
-                        splash.Close()
-
-                        splash = New SLib.SplashScreen($"Transcribing file ...")
-                        splash.Show()
-                        splash.Refresh()
-
-                        Try
-
-                            ' Call chunking vs. streaming method
-                            If methodChoice = 1 Then
-                                Await GoogleChunkedTranscribeAudioFile(filepath)
-                            Else
-                                Await GoogleFileStreamTranscription(filepath)
-                            End If
-
-                        Catch ex As Exception
-                            splash.Close()
-                            ShowCustomMessageBox($"Error in Transcribing File using Google: {ex.Message}")
-                        Finally
-                            splash.Close()
-                            Me.Invoke(Sub()
-                                          capturing = False
-                                          StartButton.Enabled = True
-                                          StopButton.Enabled = False
-                                          LoadButton.Enabled = True
-                                          AudioButton.Enabled = True
-                                          cultureComboBox.Enabled = True
-                                          deviceComboBox.Enabled = True
-                                          SpeakerIdent.Enabled = True
-                                          SpeakerDistance.Enabled = True
-                                      End Sub)
-                        End Try
-
-                    Case "vosk"
-                        VoskTranscribeAudioFile(filepath)
-                    Case "whisper"
-                        WhisperTranscribeAudioFile(filepath)
-                        ShowCustomMessageBox($"Transcription using Whisper has started In the background. You can continue working. Do not quit Word. Press 'Stop' to stop transcription.")
-                End Select
-
-            Catch ex As Exception
-                splash.Close()
-                ShowCustomMessageBox($"There has been an Error starting the transcription engine (Error: {ex.Message}).")
-
-            End Try
-
-        End Sub
-
-        ''' <summary>
-        ''' Handles Process button click. Applies selected LLM prompt to transcript text (selection or entire document).
-        ''' Inserts processed result into Word document with markdown formatting.
-        ''' </summary>
-        Private Async Sub ProcessButton_Click(sender As Object, e As EventArgs)
-            If processCombobox.SelectedIndex >= 0 Then
-                Dim selectedIndex As Integer = processCombobox.SelectedIndex
-                If selectedIndex < TranscriptPromptsLibrary.Count Then
-                    Dim OtherPrompt As String = TranscriptPromptsLibrary(selectedIndex)
-                    Dim SelectedText As String = ""
-                    If String.IsNullOrWhiteSpace(RichTextBox1.SelectedText) Then
-                        SelectedText = RichTextBox1.Text
-                    Else
-                        SelectedText = RichTextBox1.SelectedText
+                For Each line As String In File.ReadAllLines(path)
+                    Dim t As String = line.Trim()
+                    If String.IsNullOrEmpty(t) OrElse t.StartsWith(";") Then
+                        Continue For
                     End If
 
-                    Dim LLMResult As String = Await LLM(OtherPrompt & " (Current Date: " & DateTime.Now.ToString("dd MMM yyyy", CultureInfo.GetCultureInfo("en-US")) & ")", SelectedText, "", "", 0, False)
-
-                    Dim wordApp As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
-                    Dim selection As Microsoft.Office.Interop.Word.Selection = wordApp.Selection
-
-                    If wordApp.Documents.Count > 0 Then
-                        ' Collapse any existing selection towards the end
-                        selection.Collapse(Word.WdCollapseDirection.wdCollapseEnd)
-
-                        ' Insert the markdown text
-                        InsertTextWithMarkdown(selection, LLMResult, True)
-                    End If
-                End If
-            End If
-        End Sub
-
-        ''' <summary>
-        ''' Enumerates available audio input devices and populates device combo box.
-        ''' Each device appears twice: once for microphone only, once for mic + system audio.
-        ''' Pre-selects last used device from settings.
-        ''' </summary>
-        Private Sub LoadAudioDevices()
-            deviceComboBox.Items.Clear()
-            Dim i As Integer = 0
-            For i = 0 To WaveInEvent.DeviceCount - 1
-                Dim capabilities = WaveInEvent.GetCapabilities(i)
-                Dim micName As String = $"{i}: {capabilities.ProductName}"
-                ' a) plain mic
-                deviceComboBox.Items.Add(micName)
-                ' b) mic + system audio
-                deviceComboBox.Items.Add($"{micName} (plus audio output)")
-            Next
-
-            ' Select default device (if available)
-            Dim lastAudioSource As String = My.Settings.LastAudioSource
-            If Not String.IsNullOrEmpty(lastAudioSource) AndAlso deviceComboBox.Items.Contains(lastAudioSource) Then
-                deviceComboBox.SelectedItem = lastAudioSource
-            ElseIf deviceComboBox.Items.Count > 0 Then
-                deviceComboBox.SelectedIndex = 0
-            End If
-            Dim sel = TryCast(deviceComboBox.SelectedItem, String)
-            _multiSourceSelected = (sel IsNot Nothing AndAlso sel.EndsWith("(plus audio output)"))
-        End Sub
-
-        ''' <summary>
-        ''' Initializes Vosk speech recognizer with selected model and optional speaker recognition.
-        ''' Configures recognizer for optimal real-time performance with word timestamps and partial results.
-        ''' </summary>
-        Private Sub StartVosk()
-            Dim modelpath As String = System.IO.Path.Combine(ExpandEnvironmentVariables(Globals.ThisAddIn.INI_SpeechModelPath), Me.cultureComboBox.SelectedItem.ToString())
-            Dim model As New Model(modelpath)
-            recognizer = New VoskRecognizer(model, 16000.0F)
-            If Me.SpeakerIdent.Checked Then
-                ' Get the first available speaker model in the directory
-                Dim speakerModelPath As String = System.IO.Directory.GetDirectories(System.IO.Path.Combine(ExpandEnvironmentVariables(Globals.ThisAddIn.INI_SpeechModelPath), "Speaker\"), "vosk-model*").FirstOrDefault()
-                If String.IsNullOrEmpty(speakerModelPath) Then
-                    ShowCustomMessageBox($"No speaker model found (at {System.IO.Path.Combine(ExpandEnvironmentVariables(Globals.ThisAddIn.INI_SpeechModelPath), "Speaker\")}. Speaker recognition will be disabled.")
-                    Me.SpeakerIdent.Checked = False
-                Else
-                    Dim speakerModel As SpkModel = New SpkModel(speakerModelPath)
-                    recognizer.SetSpkModel(speakerModel)
-                End If
-
-                Debug.WriteLine("Vosk recognizer initialized")
-            End If
-
-            recognizer.SetMaxAlternatives(0) ' Forces earlier finalization
-            recognizer.SetWords(True) ' Enable word timestamps
-            recognizer.SetPartialWords(True) ' Partial words emitted faster
-        End Sub
-
-        ''' <summary>
-        ''' Initializes Whisper speech processor with selected GGML model and optional translation.
-        ''' Configures processor with language, thread count, voice detection threshold, and temperature settings.
-        ''' </summary>
-        ''' <param name="language">ISO 639-1 language code or "auto" for automatic detection</param>
-        Private Sub StartWhisper(Optional language As String = "auto")
-            Dim modelpath As String = System.IO.Path.Combine(
-        ExpandEnvironmentVariables(Globals.ThisAddIn.INI_SpeechModelPath),
-        Me.cultureComboBox.SelectedItem.ToString())
-
-            Dim factory As WhisperFactory = WhisperFactory.FromPath(modelpath)
-
-            ' Clamp to a Whisper-valid range. Treat 1.0 (Vosk default) as "use Whisper default 0.6".
-            Dim vad As Single = 0.6F
-            Dim parsed As Single
-            If Single.TryParse(Me.SpeakerDistance.Text, parsed) Then
-                If parsed > 0F AndAlso parsed < 1.0F Then vad = parsed
-            End If
-
-            Dim builder = factory.CreateBuilder() _
-        .WithLanguage(language) _
-        .WithThreads(Environment.ProcessorCount) _
-        .WithNoSpeechThreshold(vad) _
-        .WithTemperature(0.3)
-
-            If Me.SpeakerIdent.Checked Then builder = builder.WithTranslate()
-            WhisperRecognizer = builder.Build()
-        End Sub
-
-        ''' <summary>
-        ''' Initializes Google Cloud Speech-to-Text streaming session with OAuth2 authentication.
-        ''' Creates bidirectional gRPC stream with token refresh interceptor and initializes writer task.
-        ''' </summary>
-        Private Async Function StartGoogleSTT() As System.Threading.Tasks.Task
-            ' 1) Define interceptor that fetches a fresh token for each new streaming call
-
-            Dim callCreds As Grpc.Core.CallCredentials = Grpc.Core.CallCredentials.FromInterceptor(
-            Async Function(contextCall, metadata)
-                ' Use our local helper instead of context.GetFresh...
-                Dim tokenToSend As String = Await GetFreshSTTToken(STTSecondAPI)
-                metadata.Add("Authorization", $"Bearer {tokenToSend}")
-                Await System.Threading.Tasks.Task.CompletedTask
-            End Function
-        )
-
-            ' 2) Build ChannelCredentials with Secure SSL + our interceptor
-            Dim channelCreds As Grpc.Core.ChannelCredentials = Grpc.Core.ChannelCredentials.Create(
-                    Grpc.Core.ChannelCredentials.SecureSsl,
-                    callCreds
-                )
-
-            ' 3) Create a brand new SpeechClient using the above channelCreds
-            Dim builder As New Google.Cloud.Speech.V1.SpeechClientBuilder() With {
-                    .Endpoint = STTEndpoint,
-                    .ChannelCredentials = channelCreds
-                }
-            client = builder.Build()
-
-            ' 4) Open streaming connection with InitializeGoogleStream()
-            ' This calls "_stream = client.StreamingRecognize() ..." in the background and sends
-            ' StreamingConfig via WriteAsync. The interceptor becomes active on first WriteAsync.
-            Await InitializeGoogleStream()
-
-            SyncLock ringBuffer
-                ringBuffer.Clear()
-            End SyncLock
-
-            StartAudioQueueWriter()
-
-        End Function
-
-        ''' <summary>
-        ''' Resets the Google stream completion flag to allow new streaming sessions.
-        ''' </summary>
-        Private Sub ResetGoogleStreamFlag()
-            _googleStreamCompleted = False
-        End Sub
-
-        ''' <summary>
-        ''' Initializes bidirectional Google STT streaming with recognition configuration.
-        ''' Configures audio encoding, language, punctuation, and optional speaker diarization.
-        ''' Falls back to basic config if diarization fails for selected language.
-        ''' </summary>
-        Private Async Function InitializeGoogleStream() As System.Threading.Tasks.Task
-
-            streamingStartTime = DateTime.UtcNow
-            ResetGoogleStreamFlag()
-
-            Try
-                ' Open bidirectional streaming
-
-                If Me.SpeakerIdent.Checked Then
-
-                    Dim minSpeakers As Integer = 2
-                    Dim maxSpeakers As Integer = 6 ' Default maximum, adjust if needed
-
-                    ' Try to read values from UI with safe defaults
-                    Try
-                        ' Assumption: SpeakerDistance is now MaxCount and a new TextField is MinCount
-                        maxSpeakers = CInt(Double.Parse(Me.SpeakerDistance.Text))
-                    Catch
-                        ' Use default values on error
-                    End Try
-
-                    ' Limit values to Google-supported range
-                    minSpeakers = System.Math.Max(2, minSpeakers)
-                    maxSpeakers = System.Math.Max(minSpeakers, maxSpeakers)
-
-                    _stream = client.StreamingRecognize()
-                    Dim streamingConfig As New StreamingRecognitionConfig With {
-                .Config = New RecognitionConfig With {
-                    .Encoding = RecognitionConfig.Types.AudioEncoding.Linear16,
-                    .SampleRateHertz = 16000,
-                    .LanguageCode = GoogleLanguageCode,
-                    .EnableAutomaticPunctuation = True,
-                    .EnableSpokenPunctuation = True,
-                    .EnableWordTimeOffsets = False,
-                    .EnableWordConfidence = False,
-                    .Model = "latest_long",
-                    .UseEnhanced = True,
-                    .DiarizationConfig = New SpeakerDiarizationConfig With {
-                        .EnableSpeakerDiarization = Me.SpeakerIdent.Checked,
-                                .MinSpeakerCount = minSpeakers,
-                            .MaxSpeakerCount = maxSpeakers
-                                                    }
-                },
-                .InterimResults = True,
-                .SingleUtterance = False
-            }
-                    Await _stream.WriteAsync(New StreamingRecognizeRequest With {.StreamingConfig = streamingConfig})
-
-                Else
-                    _stream = client.StreamingRecognize()
-                    Dim streamingConfig As New StreamingRecognitionConfig With {
-            .Config = New RecognitionConfig With {
-                .Encoding = RecognitionConfig.Types.AudioEncoding.Linear16,
-                .SampleRateHertz = 16000,
-                .LanguageCode = GoogleLanguageCode,
-                .EnableAutomaticPunctuation = True,
-                    .EnableSpokenPunctuation = True,
-                    .EnableWordTimeOffsets = False,
-                    .EnableWordConfidence = False,
-                    .Model = "latest_long",
-                    .UseEnhanced = True
-                        },
-                        .InterimResults = True,
-                        .SingleUtterance = False
-                    }
-                    Await _stream.WriteAsync(New StreamingRecognizeRequest With {.StreamingConfig = streamingConfig})
-                End If
-
-            Catch ex As System.Exception
-
-                ShowCustomMessageBox("No speaker diarization available for this language (or other error).", $"{GoogleSTT_Desc} Language Code")
-                _stream = client.StreamingRecognize()
-                Dim streamingConfig As New StreamingRecognitionConfig With {
-        .Config = New RecognitionConfig With {
-            .Encoding = RecognitionConfig.Types.AudioEncoding.Linear16,
-            .SampleRateHertz = 16000,
-            .LanguageCode = GoogleLanguageCode
-                    },
-                    .InterimResults = True
-                }
-                _stream.WriteAsync(New StreamingRecognizeRequest With {.StreamingConfig = streamingConfig}).Wait()
-
-            End Try
-
-        End Function
-
-        ''' <summary>
-        ''' Handles Start button click for real-time transcription.
-        ''' Loads selected STT model, prompts for language (if needed), starts recording, and begins transcription.
-        ''' Validates language codes and prevents duplicate starts. Enables watchdog timer for Google STT.
-        ''' </summary>
-        Private Async Sub StartButton_Click(sender As Object, e As EventArgs)
-
-            If capturing Then
-                Return
-            End If
-
-            Dim splash As New SLib.SplashScreen($"Loading model...")
-            splash.Show()
-            splash.Refresh()
-
-            cts = New CancellationTokenSource()
-            STTCanceled = False
-            audioBuffer.Clear()
-
-            Try
-                ' Determine STT model from selected combo box item
-                If Me.cultureComboBox.SelectedItem.ToString().StartsWith(GoogleSTT_Desc) Then
-                    STTModel = "google"
-                ElseIf Me.cultureComboBox.SelectedItem.ToString().StartsWith("ggml") Then
-                    STTModel = "whisper"
-                Else
-                    STTModel = "vosk"
-                End If
-
-                Select Case STTModel
-
-                    Case "google"
-
-                        readerCts = New CancellationTokenSource()
-
-                        Dim language As String = ShowSelectionForm("Select the language code you want to transcribe in:", $"{GoogleSTT_Desc}", GoogleSTTsupportedLanguages)
-
-                        language = language.Trim()
-
-                        ' First handle empty or escape
-                        If String.IsNullOrWhiteSpace(language) OrElse String.Equals(language, "esc", StringComparison.OrdinalIgnoreCase) Then
-                            splash.Close()
-                            STTCanceled = True
-                            Return
-                        End If
-
-                        ' Now do a true case-insensitive lookup
-                        If Not GoogleSTTsupportedLanguages.Any(
-                        Function(code)
-                            Return String.Equals(code, language, StringComparison.OrdinalIgnoreCase)
-                        End Function) Then
-                            splash.Close()
-                            ShowCustomMessageBox("This language code is not supported. Supported are: " & String.Join(", ", GoogleSTTsupportedLanguages), $"{GoogleSTT_Desc} Language Code")
-                            STTCanceled = True
-                            Return
-                        End If
-
-                        Try
-                            GoogleLanguageCode = language
-                            Await StartGoogleSTT()
-                        Catch ex As System.Exception
-                            ShowCustomMessageBox("Error starting transcription service: {ex.Message}", $"{GoogleSTT_Desc}")
-                            STTCanceled = True
-                            Return
-                        End Try
-
-                        If Not StartRecording() Then
-                            splash.Close()
-                            Return
-                        End If
-
-                        googleTranscriptStart = RichTextBox1.TextLength
-
-                        _speakerTagToLabelMap.Clear()
-                        _nextSpeakerNumber = 1
-
-                        Me.googleReaderTask = StartGoogleReaderTask()
-
-                    Case "vosk"
-
-                        StartVosk()
-
-                        If Not StartRecording() Then
-                            splash.Close()
-                            Return
-                        End If
-
-                    Case "whisper"
-
-                        Dim language As String = ShowCustomInputBox("Enter the language ISO code you want Whisper to transcribe (e.g. en, de, fr, etc.) or go with 'auto':", "Whisper Language Code", True, "auto")
-
-                        language = language.ToLower()
-
-                        If String.IsNullOrWhiteSpace(language) Or language = "esc" Or Not WhisperSupportedLanguages.Contains(language.ToLower()) Then
-                            splash.Close()
-                            If Not WhisperSupportedLanguages.Contains(language.ToLower()) And language <> "esc" Then
-                                ShowCustomMessageBox("This language code is not supported. Supported are: Afrikaans (af), Albanian (sq), Amharic (am), Arabic (ar), Armenian (hy), Assamese (as), Azerbaijani (az), Bashkir (ba), Basque (eu), Belarusian (be), Bengali (bn), Bosnian (bs), Breton (br), Bulgarian (bg), Catalan (ca), Chinese (zh), Croatian (hr), Czech (cs), Danish (da), Dutch (nl), English (en), Estonian (et), Faroese (fo), Finnish (fi), French (fr), Galician (gl), Georgian (ka), German (de), Greek (el), Gujarati (gu), Haitian Creole (ht), Hausa (ha), Hebrew (he), Hindi (hi), Hungarian (hu), Icelandic (is), Indonesian (id), Italian (it), Japanese (ja), Javanese (jv), Kannada (kn), Kazakh (kk), Khmer (km), Kinyarwanda (rw), Kirghiz (ky), Korean (ko), Latvian (lv), Lithuanian (lt), Luxembourgish (lb), Macedonian (mk), Malagasy (mg), Malay (ms), Malayalam (ml), Maltese (mt), Maori (mi), Marathi (mr), Mongolian (mn), Myanmar (my), Nepali (ne), Norwegian (no), Occitan (oc), Pashto (ps), Persian (fa), Polish (pl), Portuguese (pt), Punjabi (pa), Romanian (ro), Russian (ru), Sanskrit (sa), Serbian (sr), Sindhi (sd), Sinhala (si), Slovak (sk), Slovenian (sl), Somali (so), Spanish (es), Sundanese (su), Swahili (sw), Swedish (sv), Tagalog (tl), Tajik (tg), Tamil (ta), Tatar (tt), Telugu (te), Thai (th), Turkish (tr), Ukrainian (uk), Urdu (ur), Uzbek (uz), Vietnamese (vi), Welsh (cy), Yiddish (yi), Yoruba (yo), Zulu (zu)")
-                            End If
-                            STTCanceled = True
-                            Return
-                        End If
-                        StartWhisper(language)
-
-                        If Not StartRecording() Then
-                            splash.Close()
-                            STTCanceled = True
-                            Return
-                        End If
-                        STTCanceled = False
-
-                        PartialTextLabel.Invoke(Sub() PartialTextLabel.Text = "Whisper is listening and working... (no partial results shown, please wait)")
-                    Case Else
-                        splash.Close()
-                        ShowCustomMessageBox($"No valid model selected. Please select a model.")
-                        Return
-
-                End Select
-
-                ' Save user preferences
-                My.Settings.LastAudioSource = Me.deviceComboBox.SelectedItem.ToString()
-                My.Settings.LastSpeechModel = Me.cultureComboBox.SelectedItem.ToString()
-                My.Settings.LastSpeakerEnabled = Me.SpeakerIdent.Checked
-                similarityThreshold = Double.Parse(Me.SpeakerDistance.Text)
-                If STTModel = "google" Then
-                    If similarityThreshold < 1 Then similarityThreshold = 1.0
-                Else
-                    If similarityThreshold = 0 Then similarityThreshold = 1.0
-                    If similarityThreshold < 0.2 Then similarityThreshold = 0.2
-                    If similarityThreshold > 2.5 Then similarityThreshold = 2.5
-                End If
-                My.Settings.LastSpeakerDistance = similarityThreshold
-
-                My.Settings.Save()
-
-                If STTModel = "google" Then StartApiWatchdogTimer()
-
-                capturing = True
-                Me.StartButton.Enabled = False
-                Me.cultureComboBox.Enabled = False
-                Me.deviceComboBox.Enabled = False
-                Me.SpeakerIdent.Enabled = False
-                Me.SpeakerDistance.Enabled = False
-                Me.StopButton.Enabled = True
-                Me.LoadButton.Enabled = False
-                Me.AudioButton.Enabled = False
-                splash.Close()
-
-            Catch ex As Exception
-                splash.Close()
-                ShowCustomMessageBox($"There has been an error starting the transcription engine (Error: {ex.Message}).")
-
-            End Try
-        End Sub
-
-        ''' <summary>
-        ''' Starts audio recording from selected microphone with optional system audio mixing.
-        ''' Configures WaveInEvent and optional WasapiLoopbackCapture with resampling.
-        ''' Prevents system sleep during recording and assigns appropriate event handlers based on STT engine.
-        ''' </summary>
-        ''' <returns>True if recording started successfully, False if device selection is invalid</returns>
-        Private Function StartRecording() As Boolean
-
-            Dim ss As String = TryCast(Me.deviceComboBox.SelectedItem, String)
-            Dim deviceIndex As Integer
-
-            ' Parse device index from selection string (format: "0: Device Name")
-            Dim pos As Integer = If(ss?.IndexOf(":"c), -1)
-            If pos < 0 OrElse Not Integer.TryParse(ss.Substring(0, pos), deviceIndex) Then
-                ShowCustomMessageBox($"Invalid device selection: '{ss}'")
-                Return False
-            End If
-
-            ' Configure microphone capture with 16 kHz mono format (required by all STT engines)
-            waveIn = New WaveInEvent() With {
-            .DeviceNumber = deviceIndex,
-            .WaveFormat = New WaveFormat(16000, 1)
-        }
-
-            ' Set up system audio loopback capture if multi-source is enabled
-            If MultiSourceEnabled Then
-
-                ' Attempt to use the output device configured in settings
-                Dim audioOutputDeviceId As String = My.Settings.AudioOutputDevice
-                Dim chosenDevice As MMDevice = Nothing
-
-                If Not String.IsNullOrEmpty(audioOutputDeviceId) Then
-                    Try
-                        Dim enumerator As New MMDeviceEnumerator()
-                        chosenDevice = enumerator.GetDevice(audioOutputDeviceId)
-                    Catch ex As System.Exception
-                        ' Invalid ID or device not found → fallback to default
-                        chosenDevice = Nothing
-                    End Try
-                End If
-
-                ' 1) Create LoopbackCapture with specific device or default
-                If chosenDevice IsNot Nothing Then
-                    loopbackCapture = New WasapiLoopbackCapture(chosenDevice)
-                Else
-                    loopbackCapture = New WasapiLoopbackCapture()
-                End If
-
-                ' 2) Raw provider in native format (will be resampled later)
-                loopbackRawProvider = New BufferedWaveProvider(loopbackCapture.WaveFormat) With {
-                        .DiscardOnBufferOverflow = True
-                    }
-                AddHandler loopbackCapture.DataAvailable, Sub(s, ev)
-                                                              loopbackRawProvider.AddSamples(ev.Buffer, 0, ev.BytesRecorded)
-                                                          End Sub
-
-                ' 3) Resample from native format → microphone format (16 kHz mono 16-bit)
-                loopbackResampler = New MediaFoundationResampler(loopbackRawProvider, waveIn.WaveFormat) With {
-                    .ResamplerQuality = 60
-                }
-
-                ' 4) Start loopback recording
-                Try
-                    loopbackCapture.StartRecording()
-                Catch ex As System.Exception
-                    ' Device possibly in exclusive use → fallback to mic-only mode
-                    ShowCustomMessageBox("Cannot capture system audio: Device is in exclusive use or invalid. Continuing with mic only.")
-                    loopbackCapture.Dispose()
-                    loopbackCapture = Nothing
-                    loopbackResampler?.Dispose()
-                    loopbackResampler = Nothing
-                    loopbackRawProvider = Nothing
-                End Try
-            End If
-
-            ' Assign appropriate data handler based on selected STT engine
-            If STTModel = "google" Then
-                AddHandler waveIn.DataAvailable, AddressOf OnGoogleDataAvailable
-            Else
-                AddHandler waveIn.DataAvailable, AddressOf OnAudioDataAvailable
-            End If
-            waveIn.StartRecording()
-
-            ' Request system stay awake during transcription
-            ' The function returns the PREVIOUS execution state
-            Dim previousState As UInteger = SetThreadExecutionState(ES_CONTINUOUS Or ES_SYSTEM_REQUIRED)
-
-            ' Check if the SYSTEM_REQUIRED flag was already set before our call
-            ' Using bitwise AND: if result is 0, the flag was NOT set
-            If (previousState And ES_SYSTEM_REQUIRED) = 0 Then
-                ' Lock was NOT active before, therefore WE are responsible for releasing it
-                _iSetTheSleepLock = True
-                Debug.WriteLine("Sleep lock was not active. This form has now acquired it.")
-            Else
-                ' Lock was ALREADY active, we are not responsible for releasing it
-                _iSetTheSleepLock = False
-                Debug.WriteLine("Sleep lock was already active. This form will not release it.")
-            End If
-
-            Return True
-
-        End Function
-
-        ''' <summary>
-        ''' Starts the Google STT API watchdog timer that monitors for unresponsive streams.
-        ''' Timer fires every 1 second and triggers recovery if no API response received within timeout period.
-        ''' </summary>
-        Private Sub StartApiWatchdogTimer()
-            ' Initialize the last response time to now
-            System.Threading.Interlocked.Exchange(_lastApiResponseTicks, DateTime.UtcNow.Ticks)
-
-            ' Dispose of any existing timer to prevent orphans
-            _apiWatchdogTimer?.Dispose()
-
-            ' Create a new timer that calls CheckApiResponse every 1000ms (1 second)
-            _apiWatchdogTimer = New System.Threading.Timer(
-                                AddressOf CheckApiResponse,
-                                Nothing,
-                                TimeSpan.FromSeconds(1),
-                                TimeSpan.FromSeconds(1)
-                            )
-        End Sub
-
-        ''' <summary>
-        ''' Stops and disposes the Google STT API watchdog timer.
-        ''' </summary>
-        Private Sub StopApiWatchdogTimer()
-            _apiWatchdogTimer?.Dispose()
-            _apiWatchdogTimer = Nothing
-        End Sub
-
-        ''' <summary>
-        ''' Watchdog timer callback that detects Google API unresponsiveness and triggers recovery.
-        ''' Fires every 1 second and checks if API has responded within the configured timeout period.
-        ''' If timeout exceeded, stops timer and initiates stream recovery.
-        ''' </summary>
-        ''' <param name="state">Timer state (unused)</param>
-        Private Sub CheckApiResponse(state As Object)
-            ' If not capturing or recovery already in progress, do nothing
-            If Not capturing OrElse recoverySemaphore.CurrentCount = 0 Then
-                Return
-            End If
-
-            ' Atomically read the last response time
-            Dim lastResponseTime As New DateTime(System.Threading.Interlocked.Read(_lastApiResponseTicks))
-
-            ' Check if elapsed time has exceeded our timeout
-            If (DateTime.UtcNow - lastResponseTime).TotalSeconds > API_RESPONSE_TIMEOUT_SECONDS Then
-                ' API has not responded in time - stream is likely hung
-                Debug.WriteLine($"[ApiWatchdog] No API response for >{API_RESPONSE_TIMEOUT_SECONDS}s. Forcing stream recovery.")
-
-                ' Stop the timer to prevent re-triggering during recovery
-                StopApiWatchdogTimer()
-
-                ' Use existing thread-safe recovery method to restart the stream
-                ' Watchdog will be restarted after recovery completes
-                System.Threading.Tasks.Task.Run(Async Sub() Await TryRecoverGoogleStreamAsync())
-            End If
-        End Sub
-
-        ''' <summary>
-        ''' Starts Google STT streaming reader task that processes transcription responses.
-        ''' Handles both final and interim results, applies speaker diarization when enabled,
-        ''' and manages duplicate detection after stream recovery.
-        ''' Updates watchdog timestamp on every API response.
-        ''' </summary>
-        ''' <returns>Background task that reads from Google's response stream</returns>
-        Private Function StartGoogleReaderTask() As System.Threading.Tasks.Task
-            ' Cancel any existing reader task
-            If readerCts IsNot Nothing Then
-                Try
-                    readerCts.Cancel()
-                Catch
-                    ' Silently ignore cancellation errors
-                End Try
-            End If
-
-            readerCts = New CancellationTokenSource()
-
-            Dim newTask = System.Threading.Tasks.Task.Run(
-                            Async Sub()
-                                Dim token = readerCts.Token
-                                Try
-                                    Dim enumerator = _stream.GetResponseStream().GetAsyncEnumerator(token)
-
-                                    While Await enumerator.MoveNextAsync()
-                                        ' Update watchdog timestamp for every API response
-                                        System.Threading.Interlocked.Exchange(_lastApiResponseTicks, DateTime.UtcNow.Ticks)
-
-                                        For Each result In enumerator.Current.Results
-                                            If result.IsFinal Then
-                                                ' Process final transcription result
-                                                If result.Alternatives.Count > 0 Then
-                                                    Dim bestAlternative = result.Alternatives(0)
-                                                    Dim finalTranscript As String = bestAlternative.Transcript.Trim()
-                                                    _lastKnownPartialResult = ""
-
-                                                    ' Check if this is a duplicate of a partial result committed during recovery
-                                                    If Not String.IsNullOrEmpty(_justCommittedPartialText) AndAlso
-                                                       String.Equals(finalTranscript, _justCommittedPartialText.Trim(), StringComparison.OrdinalIgnoreCase) Then
-
-                                                        ' This is a duplicate - ignore it
-                                                        Debug.WriteLine($"[ReaderTask] Ignoring duplicate final result: '{finalTranscript}'")
-                                                        _justCommittedPartialText = ""
-
-                                                    Else
-                                                        ' This is a new, valid final result
-                                                        _justCommittedPartialText = ""
-
-                                                        ' Apply speaker diarization formatting if enabled
-                                                        If Me.SpeakerIdent.Checked AndAlso bestAlternative.Words.Count > 0 Then
-
-                                                            Dim currentSegment As New System.Text.StringBuilder()
-                                                            ' Get label for the first word's speaker
-                                                            Dim currentSpeakerLabel As String = GetSpeakerLabel(bestAlternative.Words(0).SpeakerTag)
-
-                                                            For Each wordInfo In bestAlternative.Words
-                                                                Dim wordSpeakerLabel As String = GetSpeakerLabel(wordInfo.SpeakerTag)
-
-                                                                If wordSpeakerLabel <> currentSpeakerLabel Then
-                                                                    ' Speaker changed - commit previous speaker's segment
-                                                                    Dim segmentToCommit As String = $"{currentSpeakerLabel}: {currentSegment.ToString().Trim()}"
-                                                                    Addline(segmentToCommit)
-
-                                                                    ' Start new segment for new speaker
-                                                                    currentSegment.Clear()
-                                                                    currentSpeakerLabel = wordSpeakerLabel
-                                                                End If
-
-                                                                ' Append current word to segment
-                                                                currentSegment.Append(wordInfo.Word & " ")
-                                                            Next
-
-                                                            ' Commit final segment after loop
-                                                            If currentSegment.Length > 0 Then
-                                                                Dim finalSegmentToCommit As String = $"{currentSpeakerLabel}: {currentSegment.ToString().Trim()}"
-                                                                Addline(finalSegmentToCommit)
-                                                            End If
-                                                        Else
-                                                            ' Standard non-diarization logic
-                                                            Addline(finalTranscript)
-                                                        End If
-                                                    End If
-                                                End If
-                                            Else
-                                                ' Process interim (partial) result
-                                                If result.Alternatives.Count > 0 Then
-                                                    Dim partialTranscript = result.Alternatives(0).Transcript
-                                                    PartialTextLabel.Invoke(Sub() PartialTextLabel.Text = partialTranscript)
-                                                    _lastKnownPartialResult = partialTranscript
-                                                End If
-                                            End If
-                                        Next
-                                    End While
-
-                                Catch ex As OperationCanceledException
-                                    Debug.WriteLine($"[ReaderTask] Gracefully cancelled via OperationCanceledException.")
-                                Catch rex As RpcException
-                                    If token.IsCancellationRequested OrElse rex.StatusCode = StatusCode.Cancelled Then
-                                        Debug.WriteLine($"[ReaderTask] Gracefully cancelled via RpcException (Status: {rex.StatusCode}).")
-                                    Else
-                                        Debug.WriteLine($"[ReaderTask] Unexpected RpcException (Status: {rex.StatusCode}). Requesting recovery...")
-                                        System.Threading.Tasks.Task.Run(Async Sub() Await TryRecoverGoogleStreamAsync())
-                                    End If
-                                Catch ex As Exception
-                                    Debug.WriteLine($"[ReaderTask] UNEXPECTED FATAL ERROR: {ex.ToString()}")
-                                End Try
-                            End Sub)
-            Return newTask
-        End Function
-
-        ''' <summary>
-        ''' Maps temporary Google speaker tags to consistent human-readable labels (Speaker 1, Speaker 2, etc.).
-        ''' Maintains session-wide speaker identity across stream recoveries.
-        ''' Automatically assigns new speaker numbers for previously unseen tags.
-        ''' </summary>
-        ''' <param name="speakerTag">Temporary speaker tag from Google API</param>
-        ''' <returns>Consistent speaker label for display</returns>
-        Private Function GetSpeakerLabel(speakerTag As Integer) As String
-            ' Check if we've already seen this tag in this session
-            If _speakerTagToLabelMap.ContainsKey(speakerTag) Then
-                ' Return the consistent label we already assigned
-                Return _speakerTagToLabelMap(speakerTag)
-            Else
-                ' This is a new speaker tag - assign it a new label
-                Dim newLabel As String = $"Speaker {_nextSpeakerNumber}"
-                _nextSpeakerNumber += 1
-
-                ' Store the mapping for future use
-                _speakerTagToLabelMap.Add(speakerTag, newLabel)
-
-                Return newLabel
-            End If
-        End Function
-
-        ''' <summary>
-        ''' Thread-safe wrapper for Google STT stream recovery.
-        ''' Commits any pending partial results before recovery, acquires recovery semaphore to prevent
-        ''' concurrent recovery attempts, and restarts watchdog timer after successful recovery.
-        ''' </summary>
-        Private Async Function TryRecoverGoogleStreamAsync() As System.Threading.Tasks.Task
-
-            ' Check if there is a pending partial result that needs to be committed
-            If Not String.IsNullOrWhiteSpace(_lastKnownPartialResult) Then
-                ' Create a copy to avoid race conditions
-                Dim partialToCommit As String = _lastKnownPartialResult
-
-                ' Reset the class-level variable immediately
-                _lastKnownPartialResult = ""
-                _justCommittedPartialText = partialToCommit
-
-                ' Use thread-safe Addline method to append to RichTextBox
-                Debug.WriteLine($"[TryRecover] Committing lost partial result: '{partialToCommit}'")
-                Addline(partialToCommit)
-            End If
-
-            ' Asynchronously wait to acquire the semaphore
-            ' If another thread already has it, this thread waits without blocking thread-pool
-            Await recoverySemaphore.WaitAsync()
-            Try
-                ' Now that we have the lock, perform actual recovery
-                ' Any other threads calling this method will wait at WaitAsync above
-                Debug.WriteLine($"[TryRecover] Acquired semaphore. Starting recovery... ts={DateTime.UtcNow:HH:mm:ss.fff}")
-                Await RecoverGoogleStream()
-                streamingStartTime = DateTime.UtcNow ' Reset timer after successful recovery
-                Me.Invoke(Sub() StartApiWatchdogTimer())
-            Finally
-                ' CRITICAL: Always release semaphore in Finally block to prevent deadlocks
-                recoverySemaphore.Release()
-                Debug.WriteLine($"[TryRecover] Released semaphore. ts={DateTime.UtcNow:HH:mm:ss.fff}")
-            End Try
-        End Function
-
-        ''' <summary>
-        ''' Starts background writer task that consumes audio chunks from queue and sends to Google STT stream.
-        ''' Handles graceful shutdown when queue is completed and catches expected exceptions during recovery.
-        ''' Exits cleanly on stream disposal or cancellation.
-        ''' </summary>
-        Private Sub StartAudioQueueWriter()
-            writerTask = System.Threading.Tasks.Task.Run(
-                                Async Sub()
-                                    Try
-                                        ' Loop automatically exits when queue is completed by SafeCompleteAndDisposeGoogleStreamAsync
-                                        For Each chunk As Google.Protobuf.ByteString In audioQueue.GetConsumingEnumerable()
-                                            Try
-                                                ' If stream was disposed during recovery, exit immediately
-                                                If _stream Is Nothing Then
-                                                    Debug.WriteLine("[Writer] Stream is null. Exiting task.")
-                                                    Return
-                                                End If
-
-                                                ' Send the audio chunk to Google STT
-                                                Await _stream.WriteAsync(New StreamingRecognizeRequest With {.AudioContent = chunk})
-
-                                            Catch ex As RpcException
-                                                ' gRPC error (e.g., stream cancelled) - expected during shutdown/recovery
-                                                Debug.WriteLine($"[Writer] RpcException (Status: {ex.StatusCode}). Exiting writer task.")
-                                                Return
-
-                                            Catch ex As NullReferenceException
-                                                ' Stream set to Nothing by another thread
-                                                Debug.WriteLine("[Writer] Stream became null. Exiting writer task.")
-                                                Return
-
-                                            Catch ex As InvalidOperationException
-                                                ' Stream used after being closed
-                                                Debug.WriteLine($"[Writer] InvalidOperationException (likely closed stream). Exiting writer task.")
-                                                Return
-
-                                            Catch ex As Exception
-                                                ' Unexpected error
-                                                Debug.WriteLine($"[Writer] Unhandled exception in write loop: {ex.GetType().Name}. Exiting writer task.")
-                                                Return
-                                            End Try
-                                        Next
-
-                                    Catch ex As InvalidOperationException
-                                        ' GetConsumingEnumerable called on completed/disposed collection - expected during recovery
-                                        Debug.WriteLine("[Writer] Task ending gracefully due to completed or disposed audio queue.")
-
-                                    Catch ex As Exception
-                                        ' Truly unexpected error at task level
-                                        Debug.WriteLine($"[Writer] UNEXPECTED FATAL ERROR in writer task: {ex.ToString()}")
-                                    End Try
-                                End Sub)
-        End Sub
-
-        ''' <summary>
-        ''' Handles incoming audio data from microphone for Google STT.
-        ''' Mixes in system audio if multi-source enabled, adds to ring buffer for recovery,
-        ''' enqueues for streaming, and monitors for timeout to trigger recovery.
-        ''' </summary>
-        ''' <param name="sender">WaveInEvent source</param>
-        ''' <param name="e">Audio data event args with buffer and byte count</param>
-        Private Async Sub OnGoogleDataAvailable(sender As Object, e As WaveInEventArgs)
-            If _googleStreamCompleted Then Return
-
-            Dim now = DateTime.UtcNow
-            Dim elapsed = (now - streamingStartTime).TotalMilliseconds
-
-            ' 1) Mix in system audio (loopback) if enabled
-            If MultiSourceEnabled AndAlso loopbackCapture IsNot Nothing AndAlso loopbackResampler IsNot Nothing Then
-                Dim mixBuf(e.BytesRecorded - 1) As Byte
-                Dim bytesRead = loopbackResampler.Read(mixBuf, 0, e.BytesRecorded)
-                If bytesRead > 0 Then
-                    ' Mix microphone and system audio samples (16-bit PCM)
-                    For i As Integer = 0 To bytesRead - 1 Step 2
-                        Dim micSample As Integer = BitConverter.ToInt16(e.Buffer, i)
-                        Dim outSample As Integer = BitConverter.ToInt16(mixBuf, i)
-                        Dim summedSample As Integer = micSample + outSample
-
-                        ' Clamp to Int16 range to prevent overflow
-                        If summedSample > Short.MaxValue Then summedSample = Short.MaxValue
-                        If summedSample < Short.MinValue Then summedSample = Short.MinValue
-
-                        Dim ba() As Byte = BitConverter.GetBytes(CShort(summedSample))
-                        e.Buffer(i) = ba(0)
-                        e.Buffer(i + 1) = ba(1)
-                    Next
-                End If
-            End If
-
-            Dim chunk As Google.Protobuf.ByteString =
-        Google.Protobuf.ByteString.CopyFrom(e.Buffer, 0, e.BytesRecorded)
-
-            ' 2) Write to ring buffer (maximum 50 chunks for recovery)
-            SyncLock ringBuffer
-                ringBuffer.Enqueue(chunk)
-                If ringBuffer.Count > RING_BUFFER_SIZE Then ringBuffer.Dequeue()
-            End SyncLock
-
-            ' 3) Write to queue for streaming (if still open)
-            If Not audioQueue.IsAddingCompleted Then
-                audioQueue.Add(chunk)
-            End If
-
-            ' 4) Check timeout and trigger recovery if needed
-            If elapsed > STREAMING_LIMIT_MS Then
-                Debug.WriteLine($"[OnGoogleDataAvailable] Timeout detected. Requesting recovery... ts={DateTime.UtcNow:HH:mm:ss.fff}")
-                ' Fire-and-forget recovery task to avoid blocking audio processing
-                System.Threading.Tasks.Task.Run(Async Sub() Await TryRecoverGoogleStreamAsync())
-                ' Reset timer here to prevent immediate re-triggering
-                streamingStartTime = DateTime.UtcNow
-                Return
-            End If
-
-        End Sub
-
-        ''' <summary>
-        ''' Recovers Google STT stream after timeout or error by shutting down old components,
-        ''' waiting for old reader task completion, initializing new stream with fresh token,
-        ''' and restarting writer and reader tasks with new audio queue.
-        ''' </summary>
-        Private Async Function RecoverGoogleStream() As System.Threading.Tasks.Task
-            Debug.WriteLine($"[RecoverGoogleStream] Starting...")
-
-            ' --- 1. SHUTDOWN OLD COMPONENTS ---
-            ' Store old task before overwriting class-level variable
-            Dim oldReaderTask As System.Threading.Tasks.Task = Me.googleReaderTask
-
-            ' Cancel the old reader's token source
-            If readerCts IsNot Nothing Then
-                Try
-                    readerCts.Cancel()
-                    Debug.WriteLine($"[RecoverGoogleStream] Old CancellationTokenSource cancelled.")
-                Catch ex As Exception
-                    ' Ignore cancellation errors
-                End Try
-            End If
-
-            ' Gracefully complete and dispose old stream object
-            Await SafeCompleteAndDisposeGoogleStreamAsync(readerCts.Token)
-            Debug.WriteLine($"[RecoverGoogleStream] Old stream disposed.")
-
-            ' Explicitly wait for old reader task to finish
-            ' This is KEY to preventing race conditions
-            If oldReaderTask IsNot Nothing Then
-                Try
-                    Await oldReaderTask
-                    Debug.WriteLine($"[RecoverGoogleStream] Old reader task has completed.")
-                Catch ex As Exception
-                    ' Expected exceptions (like TaskCanceled) - just log and continue
-                    Debug.WriteLine($"[RecoverGoogleStream] Awaiting old reader task threw: {ex.GetType().Name}")
-                End Try
-            End If
-
-            ' --- 2. INITIALIZE NEW COMPONENTS ---
-
-            ' Create new client and stream with fresh OAuth2 token
-            Dim newToken As String = Await GetFreshSTTToken(STTSecondAPI)
-            Dim callCreds = Grpc.Core.CallCredentials.FromInterceptor(
-    Async Function(contextCall, metadata)
-        metadata.Add("Authorization", $"Bearer {newToken}")
-        Await System.Threading.Tasks.Task.CompletedTask
-    End Function)
-            Dim channelCreds = Grpc.Core.ChannelCredentials.Create(
-    Grpc.Core.ChannelCredentials.SecureSsl, callCreds)
-            Dim builder = New Google.Cloud.Speech.V1.SpeechClientBuilder() With {
-                        .Endpoint = STTEndpoint,
-                        .ChannelCredentials = channelCreds
-                    }
-            client = builder.Build()
-
-            ' Initialize new stream (must happen after old stream and reader are fully dead)
-            ResetGoogleStreamFlag()
-            Await InitializeGoogleStream()
-            Debug.WriteLine($"[RecoverGoogleStream] New stream initialized.")
-
-            ' --- 3. START NEW TASKS ---
-
-            ' Create fresh audio queue and start writer task
-            audioQueue = New System.Collections.Concurrent.BlockingCollection(Of ByteString)()
-            StartAudioQueueWriter()
-            Debug.WriteLine($"[RecoverGoogleStream] New writer task started.")
-
-            ' Start new reader task and assign to class-level variable
-            Me.googleReaderTask = StartGoogleReaderTask()
-            Debug.WriteLine($"[RecoverGoogleStream] New reader task started.")
-        End Function
-
-        ''' <summary>
-        ''' OBSOLETE: Old stream recovery implementation - retained for reference only.
-        ''' This function is prefixed with 'x' indicating it should not be called.
-        ''' Use RecoverGoogleStream instead.
-        ''' </summary>
-        Private Async Function xRecoverGoogleStream() As System.Threading.Tasks.Task
-
-            Try
-                ' 1) Create new token and client
-                Dim newToken As String = Await GetFreshSTTToken(STTSecondAPI)
-                Dim callCreds = Grpc.Core.CallCredentials.FromInterceptor(
-    Async Function(contextCall, metadata)
-        metadata.Add("Authorization", $"Bearer {newToken}")
-        Await System.Threading.Tasks.Task.CompletedTask
-    End Function)
-                Dim channelCreds = Grpc.Core.ChannelCredentials.Create(
-    Grpc.Core.ChannelCredentials.SecureSsl, callCreds)
-                Dim builder = New Google.Cloud.Speech.V1.SpeechClientBuilder() With {
-    .Endpoint = STTEndpoint,
-    .ChannelCredentials = channelCreds
-}
-                client = builder.Build()
-
-                ' 2) Reinitialize stream
-                streamingStartTime = DateTime.UtcNow
-                ResetGoogleStreamFlag()
-                Await InitializeGoogleStream()
-
-                ' 3) Reset offset
-                Dim offset As Integer = 0
-                Me.Invoke(Sub() offset = RichTextBox1.TextLength)
-                googleTranscriptStart = offset
-
-                ' 4) Replay ring buffer into queue
-                SyncLock ringBuffer
-                    For Each oldChunk In ringBuffer
-                        audioQueue.Add(oldChunk)
-                    Next
-                End SyncLock
-
-                ' 5) Restart reader
-                StartGoogleReaderTask()
-
-                SyncLock ringBuffer
-                    ringBuffer.Clear()
-                End SyncLock
-
-            Catch ex As System.Exception
-                ' Silently handle recovery errors
-            End Try
-        End Function
-
-        ''' <summary>
-        ''' OBSOLETE: Old stream disposal implementation - retained for reference only.
-        ''' This function is prefixed with 'xx' indicating it should not be called.
-        ''' Use SafeCompleteAndDisposeGoogleStreamAsync instead.
-        ''' </summary>
-        Private Async Function xxSafeCompleteAndDisposeGoogleStreamAsync(token As CancellationToken) As System.Threading.Tasks.Task
-            ' 1) Complete stream cleanly
-            Try
-                If _stream IsNot Nothing AndAlso Not _googleStreamCompleted Then
-                    Await _stream.WriteCompleteAsync()
-                    _googleStreamCompleted = True
-                    ' NOTE: Do NOT call CompleteAdding here
-                End If
-            Catch ex As System.Exception
-                Debug.WriteLine($"Error in SafeComplete…: {ex.Message}")
-            End Try
-
-            ' 2) Close queue and wait for writer task
-            audioQueue.CompleteAdding()
-            Await writerTask
-
-            ' 3) Release stream object
-            If _stream IsNot Nothing Then
-                _stream.Dispose()
-                _stream = Nothing
-            End If
-        End Function
-
-        ''' <summary>
-        ''' Gracefully completes and disposes Google STT stream, handling cancellation scenarios.
-        ''' Waits for writer task completion before disposing stream resources.
-        ''' Ignores expected exceptions during cancellation and handles queue completion safely.
-        ''' </summary>
-        ''' <param name="token">Cancellation token to check for forced cancellation</param>
-        Private Async Function SafeCompleteAndDisposeGoogleStreamAsync(token As CancellationToken) As System.Threading.Tasks.Task
-            ' 1) Complete stream cleanly if still valid and not cancelled
-            Try
-                If _stream IsNot Nothing AndAlso Not _googleStreamCompleted AndAlso Not token.IsCancellationRequested Then
-                    Await _stream.WriteCompleteAsync()
-                End If
-            Catch ex As RpcException When ex.StatusCode = StatusCode.Cancelled
-                ' Expected exception if stream was cancelled - safely ignore and proceed with cleanup
-                Debug.WriteLine($"[SafeComplete] Ignored expected RpcException (Cancelled).")
-            Catch ex As Exception
-                ' Catch other errors but don't let them stop cleanup
-                Debug.WriteLine($"[SafeComplete] Error during WriteCompleteAsync: {ex.Message}")
-            End Try
-
-            _googleStreamCompleted = True
-
-            ' 2) Wait for writer task to finish (exits when queue completed or exception hit)
-            If writerTask IsNot Nothing AndAlso Not writerTask.IsCompleted Then
-                Try
-                    ' Don't try to complete queue if already done
-                    If Not audioQueue.IsAddingCompleted Then
-                        audioQueue.CompleteAdding()
-                    End If
-                    Await writerTask
-                Catch ex As Exception
-                    Debug.WriteLine($"[SafeComplete] Error while awaiting writerTask: {ex.Message}")
-                End Try
-            End If
-
-            ' 3) Dispose stream object (this is a local method call, safe to use null-conditional)
-            _stream?.Dispose()
-            _stream = Nothing
-        End Function
-
-        ''' <summary>
-        ''' Converts raw 16-bit PCM audio buffer to normalized float array (-1.0 to 1.0).
-        ''' Used for Whisper processing which requires floating-point audio samples.
-        ''' </summary>
-        ''' <param name="buffer">Raw byte buffer containing 16-bit PCM audio data</param>
-        ''' <returns>Float array with normalized samples in range -1.0 to 1.0</returns>
-        Private Function ConvertAudioToFloat(buffer As Byte()) As Single()
-            ' Each sample = 2 bytes (16-bit), so half as many float samples
-            Dim floatArray As Single() = New Single((buffer.Length \ 2) - 1) {}
-
-            ' Convert raw 16-bit PCM to normalized float (-1.0 to 1.0)
-            For i As Integer = 0 To buffer.Length - 2 Step 2
-                Dim sample As Short = BitConverter.ToInt16(buffer, i)
-                floatArray(i \ 2) = sample / 32768.0F
-            Next
-
-            Return floatArray
-        End Function
-
-        ''' <summary>
-        ''' Handles loopback (system audio) data available event.
-        ''' Buffers system audio for later mixing with microphone input.
-        ''' NOTE: Currently unused - audio mixing is done inline in OnAudioDataAvailable.
-        ''' </summary>
-        ''' <param name="sender">WasapiLoopbackCapture source</param>
-        ''' <param name="e">Audio data event args</param>
-        Private Sub OnLoopbackDataAvailable(sender As Object, e As WaveInEventArgs)
-            ' Buffer the system audio for later mixing
-            loopbackBuffer.AddSamples(e.Buffer, 0, e.BytesRecorded)
-        End Sub
-
-        ''' <summary>
-        ''' Handles incoming audio data from microphone for Vosk and Whisper STT engines.
-        ''' Mixes in system audio if multi-source enabled, normalizes audio levels,
-        ''' and dispatches to appropriate STT engine for processing.
-        ''' </summary>
-        ''' <param name="sender">WaveInEvent source</param>
-        ''' <param name="e">Audio data event args with buffer and byte count</param>
-        Private Async Sub OnAudioDataAvailable(sender As Object, e As WaveInEventArgs)
-
-            ' Mix in system audio (loopback) if multi-source enabled
-            If MultiSourceEnabled AndAlso loopbackCapture IsNot Nothing AndAlso loopbackResampler IsNot Nothing Then
-                Dim mixBuf(e.BytesRecorded - 1) As Byte
-                ' Read same number of bytes from resampler (16kHz mono 16-bit)
-                Dim bytesRead = loopbackResampler.Read(mixBuf, 0, e.BytesRecorded)
-                If bytesRead > 0 Then
-                    ' Mix microphone and system audio samples
-                    For i As Integer = 0 To bytesRead - 1 Step 2
-                        Dim micSample As Integer = BitConverter.ToInt16(e.Buffer, i)
-                        Dim outSample As Integer = BitConverter.ToInt16(mixBuf, i)
-                        Dim summedSample As Integer = micSample + outSample
-
-                        ' Clamp to Int16 range
-                        If summedSample > Short.MaxValue Then summedSample = Short.MaxValue
-                        If summedSample < Short.MinValue Then summedSample = Short.MinValue
-
-                        Dim ba() As Byte = BitConverter.GetBytes(CShort(summedSample))
-                        e.Buffer(i) = ba(0)
-                        e.Buffer(i + 1) = ba(1)
-                    Next
-                End If
-            End If
-
-            Dim buffer As Byte() = e.Buffer
-            Dim bytesRecorded As Integer = e.BytesRecorded
-
-            ' Convert to 16-bit PCM samples and normalize
-            Dim sampleCount As Integer = CInt(bytesRecorded / 2)
-            Dim samples(sampleCount - 1) As Single ' Float array for normalized audio
-
-            For i As Integer = 0 To sampleCount - 1
-                ' Convert 16-bit PCM to float (-1.0 to 1.0)
-                Dim sample As Short = BitConverter.ToInt16(buffer, i * 2)
-                Dim floatSample As Single = sample / 32768.0F
-                samples(i) = floatSample
-            Next
-
-            ' Normalize samples (equalize audio levels)
-            Dim maxSample As Single = samples.Max(Function(x) System.Math.Abs(x))
-            If maxSample > 0 Then
-                Dim gain As Single = 1.0F / maxSample ' Compute normalization factor
-                For i As Integer = 0 To sampleCount - 1
-                    samples(i) *= gain ' Apply normalization
-                Next
-            End If
-
-            ' Convert back to 16-bit PCM after normalization
-            For i As Integer = 0 To sampleCount - 1
-                Dim normalizedSample As Short = CShort(samples(i) * 32767)
-                Dim bytes As Byte() = BitConverter.GetBytes(normalizedSample)
-                buffer(i * 2) = bytes(0)
-                buffer(i * 2 + 1) = bytes(1)
-            Next
-
-            ' Dispatch to appropriate STT engine
-            Select Case STTModel
-                Case "vosk"
-                    If recognizer IsNot Nothing AndAlso capturing Then
-                        Dim jsonResult As String = ""
-                        jsonResult = If(recognizer.AcceptWaveform(e.Buffer, e.BytesRecorded),
-                                        recognizer.Result, recognizer.PartialResult)
-                        ProcessTranscriptionJson(jsonResult)
-                    End If
-
-                Case "whisper"
-
-                    If WhisperRecognizer Is Nothing Then Return
-
-                    Try
-                        ' Convert audio buffer to float array for Whisper
-                        Dim whispersamples As Single() = ConvertAudioToFloat(e.Buffer)
-
-                        ' Append to buffer and wait for enough data
-                        audioBuffer.AddRange(whispersamples)
-                        If audioBuffer.Count < 32000 Then Return ' Wait for ~2 seconds of audio at 16kHz
-
-                        ' Copy buffered audio and clear buffer for next batch
-                        Dim processSamples = audioBuffer.ToArray()
-                        audioBuffer.Clear()
-                        e.Buffer.Initialize() ' Clear the input buffer
-
-                        ' Process transcription asynchronously
-                        Await ProcessWhisper(processSamples)
-                    Catch ex As Exception
-                        Debug.WriteLine($"Error in OnAudioDataAvailable: {ex.Message}")
-                    End Try
-            End Select
-
-        End Sub
-
-        ''' <summary>
-        ''' Processes Whisper transcription results from audio samples.
-        ''' Filters out bracketed and asterisk-enclosed text patterns, then appends valid text to RichTextBox.
-        ''' Handles single result batch to prevent duplicate processing.
-        ''' </summary>
-        ''' <param name="samples">Float array of normalized audio samples from Whisper</param>
-        Private Async Function ProcessWhisper(samples As Single()) As System.Threading.Tasks.Task
-            If STTCanceled Then Return
-
-            Dim enumerator As IAsyncEnumerator(Of SegmentData) = Nothing
-            Try
-                Dim segments As IAsyncEnumerable(Of SegmentData) = WhisperRecognizer.ProcessAsync(samples)
-                enumerator = segments.GetAsyncEnumerator()
-
-                Dim hasNext As Boolean = True
-                While hasNext
-                    Try
-                        hasNext = Await enumerator.MoveNextAsync()
-                    Catch ex As Exception
-                        Debug.WriteLine($"Error advancing Whisper enumerator: {ex.Message}")
-                        Exit While
-                    End Try
-
-                    If Not hasNext OrElse STTCanceled Then Exit While
-
-                    Dim result As SegmentData = enumerator.Current
-                    Dim text As String = result.Text
-
-                    ' Remove bracketed content like [MUSIC] and asterisk-enclosed content like *applause*
-                    text = Regex.Replace(text, "\[.*?\]", String.Empty)
-                    text = Regex.Replace(text, "\*.*?\*", String.Empty)
-
-                    If Not String.IsNullOrWhiteSpace(text) Then
-                        Me.Invoke(Sub()
-                                      RichTextBox1.AppendText(text & vbCrLf)
-                                      RichTextBox1.ScrollToCaret()
-                                  End Sub)
-                    End If
-                End While
-
-            Catch ex As Exception
-                Debug.WriteLine($"Error in ProcessWhisper: {ex.Message}")
-            End Try
-
-            ' Dispose outside Try/Catch/Finally so Await is never in a handler block
-            If enumerator IsNot Nothing Then
-                Try
-                    Await enumerator.DisposeAsync()
-                Catch ex As Exception
-                    Debug.WriteLine($"Error disposing Whisper enumerator: {ex.Message}")
-                End Try
-            End If
-        End Function
-
-        ''' <summary>
-        ''' Transcribes an entire audio file using Whisper STT engine.
-        ''' Loads audio file, converts to float array, processes asynchronously with cancellation support,
-        ''' and updates UI with transcription progress. Resets UI state and shows completion message when done.
-        ''' </summary>
-        ''' <param name="filepath">Path to audio file (WAV, MP3, AAC, M4A, WMA)</param>
-        Public Async Function WhisperTranscribeAudioFile(filepath As String) As System.Threading.Tasks.Task
-
-            Try
-                PartialTextLabel.Invoke(Sub() PartialTextLabel.Text = "Whisper is reading and transcribing your file...")
-
-                ' Load and convert audio file to float samples required by Whisper
-                Dim samples As Single() = LoadAudioToFloatArray(filepath)
-
-                Dim segments As IAsyncEnumerable(Of SegmentData) = WhisperRecognizer.ProcessAsync(samples)
-
-                Dim enumerator = segments.GetAsyncEnumerator()
-
-                Dim Exited As Boolean = False
-
-                ' Process all segments until completion or cancellation
-                While Await enumerator.MoveNextAsync()
-
-                    If cts.Token.IsCancellationRequested Then
-                        Exited = True
-                        Exit While
-                    End If
-
-                    Dim result As SegmentData = enumerator.Current
-                    Dim Text = result.Text
-                    If Not String.IsNullOrWhiteSpace(Text) And Not STTCanceled Then
-                        Me.Invoke(Sub()
-                                      RichTextBox1.AppendText(Text & vbCrLf)
-                                      RichTextBox1.ScrollToCaret()
-                                  End Sub)
-                    End If
-
-                End While
-                Await enumerator.DisposeAsync()
-
-                ' Cleanup and reset UI state
-                STTCanceled = True
-                Await StopRecording()
-                capturing = False
-                Me.StartButton.Enabled = True
-                Me.StopButton.Enabled = False
-                Me.AudioButton.Enabled = True
-                Me.LoadButton.Enabled = True
-                Me.cultureComboBox.Enabled = True
-                Me.deviceComboBox.Enabled = True
-                Me.SpeakerIdent.Enabled = True
-                Me.SpeakerDistance.Enabled = True
-                PartialTextLabel.Invoke(Sub() PartialTextLabel.Text = "")
-
-                If Exited Then
-                    ShowCustomMessageBox("Transcription aborted.")
-                Else
-                    ShowCustomMessageBox("The transcription of your file is complete.")
-                End If
-
-            Catch ex As Exception
-                Debug.WriteLine($"Error in WhisperTranscribeAudioFile: {ex.Message}")
-            End Try
-        End Function
-
-        ''' <summary>
-        ''' Cancels ongoing transcription by triggering the cancellation token.
-        ''' Safe to call even if no transcription is active.
-        ''' </summary>
-        Public Sub CancelTranscription()
-            If cts IsNot Nothing Then
-                cts.Cancel()
-            End If
-        End Sub
-
-        ''' <summary>
-        ''' Loads an audio file and converts it to a float array suitable for Whisper processing.
-        ''' Supports multiple formats (MP3, WAV, FLAC, etc.) via MediaFoundationReader.
-        ''' Resamples audio to 16 kHz mono and converts to normalized float samples (-1.0 to 1.0).
-        ''' </summary>
-        ''' <param name="filepath">Path to audio file</param>
-        ''' <returns>Float array of normalized audio samples at 16 kHz mono</returns>
-        Public Function LoadAudioToFloatArray(filepath As String) As Single()
-            Using reader As New MediaFoundationReader(filepath) ' Supports MP3, WAV, FLAC, etc.
-                ' Convert audio to 16kHz Mono (Whisper requires this format)
-                Dim waveFormat = New WaveFormat(16000, 1) ' 16kHz, Mono
-                Using resampler As New MediaFoundationResampler(reader, waveFormat)
-                    resampler.ResamplerQuality = 60
-
-                    ' Convert to floating point explicitly
-                    Dim floatProvider As ISampleProvider = resampler.ToSampleProvider()
-
-                    ' Read audio data into a floating-point array
-                    Dim samples As New List(Of Single)()
-                    Dim buffer As Single() = New Single(1024 - 1) {} ' Buffer for PCM float samples
-                    Dim samplesRead As Integer
-
-                    Do
-                        samplesRead = floatProvider.Read(buffer, 0, buffer.Length)
-                        If samplesRead > 0 Then
-                            samples.AddRange(buffer.Take(samplesRead))
-                        End If
-                    Loop While samplesRead > 0
-
-                    Return samples.ToArray()
-                End Using
-            End Using
-        End Function
-
-        ''' <summary>
-        ''' Transcribes an audio file using Google Cloud Speech-to-Text in chunked mode.
-        ''' Splits audio into 50-second slices with 2-second overlap, processes each via RecognizeAsync,
-        ''' and appends results to transcript. Self-terminating after completion.
-        ''' Ensures Google client is initialized with fresh OAuth2 token before processing.
-        ''' </summary>
-        ''' <param name="filepath">Path to audio file to transcribe</param>
-        Public Async Function GoogleChunkedTranscribeAudioFile(filepath As String) _
-As System.Threading.Tasks.Task
-
-            ' 0) Ensure client is initialized with fresh OAuth2 credentials
-            If client Is Nothing Then
-                Dim tokenToSend As String = Await GetFreshSTTToken(STTSecondAPI)
-                Dim callCreds As Grpc.Core.CallCredentials = Grpc.Core.CallCredentials.FromInterceptor(
-            Async Function(contextCall, metadata)
-                metadata.Add("Authorization", $"Bearer {tokenToSend}")
-                Await System.Threading.Tasks.Task.CompletedTask
-            End Function
-        )
-                Dim channelCreds As Grpc.Core.ChannelCredentials = Grpc.Core.ChannelCredentials.Create(
-            Grpc.Core.ChannelCredentials.SecureSsl,
-            callCreds
-        )
-                Dim builder As New Google.Cloud.Speech.V1.SpeechClientBuilder() With {
-            .Endpoint = STTEndpoint,
-            .ChannelCredentials = channelCreds
-        }
-                client = builder.Build()
-            End If
-
-            ' 1) Load PCM data (16 kHz, mono, 16-bit)
-            Dim pcmData As Byte() = LoadAudioToPCM(filepath)
-
-            ' 2) Chunk parameters
-            Dim bytesPerSec As Integer = 16000 * 2      ' 32,000 bytes/sec (16 kHz * 16-bit)
-            Dim sliceLenSec As Integer = 50              ' 50-second chunks
-            Dim overlapSec As Integer = 2                ' 2-second overlap between chunks
-            Dim sliceSize As Integer = sliceLenSec * bytesPerSec
-            Dim overlapSize As Integer = overlapSec * bytesPerSec
-            Dim offset As Integer = 0
-
-            ' 3) Loop through all audio slices
-            While offset < pcmData.Length AndAlso Not STTCanceled
-                Dim endPos = System.Math.Min(offset + sliceSize, pcmData.Length)
-                Dim slice(endPos - offset - 1) As Byte
-                Array.Copy(pcmData, offset, slice, 0, endPos - offset)
-
-                ' 4) Build RecognitionConfig for this chunk
-                Dim config As New Google.Cloud.Speech.V1.RecognitionConfig With {
-            .Encoding = Google.Cloud.Speech.V1.RecognitionConfig.Types.AudioEncoding.Linear16,
-            .SampleRateHertz = 16000,
-            .LanguageCode = GoogleLanguageCode,
-            .EnableAutomaticPunctuation = True,
-            .Model = "latest_long",
-            .UseEnhanced = True
-        }
-                Dim audio As Google.Cloud.Speech.V1.RecognitionAudio =
-            Google.Cloud.Speech.V1.RecognitionAudio.FromBytes(slice)
-
-                ' 5) Synchronous API call (non-streaming)
-                Dim response As Google.Cloud.Speech.V1.RecognizeResponse =
-            Await client.RecognizeAsync(config, audio)
-
-                ' 6) Append results to transcript
-                For Each result As Google.Cloud.Speech.V1.SpeechRecognitionResult In response.Results
-                    If result.Alternatives.Count > 0 Then
-                        Addline(result.Alternatives(0).Transcript)
+                    Dim parts = t.Split("|"c)
+                    If parts.Length >= 2 Then
+                        _promptTitles.Add(parts(0).Trim())
+                        _promptBodies.Add(String.Join("|", parts.Skip(1)).Trim())
                     End If
                 Next
 
-                ' 7) Exit if this was the last slice
-                If endPos >= pcmData.Length Then
-                    Exit While
-                End If
-
-                ' Otherwise, advance offset with overlap
-                offset = endPos - overlapSize
-                If offset < 0 Then offset = 0
-            End While
-
-            ' 8) Show completion message
-            ShowCustomMessageBox("Chunked transcription complete.", $"{AN} Transcriptor")
-        End Function
-
-        ''' <summary>
-        ''' Transcribes a local audio file via Google STT StreamingRecognize.
-        ''' Feeds audio through existing audioQueue → writerTask → readerTask pipeline at file tempo (16 kHz),
-        ''' then cleanly shuts down stream. Displays streaming progress and completion message.
-        ''' </summary>
-        ''' <param name="filepath">Path to audio file to transcribe</param>
-        Public Async Function GoogleFileStreamTranscription(filepath As String) As System.Threading.Tasks.Task
-            ' 1) Update UI status
-            PartialTextLabel.Invoke(Sub() PartialTextLabel.Text = $"{GoogleSTT_Desc} streaming file…")
-
-            ' 2) Initialize stream and reader task
-            readerCts = New CancellationTokenSource()
-            Await StartGoogleSTT()                             ' Opens _stream & writes config
-            googleTranscriptStart = RichTextBox1.TextLength
-            googleReaderTask = StartGoogleReaderTask()         ' Starts reading responses
-
-            ' 3) Reset queue and writer
-            audioQueue = New BlockingCollection(Of Google.Protobuf.ByteString)()
-            StartAudioQueueWriter()                            ' Writes from audioQueue to _stream
-
-            ' 4) Load PCM data from file
-            Dim pcmFull As Byte() = LoadAudioToPCM(filepath)
-
-            ' 5) Remove RIFF header if WAV format
-            Dim pcmData = If(
-        pcmFull.Length > 44 AndAlso
-        System.Text.Encoding.ASCII.GetString(pcmFull, 0, 4) = "RIFF",
-        pcmFull.Skip(44).ToArray(),
-        pcmFull
-        )
-
-            ' 6) Enqueue audio at file tempo (16 kHz)
-            Const chunkSize As Integer = 4096
-            Dim bytesPerSec As Integer = 16000 * 2  ' 16 kHz × 16-bit Mono = 32,000 bytes/sec
-            Dim pos As Integer = 0
-
-            While pos < pcmData.Length AndAlso Not STTCanceled
-                Dim len = System.Math.Min(chunkSize, pcmData.Length - pos)
-                Dim chunk = Google.Protobuf.ByteString.CopyFrom(pcmData, pos, len)
-                audioQueue.Add(chunk)
-
-                ' Throttle to file tempo (simulates real-time streaming)
-                Dim delayMs = CInt(1000.0 * len / bytesPerSec)
-                Await System.Threading.Tasks.Task.Delay(delayMs)
-
-                pos += len
-            End While
-
-            ' 7) Close queue → writer knows no more audio is coming
-            audioQueue.CompleteAdding()
-
-            ' 8) Cleanly complete stream and wait for reader task
-            Await SafeCompleteAndDisposeGoogleStreamAsync(readerCts.Token)
-            Await googleReaderTask
-
-            ' 9) Cleanup and re-enable UI
-            StopApiWatchdogTimer()
-            PartialTextLabel.Invoke(Sub() PartialTextLabel.Text = "")
-            ShowCustomMessageBox("Streaming transcription complete.", $"{AN} Transcriptor")
-            Me.Invoke(Sub()
-                          capturing = False
-                          StartButton.Enabled = True
-                          StopButton.Enabled = False
-                          LoadButton.Enabled = True
-                          AudioButton.Enabled = True
-                          cultureComboBox.Enabled = True
-                          deviceComboBox.Enabled = True
-                          SpeakerIdent.Enabled = True
-                          SpeakerDistance.Enabled = True
-                      End Sub)
-        End Function
-
-        ''' <summary>
-        ''' Transcribes an audio file using Vosk STT engine with Escape key cancellation support.
-        ''' Processes audio in 4KB chunks, extracts text from JSON results, And updates UI in real-time.
-        ''' Resets UI state and displays completion/cancellation message when done.
-        ''' </summary>
-        ''' <param name="filepath">Path to audio file to transcribe</param>
-        Public Async Function VoskTranscribeAudioFile(filepath As String) As System.Threading.Tasks.Task
-            Try
-                PartialTextLabel.Invoke(Sub() PartialTextLabel.Text = "Vosk is reading and transcribing your file... press 'Esc' to abort")
-
-                Dim Exited As Boolean = False
-
-                ' Load PCM audio directly (no float conversion needed for Vosk)
-                Dim pcmData As Byte() = LoadAudioToPCM(filepath)
-
-                ' Initialize Vosk recognizer
-                recognizer.Reset()
-
-                ' Stream PCM data to Vosk recognizer in small chunks
-                Dim chunkSize As Integer = 4096
-                Dim offset As Integer = 0
-
-                While offset < pcmData.Length
-
-                    ' Allow UI to process events (for Escape key detection)
-                    System.Windows.Forms.Application.DoEvents()
-
-                    ' Check for Escape key press (both current state and toggle state)
-                    If (GetAsyncKeyState(VK_ESCAPE) And &H8000) <> 0 Then
-                        Exited = True
-                        Exit While
-                    End If
-
-                    If (GetAsyncKeyState(VK_ESCAPE) And 1) <> 0 Then
-                        Exited = True
-                        Exit While
-                    End If
-
-                    ' Extract chunk from audio data
-                    Dim chunkLength As Integer = System.Math.Min(chunkSize, pcmData.Length - offset)
-                    Dim chunk As Byte() = pcmData.Skip(offset).Take(chunkLength).ToArray()
-
-                    ' Feed the chunk into the recognizer
-                    Dim resultAvailable As Boolean = recognizer.AcceptWaveform(chunk, chunk.Length)
-
-                    ' Retrieve transcription (final or partial)
-                    Dim resultText As String
-                    If resultAvailable Then
-                        Dim resultJson As String = recognizer.Result()
-                        resultText = ExtractTextFromJson(resultJson)
-                    Else
-                        Dim partialJson As String = recognizer.PartialResult()
-                        resultText = ExtractTextFromJson(partialJson)
-                    End If
-
-                    ' Update UI with transcribed text
-                    If Not String.IsNullOrWhiteSpace(resultText) And Not STTCanceled Then
-                        Me.Invoke(Sub()
-                                      RichTextBox1.AppendText(resultText & vbCrLf)
-                                      RichTextBox1.ScrollToCaret()
-                                  End Sub)
-                    End If
-
-                    offset += chunkLength
-                End While
-
-                ' Get final result from recognizer
-                Dim finalResultJson As String = recognizer.FinalResult()
-                Dim finalText As String = ExtractTextFromJson(finalResultJson)
-
-                If Not String.IsNullOrWhiteSpace(finalText) Then
-                    Me.Invoke(Sub()
-                                  RichTextBox1.AppendText(finalText & vbCrLf)
-                                  RichTextBox1.ScrollToCaret()
-                              End Sub)
-                End If
-
-                ' Reset flags and UI state
-                PartialTextLabel.Invoke(Sub() PartialTextLabel.Text = "")
-                STTCanceled = True
-                Await StopRecording()
-                capturing = False
-                Me.StartButton.Enabled = True
-                Me.StopButton.Enabled = False
-                Me.LoadButton.Enabled = True
-                Me.AudioButton.Enabled = True
-                Me.cultureComboBox.Enabled = True
-                Me.deviceComboBox.Enabled = True
-                Me.SpeakerIdent.Enabled = True
-                Me.SpeakerDistance.Enabled = True
-                PartialTextLabel.Invoke(Sub() PartialTextLabel.Text = "")
-
-                If Exited Then
-                    ShowCustomMessageBox("Transcription aborted.")
-                Else
-                    ShowCustomMessageBox("The transcription of your file is complete.")
-                End If
-            Catch ex As Exception
-                Debug.WriteLine($"Error in VoskTranscribeAudioFile: {ex.Message}")
+                For Each title As String In _promptTitles
+                    combo.Items.Add(title)
+                Next
+            Catch
             End Try
-        End Function
+        End Sub
 
-        ''' <summary>
-        ''' Extracts transcribed text from Vosk JSON response.
-        ''' Parses JSON and returns the "text" field value, or empty string if not found.
-        ''' </summary>
-        ''' <param name="jsonString">JSON string from Vosk recognizer</param>
-        ''' <returns>Extracted text or empty string</returns>
-        Private Function ExtractTextFromJson(jsonString As String) As String
-            Try
-                Dim json As JObject = JObject.Parse(jsonString)
-                If json.ContainsKey("text") Then
-                    Return json("text").ToString()
-                Else
-                    Return String.Empty
-                End If
-            Catch ex As Exception
-                Debug.WriteLine($"JSON Parsing Error: {ex.Message}")
-                Return String.Empty
-            End Try
-        End Function
+        Private Async Sub OnProcess(sender As Object, e As EventArgs)
+            If cboProcess.SelectedIndex < 0 OrElse cboProcess.SelectedIndex >= _promptBodies.Count Then
+                Return
+            End If
 
-        ''' <summary>
-        ''' Loads an audio file and converts it to 16 kHz mono PCM byte array.
-        ''' Supports multiple formats (MP3, WAV, FLAC, etc.) via MediaFoundationReader.
-        ''' Returns raw PCM data suitable for Vosk or Google STT processing.
-        ''' </summary>
-        ''' <param name="filepath">Path to audio file</param>
-        ''' <returns>Byte array containing 16 kHz, 16-bit, mono PCM audio data</returns>
-        Public Function LoadAudioToPCM(filepath As String) As Byte()
-            Using reader As New MediaFoundationReader(filepath) ' Supports MP3, WAV, FLAC, etc.
-                ' Convert audio to 16kHz Mono PCM (required by Vosk and Google STT)
-                Dim waveFormat = New WaveFormat(16000, 16, 1) ' 16kHz, 16-bit, Mono
+            Dim prompt As String = _promptBodies(cboProcess.SelectedIndex)
+            Dim payload As String = If(String.IsNullOrWhiteSpace(rtb.SelectedText), rtb.Text, rtb.SelectedText)
+            Dim contextDocumentText As String = ""
+            Dim contextDocumentPath As String = ""
 
-                Using resampler As New MediaFoundationResampler(reader, waveFormat)
-                    resampler.ResamplerQuality = 60
+            Dim askContext As Integer = ShowCustomYesNoBox(
+                "Do you want to add a document as additional context for processing the transcript?",
+                "Yes",
+                "No",
+                Me.Text,
+                extraButtonText:="Cancel",
+                extraButtonAction:=Sub()
+                                   End Sub,
+                CloseAfterExtra:=True)
 
-                    ' Use MemoryStream to store PCM data
-                    Using memoryStream As New MemoryStream()
-                        Using pcmWriter As New WaveFileWriter(memoryStream, waveFormat)
-                            Dim buffer(4096 - 1) As Byte
-                            Dim bytesRead As Integer
+            If askContext = 0 Then
+                Return
+            End If
 
-                            Do
-                                bytesRead = resampler.Read(buffer, 0, buffer.Length)
-                                If bytesRead > 0 Then
-                                    pcmWriter.Write(buffer, 0, bytesRead)
-                                End If
-                            Loop While bytesRead > 0
+            If askContext = 1 Then
+                DragDropFormLabel = "Context document"
+                DragDropFormFilter = "Supported|*.txt;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.yaml;*.yml;*.vb;*.cs;*.js;*.ts;*.py;*.java;*.cpp;*.c;*.h;*.sql;*.rtf;*.doc;*.docx;*.xlsx;*.pptx;*.pdf;*.eml;*.msg|All|*.*"
 
-                            pcmWriter.Flush()
-                        End Using
-
-                        ' Return raw PCM byte array
-                        Return memoryStream.ToArray()
+                Try
+                    Using f As New DragDropForm()
+                        If f.ShowDialog() = DialogResult.OK Then
+                            contextDocumentPath = f.SelectedFilePath
+                        End If
                     End Using
-                End Using
+                Finally
+                    DragDropFormLabel = ""
+                    DragDropFormFilter = ""
+                End Try
+
+                If Not String.IsNullOrWhiteSpace(contextDocumentPath) Then
+                    Dim fileResult = Await Globals.ThisAddIn.GetFileContentEx(
+                        contextDocumentPath,
+                        Silent:=True,
+                        DoOCR:=True,
+                        AskUser:=True,
+                        AskWorksheetSelection:=True)
+
+                    contextDocumentText = If(fileResult.Content, "").Trim()
+
+                    If String.IsNullOrWhiteSpace(contextDocumentText) Then
+                        ShowTranscriptorMessageBox("The selected context document could not be read or returned no usable text.")
+                    End If
+                End If
+            End If
+
+            Dim combinedPayload As String = payload.Trim()
+
+            If Not String.IsNullOrWhiteSpace(contextDocumentText) Then
+                combinedPayload &= vbCrLf & vbCrLf &
+                    "=== Additional Context Document: " & Path.GetFileName(contextDocumentPath) & " ===" & vbCrLf &
+                    contextDocumentText
+            End If
+
+            Dim suffix As String = " (Current Date: " & DateTime.Now.ToString("dd MMM yyyy", CultureInfo.GetCultureInfo("en-US")) & ")"
+            Dim result As String = Await LLM(prompt & suffix, combinedPayload, "", "", 0, False)
+
+            Dim wordApp = Globals.ThisAddIn.Application
+            If wordApp.Documents.Count > 0 Then
+                Dim sel = wordApp.Selection
+                sel.Collapse(Word.WdCollapseDirection.wdCollapseEnd)
+                InsertTextWithMarkdown(sel, result, True)
+            End If
+        End Sub
+
+        Private Async Sub OnClosing(sender As Object, e As FormClosingEventArgs)
+            If _isStopping Then
+                e.Cancel = True
+                Return
+            End If
+
+            If _capturing Then
+                e.Cancel = True
+                _closeAfterStop = True
+                Await StopCurrentSessionAsync()
+            ElseIf _fileTranscribing Then
+                e.Cancel = True
+                _closeAfterStop = True
+                CancelCurrentFileTranscription()
+            End If
+        End Sub
+
+        Private Function GetLanguagePersistenceKey(d As EngineDescriptor) As String
+            If d Is Nothing Then
+                Return ""
+            End If
+
+            Return d.DisplayName
+        End Function
+
+        Private Function LoadLastLanguageMap() As Newtonsoft.Json.Linq.JObject
+            Try
+                Dim raw As String = My.Settings.LastLanguageByEngineJson
+                If String.IsNullOrWhiteSpace(raw) Then
+                    Return New Newtonsoft.Json.Linq.JObject()
+                End If
+
+                Return Newtonsoft.Json.Linq.JObject.Parse(raw)
+            Catch
+                Return New Newtonsoft.Json.Linq.JObject()
+            End Try
+        End Function
+
+        Private Sub SaveLastLanguageMap(map As Newtonsoft.Json.Linq.JObject)
+            Try
+                My.Settings.LastLanguageByEngineJson = map.ToString(Newtonsoft.Json.Formatting.None)
+            Catch
+            End Try
+        End Sub
+
+        Private Function GetSavedLanguageForDescriptor(d As EngineDescriptor) As String
+            Dim key As String = GetLanguagePersistenceKey(d)
+            If String.IsNullOrWhiteSpace(key) Then
+                Return ""
+            End If
+
+            Dim map = LoadLastLanguageMap()
+            Dim token = map(key)
+            If token Is Nothing Then
+                Return ""
+            End If
+
+            Return token.ToString()
+        End Function
+
+        Private Sub SaveCurrentLanguageForCurrentEngine()
+            Dim d As EngineDescriptor = CurrentDescriptor()
+            If d Is Nothing Then
+                Return
+            End If
+
+            If cboLang Is Nothing OrElse cboLang.SelectedItem Is Nothing Then
+                Return
+            End If
+
+            Dim value As String = cboLang.SelectedItem.ToString()
+            If String.IsNullOrWhiteSpace(value) Then
+                Return
+            End If
+
+            Dim key As String = GetLanguagePersistenceKey(d)
+            If String.IsNullOrWhiteSpace(key) Then
+                Return
+            End If
+
+            Dim map = LoadLastLanguageMap()
+            map(key) = value
+            SaveLastLanguageMap(map)
+        End Sub
+
+        Private Function GetFriendlySttErrorText(engineDisplayName As String, rawMessage As String) As String
+            Dim original As String = If(rawMessage, "").Trim()
+            Dim m As String = original.ToLowerInvariant()
+
+            If m.StartsWith("openai realtime error:") OrElse
+       m.StartsWith("openai realtime ws send failed:") OrElse
+       m.StartsWith("openai realtime ws read failed:") OrElse
+       m.StartsWith("openai rest request failed:") Then
+                Return engineDisplayName & ": " & original
+            End If
+
+            If m.Contains("permissiondenied") OrElse m.Contains("permission denied") Then
+                Return engineDisplayName & ": Access was denied. Please check the configured account and permissions."
+            End If
+
+            If m.Contains("unavailable") OrElse
+               m.Contains("winhttp") OrElse
+               m.Contains("connection") OrElse
+               m.Contains("timeout") OrElse
+               m.Contains("interrupted") Then
+                Return engineDisplayName & ": Connection to the speech service was interrupted. Please try again."
+            End If
+
+            If m.Contains("audio write failed") Then
+                Return engineDisplayName & ": The live audio stream was interrupted. Please try again."
+            End If
+
+            If m.Contains("reader") OrElse m.Contains("writer") OrElse m.Contains("stream") Then
+                Return engineDisplayName & ": The live transcription session ended unexpectedly."
+            End If
+
+            Return engineDisplayName & ": Transcription encountered an error."
+        End Function
+
+        Private Function GetFriendlyStatusText(engineDisplayName As String, rawMessage As String) As String
+            Dim m As String = If(rawMessage, "").Trim()
+            If String.IsNullOrWhiteSpace(m) Then
+                Return ""
+            End If
+
+            Dim ml As String = m.ToLowerInvariant()
+
+            If ml.Contains("preparing") OrElse
+       ml.Contains("uploading") OrElse
+       ml.Contains("streaming file") OrElse
+       ml.Contains("transcribing file") OrElse
+       ml.Contains("processing") OrElse
+       ml.Contains("parsing") OrElse
+       ml.Contains("finalizing") Then
+                Return engineDisplayName & ": " & m
+            End If
+
+            If ml.Contains("cancel") Then
+                Return engineDisplayName & ": Canceling…"
+            End If
+
+            If ml.Contains("stream configured") OrElse
+       ml.Contains("streaming session opened") OrElse
+       ml.Contains("session configured") Then
+                If _fileTranscribing Then
+                    Return GetFileTranscribingState()
+                End If
+
+                Return engineDisplayName & ": Listening…"
+            End If
+
+            If ml.Contains("starting") OrElse
+       ml.Contains("opening") OrElse
+       ml.Contains("connecting") Then
+                Return engineDisplayName & ": Starting…"
+            End If
+
+            If ml.Contains("stopped") Then
+                If _fileTranscribing Then
+                    Return engineDisplayName & ": Finalizing file transcription…"
+                End If
+
+                Return engineDisplayName & ": Ready."
+            End If
+
+            Return engineDisplayName & ": " & m
+        End Function
+
+        Private Sub LogSttError(engineDisplayName As String, detail As String, Optional ex As Exception = Nothing)
+            If Not INI_APIDebug Then
+                Return
+            End If
+
+            Try
+                Dim dir As String = System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "RedInk")
+
+                System.IO.Directory.CreateDirectory(dir)
+
+                Dim logPath As String = System.IO.Path.Combine(dir, "RI_STT_Log.txt")
+                Dim sb As New StringBuilder()
+
+                sb.AppendLine("============================================================")
+                sb.AppendLine(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"))
+                sb.AppendLine("Engine: " & engineDisplayName)
+                sb.AppendLine("Detail: " & detail)
+
+                If ex IsNot Nothing Then
+                    sb.AppendLine("Exception: " & ex.ToString())
+                End If
+
+                System.IO.File.AppendAllText(logPath, sb.ToString() & Environment.NewLine)
+            Catch
+            End Try
+        End Sub
+
+        Private Shared Function NormalizeIniValue(value As String) As String
+            Dim result As String = If(value, "").Trim()
+
+            If result.Length >= 2 AndAlso result.StartsWith("""", StringComparison.Ordinal) AndAlso result.EndsWith("""", StringComparison.Ordinal) Then
+                result = result.Substring(1, result.Length - 2).Trim()
+            End If
+
+            Return result
+        End Function
+
+        Private Shared Function ParseSttSettings(raw As String) As Dictionary(Of String, String)
+            Dim result As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+
+            For Each part As String In If(raw, "").Split(";"c)
+                Dim trimmed As String = part.Trim()
+                If trimmed.Length = 0 Then
+                    Continue For
+                End If
+
+                Dim pos As Integer = trimmed.IndexOf("="c)
+                If pos <= 0 Then
+                    Continue For
+                End If
+
+                Dim key As String = trimmed.Substring(0, pos).Trim()
+                Dim value As String = trimmed.Substring(pos + 1).Trim()
+
+                If key.Length > 0 Then
+                    result(key) = value
+                End If
+            Next
+
+            Return result
+        End Function
+
+        Private Shared Function ResolveSttSetting(raw As String, modelOrTag As String, settingName As String, defaultValue As String) As String
+            Dim settings As Dictionary(Of String, String) = ParseSttSettings(raw)
+            Dim value As String = ""
+
+            If Not String.IsNullOrWhiteSpace(modelOrTag) AndAlso
+               settings.TryGetValue(modelOrTag & "." & settingName, value) Then
+                Return value
+            End If
+
+            If settings.TryGetValue("default." & settingName, value) Then
+                Return value
+            End If
+
+            If settings.TryGetValue(settingName, value) Then
+                Return value
+            End If
+
+            Return defaultValue
+        End Function
+
+        Private Function ResolveGoogleProjectId() As String
+            Return If(INI_STT_Google_ProjectID, "").Trim()
+        End Function
+
+        Private Function ResolveGoogleSttSetting(modelOrTag As String, settingName As String, defaultValue As String) As String
+            Return ResolveSttSetting(INI_STT_Google, modelOrTag, settingName, defaultValue)
+        End Function
+
+        Private Function ResolveOpenAiSttSetting(modelOrTag As String, settingName As String, defaultValue As String) As String
+            Return ResolveSttSetting(INI_STT_OpenAI, modelOrTag, settingName, defaultValue)
+        End Function
+
+        Private Function ResolveAzureSpeechKey() As String
+            Return DecodeWrappedEncryptedValue(NormalizeIniValue(INI_STT_Azure_SpeechKey), "Azure Speech key")
+        End Function
+
+        Private Shared Function DecodeWrappedEncryptedValue(value As String, valueName As String) As String
+            Dim normalized As String = NormalizeIniValue(value)
+
+            If normalized.StartsWith("encrypted(", StringComparison.OrdinalIgnoreCase) AndAlso
+               normalized.EndsWith(")", StringComparison.Ordinal) Then
+
+                Dim innerValue As String = normalized.Substring(
+                    "encrypted(".Length,
+                    normalized.Length - "encrypted(".Length - 1).Trim()
+
+                If String.IsNullOrWhiteSpace(innerValue) Then
+                    Return ""
+                End If
+
+                Dim codeBasis As String = ResolveCodeBasis()
+                If String.IsNullOrWhiteSpace(codeBasis) Then
+                    Throw New InvalidOperationException("Missing CodeBasis for encrypted " & valueName & ".")
+                End If
+
+                Dim decoded As String = DecodeString(innerValue, codeBasis)
+                If decoded.StartsWith("Error:", StringComparison.OrdinalIgnoreCase) Then
+                    Throw New InvalidOperationException("Failed to decrypt " & valueName & ": " & decoded)
+                End If
+
+                Return NormalizeIniValue(decoded)
+            End If
+
+            Return normalized
+        End Function
+
+        Private Shared Function ResolveCodeBasis() As String
+            Dim codeBasis As String = ""
+
+            Try
+                If ThisAddIn._context IsNot Nothing Then
+                    codeBasis = If(ThisAddIn._context.Codebasis, "").Trim()
+                End If
+            Catch
+            End Try
+
+            If String.IsNullOrWhiteSpace(codeBasis) Then
+                Try
+                    If IsEmptyOrBlank(Int_CodeBasis) Then
+                        codeBasis = GetFromRegistry(RegPath_Base, RegPath_CodeBasis, False)
+                    Else
+                        codeBasis = Int_CodeBasis
+                    End If
+                Catch
+                End Try
+            End If
+
+            Try
+                If ThisAddIn._context IsNot Nothing AndAlso
+                   String.IsNullOrWhiteSpace(ThisAddIn._context.Codebasis) AndAlso
+                   Not String.IsNullOrWhiteSpace(codeBasis) Then
+
+                    ThisAddIn._context.Codebasis = codeBasis
+                End If
+            Catch
+            End Try
+
+            Return If(codeBasis, "").Trim()
+        End Function
+
+        Private Function ResolveAzureSttSetting(modelOrTag As String, settingName As String, defaultValue As String) As String
+            Return NormalizeIniValue(ResolveSttSetting(INI_STT_Azure, modelOrTag, settingName, defaultValue))
+        End Function
+
+        Private Function ResolveAzureSpeechLocation(modelOrTag As String) As String
+            Dim endpoint As String = ResolveAzureSttSetting(modelOrTag, "endpoint", "")
+            If Not String.IsNullOrWhiteSpace(endpoint) Then
+                Return endpoint
+            End If
+
+            Return ResolveAzureSttSetting(modelOrTag, "region", "")
+        End Function
+
+        Private Shared Function IsLiveOnlyEngine(kind As EngineKind) As Boolean
+            Select Case kind
+                Case EngineKind.OpenAiRealtime, EngineKind.AzureSpeechRealtime, EngineKind.TeamsAcsRealtime
+                    Return True
+                Case Else
+                    Return False
+            End Select
+        End Function
+
+        Private Shared Function IsFileOnlyEngine(kind As EngineKind) As Boolean
+            Select Case kind
+                Case EngineKind.OpenAiRest, EngineKind.AzureSpeechFastRest
+                    Return True
+                Case Else
+                    Return False
+            End Select
+        End Function
+
+        Private Sub ShowTranscriptorMessageBox(
+    bodyText As String,
+    Optional header As String = Nothing,
+    Optional autoCloseSeconds As Integer? = Nothing,
+    Optional defaultText As String = " - execution continues meanwhile",
+    Optional separateThread As Boolean = False,
+    Optional extraButtonText As String = Nothing,
+    Optional extraButtonAction As System.Action = Nothing,
+    Optional closeAfterExtra As Boolean = False)
+
+            If Me.IsDisposed Then
+                Return
+            End If
+
+            If Me.InvokeRequired Then
+                Try
+                    Me.Invoke(
+                        New Action(Of String, String, Integer?, String, Boolean, String, System.Action, Boolean)(
+                            AddressOf ShowTranscriptorMessageBox),
+                        bodyText,
+                        header,
+                        autoCloseSeconds,
+                        defaultText,
+                        separateThread,
+                        extraButtonText,
+                        extraButtonAction,
+                        closeAfterExtra)
+                Catch
+                End Try
+                Return
+            End If
+
+            Using SLib.PushDialogOwner(Me)
+                ShowCustomMessageBox(
+                    bodyText,
+                    If(String.IsNullOrWhiteSpace(header), Me.Text, header),
+                    autoCloseSeconds,
+                    defaultText,
+                    separateThread,
+                    extraButtonText,
+                    extraButtonAction,
+                    closeAfterExtra)
             End Using
-        End Function
 
-        ''' <summary>
-        ''' Processes Vosk JSON transcription results with optional speaker identification.
-        ''' Extracts text and speaker embeddings from JSON, identifies speakers via Euclidean distance,
-        ''' and adds formatted text to transcript. Handles both final and partial results.
-        ''' </summary>
-        ''' <param name="jsonString">JSON string from Vosk recognizer containing text and optional speaker embeddings</param>
-        Private Sub ProcessTranscriptionJson(jsonString As String)
             Try
-                Dim jsonObject As JObject = JObject.Parse(jsonString)
-
-                If jsonObject.ContainsKey("text") AndAlso jsonObject("text") IsNot Nothing Then
-                    Dim completedLine As String = jsonObject("text").ToString()
-                    If Not String.IsNullOrWhiteSpace(completedLine) Then
-
-                        ' Check if speaker embeddings are available
-                        If jsonObject.ContainsKey("spk") AndAlso jsonObject("spk").Type = JTokenType.Array Then
-                            Dim speakerArray As JArray = jsonObject("spk")
-                            Dim speakerEmbedding As List(Of Double) = speakerArray.Select(Function(x) CDbl(x)).ToList()
-
-                            ' Identify the speaker using Euclidean distance
-                            Dim speakerID As String = IdentifySpeaker(speakerEmbedding)
-                            completedLine = $"{speakerID}: " & completedLine
-                        End If
-
-                        ' Add line to transcript
-                        Addline(completedLine)
-                    End If
-                ElseIf jsonObject.ContainsKey("partial") AndAlso jsonObject("partial") IsNot Nothing Then
-                    ' Update partial text label with interim result
-                    partialText = jsonObject("partial").ToString()
-                    PartialTextLabel.Invoke(Sub() PartialTextLabel.Text = partialText)
-                End If
-
-            Catch ex As Exception
-                MessageBox.Show("Error in ProcessTranscriptionJson: " & ex.Message, "Error")
+                Me.Activate()
+                Me.BringToFront()
+            Catch
             End Try
         End Sub
 
-        ' ============================================================================
-        ' Vosk Speaker Identification via Euclidean Distance
-        ' ============================================================================
-
-        ''' <summary>
-        ''' Dictionary storing multiple embeddings per speaker for improved matching accuracy.
-        ''' Key = Speaker ID (e.g., "Speaker 1"), Value = List of normalized embedding vectors.
-        ''' </summary>
-        Dim knownSpeakers As New Dictionary(Of String, List(Of List(Of Double)))
-
-        ''' <summary>
-        ''' Euclidean distance threshold for speaker matching.
-        ''' Lower values = stricter matching (0.5-0.7 for real-time, 1.0-1.5 for meetings).
-        ''' </summary>
-        Dim similarityThreshold As Double = 1.0
-
-        ''' <summary>
-        ''' Identifies a speaker from their voice embedding using Euclidean distance.
-        ''' Compares new embedding against average embeddings of known speakers.
-        ''' Assigns new speaker ID if no match found within threshold.
-        ''' Stores embedding history (last 5) to stabilize detection across variations.
-        ''' </summary>
-        ''' <param name="newEmbedding">Speaker embedding vector from Vosk</param>
-        ''' <returns>Speaker ID string (e.g., "Speaker 1", "Speaker 2")</returns>
-        Private Function IdentifySpeaker(newEmbedding As List(Of Double)) As String
-            ' Normalize new embedding for consistent comparison
-            newEmbedding = NormalizeEmbedding(newEmbedding)
-
-            Dim bestMatch As String = "Unknown"
-            Dim bestDistance As Double = Double.MaxValue
-
-            For Each kvp In knownSpeakers
-                Dim existingEmbeddings As List(Of List(Of Double)) = kvp.Value
-
-                ' Compute similarity with the average embedding of the stored speaker
-                Dim avgEmbedding As List(Of Double) = GetAverageEmbedding(existingEmbeddings)
-                Dim distance As Double = EuclideanDistance(avgEmbedding, newEmbedding)
-
-                ' Consider as the same speaker if distance is below threshold
-                If distance < bestDistance AndAlso distance < similarityThreshold Then
-                    bestMatch = kvp.Key
-                    bestDistance = distance
-                End If
-            Next
-
-            ' If no match, assign a new speaker ID
-            If bestMatch = "Unknown" Then
-                Dim newSpeakerID As String = "Speaker " & (knownSpeakers.Count + 1).ToString()
-                knownSpeakers(newSpeakerID) = New List(Of List(Of Double)) From {newEmbedding}
-                Return newSpeakerID
-            Else
-                ' Store the new embedding for future matches (stabilizes detection)
-                knownSpeakers(bestMatch).Add(newEmbedding)
-
-                ' Limit stored embeddings to the last 5 to prevent memory overuse
-                If knownSpeakers(bestMatch).Count > 5 Then
-                    knownSpeakers(bestMatch).RemoveAt(0)
-                End If
-
-                Return bestMatch
-            End If
-        End Function
-
-        ''' <summary>
-        ''' Normalizes an embedding vector to unit length using L2 normalization.
-        ''' Ensures embeddings are comparable regardless of magnitude.
-        ''' </summary>
-        ''' <param name="embedding">Raw embedding vector</param>
-        ''' <returns>Normalized embedding vector with L2 norm = 1</returns>
-        Private Function NormalizeEmbedding(embedding As List(Of Double)) As List(Of Double)
-            Dim norm As Double = System.Math.Sqrt(embedding.Sum(Function(x) x * x))
-            If norm = 0 Then Return embedding
-            Return embedding.Select(Function(x) x / norm).ToList()
-        End Function
-
-        ''' <summary>
-        ''' Computes the average embedding from multiple stored embeddings for a speaker.
-        ''' Used to create a stable reference embedding that accounts for voice variations.
-        ''' </summary>
-        ''' <param name="embeddings">List of embedding vectors for a single speaker</param>
-        ''' <returns>Average embedding vector</returns>
-        Private Function GetAverageEmbedding(embeddings As List(Of List(Of Double))) As List(Of Double)
-            Dim embeddingSize As Integer = embeddings(0).Count
-            Dim avgEmbedding As New List(Of Double)(New Double(embeddingSize - 1) {})
-
-            ' Sum up all embeddings
-            For Each emb In embeddings
-                For i As Integer = 0 To embeddingSize - 1
-                    avgEmbedding(i) += emb(i)
-                Next
-            Next
-
-            ' Divide by the number of stored embeddings
-            For i As Integer = 0 To embeddingSize - 1
-                avgEmbedding(i) /= embeddings.Count
-            Next
-
-            Return avgEmbedding
-        End Function
-
-''' <summary>
-''' Computes Euclidean distance between two speaker embedding vectors.
-''' Lower distance indicates more similar speakers.
-/// Formula sqrt(sum((vec1[i] - vec2[i])^2))
-''' </summary>
-''' <param name="vec1">First embedding vector</param>
-''' <param name="vec2">Second embedding vector</param>
-''' <returns>Euclidean distance (0 = identical, larger = more different)</returns>
-Private Function EuclideanDistance(vec1 As List(Of Double), vec2 As List(Of Double)) As Double
-            Dim sum As Double = 0
-            For i As Integer = 0 To vec1.Count - 1
-                sum += (vec1(i) - vec2(i)) ^ 2
-            Next
-            Return System.Math.Sqrt(sum)
-        End Function
-
-        ''' <summary>
-        ''' Computes cosine similarity between two speaker embedding vectors.
-        ''' Alternative to Euclidean distance (currently unused in favor of Euclidean).
-        ''' Formula: dot(vec1, vec2) / (||vec1|| * ||vec2||)
-        ''' </summary>
-        ''' <param name="vec1">First embedding vector</param>
-        ''' <param name="vec2">Second embedding vector</param>
-        ''' <returns>Cosine similarity (1 = identical, 0 = orthogonal, -1 = opposite)</returns>
-        Private Function CosineSimilarity(vec1 As List(Of Double), vec2 As List(Of Double)) As Double
-            Dim dotProduct As Double = vec1.Zip(vec2, Function(a, b) a * b).Sum()
-            Dim magnitude1 As Double = System.Math.Sqrt(vec1.Sum(Function(a) a * a))
-            Dim magnitude2 As Double = System.Math.Sqrt(vec2.Sum(Function(b) b * b))
-
-            If magnitude1 = 0 OrElse magnitude2 = 0 Then
-                Return 0
-            End If
-
-            Return dotProduct / (magnitude1 * magnitude2)
-        End Function
-
-        ''' <summary>
-        ''' Thread-safely appends a completed transcription line to the RichTextBox and internal buffer.
-        ''' Clears partial text label, scrolls to caret, and updates Google transcript start position if applicable.
-        ''' </summary>
-        ''' <param name="completedline">Finalized transcription text to add</param>
-        Private Sub Addline(completedline As String)
-            completedline = completedline.Trim()
-
-            ' Thread-safe append to internal text buffer
-            SyncLock finalText
-                finalText.AppendLine(completedline)
-            End SyncLock
-
-            ' Thread-safe UI update (deadlock-safe as it only writes)
-            RichTextBox1.Invoke(Sub()
-                                    ' Clear the partial text label
-                                    PartialTextLabel.Text = ""
-
-                                    ' Append the new completed line
-                                    RichTextBox1.AppendText(completedline & vbCrLf)
-
-                                    RichTextBox1.SelectionStart = RichTextBox1.Text.Length
-                                    RichTextBox1.ScrollToCaret()
-                                    If STTModel = "google" Then googleTranscriptStart = RichTextBox1.TextLength
-                                End Sub)
-        End Sub
-
-        ''' <summary>
-        ''' Replaces Google STT transcript text from session start position to end with new full transcript.
-        ''' Used for updating entire Google transcription session when receiving complete results.
-        ''' Thread-safe via Invoke.
-        ''' </summary>
-        ''' <param name="fullTranscript">Complete transcript text to replace existing Google session text</param>
-        Private Sub ReplaceAndAddLine(fullTranscript As String)
-            RichTextBox1.Invoke(Sub()
-                                    ' 1) Select everything from the start index to the end
-                                    RichTextBox1.Select(googleTranscriptStart, RichTextBox1.TextLength - googleTranscriptStart)
-                                    ' 2) Replace it with the entire new transcript
-                                    RichTextBox1.SelectedText = fullTranscript & Environment.NewLine
-                                    ' 3) Reset the caret to the end
-                                    RichTextBox1.SelectionStart = RichTextBox1.Text.Length
-                                    RichTextBox1.ScrollToCaret()
-                                    If STTModel = "google" Then googleTranscriptStart = RichTextBox1.TextLength
-                                End Sub)
-        End Sub
-
-        ''' <summary>
-        ''' Loads transcript processing prompts from file and populates the process ComboBox.
-        ''' Parses pipe-delimited prompt library file, extracts titles and prompt text.
-        ''' Displays error messages for missing or malformed files.
-        ''' </summary>
-        ''' <param name="filePath">Path to transcript prompt library file</param>
-        ''' <param name="processComboBox">ComboBox to populate with prompt titles</param>
-        Public Sub LoadAndPopulateProcessComboBox(filePath As String, processComboBox As Forms.ComboBox)
-            ' Execute LoadPrompts function
-            Dim resultCode As Integer = LoadTranscriptPrompts(ExpandEnvironmentVariables(filePath))
-
-            ' Clear the combo box before populating
-            processComboBox.Items.Clear()
-
-            ' Check if prompts were successfully loaded
-            If resultCode = 0 AndAlso TranscriptPromptsTitles.Count > 0 Then
-                ' Add the titles to the combo box
-                For Each title As String In TranscriptPromptsTitles
-                    processComboBox.Items.Add(title)
-                Next
-            End If
-        End Sub
-
-''' <summary>
-''' Loads transcript processing prompts from a pipe-delimited file.
-''' File format: Title|Prompt text (one per line, lines starting with ';' are comments).
-''' Returns error codes for various failure conditions.
-/// </summary>
-''' <param name="filePath">Path to prompt library file (environment variables expanded)</param>
-''' <returns>0=success, 1=file not found, 2=format error, 3=no prompts found, 99=unexpected error</returns>
-Private Function LoadTranscriptPrompts(filePath As String) As Integer
-
-            ' Initialize the return code to 0 (no error)
-            Dim returnCode As Integer = 0
-
-            filePath = ExpandEnvironmentVariables(filePath)
-
-            Try
-                ' Verify the file exists
-                If Not System.IO.File.Exists(filePath) Then
-                    ShowCustomMessageBox("The transcript prompt library file was not found.")
-                    Return 1
-                End If
-
-                TranscriptPromptsTitles.Clear()
-                TranscriptPromptsLibrary.Clear()
-
-                ' Read all lines from the file
-                Dim lines = System.IO.File.ReadAllLines(filePath)
-
-                For Each line As String In lines
-                    ' Trim leading and trailing spaces
-                    Dim trimmedLine = line.Trim()
-
-                    ' Ignore empty lines and lines starting with ';' (comments)
-                    If Not String.IsNullOrEmpty(trimmedLine) AndAlso Not trimmedLine.StartsWith(";") Then
-                        ' Split the line by the delimiter '|'
-                        Dim promptData = trimmedLine.Split("|"c)
-
-                        ' Ensure there are at least two parts (title and prompt)
-                        If promptData.Length >= 2 Then
-                            Dim title = promptData(0).Trim()
-                            Dim prompt = String.Join("|", promptData.Skip(1)).Trim()
-
-                            ' Add title and prompt to the respective lists
-                            TranscriptPromptsTitles.Add(title)
-                            TranscriptPromptsLibrary.Add(prompt)
-                        End If
-                    End If
-                Next
-
-                ' Check if no prompts were found
-                If TranscriptPromptsLibrary.Count = 0 Then
-                    returnCode = 3
-                    ShowCustomMessageBox("No prompts have been found in the configured transcript prompt library file.")
-                End If
-
-            Catch ex As System.IO.FileNotFoundException
-                returnCode = 1
-                ShowCustomMessageBox("The transcript prompt library file was not found: " & ex.Message)
-
-            Catch ex As IndexOutOfRangeException
-                returnCode = 2
-                ShowCustomMessageBox("The format of the transcript prompt library file is not correct (is a '|' or text thereafter missing?): " & ex.Message)
-
-            Catch ex As Exception
-                returnCode = 99
-                ShowCustomMessageBox("An unexpected error occurred while loading transcript prompts: " & ex.Message)
-            End Try
-
-            Return returnCode
-        End Function
 
     End Class
 
-    ''' <summary>
-    ''' Simple dialog form for stopping transcription operations.
-    ''' Displays a centered dialog with a Stop button that sets StopRequested flag.
-    ''' Used for user-initiated transcription cancellation.
-
-    Public Class StopForm
-        Inherits Form
-
-        ''' <summary>
-        ''' Flag indicating whether user clicked the Stop button.
-        ''' </summary>
-        Public Property StopRequested As Boolean = False
-
-        ''' <summary>
-        ''' Initializes the StopForm with German title and centered Stop button.
-        ''' </summary>
-        Public Sub New()
-            Me.Text = "Stop Transcription"
-            Me.FormBorderStyle = FormBorderStyle.FixedDialog
-            Me.StartPosition = FormStartPosition.CenterScreen
-            Me.Width = 200
-            Me.Height = 100
-
-            Dim btnStop As New System.Windows.Forms.Button() With {
-        .Text = "Stop",
-        .Dock = DockStyle.Fill
-    }
-            AddHandler btnStop.Click, Sub(s, e)
-                                          Me.StopRequested = True
-                                          Me.Close()
-                                      End Sub
-
-            Me.Controls.Add(btnStop)
-        End Sub
-    End Class
 
 
 End Class

@@ -1146,9 +1146,24 @@ Partial Public Class ThisAddIn
                 Dim StylePath As String = ExpandEnvironmentVariables(INI_MyStylePath)
                 If Not String.IsNullOrWhiteSpace(StylePath) And IO.File.Exists(StylePath) Then DoMyStyle = True
 
+                Dim lastPromptHint As String =
+                    If(String.IsNullOrWhiteSpace(My.Settings.LastPromptReply),
+                       "",
+                       " Ctrl+P inserts your last reply prompt.")
+
                 ' Prompt for additional instructions
-                OtherPrompt = SLib.ShowCustomInputBox("Please provide additional instructions for drafting an answer (or leave it empty for the most likely substantive response):", $"{AN} Answers", False)
+                OtherPrompt = SLib.ShowCustomInputBox(
+                    "Please provide additional instructions for drafting an answer (or leave it empty for the most likely substantive response)." & lastPromptHint,
+                    $"{AN} Answers",
+                    False,
+                    "",
+                    My.Settings.LastPromptReply).Trim()
                 If OtherPrompt = "ESC" Then Return
+
+                If Not String.IsNullOrWhiteSpace(OtherPrompt) Then
+                    My.Settings.LastPromptReply = OtherPrompt
+                    My.Settings.Save()
+                End If
 
                 If DoMyStyle Then
                     MyStyleInsert = MyStyleHelpers.SelectPromptFromMyStyle(StylePath, "Outlook", 0, "Choose the style prompt to apply …", $"{AN} MyStyle", True)
@@ -1161,8 +1176,14 @@ Partial Public Class ThisAddIn
             Else
                 LLMResult = Await LLM(InterpolateAtRuntime(SP_MailSumup), "<MAILCHAIN>" & selectedText & "</MAILCHAIN>", "", "", 0)
             End If
+
             If INI_PostCorrection <> "" Then
                 LLMResult = Await PostCorrection(LLMResult)
+            End If
+
+            If String.IsNullOrWhiteSpace(LLMResult) Then
+                SLib.ShowCustomMessageBox("No reply text was returned.")
+                Return
             End If
 
             'LLMResult = LLMResult.Replace("**", "")  ' Remove bold markers
