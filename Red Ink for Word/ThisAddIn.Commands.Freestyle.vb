@@ -1407,6 +1407,7 @@ Partial Public Class ThisAddIn
                 AddItem("drawio", "Open a draw.io For editing chart files, optionally With Internet blocking.")
                 AddItem("drawioconverter", "Convert a draw.io flow chart To a HTML mini-web-app.")
                 AddItem("pptxconvert", "Convert a PowerPoint presentation To a different template format.")
+                AddItem("talktome", "Start a widget that allows you to control Red Ink via speech")
 
                 ' PRIVACY / TRANSFORMS
                 AddItem("anonymize", "Anonymize/redact the current selection (no LLM Call).")
@@ -1877,6 +1878,11 @@ Partial Public Class ThisAddIn
 
             If String.Equals(OtherPrompt.Trim(), "pptxconvert", StringComparison.OrdinalIgnoreCase) Then
                 RetemplatePresentation_UI()
+                Return
+            End If
+
+            If String.Equals(OtherPrompt.Trim(), "talktome", StringComparison.OrdinalIgnoreCase) Then
+                Globals.ThisAddIn.ShowTalkToMeWidget()
                 Return
             End If
 
@@ -3204,6 +3210,5 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
-
-
 End Class
+

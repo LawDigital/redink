@@ -617,7 +617,7 @@ Partial Public Class ThisAddIn
     End Sub
 
     Private Sub ThisAddIn_Shutdown() Handles Me.Shutdown
-        ' Shut down Knowledge Store service
+        ShutdownTalkToMe()
         ShutdownKnowledgeStoreService()
         ShutdownHttpListener()
         RemoveOldContextMenu()

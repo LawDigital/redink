@@ -693,20 +693,6 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Public Sub Transcriptor()
         If INILoadFail() Then Return
-        If Not String.IsNullOrEmpty(INI_SpeechModelPath) Then
-            Dim SpeechPath As String = ExpandEnvironmentVariables(INI_SpeechModelPath)
-            If Not String.IsNullOrEmpty(SpeechPath) AndAlso Not SpeechPath.EndsWith("\") Then
-                SpeechPath = SpeechPath & "\"
-            End If
-            Dim currentPath As String = Environment.GetEnvironmentVariable("PATH")
-
-            If Not currentPath.Contains(SpeechPath) Then
-                Environment.SetEnvironmentVariable("PATH", currentPath & ";" & SpeechPath)
-            End If
-            RuntimeOptions.LibraryPath = SpeechPath
-            'RuntimeOptions.RuntimeLibraryOrder = New List(Of RuntimeLibrary) From {RuntimeLibrary.Cuda, RuntimeLibrary.Cpu}
-
-        End If
 
         Dim TranscriptionForm = New TranscriptionForm()
         TranscriptionForm.Show()

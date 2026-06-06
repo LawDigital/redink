@@ -129,6 +129,7 @@ Partial Class Ribbon1
         Me.RI_InsertClipboard = Me.Factory.CreateRibbonButton
         Me.RI_Image = Me.Factory.CreateRibbonButton
         Me.RI_Transcriptor = Me.Factory.CreateRibbonButton
+        Me.RI_TalkToMe = Me.Factory.CreateRibbonButton
         Me.RI_HelpMe = Me.Factory.CreateRibbonButton
         Me.Menu6 = Me.Factory.CreateRibbonMenu
         Me.RI_Model1 = Me.Factory.CreateRibbonButton
@@ -189,6 +190,7 @@ Partial Class Ribbon1
         Me.Menu1.Items.Add(Me.Menu2)
         Me.Menu1.Items.Add(Me.RI_Image)
         Me.Menu1.Items.Add(Me.RI_Transcriptor)
+        Me.Menu1.Items.Add(Me.RI_TalkToMe)
         Me.Menu1.Items.Add(Me.RI_HelpMe)
         Me.Menu1.Items.Add(Me.Menu6)
         Me.Menu1.Items.Add(Me.Settings)
@@ -869,6 +871,14 @@ Partial Class Ribbon1
         Me.RI_Transcriptor.OfficeImageId = "AudioRecordingInsert"
         Me.RI_Transcriptor.ShowImage = True
         '
+        'RI_TalkToMe
+        '
+        Me.RI_TalkToMe.Label = "Talk to me!"
+        Me.RI_TalkToMe.Name = "RI_TalkToMe"
+        Me.RI_TalkToMe.OfficeImageId = "SpeakCells"
+        Me.RI_TalkToMe.ScreenTip = "Allows you to talk to Red Ink for issuing commands and typing text"
+        Me.RI_TalkToMe.ShowImage = True
+        '
         'RI_HelpMe
         '
         Me.RI_HelpMe.Label = "Help me, Inky"
@@ -1057,6 +1067,7 @@ Partial Class Ribbon1
         AddHandler RI_Chat.Click, AddressOf RI_Chat_Click
         AddHandler RI_Chat2.Click, AddressOf RI_Chat2_Click
         AddHandler RI_Transcriptor.Click, AddressOf RI_Transcriptor_Click
+        AddHandler RI_TalkToMe.Click, AddressOf RI_TalkToMe_Click
         AddHandler RI_TimeSpan.Click, AddressOf RI_TimeSpan_Click
         AddHandler RI_AcceptFormat.Click, AddressOf RI_AcceptFormat_Click
         AddHandler RI_Halves.Click, AddressOf RI_Halves_Click
@@ -1270,6 +1281,7 @@ Partial Class Ribbon1
     Friend WithEvents RI_Chat2 As RibbonButton
     Friend WithEvents RI_Search As RibbonButton
     Friend WithEvents RI_Transcriptor As RibbonButton
+    Friend WithEvents RI_TalkToMe As RibbonButton
     Friend WithEvents Menu3 As RibbonMenu
     Friend WithEvents RI_Explain As RibbonButton
     Friend WithEvents RI_SuggestTitles As RibbonButton

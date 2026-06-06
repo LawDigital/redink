@@ -39,6 +39,7 @@ Imports Red_Ink_for_Word.Transcription
 Imports SharedLibrary.SharedLibrary
 Imports SharedLibrary.SharedLibrary.SharedMethods
 Imports SLib = SharedLibrary.SharedLibrary.SharedMethods
+Imports SharedLibrary.Transcription
 
 Partial Public Class ThisAddIn
 
@@ -1056,6 +1057,38 @@ Partial Public Class ThisAddIn
                         Throw New InvalidOperationException("INI_STT_Google_ProjectID is missing.")
                     End If
 
+                    Dim dbgProjectIdRaw As String = If(INI_STT_Google_ProjectID, "")
+                    Dim dbgProjectIdResolved As String = ResolveGoogleProjectId()
+                    Dim dbgIniSttGoogleRaw As String =
+                        If(INI_STT_Google, "").
+                            Replace(vbCrLf, "\n").
+                            Replace(vbCr, "\n").
+                            Replace(vbLf, "\n")
+                    Dim dbgResolvedEndpoint As String = ResolveGoogleSttSetting(d.ModelOrTag, "endpoint", "")
+                    Dim dbgResolvedLocation As String = ResolveGoogleSttSetting(d.ModelOrTag, "location", "")
+                    Dim dbgResolvedRecognizer As String = ResolveGoogleSttSetting(d.ModelOrTag, "recognizer", "")
+                    Dim dbgResolvedModel As String = ResolveGoogleSttSetting(d.ModelOrTag, "model", "")
+                    Dim dbgResolvedLanguage As String = ResolveGoogleSttSetting(d.ModelOrTag, "language", "")
+
+                    System.Diagnostics.Debug.WriteLine("[Transcriptor.GoogleV2] _context Is Nothing=" & (ThisAddIn._context Is Nothing).ToString())
+                    System.Diagnostics.Debug.WriteLine("[Transcriptor.GoogleV2] Codebasis present=" & (ThisAddIn._context IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(ThisAddIn._context.Codebasis)).ToString())
+                    System.Diagnostics.Debug.WriteLine("[Transcriptor.GoogleV2] CacheSlot=" & googleCacheSlot)
+                    System.Diagnostics.Debug.WriteLine("[Transcriptor.GoogleV2] OAuthClientMail=" & If(googleConfig.OAuth2ClientMail, ""))
+                    System.Diagnostics.Debug.WriteLine("[Transcriptor.GoogleV2] OAuthTokenEndpoint=" & If(googleConfig.OAuth2Endpoint, ""))
+                    System.Diagnostics.Debug.WriteLine("[Transcriptor.GoogleV2] APIKeyLength=" & If(googleConfig.APIKey, "").Length.ToString())
+                    System.Diagnostics.Debug.WriteLine("[Transcriptor.GoogleV2] INI_STT_Google_ProjectID raw=" & dbgProjectIdRaw)
+                    System.Diagnostics.Debug.WriteLine("[Transcriptor.GoogleV2] ResolveGoogleProjectId()=" & dbgProjectIdResolved)
+                    System.Diagnostics.Debug.WriteLine("[Transcriptor.GoogleV2] INI_STT_Google raw=" & dbgIniSttGoogleRaw)
+                    System.Diagnostics.Debug.WriteLine(
+                        "[Transcriptor.GoogleV2] Resolved STT settings " &
+                        "endpoint=" & dbgResolvedEndpoint &
+                        "; location=" & dbgResolvedLocation &
+                        "; recognizer=" & dbgResolvedRecognizer &
+                        "; model=" & dbgResolvedModel &
+                        "; language=" & dbgResolvedLanguage)
+
+
+
                     Return New GoogleV2Engine(
                         googleConfig.OAuth2ClientMail,
                         googleConfig.APIKey,
@@ -1065,7 +1098,9 @@ Partial Public Class ThisAddIn
                         ResolveGoogleSttSetting(d.ModelOrTag, "location", ""),
                         ResolveGoogleSttSetting(d.ModelOrTag, "recognizer", ""),
                         ResolveGoogleSttSetting(d.ModelOrTag, "model", ""),
-                        ResolveGoogleSttSetting(d.ModelOrTag, "language", ""))
+                        ResolveGoogleSttSetting(d.ModelOrTag, "language", ""),
+                        googleConfig.OAuth2Scopes,
+                        "Transcriptor")
 
                 Case EngineKind.OpenAiRest
                     Dim key As String = ResolveOpenAiKey()
@@ -1305,6 +1340,14 @@ Partial Public Class ThisAddIn
                 _engine = Await CreateEngineAsync(d)
                 AttachEngineEvents(_engine)
                 _cts = New CancellationTokenSource()
+
+                System.Diagnostics.Debug.WriteLine(
+                    "[Transcriptor.Live] About to call StartLiveAsync " &
+                    "Engine=" & d.DisplayName &
+                    "; LanguageCode=" & If(_opts Is Nothing OrElse String.IsNullOrWhiteSpace(_opts.LanguageCode), "(empty)", _opts.LanguageCode) &
+                    "; Model=" & If(_opts Is Nothing OrElse String.IsNullOrWhiteSpace(_opts.Model), "(empty)", _opts.Model) &
+                    "; MultiChannelDiarization=" & If(_opts IsNot Nothing AndAlso _opts.MultiChannelDiarization, "True", "False"))
+
                 Await _engine.StartLiveAsync(_opts, _cts.Token)
             Catch ex As Exception
                 startException = ex
