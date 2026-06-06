@@ -243,7 +243,7 @@ Namespace Transcription
                             End If
 
                             RaiseStatusMessage("Parsing Azure Speech Fast REST response…")
-                            HandleResponseBody(body)
+                            HandleResponseBody(body, opts)
                             RaiseStatusMessage("Azure Speech Fast REST file transcription completed.")
                         End Using
                     Catch ex As System.OperationCanceledException When ct.IsCancellationRequested
@@ -256,6 +256,121 @@ Namespace Transcription
                     End Try
                 End Using
             End Using
+        End Function
+
+        Private Sub HandleResponseBody(body As String, opts As TranscriptionOptions)
+            Try
+                Dim jo As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(body)
+                Dim phrases As Newtonsoft.Json.Linq.JArray = TryCast(jo("phrases"), Newtonsoft.Json.Linq.JArray)
+                Dim combinedPhrases As Newtonsoft.Json.Linq.JArray = TryCast(jo("combinedPhrases"), Newtonsoft.Json.Linq.JArray)
+                Dim diarizationRequested As Boolean = WantsDiarization(opts)
+
+                If diarizationRequested Then
+                    Dim diarizedText As String = BuildPhraseText(phrases)
+                    If diarizedText.Length > 0 Then
+                        RaiseEvent FinalResult(Me, New TranscriptionEventArgs(diarizedText, True))
+                        Return
+                    End If
+                End If
+
+                Dim combinedText As String = BuildCombinedPhraseText(combinedPhrases)
+                If combinedText.Length > 0 Then
+                    RaiseEvent FinalResult(Me, New TranscriptionEventArgs(combinedText, True))
+                    Return
+                End If
+
+                Dim phraseText As String = BuildPhraseText(phrases)
+                If phraseText.Length > 0 Then
+                    RaiseEvent FinalResult(Me, New TranscriptionEventArgs(phraseText, True))
+                    Return
+                End If
+
+                Throw New System.InvalidOperationException("Azure Speech Fast REST returned no transcription text.")
+            Catch ex As Newtonsoft.Json.JsonException
+                If Not System.String.IsNullOrWhiteSpace(body) Then
+                    RaiseEvent FinalResult(Me, New TranscriptionEventArgs(body.Trim(), True))
+                    Return
+                End If
+
+                Throw
+            End Try
+        End Sub
+
+        Private Shared Function BuildCombinedPhraseText(combinedPhrases As Newtonsoft.Json.Linq.JArray) As String
+            If combinedPhrases Is Nothing OrElse combinedPhrases.Count = 0 Then
+                Return ""
+            End If
+
+            Dim sb As New System.Text.StringBuilder()
+
+            For Each phrase As Newtonsoft.Json.Linq.JToken In combinedPhrases
+                Dim textValue As String = If(phrase("text")?.ToString(), "").Trim()
+                Dim channelValue As String = If(phrase("channel")?.ToString(), "").Trim()
+
+                If textValue.Length > 0 Then
+                    If channelValue.Length > 0 Then
+                        sb.AppendLine("[Channel " & channelValue & "] " & textValue)
+                    Else
+                        sb.AppendLine(textValue)
+                    End If
+                End If
+            Next
+
+            Return sb.ToString().Trim()
+        End Function
+
+        Private Shared Function BuildPhraseText(phrases As Newtonsoft.Json.Linq.JArray) As String
+            If phrases Is Nothing OrElse phrases.Count = 0 Then
+                Return ""
+            End If
+
+            Dim sb As New System.Text.StringBuilder()
+
+            For Each phrase As Newtonsoft.Json.Linq.JToken In phrases
+                Dim textValue As String = If(phrase("text")?.ToString(), "").Trim()
+                Dim speakerValue As String = If(phrase("speaker")?.ToString(), "").Trim()
+
+                If textValue.Length > 0 Then
+                    If speakerValue.Length > 0 Then
+                        sb.AppendLine("[Speaker " & speakerValue & "] " & textValue)
+                    Else
+                        sb.AppendLine(textValue)
+                    End If
+                End If
+            Next
+
+            Return sb.ToString().Trim()
+        End Function
+
+
+
+
+
+        Private Shared Function GetDiarizationMaxSpeakers(opts As TranscriptionOptions) As Integer
+            Dim value As Integer = 2
+
+            If opts IsNot Nothing Then
+                Try
+                    Dim prop As System.Reflection.PropertyInfo = opts.GetType().GetProperty("DiarizationMaxSpeakers")
+                    If prop IsNot Nothing Then
+                        Dim raw As Object = prop.GetValue(opts, Nothing)
+                        If raw IsNot Nothing Then
+                            value = System.Convert.ToInt32(raw, System.Globalization.CultureInfo.InvariantCulture)
+                        End If
+                    End If
+                Catch ex As System.Exception
+                End Try
+            End If
+
+            If value < 2 Then
+                value = 2
+            End If
+
+            If value > 35 Then
+                value = 35
+            End If
+
+            Return value
         End Function
         Private Sub HandleResponseBody(body As String)
             Try
@@ -327,12 +442,13 @@ Namespace Transcription
             definition("locales") = New Newtonsoft.Json.Linq.JArray(languageCode)
 
             If WantsDiarization(opts) Then
-                definition("diarization") = New Newtonsoft.Json.Linq.JObject From {
-                    {"enabled", True}
-                }
-            End If
+                Dim maxSpeakers As Integer = GetDiarizationMaxSpeakers(opts)
 
-            If opts IsNot Nothing AndAlso opts.MultiChannelDiarization Then
+                definition("diarization") = New Newtonsoft.Json.Linq.JObject From {
+                    {"enabled", True},
+                    {"maxSpeakers", maxSpeakers}
+                }
+            ElseIf opts IsNot Nothing AndAlso opts.MultiChannelDiarization Then
                 definition("channels") = New Newtonsoft.Json.Linq.JArray(0, 1)
             End If
 
@@ -354,6 +470,17 @@ Namespace Transcription
 
             Try
                 Dim prop As System.Reflection.PropertyInfo = opts.GetType().GetProperty("Diarization")
+                If prop IsNot Nothing Then
+                    Dim value As Object = prop.GetValue(opts, Nothing)
+                    If value IsNot Nothing AndAlso System.Convert.ToBoolean(value, System.Globalization.CultureInfo.InvariantCulture) Then
+                        Return True
+                    End If
+                End If
+            Catch
+            End Try
+
+            Try
+                Dim prop As System.Reflection.PropertyInfo = opts.GetType().GetProperty("EnableDiarization")
                 If prop IsNot Nothing Then
                     Dim value As Object = prop.GetValue(opts, Nothing)
                     If value IsNot Nothing AndAlso System.Convert.ToBoolean(value, System.Globalization.CultureInfo.InvariantCulture) Then

@@ -1,5 +1,4 @@
-﻿' Part of "Red Ink for Word"
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+﻿' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
 ' =============================================================================
 ' File: TranscriptionOptionsDialog.vb
@@ -49,6 +48,7 @@ Namespace Transcription
         Public Property SelectedSourceMode As String
         Public Property SelectedOutputDeviceId As String
 
+        Private ReadOnly _kind As EngineKind
         Private ReadOnly _toolTip As New ToolTip()
         Private ReadOnly _root As TableLayoutPanel
         Private ReadOnly _contentPanel As Panel
@@ -78,6 +78,7 @@ Namespace Transcription
                        currentOutputDeviceId As String,
                        outputDevices As IEnumerable(Of KeyValuePair(Of String, String)))
 
+            _kind = kind
             Options = CloneOptions(currentOpts)
             SelectedSourceMode = currentSourceMode
             SelectedOutputDeviceId = currentOutputDeviceId
@@ -125,6 +126,7 @@ Namespace Transcription
 
             BuildControls(langChoices, outputDevices)
             BuildSections(kind, recognizerDisplayName)
+            UpdateDiarizationUi()
 
             _contentPanel.Controls.Add(_contentLayout)
             _root.Controls.Add(_contentPanel, 0, 0)
@@ -171,7 +173,11 @@ Namespace Transcription
         End Sub
 
         Private Shared Function CloneOptions(source As TranscriptionOptions) As TranscriptionOptions
-            Return New TranscriptionOptions With {
+            If source Is Nothing Then
+                Return New TranscriptionOptions()
+            End If
+
+            Dim clone As New TranscriptionOptions With {
                 .LanguageCode = source.LanguageCode,
                 .EnableDiarization = source.EnableDiarization,
                 .MinSpeakers = source.MinSpeakers,
@@ -185,7 +191,102 @@ Namespace Transcription
                 .TurnDetection = source.TurnDetection,
                 .Prompt = source.Prompt
             }
+
+            SetOptionDiarization(clone, GetOptionDiarization(source))
+            SetOptionDiarizationMaxSpeakers(clone, GetOptionDiarizationMaxSpeakers(source))
+
+            Return clone
         End Function
+
+        Private Shared Function GetOptionDiarization(opts As TranscriptionOptions) As Boolean
+            If opts Is Nothing Then
+                Return False
+            End If
+
+            Dim value As Boolean = opts.EnableDiarization
+
+            Try
+                Dim prop = opts.GetType().GetProperty("Diarization")
+                If prop IsNot Nothing Then
+                    Dim raw As Object = prop.GetValue(opts, Nothing)
+                    If raw IsNot Nothing Then
+                        value = System.Convert.ToBoolean(raw, System.Globalization.CultureInfo.InvariantCulture)
+                    End If
+                End If
+            Catch
+            End Try
+
+            Return value
+        End Function
+
+        Private Shared Sub SetOptionDiarization(opts As TranscriptionOptions, value As Boolean)
+            If opts Is Nothing Then
+                Return
+            End If
+
+            opts.EnableDiarization = value
+
+            Try
+                Dim prop = opts.GetType().GetProperty("Diarization")
+                If prop IsNot Nothing AndAlso prop.CanWrite Then
+                    prop.SetValue(opts, value, Nothing)
+                End If
+            Catch
+            End Try
+        End Sub
+
+        Private Shared Function GetOptionDiarizationMaxSpeakers(opts As TranscriptionOptions) As Integer
+            If opts Is Nothing Then
+                Return 2
+            End If
+
+            Dim value As Integer = opts.MaxSpeakers
+
+            Try
+                Dim prop = opts.GetType().GetProperty("DiarizationMaxSpeakers")
+                If prop IsNot Nothing Then
+                    Dim raw As Object = prop.GetValue(opts, Nothing)
+                    If raw IsNot Nothing Then
+                        value = System.Convert.ToInt32(raw, System.Globalization.CultureInfo.InvariantCulture)
+                    End If
+                End If
+            Catch
+            End Try
+
+            If value < 2 Then
+                value = 2
+            End If
+
+            If value > 35 Then
+                value = 35
+            End If
+
+            Return value
+        End Function
+
+        Private Shared Sub SetOptionDiarizationMaxSpeakers(opts As TranscriptionOptions, value As Integer)
+            If opts Is Nothing Then
+                Return
+            End If
+
+            If value < 2 Then
+                value = 2
+            End If
+
+            If value > 35 Then
+                value = 35
+            End If
+
+            opts.MaxSpeakers = value
+
+            Try
+                Dim prop = opts.GetType().GetProperty("DiarizationMaxSpeakers")
+                If prop IsNot Nothing AndAlso prop.CanWrite Then
+                    prop.SetValue(opts, value, Nothing)
+                End If
+            Catch
+            End Try
+        End Sub
 
         Private Sub BuildControls(langChoices As IEnumerable(Of String), outputDevices As IEnumerable(Of KeyValuePair(Of String, String)))
             cboLang = New ComboBox() With {
@@ -234,7 +335,7 @@ Namespace Transcription
             chkDiar = New CheckBox() With {
                 .AutoSize = True,
                 .Text = "Enable speaker diarization",
-                .Checked = Options.EnableDiarization,
+                .Checked = GetOptionDiarization(Options),
                 .Margin = New Padding(0, 4, 0, 6)
             }
 
@@ -250,8 +351,8 @@ Namespace Transcription
             nudMax = New NumericUpDown() With {
                 .Dock = DockStyle.Left,
                 .Minimum = 2,
-                .Maximum = 16,
-                .Value = Math.Max(2, Math.Min(16, Options.MaxSpeakers)),
+                .Maximum = 35,
+                .Value = Math.Max(2, Math.Min(35, GetOptionDiarizationMaxSpeakers(Options))),
                 .Width = 110,
                 .Margin = New Padding(0, 2, 0, 6)
             }
@@ -327,11 +428,15 @@ Namespace Transcription
 
             _toolTip.SetToolTip(cboOutputDevice, "Select the system output device used for loopback capture.")
             _toolTip.SetToolTip(cboSourceMode, "Choose microphone-only, system-audio-only, or mixed capture.")
+            _toolTip.SetToolTip(chkDiar, "Enable speaker labeling when supported by the selected recognizer.")
+            _toolTip.SetToolTip(nudMin, "Minimum speaker hint.")
+            _toolTip.SetToolTip(nudMax, "Maximum speaker hint. Azure Fast REST supports 2 to 35 speakers.")
             _toolTip.SetToolTip(chkMulti, "Routes microphone to the left channel and system audio to the right channel.")
             _toolTip.SetToolTip(nudVad, "Whisper no-speech threshold. Default is 0.60.")
             _toolTip.SetToolTip(nudVosk, "Vosk speaker similarity threshold.")
             _toolTip.SetToolTip(chkDebug, "Only use for diagnostics. Writes RedInk_AudioDebug.wav to %TEMP%.")
 
+            AddHandler chkDiar.CheckedChanged, AddressOf OnDiarizationChanged
             AddHandler cboLang.SelectedIndexChanged, Sub() UpdateComboToolTip(cboLang)
             AddHandler cboSourceMode.SelectedIndexChanged, Sub() UpdateComboToolTip(cboSourceMode)
             AddHandler cboOutputDevice.SelectedIndexChanged, Sub() UpdateComboToolTip(cboOutputDevice)
@@ -427,12 +532,29 @@ Namespace Transcription
                     AddLabeledRow(grid, "Model", txtModel)
                     AddLabeledRow(grid, "Turn detection", cboTurn)
 
+                Case EngineKind.AzureSpeechRealtime
+                    AddFullWidthRow(grid, BuildInfoLabel("Realtime Azure diarization is not available for the current non-SDK WebSocket engine."))
+
+                Case EngineKind.AzureSpeechFastRest
+                    AddFullWidthRow(grid, chkDiar)
+                    AddLabeledRow(grid, "Maximum speakers", nudMax)
+
                 Case Else
                     AddLabeledRow(grid, "Model", txtModel)
             End Select
 
             grp.Controls.Add(grid)
             Return grp
+        End Function
+
+        Private Shared Function BuildInfoLabel(text As String) As Control
+            Return New Label() With {
+                .AutoSize = True,
+                .MaximumSize = New Size(700, 0),
+                .Text = text,
+                .ForeColor = SystemColors.GrayText,
+                .Margin = New Padding(0, 2, 0, 6)
+            }
         End Function
 
         Private Sub AddLabeledRow(grid As TableLayoutPanel, labelText As String, editor As Control)
@@ -473,15 +595,45 @@ Namespace Transcription
             _toolTip.SetToolTip(cbo, text)
         End Sub
 
+        Private Sub OnDiarizationChanged(sender As Object, e As EventArgs)
+            UpdateDiarizationUi()
+        End Sub
+
+        Private Sub UpdateDiarizationUi()
+            If nudMax IsNot Nothing Then
+                Dim maxLimit As Integer = If(_kind = EngineKind.AzureSpeechFastRest, 35, 16)
+                nudMax.Maximum = maxLimit
+
+                If nudMax.Value > nudMax.Maximum Then
+                    nudMax.Value = nudMax.Maximum
+                End If
+            End If
+
+            Select Case _kind
+                Case EngineKind.GoogleV1
+                    nudMin.Enabled = chkDiar.Checked
+                    nudMax.Enabled = chkDiar.Checked
+
+                Case EngineKind.AzureSpeechFastRest
+                    nudMin.Enabled = False
+                    nudMax.Enabled = chkDiar.Checked
+
+                Case Else
+                    nudMin.Enabled = False
+                    nudMax.Enabled = False
+            End Select
+        End Sub
+
         Private Sub Ok_Click(sender As Object, e As EventArgs)
             Commit()
         End Sub
 
         Private Sub Commit()
             Options.LanguageCode = cboLang.Text.Trim()
-            Options.EnableDiarization = chkDiar.Checked
+            SetOptionDiarization(Options, chkDiar.Checked)
             Options.MinSpeakers = CInt(nudMin.Value)
             Options.MaxSpeakers = CInt(nudMax.Value)
+            SetOptionDiarizationMaxSpeakers(Options, CInt(nudMax.Value))
             Options.MultiChannelDiarization = chkMulti.Checked
             Options.Translate = chkTrans.Checked
             Options.VadThreshold = CSng(nudVad.Value)

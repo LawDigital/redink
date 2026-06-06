@@ -42,22 +42,61 @@ Namespace Transcription
         OpenAiRealtime
         AzureSpeechRealtime
         AzureSpeechFastRest
+        TeamsAcsRealtime
     End Enum
 
     Public Class TranscriptionOptions
+        Private _diarization As Boolean = False
+        Private _diarizationMaxSpeakers As Integer = 2
+
         Public Property LanguageCode As String = "auto"
-        Public Property EnableDiarization As Boolean = False
+
+        Public Property EnableDiarization As Boolean
+            Get
+                Return _diarization
+            End Get
+            Set(value As Boolean)
+                _diarization = value
+            End Set
+        End Property
+
+        Public Property Diarization As Boolean
+            Get
+                Return _diarization
+            End Get
+            Set(value As Boolean)
+                _diarization = value
+            End Set
+        End Property
+
         Public Property MinSpeakers As Integer = 2
-        Public Property MaxSpeakers As Integer = 6
+
+        Public Property MaxSpeakers As Integer
+            Get
+                Return _diarizationMaxSpeakers
+            End Get
+            Set(value As Integer)
+                _diarizationMaxSpeakers = value
+            End Set
+        End Property
+
+        Public Property DiarizationMaxSpeakers As Integer
+            Get
+                Return _diarizationMaxSpeakers
+            End Get
+            Set(value As Integer)
+                _diarizationMaxSpeakers = value
+            End Set
+        End Property
+
         Public Property Translate As Boolean = False
         Public Property Model As String = ""
         Public Property VadThreshold As Single = 0.6F
         Public Property VoskSimilarityThreshold As Double = 1.0
         Public Property MultiChannelDiarization As Boolean = False
         Public Property AudioDebugDump As Boolean = False
-        ' Engine-specific extras (free-form, used by OpenAI Realtime e.g. "server_vad" vs "none")
         Public Property TurnDetection As String = "server_vad"
-        Public Property Prompt As String = ""  ' OpenAI REST 'prompt' biasing
+        Public Property Prompt As String = ""
     End Class
 
     Public Class TranscriptionEventArgs

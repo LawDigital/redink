@@ -90,6 +90,8 @@ Partial Public Class ThisAddIn
 
         Private _dialogOwnerScope As IDisposable
 
+        Public Const ACS_Bridge_Address As String = ""
+
         Private Class EngineDescriptor
             Public DisplayName As String
             Public Kind As EngineKind
@@ -409,6 +411,14 @@ Partial Public Class ThisAddIn
                 })
             End If
 
+            If HasConfiguredTeamsAcsProvider() Then
+                _engines.Add(New EngineDescriptor With {
+                    .DisplayName = TeamsAcsRealtimeEngine.DisplayNameValue,
+                    .Kind = EngineKind.TeamsAcsRealtime,
+                    .ModelOrTag = "teams-acs-realtime"
+                })
+            End If
+
             For Each e In _engines
                 cboEngine.Items.Add(e.DisplayName)
             Next
@@ -471,6 +481,33 @@ Partial Public Class ThisAddIn
 
         Private Function HasConfiguredAzureProvider() As Boolean
             Return Not String.IsNullOrWhiteSpace(ResolveAzureSpeechKey())
+        End Function
+
+        Private Function HasConfiguredTeamsAcsProvider() As Boolean
+            Return Not String.IsNullOrWhiteSpace(ResolveTeamsAcsBridgeWebSocketUri())
+        End Function
+
+        Private Function ResolveTeamsAcsBridgeWebSocketUri() As String
+            Return NormalizeIniValue(If(ACS_Bridge_Address, ""))
+        End Function
+
+        Private Function ResolveTeamsMeetingJoinUrl() As String
+            Return NormalizeIniValue(If(ACS_Bridge_Address, ""))
+        End Function
+
+        Private Function ResolveTeamsAcsBridgeBearerToken() As String
+            Return DecodeWrappedEncryptedValue(
+                NormalizeIniValue(INI_Model_Parameter3),
+                "Teams ACS bridge bearer token")
+        End Function
+
+        Private Shared Function EngineNeedsLocalAudioCapture(kind As EngineKind) As Boolean
+            Select Case kind
+                Case EngineKind.TeamsAcsRealtime
+                    Return False
+                Case Else
+                    Return True
+            End Select
         End Function
 
         Private Function HasConfiguredOpenAiProvider() As Boolean
@@ -709,6 +746,16 @@ Partial Public Class ThisAddIn
                     Case EngineKind.AzureSpeechFastRest
                         cboLang.Items.AddRange(
                             AzureSpeechFastRestEngine.SupportedLanguages.
+                                OrderBy(Function(x) x, StringComparer.OrdinalIgnoreCase).
+                                Select(Function(x) CObj(x)).
+                                ToArray())
+                        If cboLang.Items.Count > 0 Then
+                            cboLang.SelectedIndex = 0
+                        End If
+
+                    Case EngineKind.TeamsAcsRealtime
+                        cboLang.Items.AddRange(
+                            TeamsAcsRealtimeEngine.SupportedLanguages.
                                 OrderBy(Function(x) x, StringComparer.OrdinalIgnoreCase).
                                 Select(Function(x) CObj(x)).
                                 ToArray())
@@ -1060,6 +1107,13 @@ Partial Public Class ThisAddIn
                         ResolveAzureFastRestLocation(d.ModelOrTag),
                         ResolveAzureSttSetting(d.ModelOrTag, "api-version", ""),
                         ResolveAzureRegionForHeader(d.ModelOrTag))
+
+                Case EngineKind.TeamsAcsRealtime
+                    Return New TeamsAcsRealtimeEngine(
+                        ResolveTeamsAcsBridgeWebSocketUri(),
+                        ResolveTeamsMeetingJoinUrl(),
+                        ResolveTeamsAcsBridgeBearerToken())
+
             End Select
 
             Throw New NotSupportedException(d.Kind.ToString())
@@ -1281,21 +1335,24 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
-            _capture = New AudioCaptureService With {
-        .MicDeviceIndex = micDeviceIndex,
-        .SourceMode = sourceMode,
-        .SystemAudioRenderDeviceId = GetConfiguredOutputDeviceId(),
-        .MultiChannelStereo = _opts.MultiChannelDiarization AndAlso _engine.SupportsMultiChannelDiarization,
-        .AudioDebugDump = _opts.AudioDebugDump OrElse INI_APIDebug
-    }
+            If EngineNeedsLocalAudioCapture(d.Kind) Then
+                _capture = New AudioCaptureService With {
+                    .MicDeviceIndex = micDeviceIndex,
+                    .SourceMode = sourceMode,
+                    .SystemAudioRenderDeviceId = GetConfiguredOutputDeviceId(),
+                    .MultiChannelStereo = _opts.MultiChannelDiarization AndAlso _engine.SupportsMultiChannelDiarization,
+                    .AudioDebugDump = _opts.AudioDebugDump OrElse INI_APIDebug
+                }
 
-            AddHandler _capture.Frame, AddressOf OnCaptureFrame
-            AddHandler _capture.CaptureError,
-        Sub(s, ev)
-            SetLiveState(_currentEngineDisplayName & ": Capture error: " & ev.Message)
-        End Sub
+                AddHandler _capture.Frame, AddressOf OnCaptureFrame
+                AddHandler _capture.CaptureError,
+                    Sub(s, ev)
+                        SetLiveState(_currentEngineDisplayName & ": Capture error: " & ev.Message)
+                    End Sub
 
-            _capture.Start()
+                _capture.Start()
+            End If
+
             AcquireSleepLock()
 
             _capturing = True
@@ -2017,7 +2074,71 @@ Partial Public Class ThisAddIn
         End Function
 
         Private Function ResolveAzureSpeechKey() As String
-            Return NormalizeIniValue(INI_STT_Azure_SpeechKey)
+            Return DecodeWrappedEncryptedValue(NormalizeIniValue(INI_STT_Azure_SpeechKey), "Azure Speech key")
+        End Function
+
+        Private Shared Function DecodeWrappedEncryptedValue(value As String, valueName As String) As String
+            Dim normalized As String = NormalizeIniValue(value)
+
+            If normalized.StartsWith("encrypted(", StringComparison.OrdinalIgnoreCase) AndAlso
+               normalized.EndsWith(")", StringComparison.Ordinal) Then
+
+                Dim innerValue As String = normalized.Substring(
+                    "encrypted(".Length,
+                    normalized.Length - "encrypted(".Length - 1).Trim()
+
+                If String.IsNullOrWhiteSpace(innerValue) Then
+                    Return ""
+                End If
+
+                Dim codeBasis As String = ResolveCodeBasis()
+                If String.IsNullOrWhiteSpace(codeBasis) Then
+                    Throw New InvalidOperationException("Missing CodeBasis for encrypted " & valueName & ".")
+                End If
+
+                Dim decoded As String = DecodeString(innerValue, codeBasis)
+                If decoded.StartsWith("Error:", StringComparison.OrdinalIgnoreCase) Then
+                    Throw New InvalidOperationException("Failed to decrypt " & valueName & ": " & decoded)
+                End If
+
+                Return NormalizeIniValue(decoded)
+            End If
+
+            Return normalized
+        End Function
+
+        Private Shared Function ResolveCodeBasis() As String
+            Dim codeBasis As String = ""
+
+            Try
+                If ThisAddIn._context IsNot Nothing Then
+                    codeBasis = If(ThisAddIn._context.Codebasis, "").Trim()
+                End If
+            Catch
+            End Try
+
+            If String.IsNullOrWhiteSpace(codeBasis) Then
+                Try
+                    If IsEmptyOrBlank(Int_CodeBasis) Then
+                        codeBasis = GetFromRegistry(RegPath_Base, RegPath_CodeBasis, False)
+                    Else
+                        codeBasis = Int_CodeBasis
+                    End If
+                Catch
+                End Try
+            End If
+
+            Try
+                If ThisAddIn._context IsNot Nothing AndAlso
+                   String.IsNullOrWhiteSpace(ThisAddIn._context.Codebasis) AndAlso
+                   Not String.IsNullOrWhiteSpace(codeBasis) Then
+
+                    ThisAddIn._context.Codebasis = codeBasis
+                End If
+            Catch
+            End Try
+
+            Return If(codeBasis, "").Trim()
         End Function
 
         Private Function ResolveAzureSttSetting(modelOrTag As String, settingName As String, defaultValue As String) As String
@@ -2035,7 +2156,7 @@ Partial Public Class ThisAddIn
 
         Private Shared Function IsLiveOnlyEngine(kind As EngineKind) As Boolean
             Select Case kind
-                Case EngineKind.OpenAiRealtime, EngineKind.AzureSpeechRealtime
+                Case EngineKind.OpenAiRealtime, EngineKind.AzureSpeechRealtime, EngineKind.TeamsAcsRealtime
                     Return True
                 Case Else
                     Return False

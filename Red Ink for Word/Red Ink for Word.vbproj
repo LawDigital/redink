@@ -790,6 +790,7 @@
     <Compile Include="Transcription\ITranscriptionEngine.vb" />
     <Compile Include="Transcription\OpenAiRealtimeEngine.vb" />
     <Compile Include="Transcription\OpenAiRestEngine.vb" />
+    <Compile Include="Transcription\TeamsAcsRealtimeEngine.vb" />
     <Compile Include="Transcription\TranscriptionOptionsDialog.vb">
       <SubType>Form</SubType>
     </Compile>

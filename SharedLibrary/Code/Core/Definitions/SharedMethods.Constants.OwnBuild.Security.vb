@@ -22,7 +22,7 @@ Namespace SharedLibrary
 
         ' Amend the following two values to hard code the encryption key and permitted domains (otherwise the values are taken from the registry at the path below)
 
-        Private Const Int_CodeBasis As String = ""
+        Public Const Int_CodeBasis As String = ""
         Public Const allowedDomains As String = ""
         Public Const noSilentIniUpdatesWithoutRegistryFlag As Boolean = False    ' If set to True, SharedMethods.UpdateIni.vb will disable silent INI unless explicitly enabled via registry flag
 
