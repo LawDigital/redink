@@ -149,6 +149,13 @@ Namespace SharedLibrary
             Property INI_SpeechModelPath As String
             Property INI_LocalModelPath As String
             Property INI_TTSEndpoint As String
+
+            Property INI_STT_Google As String
+            Property INI_STT_OpenAI As String
+            Property INI_STT_Azure As String
+            Property INI_STT_Google_ProjectID As String
+            Property INI_STT_Azure_SpeechKey As String
+
             Property SP_Translate As String
             Property SP_Translate_Multi As String
 
@@ -490,6 +497,14 @@ Namespace SharedLibrary
         Public Property INI_SpeechModelPath As String Implements ISharedContext.INI_SpeechModelPath
         Public Property INI_LocalModelPath As String Implements ISharedContext.INI_LocalModelPath
         Public Property INI_TTSEndpoint As String Implements ISharedContext.INI_TTSEndpoint
+
+        Public Property INI_STT_Google As String Implements ISharedContext.INI_STT_Google
+        Public Property INI_STT_OpenAI As String Implements ISharedContext.INI_STT_OpenAI
+        Public Property INI_STT_Azure As String Implements ISharedContext.INI_STT_Azure
+        Public Property INI_STT_Google_ProjectID As String Implements ISharedContext.INI_STT_Google_ProjectID
+        Public Property INI_STT_Azure_SpeechKey As String Implements ISharedContext.INI_STT_Azure_SpeechKey
+
+
         Public Property SP_Translate As String Implements ISharedContext.SP_Translate
         Public Property SP_Translate_Multi As String Implements ISharedContext.SP_Translate_Multi
         Public Property SP_Translate_Multi_Source As String Implements ISharedContext.SP_Translate_Multi_Source

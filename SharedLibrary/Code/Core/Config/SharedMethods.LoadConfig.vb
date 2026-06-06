@@ -348,6 +348,12 @@ Namespace SharedLibrary
                 context.INI_TTSEndpoint = If(configDict.ContainsKey("TTSEndpoint"), configDict("TTSEndpoint"), "")
                 context.INI_LocalModelPath = If(configDict.ContainsKey("LocalModelPath"), configDict("LocalModelPath"), "")
 
+                context.INI_STT_Google = If(configDict.ContainsKey("STT_Google"), configDict("STT_Google"), "")
+                context.INI_STT_OpenAI = If(configDict.ContainsKey("STT_OpenAI"), configDict("STT_OpenAI"), "")
+                context.INI_STT_Azure = If(configDict.ContainsKey("STT_Azure"), configDict("STT_Azure"), "")
+                context.INI_STT_Google_ProjectID = If(configDict.ContainsKey("STT_Google_ProjectID"), configDict("STT_Google_ProjectID"), "")
+                context.INI_STT_Azure_SpeechKey = If(configDict.ContainsKey("STT_Azure_SpeechKey"), configDict("STT_Azure_SpeechKey"), "")
+
                 context.INI_PromptLibPath = If(configDict.ContainsKey("PromptLib"), configDict("PromptLib"), "")
                 context.INI_PromptLibPathLocal = If(configDict.ContainsKey("PromptLibLocal"), configDict("PromptLibLocal"), "")
                 context.INI_MyStylePath = If(configDict.ContainsKey("MyStylePath"), configDict("MyStylePath"), "")

@@ -3,7 +3,7 @@
 
 ' =============================================================================
 ' File: DPIProgressForm.vb
-' Purpose: Implements a small modal Windows Forms progress dialog with a progress bar,
+' Purpose: Implements a small Windows Forms progress dialog with a progress bar,
 '          status text, and a Cancel button. The UI is periodically refreshed from
 '          shared state exposed by `ProgressBarModule`.
 '
@@ -13,7 +13,8 @@
 '  - Update Loop: A WinForms `Timer` triggers periodic UI refreshes (default: 250 ms).
 '  - Cancellation: Clicking Cancel sets `ProgressBarModule.CancelOperation`; the timer also
 '    closes the form if cancellation is detected.
-'  - DPI Awareness: Uses WinForms autoscaling (`AutoScaleMode.Font`) for DPI/font scaling.
+'  - DPI Awareness: Uses WinForms autoscaling (`AutoScaleMode.Font`) and layout panels
+'    instead of absolute positioning, so wrapped status text and button spacing scale correctly.
 ' =============================================================================
 
 Option Strict On
@@ -22,7 +23,7 @@ Option Explicit On
 Namespace SharedLibrary
 
     ''' <summary>
-    ''' Modal progress dialog that displays progress and status text and allows the user to cancel.
+    ''' Progress dialog that displays progress and status text and allows the user to cancel.
     ''' </summary>
     Public Class DPIProgressForm
         Inherits System.Windows.Forms.Form
@@ -53,6 +54,16 @@ Namespace SharedLibrary
         Private WithEvents uiTimer As System.Windows.Forms.Timer
 
         ''' <summary>
+        ''' Root layout panel.
+        ''' </summary>
+        Private layoutRoot As System.Windows.Forms.TableLayoutPanel
+
+        ''' <summary>
+        ''' Button row container.
+        ''' </summary>
+        Private buttonPanel As System.Windows.Forms.FlowLayoutPanel
+
+        ''' <summary>
         ''' Initializes a new instance of the <see cref="DPIProgressForm"/> class.
         ''' </summary>
         ''' <param name="headerText">The caption text shown in the form title bar.</param>
@@ -62,8 +73,13 @@ Namespace SharedLibrary
             Me.AutoScaleDimensions = New System.Drawing.SizeF(96.0F, 96.0F)
             Me.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font
 
-            ' --- Form properties ---
-            Me.ClientSize = New System.Drawing.Size(400, 220)
+            Dim standardFont As New System.Drawing.Font(
+                "Segoe UI",
+                9.0F,
+                System.Drawing.FontStyle.Regular,
+                System.Drawing.GraphicsUnit.Point)
+
+            Me.Font = standardFont
             Me.FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedDialog
             Me.StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen
             Me.MaximizeBox = False
@@ -71,81 +87,118 @@ Namespace SharedLibrary
             Me.ShowInTaskbar = False
             Me.TopMost = True
             Me.Text = headerText
+            Me.AutoSize = True
+            Me.AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink
+            Me.Padding = New System.Windows.Forms.Padding(0)
+            Me.MinimumSize = New System.Drawing.Size(440, 0)
 
             ' Set icon
             Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
             Me.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
 
-            ' Standard font
-            Dim standardFont As New System.Drawing.Font(
-    "Segoe UI",
-    9.0F,
-    System.Drawing.FontStyle.Regular,
-    System.Drawing.GraphicsUnit.Point)
+            ' --- Root layout ---
+            layoutRoot = New System.Windows.Forms.TableLayoutPanel() With {
+                .AutoSize = True,
+                .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
+                .Dock = System.Windows.Forms.DockStyle.Fill,
+                .Padding = New System.Windows.Forms.Padding(12),
+                .ColumnCount = 1,
+                .RowCount = 4
+            }
+            layoutRoot.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
+            layoutRoot.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+            layoutRoot.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+            layoutRoot.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+            layoutRoot.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+            Me.Controls.Add(layoutRoot)
 
             ' --- Header label ---
-            lblHeader = New System.Windows.Forms.Label()
-            lblHeader.Text = "Progress ..."
-            lblHeader.AutoSize = True
-            lblHeader.Font = standardFont
-            lblHeader.Location = New System.Drawing.Point(10, 10)
-            lblHeader.Anchor = System.Windows.Forms.AnchorStyles.Top Or System.Windows.Forms.AnchorStyles.Left
-            Me.Controls.Add(lblHeader)
+            lblHeader = New System.Windows.Forms.Label() With {
+                .Text = headerText,
+                .AutoSize = True,
+                .Font = standardFont,
+                .Dock = System.Windows.Forms.DockStyle.Fill,
+                .Margin = New System.Windows.Forms.Padding(0, 0, 0, 8)
+            }
+            layoutRoot.Controls.Add(lblHeader, 0, 0)
 
-            ' --- ProgressBar ---
-            progressBar = New System.Windows.Forms.ProgressBar()
-            progressBar.Minimum = 0
-            progressBar.Maximum = ProgressBarModule.GlobalProgressMax
-            progressBar.Size = New System.Drawing.Size(Me.ClientSize.Width - 20, 25)
-            progressBar.Location = New System.Drawing.Point(10, 40)
-            progressBar.Anchor = System.Windows.Forms.AnchorStyles.Top Or
-                     System.Windows.Forms.AnchorStyles.Left Or
-                     System.Windows.Forms.AnchorStyles.Right
-            Me.Controls.Add(progressBar)
+            ' --- Progress bar ---
+            progressBar = New System.Windows.Forms.ProgressBar() With {
+                .Minimum = 0,
+                .Maximum = ProgressBarModule.GlobalProgressMax,
+                .Dock = System.Windows.Forms.DockStyle.Fill,
+                .Height = 22,
+                .Margin = New System.Windows.Forms.Padding(0, 0, 0, 8)
+            }
+            layoutRoot.Controls.Add(progressBar, 0, 1)
 
             ' --- Status label ---
-            lblStatus = New System.Windows.Forms.Label()
-            lblStatus.Text = initialLabel
-            lblStatus.AutoSize = False
-            lblStatus.Font = standardFont
-            lblStatus.Location = New System.Drawing.Point(10, 75)
-            lblStatus.Size = New System.Drawing.Size(Me.ClientSize.Width - 20, 20)
-            lblStatus.Anchor = System.Windows.Forms.AnchorStyles.Top Or
-                 System.Windows.Forms.AnchorStyles.Left Or
-                 System.Windows.Forms.AnchorStyles.Right
-            Me.Controls.Add(lblStatus)
+            lblStatus = New System.Windows.Forms.Label() With {
+                .Text = initialLabel,
+                .AutoSize = True,
+                .Font = standardFont,
+                .Dock = System.Windows.Forms.DockStyle.Fill,
+                .Margin = New System.Windows.Forms.Padding(0, 0, 0, 8)
+            }
+            layoutRoot.Controls.Add(lblStatus, 0, 2)
 
-            ' --- Cancel button ---
-            btnCancel = New System.Windows.Forms.Button()
-            btnCancel.Text = "Cancel"
-            btnCancel.Font = standardFont
-            btnCancel.AutoSize = True
-            btnCancel.Location = New System.Drawing.Point(10, 120)
-            btnCancel.Anchor = System.Windows.Forms.AnchorStyles.Bottom Or System.Windows.Forms.AnchorStyles.Left
+            ' --- Cancel button row ---
+            buttonPanel = New System.Windows.Forms.FlowLayoutPanel() With {
+                .AutoSize = True,
+                .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
+                .Dock = System.Windows.Forms.DockStyle.Fill,
+                .FlowDirection = System.Windows.Forms.FlowDirection.RightToLeft,
+                .WrapContents = False,
+                .Margin = New System.Windows.Forms.Padding(0)
+            }
+
+            btnCancel = New System.Windows.Forms.Button() With {
+                .Text = "Cancel",
+                .AutoSize = True,
+                .Margin = New System.Windows.Forms.Padding(0)
+            }
             AddHandler btnCancel.Click, AddressOf btnCancel_Click
-            Me.Controls.Add(btnCancel)
+            buttonPanel.Controls.Add(btnCancel)
 
-            ' --- Resize event for dynamic adjustments ---
+            layoutRoot.Controls.Add(buttonPanel, 0, 3)
+
+            ' --- Layout updates ---
+            AddHandler Me.Shown, AddressOf Form_Shown
             AddHandler Me.ClientSizeChanged, AddressOf Form_Resize
 
             ' --- UI timer for periodic updates ---
-            uiTimer = New System.Windows.Forms.Timer()
-            uiTimer.Interval = 250 ' Update every 250 ms
+            uiTimer = New System.Windows.Forms.Timer() With {
+                .Interval = 250
+            }
             AddHandler uiTimer.Tick, AddressOf Timer_Tick
             uiTimer.Start()
         End Sub
 
         ''' <summary>
-        ''' Updates control widths when the client size changes.
+        ''' Applies width-dependent wrapping for the status label.
         ''' </summary>
-        ''' <param name="sender">The event sender.</param>
-        ''' <param name="e">Event arguments.</param>
-        Private Sub Form_Resize(sender As Object, e As EventArgs)
-            progressBar.Size = New System.Drawing.Size(Me.ClientSize.Width - 20, progressBar.Height)
-            lblStatus.Size = New System.Drawing.Size(Me.ClientSize.Width - 20, lblStatus.Height)
+        Private Sub UpdateStatusLayout()
+            Try
+                Dim horizontalPadding As Integer = layoutRoot.Padding.Left + layoutRoot.Padding.Right
+                Dim usableWidth As Integer = Math.Max(200, Me.ClientSize.Width - horizontalPadding)
+                lblStatus.MaximumSize = New System.Drawing.Size(usableWidth, 0)
+            Catch
+            End Try
         End Sub
 
-        ' Timer tick event updates the progress bar and status label.
+        ''' <summary>
+        ''' Updates wrapping after the form is first shown.
+        ''' </summary>
+        Private Sub Form_Shown(sender As Object, e As System.EventArgs)
+            UpdateStatusLayout()
+        End Sub
+
+        ''' <summary>
+        ''' Updates control wrapping when the client size changes.
+        ''' </summary>
+        Private Sub Form_Resize(sender As Object, e As System.EventArgs)
+            UpdateStatusLayout()
+        End Sub
 
         ''' <summary>
         ''' Periodically refreshes the progress bar and status label from <c>ProgressBarModule</c>,
@@ -153,38 +206,34 @@ Namespace SharedLibrary
         ''' </summary>
         ''' <param name="sender">The event sender.</param>
         ''' <param name="e">Event arguments.</param>
-        Private Sub Timer_Tick(sender As Object, e As EventArgs)
+        Private Sub Timer_Tick(sender As Object, e As System.EventArgs)
             Try
-                ' Update the progress bar maximum and value.
-                progressBar.Maximum = ProgressBarModule.GlobalProgressMax
+                progressBar.Maximum = Math.Max(1, ProgressBarModule.GlobalProgressMax)
                 progressBar.Value = Math.Min(ProgressBarModule.GlobalProgressValue, progressBar.Maximum)
 
-                ' Update the status text.
-                lblStatus.Text = ProgressBarModule.GlobalProgressLabel
+                Dim newStatus As String = ProgressBarModule.GlobalProgressLabel
+                If lblStatus.Text <> newStatus Then
+                    lblStatus.Text = newStatus
+                    UpdateStatusLayout()
+                End If
 
-                ' If the cancel flag is set, close the form with a Cancel result.
                 If ProgressBarModule.CancelOperation Then
                     Me.DialogResult = System.Windows.Forms.DialogResult.Cancel
                     Me.Close()
                 End If
             Catch ex As System.Exception
-                ' It is possible to get an exception if the form is closing.
                 System.Diagnostics.Debug.WriteLine("Timer error: " & ex.Message)
             End Try
         End Sub
-
-        ' When the Cancel button is clicked, set the global cancel flag.
 
         ''' <summary>
         ''' Handles the Cancel button click by setting <c>ProgressBarModule.CancelOperation</c> to <c>True</c>.
         ''' </summary>
         ''' <param name="sender">The event sender.</param>
         ''' <param name="e">Event arguments.</param>
-        Private Sub btnCancel_Click(sender As Object, e As EventArgs)
+        Private Sub btnCancel_Click(sender As Object, e As System.EventArgs)
             ProgressBarModule.CancelOperation = True
         End Sub
-
-        ' Stop the timer when the form is closed.
 
         ''' <summary>
         ''' Stops the UI timer and sets the global cancel flag when the form is closed.

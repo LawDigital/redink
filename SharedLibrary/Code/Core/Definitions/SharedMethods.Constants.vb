@@ -132,7 +132,7 @@ Namespace SharedLibrary
             "(https://licenses.nuget.org/MIT) at https://github.com/sandrohanea/whisper.net" & vbCrLf &
             "10. Includes Grpc.core/Grpc.net in unchanged form; Copyright (c) 2023/2025 The gRPC Authors; licensed under the Apache 2.0 license " &
             "(https://licenses.nuget.org/Apache-2.0) at https://github.com/grpc/grpc" & vbCrLf &
-            "11. Includes Google Speech V1 library and related API libraries in unchanged form; Copyright (c) 2024 Google LLC; " &
+            "11. Includes Google Speech V1/V2 library and related API libraries in unchanged form; Copyright (c) 2024 Google LLC; " &
             "licensed under the Apache 2.0 license (https://licenses.nuget.org/Apache-2.0) at https://github.com/googleapis/google-cloud-dotnet" & vbCrLf &
             "12. Includes Google Protobuf in unchanged form; Copyright (c) 2025 Google Inc.; licensed under the BSD-3-Clause license " &
             "(https://licenses.nuget.org/BSD-3-Clause) at https://github.com/protocolbuffers/protobuf" & vbCrLf &

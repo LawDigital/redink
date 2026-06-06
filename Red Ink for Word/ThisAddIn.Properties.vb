@@ -1993,7 +1993,50 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_STT_Google As String
+        Get
+            Return _context.INI_STT_Google
+        End Get
+        Set(value As String)
+            _context.INI_STT_Google = value
+        End Set
+    End Property
 
+    Public Shared Property INI_STT_OpenAI As String
+        Get
+            Return _context.INI_STT_OpenAI
+        End Get
+        Set(value As String)
+            _context.INI_STT_OpenAI = value
+        End Set
+    End Property
+
+    Public Shared Property INI_STT_Azure As String
+        Get
+            Return _context.INI_STT_Azure
+        End Get
+        Set(value As String)
+            _context.INI_STT_Azure = value
+        End Set
+    End Property
+
+    Public Shared Property INI_STT_Google_ProjectID As String
+        Get
+            Return _context.INI_STT_Google_ProjectID
+        End Get
+        Set(value As String)
+            _context.INI_STT_Google_ProjectID = value
+        End Set
+    End Property
+
+    Public Shared Property INI_STT_Azure_SpeechKey As String
+        Get
+            Return _context.INI_STT_Azure_SpeechKey
+        End Get
+        Set(value As String)
+            _context.INI_STT_Azure_SpeechKey = value
+        End Set
+    End Property
 
     Public Shared Property INI_TTSEndpoint As String
         Get
