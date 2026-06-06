@@ -153,54 +153,6 @@ Namespace My
         <Global.System.Configuration.UserScopedSettingAttribute(),  _
          Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
          Global.System.Configuration.DefaultSettingValueAttribute("")>  _
-        Public Property LastSpeechModel() As String
-            Get
-                Return CType(Me("LastSpeechModel"),String)
-            End Get
-            Set
-                Me("LastSpeechModel") = value
-            End Set
-        End Property
-        
-        <Global.System.Configuration.UserScopedSettingAttribute(),  _
-         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
-         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
-        Public Property LastAudioSource() As String
-            Get
-                Return CType(Me("LastAudioSource"),String)
-            End Get
-            Set
-                Me("LastAudioSource") = value
-            End Set
-        End Property
-        
-        <Global.System.Configuration.UserScopedSettingAttribute(),  _
-         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
-         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
-        Public Property LastSpeakerEnabled() As Boolean
-            Get
-                Return CType(Me("LastSpeakerEnabled"),Boolean)
-            End Get
-            Set
-                Me("LastSpeakerEnabled") = value
-            End Set
-        End Property
-        
-        <Global.System.Configuration.UserScopedSettingAttribute(),  _
-         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
-         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
-        Public Property LastSpeakerDistance() As Double
-            Get
-                Return CType(Me("LastSpeakerDistance"),Double)
-            End Get
-            Set
-                Me("LastSpeakerDistance") = value
-            End Set
-        End Property
-        
-        <Global.System.Configuration.UserScopedSettingAttribute(),  _
-         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
-         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
         Public Property LastVoice() As String
             Get
                 Return CType(Me("LastVoice"),String)
@@ -471,18 +423,6 @@ Namespace My
             End Get
             Set
                 Me("CleanTextPrompt") = value
-            End Set
-        End Property
-        
-        <Global.System.Configuration.UserScopedSettingAttribute(),  _
-         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
-         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
-        Public Property AudioOutputDevice() As String
-            Get
-                Return CType(Me("AudioOutputDevice"),String)
-            End Get
-            Set
-                Me("AudioOutputDevice") = value
             End Set
         End Property
         
@@ -1598,6 +1538,90 @@ Namespace My
             End Get
             Set
                 Me("AdvancedToolsEnabled") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property LastAudioOutputDeviceId() As String
+            Get
+                Return CType(Me("LastAudioOutputDeviceId"),String)
+            End Get
+            Set
+                Me("LastAudioOutputDeviceId") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property LastEngineOptionsJson() As String
+            Get
+                Return CType(Me("LastEngineOptionsJson"),String)
+            End Get
+            Set
+                Me("LastEngineOptionsJson") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property LastAudioSourceMode() As String
+            Get
+                Return CType(Me("LastAudioSourceMode"),String)
+            End Get
+            Set
+                Me("LastAudioSourceMode") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property LastAudioInputDeviceIndex() As Integer
+            Get
+                Return CType(Me("LastAudioInputDeviceIndex"),Integer)
+            End Get
+            Set
+                Me("LastAudioInputDeviceIndex") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property LastModelOrLanguage() As String
+            Get
+                Return CType(Me("LastModelOrLanguage"),String)
+            End Get
+            Set
+                Me("LastModelOrLanguage") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property LastEngineName() As String
+            Get
+                Return CType(Me("LastEngineName"),String)
+            End Get
+            Set
+                Me("LastEngineName") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("{}")>  _
+        Public Property LastLanguageByEngineJson() As String
+            Get
+                Return CType(Me("LastLanguageByEngineJson"),String)
+            End Get
+            Set
+                Me("LastLanguageByEngineJson") = value
             End Set
         End Property
     End Class

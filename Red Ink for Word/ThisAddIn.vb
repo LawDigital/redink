@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 4.6.2026
+' 6.6.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -15,7 +15,7 @@
 ' Includes Vosk in unchanged form; Copyright (c) 2022 Alpha Cephei Inc.; licensed under the Apache 2.0 license (https://licenses.nuget.org/Apache-2.0) at https://alphacephei.com/vosk/
 ' Includes Whisper.net in unchanged form; Copyright (c) 2024 Sandro Hanea; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://github.com/sandrohanea/whisper.net
 ' Includes Grpc.core/Grpc.net in unchanged form; Copyright (c) 2023/2025 The gRPC Authors; licensed under the Apache 2.0 license (https://licenses.nuget.org/Apache-2.0) at https://github.com/grpc/grpc
-' Includes Google Speech V1 library and related API libraries in unchanged form; Copyright (c) 2024 Google LLC; licensed under the Apache 2.0 license (https://licenses.nuget.org/Apache-2.0) at https://github.com/googleapis/google-cloud-dotnet
+' Includes Google Speech V1/V2 library and related API libraries in unchanged form; Copyright (c) 2024 Google LLC; licensed under the Apache 2.0 license (https://licenses.nuget.org/Apache-2.0) at https://github.com/googleapis/google-cloud-dotnet
 ' Includes Google Protobuf in unchanged form; Copyright (c) 2025 Google Inc.; licensed under the BSD-3-Clause license (https://licenses.nuget.org/BSD-3-Clause) at https://github.com/protocolbuffers/protobuf
 ' Includes Google.Api in unchanged form; Copyright (c) 2025 Google LLC; licensed under the BSD-3-Clause license (https://licenses.nuget.org/BSD-3-Clause) at https://github.com/googleapis/gax-dotnet
 ' Includes Google.Apis in unchanged form; Copyright (c) 2025 Google LLC; licensed under the Apache 2.0 license (https://licenses.nuget.org/Apache-2.0) at https://github.com/googleapis/google-api-dotnet-client
@@ -45,6 +45,7 @@ Imports System.Windows.Forms
 Imports SharedLibrary.SharedLibrary
 Imports System.Globalization
 Imports SharedLibrary.SharedLibrary.SharedMethods
+Imports System.Net
 
 
 Partial Public Class ThisAddIn
@@ -53,7 +54,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.040626" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.060626" & SharedMethods.VersionQualifier
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
     Public Const AN5 As String = "RI" ' for bubble comments 
@@ -216,33 +217,6 @@ Partial Public Class ThisAddIn
     Private Shared TTS_openAISecondary As Boolean = False
     Private Shared TTS_GoogleEndpoint As String = ""
     Private Shared TTS_OpenAIEndpoint As String = ""
-
-    Public Shared GoogleSTT_Desc As String = "Google STT V1 (run in EU)"
-    Public Shared STTEndpoint As String = "eu-speech.googleapis.com"
-
-
-    Public Shared OpenAISTTModel As String = "gpt-4o-realtime-preview"
-    Public Shared OpenAISTT_Desc As String = $"OpenAI Streaming"
-    Public Shared STTEndpoint_OpenAI As String = $"wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
-
-    Public Shared GoogleSTTsupportedLanguages As String() = {
-    "en-US", "de-DE",
-    "de-AT", "de-CH", "es-AR", "es-BO", "es-CL", "es-CO", "es-CR", "es-DO", "es-EC", "es-ES", "es-GT",
-    "es-HN", "es-MX", "es-NI", "es-PA", "es-PE", "es-PR", "es-PY", "es-SV", "es-UY", "es-VE",
-    "fr-BE", "fr-CA", "fr-CH", "fr-FR", "it-CH", "it-IT", "nl-BE", "nl-NL",
-    "af-ZA", "am-ET", "ar-BH", "ar-DZ", "ar-EG", "ar-IQ", "ar-IL", "ar-JO", "ar-KW", "ar-LB", "ar-MA",
-    "ar-MR", "ar-OM", "ar-PS", "ar-QA", "ar-SA", "ar-SY", "ar-TN", "ar-AE", "ar-YE", "az-AZ", "bg-BG",
-    "bn-BD", "bn-IN", "bs-BA", "ca-ES", "cmn-Hans-CN", "cmn-Hans-HK", "cmn-Hant-TW", "cs-CZ",
-    "da-DK", "el-GR", "en-AU", "en-CA", "en-GH", "en-HK", "en-IE", "en-IN", "en-KE", "en-NG",
-    "en-NZ", "en-PH", "en-PK", "en-SG", "en-TZ", "en-ZA", "et-EE", "eu-ES", "fa-IR", "fi-FI",
-    "fil-PH", "gl-ES", "gu-IN", "hi-IN", "hr-HR", "hu-HU", "hy-AM", "id-ID", "is-IS", "iw-IL",
-    "ja-JP", "jv-ID", "ka-GE", "kk-KZ", "km-KH", "kn-IN", "ko-KR", "lo-LA", "lt-LT", "lv-LV",
-    "ml-IN", "mn-MN", "mr-IN", "ms-MY", "my-MM", "ne-NP", "no-NO", "pa-Guru-IN", "pl-PL",
-    "pt-BR", "pt-PT", "ro-RO", "rw-RW", "si-LK", "sk-SK", "sl-SI", "sr-RS", "ss-Latn-ZA", "st-ZA",
-    "su-ID", "sv-SE", "sw-KE", "sw-TZ", "ta-IN", "ta-LK", "ta-MY", "ta-SG", "te-IN", "th-TH",
-    "tn-Latn-ZA", "tr-TR", "uk-UA", "ur-IN", "ur-PK", "uz-UZ", "ve-ZA", "vi-VN", "xh-ZA",
-    "yue-Hant-HK", "zu-ZA"
-        }
 
     ' Tooling
 
@@ -437,6 +411,32 @@ Partial Public Class ThisAddIn
     Public Shared UiThreadId As Integer
 
 
+    Private Shared Sub EnsureModernTls()
+        Try
+            AppContext.SetSwitch("Switch.System.Net.DontEnableSchUseStrongCrypto", False)
+        Catch
+        End Try
+
+        Try
+            AppContext.SetSwitch("Switch.System.Net.DontEnableSystemDefaultTlsVersions", False)
+        Catch
+        End Try
+
+        Try
+            ServicePointManager.Expect100Continue = False
+        Catch
+        End Try
+
+        Try
+            ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12
+        Catch
+            Try
+                ServicePointManager.SecurityProtocol = CType(3072, SecurityProtocolType)
+            Catch
+            End Try
+        End Try
+    End Sub
+
     Private Sub ThisAddIn_Startup() Handles Me.Startup
 
         ' Necessary for Update Handler to work correctly
@@ -474,6 +474,8 @@ Partial Public Class ThisAddIn
         UpdateHandler.HostHandle = hwnd
 
         ' Other tasks that need to be done at startup
+
+        EnsureModernTls()
 
         SharedMethods.Initialize(Me.CustomTaskPanes)
 
