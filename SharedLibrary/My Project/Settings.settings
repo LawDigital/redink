@@ -203,5 +203,20 @@
     <Setting Name="MarkupAuthor" Type="System.String" Scope="User">
       <Value Profile="(Default)" />
     </Setting>
+    <Setting Name="TalkToMeWidgetX" Type="System.Int32" Scope="User">
+      <Value Profile="(Default)">-2147483648</Value>
+    </Setting>
+    <Setting Name="TalkToMeWidgetY" Type="System.Int32" Scope="User">
+      <Value Profile="(Default)">-2147483648</Value>
+    </Setting>
+    <Setting Name="TalkToMeWidgetWidth" Type="System.Int32" Scope="User">
+      <Value Profile="(Default)">420</Value>
+    </Setting>
+    <Setting Name="TalkToMeWidgetHeight" Type="System.Int32" Scope="User">
+      <Value Profile="(Default)">44</Value>
+    </Setting>
+    <Setting Name="TalkToMeIncludeFullDocument" Type="System.Boolean" Scope="User">
+      <Value Profile="(Default)">False</Value>
+    </Setting>
   </Settings>
 </SettingsFile>

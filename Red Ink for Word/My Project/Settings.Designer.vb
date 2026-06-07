@@ -1624,6 +1624,42 @@ Namespace My
                 Me("LastLanguageByEngineJson") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property TalkToMeSpeechEngineName() As String
+            Get
+                Return CType(Me("TalkToMeSpeechEngineName"),String)
+            End Get
+            Set
+                Me("TalkToMeSpeechEngineName") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property TalkToMeSpeechLanguageCode() As String
+            Get
+                Return CType(Me("TalkToMeSpeechLanguageCode"),String)
+            End Get
+            Set
+                Me("TalkToMeSpeechLanguageCode") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property TalkToMeSpeechMicrophoneDeviceIndex() As Integer
+            Get
+                Return CType(Me("TalkToMeSpeechMicrophoneDeviceIndex"),Integer)
+            End Get
+            Set
+                Me("TalkToMeSpeechMicrophoneDeviceIndex") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

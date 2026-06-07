@@ -1,0 +1,15 @@
+root = true
+
+[*]
+charset = utf-8-bom
+end_of_line = crlf
+insert_final_newline = true
+indent_style = space
+indent_size = 4
+trim_trailing_whitespace = true
+
+[*.{vb,vbproj}]
+# Project preference: use fully qualified .NET type names where needed for clarity.
+# Project preference: in VB.NET code, prefer `IsNot` over `Is Not`.
+indent_style = space
+indent_size = 4

@@ -1,0 +1,528 @@
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: TalkToMeWidget.vb
+' Purpose: Provides the user interface for the "Talk to Me" feature. It's a
+'          floating, non-modal window that displays recording status and handles
+'          user interaction to start/stop transcription.
+'
+' Architecture:
+'  - UI Component: A `System.Windows.Forms.Form` designed as a lightweight,
+'    always-on-top widget.
+'  - State Display: Visually indicates the current state of transcription
+'    (e.g., listening, processing) to the user.
+'  - User Interaction: Captures user clicks to toggle the recording state via
+'    the `ITalkToMeHost` interface.
+'  - Host Communication: Interacts with a host application (e.g., Word Add-in)
+'    through the `ITalkToMeHost` interface to control the transcription process.
+' =============================================================================
+
+
+Option Explicit On
+Option Strict On
+
+Imports System.Drawing
+Imports System.IO
+Imports System.Threading
+Imports System.Threading.Tasks
+Imports System.Windows.Forms
+Imports Newtonsoft.Json
+
+Namespace SharedLibrary
+    Public Class TalkToMeWidget
+        Inherits Form
+
+        Private NotInheritable Class WidgetSettings
+            Public Property X As Integer = Integer.MinValue
+            Public Property Y As Integer = Integer.MinValue
+            Public Property Width As Integer = 420
+            Public Property Height As Integer = 44
+            Public Property IncludeFullDocument As Boolean = False
+        End Class
+
+        Private Const DefaultPromptText As String = "Ready. Click ▶ to start."
+        Private Const ListeningPromptText As String = "Listening…"
+        Private Const DispatchPauseMilliseconds As Integer = 900
+
+        Private ReadOnly _speechAdapter As ITalkToMeSpeechAdapter
+        Private ReadOnly _coordinator As TalkToMeCoordinator
+
+        Private _settings As WidgetSettings
+        Private _isDisplaySettingsHooked As Boolean = False
+        Private _isClosing As Boolean = False
+        Private _dispatchCts As CancellationTokenSource = Nothing
+        Private _isBusy As Boolean = False
+
+        Private WithEvents btnStartStop As Button
+        Private WithEvents btnConfigure As Button
+        Private lblTranscript As Label
+
+        Public Sub New(speechAdapter As ITalkToMeSpeechAdapter,
+                       coordinator As TalkToMeCoordinator)
+            _speechAdapter = speechAdapter
+            _coordinator = coordinator
+
+            InitializeComponent()
+            LoadSettings()
+            RestoreBoundsSafe()
+
+            AddHandler _speechAdapter.PartialTranscriptReceived, AddressOf OnPartialTranscriptReceived
+            AddHandler _speechAdapter.FinalTranscriptReceived, AddressOf OnFinalTranscriptReceived
+        End Sub
+
+        Public Function GetIncludeFullDocumentSetting() As Boolean
+            Return _settings IsNot Nothing AndAlso _settings.IncludeFullDocument
+        End Function
+
+        Private Sub InitializeComponent()
+            Me.Text = SharedMethods.AN & " - Talk to me!"
+            Me.FormBorderStyle = FormBorderStyle.Sizable
+            Me.TopMost = True
+            Me.ShowInTaskbar = False
+            Me.StartPosition = FormStartPosition.Manual
+            Me.MinimumSize = New Size(320, 44)
+            Me.Size = New Size(420, 44)
+            Me.Font = New Font("Segoe UI", 9.0F, FontStyle.Regular, GraphicsUnit.Point)
+            Me.Padding = New Padding(0)
+
+            Try
+                Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
+                Me.Icon = Icon.FromHandle(bmp.GetHicon())
+            Catch
+            End Try
+
+            Dim root As New TableLayoutPanel() With {
+                .Dock = DockStyle.Fill,
+                .ColumnCount = 3,
+                .RowCount = 1,
+                .Padding = New Padding(8, 2, 8, 2),
+                .Margin = New Padding(0)
+            }
+            root.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
+            root.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
+            root.ColumnStyles.Add(New ColumnStyle(SizeType.Percent, 100.0F))
+            root.RowStyles.Add(New RowStyle(SizeType.Percent, 100.0F))
+
+            btnStartStop = New Button() With {
+                .Text = ChrW(&H25B6),
+                .Font = New Font("Segoe UI Symbol", 9.0F, FontStyle.Regular, GraphicsUnit.Point),
+                .Size = New Size(22, 22),
+                .MinimumSize = New Size(22, 22),
+                .MaximumSize = New Size(22, 22),
+                .Margin = New Padding(0, 0, 4, 0),
+                .Padding = New Padding(0),
+                .UseVisualStyleBackColor = True
+            }
+
+            btnConfigure = New Button() With {
+                .Text = ChrW(&H2699),
+                .Font = New Font("Segoe UI Symbol", 9.0F, FontStyle.Regular, GraphicsUnit.Point),
+                .Size = New Size(22, 22),
+                .MinimumSize = New Size(22, 22),
+                .MaximumSize = New Size(22, 22),
+                .Margin = New Padding(0, 0, 6, 0),
+                .Padding = New Padding(0),
+                .UseVisualStyleBackColor = True
+            }
+
+            lblTranscript = New Label() With {
+                .Dock = DockStyle.Fill,
+                .Text = DefaultPromptText,
+                .AutoSize = False,
+                .AutoEllipsis = False,
+                .TextAlign = ContentAlignment.MiddleLeft,
+                .Margin = New Padding(0)
+            }
+
+            root.Controls.Add(btnStartStop, 0, 0)
+            root.Controls.Add(btnConfigure, 1, 0)
+            root.Controls.Add(lblTranscript, 2, 0)
+
+            Me.Controls.Add(root)
+
+            UpdateUiState()
+        End Sub
+
+        Protected Overrides Sub OnHandleCreated(e As EventArgs)
+            MyBase.OnHandleCreated(e)
+
+            If Not _isDisplaySettingsHooked Then
+                AddHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
+                _isDisplaySettingsHooked = True
+            End If
+        End Sub
+
+        Private _speechStopTask As Task = Nothing
+
+        Protected Overrides Sub OnFormClosing(e As FormClosingEventArgs)
+            BeginShutdown()
+            MyBase.OnFormClosing(e)
+        End Sub
+
+        Public Sub PrepareForHostShutdown()
+            BeginShutdown()
+
+            Try
+                If Not Me.IsDisposed Then
+                    Me.Hide()
+                End If
+            Catch
+            End Try
+        End Sub
+
+        Private Sub BeginShutdown()
+            If _isClosing Then
+                Return
+            End If
+
+            _isClosing = True
+
+            If _isDisplaySettingsHooked Then
+                RemoveHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
+                _isDisplaySettingsHooked = False
+            End If
+
+            SaveSettings()
+
+            Try
+                _dispatchCts?.Cancel()
+                _dispatchCts?.Dispose()
+                _dispatchCts = Nothing
+            Catch
+            End Try
+
+            RemoveHandler _speechAdapter.PartialTranscriptReceived, AddressOf OnPartialTranscriptReceived
+            RemoveHandler _speechAdapter.FinalTranscriptReceived, AddressOf OnFinalTranscriptReceived
+
+            BeginStopSpeechAdapter()
+        End Sub
+
+        Private Sub BeginStopSpeechAdapter()
+            If _speechAdapter Is Nothing Then
+                Return
+            End If
+
+            If _speechStopTask IsNot Nothing Then
+                Return
+            End If
+
+            Try
+                _speechStopTask =
+                    Task.Run(
+                        Async Function()
+                            Try
+                                Await _speechAdapter.StopListeningAsync().ConfigureAwait(False)
+                            Catch
+                            End Try
+                        End Function)
+            Catch
+            End Try
+        End Sub
+
+        Public Sub ShowWidget()
+            EnsureWidgetVisible()
+
+            If Me.Visible Then
+                Me.BringToFront()
+                Me.Activate()
+            Else
+                Me.Show()
+            End If
+        End Sub
+
+        Private Async Sub btnStartStop_Click(sender As Object, e As EventArgs) Handles btnStartStop.Click
+            If _isBusy Then
+                Return
+            End If
+
+            If _speechAdapter.IsListening Then
+                Await StopListeningAsync().ConfigureAwait(True)
+            Else
+                Await StartListeningAsync().ConfigureAwait(True)
+            End If
+        End Sub
+
+        Private Sub btnConfigure_Click(sender As Object, e As EventArgs) Handles btnConfigure.Click
+            ConfigureSpeech()
+        End Sub
+
+        Private Sub ConfigureSpeech()
+            Dim result As TalkToMeSpeechConfigurationResult =
+                _speechAdapter.Configure(Me, GetIncludeFullDocumentSetting())
+
+            If result IsNot Nothing AndAlso result.Applied Then
+                If _settings Is Nothing Then
+                    _settings = New WidgetSettings()
+                End If
+
+                _settings.IncludeFullDocument = result.IncludeFullDocument
+                SaveSettings()
+
+                If String.IsNullOrWhiteSpace(result.Summary) Then
+                    SetDisplayText("Configuration updated.")
+                Else
+                    SetDisplayText(result.Summary)
+                End If
+            End If
+
+            UpdateUiState()
+        End Sub
+
+        Private Async Function StartListeningAsync() As Task
+            If Not _speechAdapter.IsConfigured Then
+                ConfigureSpeech()
+
+                If Not _speechAdapter.IsConfigured Then
+                    SetDisplayText("Configuration required.")
+                    UpdateUiState()
+                    Return
+                End If
+            End If
+
+            _isBusy = True
+            UpdateUiState()
+            SetDisplayText("Starting…")
+
+            Try
+                Await _speechAdapter.StartListeningAsync(CancellationToken.None).ConfigureAwait(True)
+                SetDisplayText(ListeningPromptText)
+            Catch ex As System.Exception
+                SetDisplayText("Start failed: " & ex.Message)
+            Finally
+                _isBusy = False
+                UpdateUiState()
+            End Try
+        End Function
+
+        Private Async Function StopListeningAsync() As Task
+            _isBusy = True
+            UpdateUiState()
+            SetDisplayText("Stopping…")
+
+            Try
+                Await _speechAdapter.StopListeningAsync().ConfigureAwait(True)
+                SetDisplayText(DefaultPromptText)
+            Catch ex As System.Exception
+                SetDisplayText("Stop failed: " & ex.Message)
+            Finally
+                _isBusy = False
+                UpdateUiState()
+            End Try
+        End Function
+
+        Private Sub OnPartialTranscriptReceived(sender As Object, e As TalkToMeTranscriptEventArgs)
+            If _isClosing OrElse Me.IsDisposed Then
+                Return
+            End If
+
+            If Me.InvokeRequired Then
+                Me.BeginInvoke(New Action(Of Object, TalkToMeTranscriptEventArgs)(AddressOf OnPartialTranscriptReceived), sender, e)
+                Return
+            End If
+
+            SetDisplayText(e.Text)
+        End Sub
+
+        Private Async Sub OnFinalTranscriptReceived(sender As Object, e As TalkToMeTranscriptEventArgs)
+            If _isClosing OrElse Me.IsDisposed Then
+                Return
+            End If
+
+            If Me.InvokeRequired Then
+                Me.BeginInvoke(New Action(Of Object, TalkToMeTranscriptEventArgs)(AddressOf OnFinalTranscriptReceived), sender, e)
+                Return
+            End If
+
+            Dim finalText As String = If(e.Text, "").Trim()
+
+            If String.IsNullOrWhiteSpace(finalText) Then
+                Return
+            End If
+
+            SetDisplayText(finalText)
+
+            If finalText.StartsWith("Error:", StringComparison.OrdinalIgnoreCase) Then
+                Return
+            End If
+
+            Try
+                _dispatchCts?.Cancel()
+            Catch
+            End Try
+
+            Dim localCts As New CancellationTokenSource()
+            _dispatchCts = localCts
+
+            Try
+                Await Task.Delay(DispatchPauseMilliseconds, localCts.Token).ConfigureAwait(True)
+
+                Dim result As TalkToMeDispatchResult =
+                    Await _coordinator.ProcessTranscriptAsync(finalText, localCts.Token).ConfigureAwait(True)
+
+                If localCts.IsCancellationRequested Then
+                    Return
+                End If
+
+                If result Is Nothing Then
+                    SetDisplayText("No result.")
+                ElseIf Not String.IsNullOrWhiteSpace(result.TranscriptToDisplay) Then
+                    SetDisplayText(result.TranscriptToDisplay)
+                ElseIf Not String.IsNullOrWhiteSpace(result.StatusText) Then
+                    SetDisplayText(result.StatusText)
+                ElseIf _speechAdapter.IsListening Then
+                    SetDisplayText(ListeningPromptText)
+                Else
+                    SetDisplayText(DefaultPromptText)
+                End If
+            Catch ex As OperationCanceledException
+            Catch ex As System.Exception
+                SetDisplayText("Error: " & ex.Message)
+            Finally
+                If ReferenceEquals(_dispatchCts, localCts) Then
+                    Try
+                        localCts.Dispose()
+                    Catch
+                    End Try
+
+                    _dispatchCts = Nothing
+                Else
+                    Try
+                        localCts.Dispose()
+                    Catch
+                    End Try
+                End If
+            End Try
+        End Sub
+
+        Private Sub SetDisplayText(text As String)
+            If Me.IsDisposed OrElse lblTranscript Is Nothing Then
+                Return
+            End If
+
+            If Me.InvokeRequired Then
+                Try
+                    Me.BeginInvoke(New Action(Of String)(AddressOf SetDisplayText), text)
+                Catch
+                End Try
+                Return
+            End If
+
+            Dim value As String = FitTranscript(If(text, "").Trim())
+
+            If String.IsNullOrWhiteSpace(value) Then
+                value = DefaultPromptText
+            End If
+
+            lblTranscript.Text = value
+        End Sub
+
+        Private Sub UpdateUiState()
+            If Me.IsDisposed OrElse btnStartStop Is Nothing OrElse btnConfigure Is Nothing Then
+                Return
+            End If
+
+            If Me.InvokeRequired Then
+                Try
+                    Me.BeginInvoke(New MethodInvoker(AddressOf UpdateUiState))
+                Catch
+                End Try
+                Return
+            End If
+
+            btnStartStop.Enabled = Not _isBusy
+            btnConfigure.Enabled = Not _isBusy AndAlso Not _speechAdapter.IsListening
+
+            btnStartStop.Text = If(_speechAdapter.IsListening, ChrW(&H25A0), ChrW(&H25B6))
+
+            If _speechAdapter.IsListening Then
+                btnStartStop.BackColor = Color.FromArgb(220, 240, 220)
+            Else
+                btnStartStop.BackColor = SystemColors.Control
+            End If
+        End Sub
+
+        Private Shared Function FitTranscript(text As String) As String
+            Return System.Text.RegularExpressions.Regex.Replace(If(text, ""), "\s+", " ").Trim()
+        End Function
+
+        Private Sub LoadSettings()
+            _settings = New WidgetSettings()
+
+            Try
+                _settings.X = My.Settings.TalkToMeWidgetX
+                _settings.Y = My.Settings.TalkToMeWidgetY
+                _settings.Width = If(My.Settings.TalkToMeWidgetWidth > 0, My.Settings.TalkToMeWidgetWidth, 420)
+                _settings.Height = Math.Max(44, If(My.Settings.TalkToMeWidgetHeight > 0, My.Settings.TalkToMeWidgetHeight, 44))
+                _settings.IncludeFullDocument = My.Settings.TalkToMeIncludeFullDocument
+            Catch
+                _settings = New WidgetSettings()
+            End Try
+        End Sub
+
+        Private Sub SaveSettings()
+            Try
+                If _settings Is Nothing Then
+                    _settings = New WidgetSettings()
+                End If
+
+                _settings.X = Me.Left
+                _settings.Y = Me.Top
+                _settings.Width = Me.Width
+                _settings.Height = Math.Max(44, Me.Height)
+
+                My.Settings.TalkToMeWidgetX = _settings.X
+                My.Settings.TalkToMeWidgetY = _settings.Y
+                My.Settings.TalkToMeWidgetWidth = _settings.Width
+                My.Settings.TalkToMeWidgetHeight = _settings.Height
+                My.Settings.TalkToMeIncludeFullDocument = _settings.IncludeFullDocument
+                My.Settings.Save()
+            Catch
+            End Try
+        End Sub
+
+        Private Sub RestoreBoundsSafe()
+            If _settings Is Nothing Then
+                PositionOnScreen()
+                EnsureWidgetVisible()
+                Return
+            End If
+
+            If _settings.Width > 0 AndAlso _settings.Height > 0 AndAlso
+               _settings.X <> Integer.MinValue AndAlso _settings.Y <> Integer.MinValue Then
+
+                Dim safeHeight As Integer = Math.Max(44, _settings.Height)
+                Me.SetBounds(_settings.X, _settings.Y, _settings.Width, safeHeight)
+            Else
+                PositionOnScreen()
+            End If
+
+            EnsureWidgetVisible()
+        End Sub
+
+        Private Sub PositionOnScreen()
+            Dim wa As Rectangle = Screen.FromPoint(Cursor.Position).WorkingArea
+            Const margin As Integer = 30
+            Me.Location = New Point(wa.Right - Me.Width - margin, wa.Top + margin)
+        End Sub
+
+        Private Sub EnsureWidgetVisible()
+            SharedMethods.EnsureVisibleOnScreen(Me)
+        End Sub
+
+        Private Sub OnDisplaySettingsChanged(sender As Object, e As EventArgs)
+            If _isClosing OrElse Me.IsDisposed Then
+                Return
+            End If
+
+            Try
+                If Me.InvokeRequired Then
+                    Me.BeginInvoke(New MethodInvoker(AddressOf EnsureWidgetVisible))
+                Else
+                    EnsureWidgetVisible()
+                End If
+            Catch
+            End Try
+        End Sub
+    End Class
+End Namespace

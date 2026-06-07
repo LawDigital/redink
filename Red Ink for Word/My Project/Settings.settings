@@ -395,5 +395,14 @@
     <Setting Name="LastLanguageByEngineJson" Type="System.String" Scope="User">
       <Value Profile="(Default)">{}</Value>
     </Setting>
+    <Setting Name="TalkToMeSpeechEngineName" Type="System.String" Scope="User">
+      <Value Profile="(Default)" />
+    </Setting>
+    <Setting Name="TalkToMeSpeechLanguageCode" Type="System.String" Scope="User">
+      <Value Profile="(Default)" />
+    </Setting>
+    <Setting Name="TalkToMeSpeechMicrophoneDeviceIndex" Type="System.Int32" Scope="User">
+      <Value Profile="(Default)">0</Value>
+    </Setting>
   </Settings>
 </SettingsFile>
