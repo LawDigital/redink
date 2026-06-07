@@ -27,6 +27,7 @@ Imports System.Threading
 Imports System.Threading.Tasks
 Imports NAudio.Wave
 Imports Whisper.net
+Imports Whisper.net.LibraryLoader
 
 Namespace Transcription
 
@@ -102,12 +103,17 @@ Namespace Transcription
         Private Const PROCESS_THRESHOLD_SAMPLES As Integer = 16000 * 2
         Private _cancelled As Boolean
 
+        Private Shared ReadOnly _runtimeInitLock As New Object()
+        Private Shared _runtimeConfigured As Boolean
+
         Public Sub New(modelRoot As String, modelFileName As String)
             _modelRoot = modelRoot
             _modelFile = modelFileName
         End Sub
 
         Private Sub Init(opts As TranscriptionOptions)
+            EnsureRuntimeConfigured()
+
             Dim modelPath As String = Path.Combine(_modelRoot, _modelFile)
             _factory = WhisperFactory.FromPath(modelPath)
 
@@ -131,6 +137,68 @@ Namespace Transcription
             _processor = builder.Build()
             _cancelled = False
         End Sub
+
+        Private Sub EnsureRuntimeConfigured()
+            If _runtimeConfigured Then
+                Return
+            End If
+
+            SyncLock _runtimeInitLock
+                If _runtimeConfigured Then
+                    Return
+                End If
+
+                Dim speechPath As String = _modelRoot
+
+                If String.IsNullOrWhiteSpace(speechPath) Then
+                    _runtimeConfigured = True
+                    Return
+                End If
+
+                speechPath = Path.GetFullPath(speechPath.Trim())
+
+                If Not speechPath.EndsWith(Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal) Then
+                    speechPath &= Path.DirectorySeparatorChar
+                End If
+
+                Dim currentPath As String = Environment.GetEnvironmentVariable("PATH")
+
+                If String.IsNullOrEmpty(currentPath) Then
+                    Environment.SetEnvironmentVariable("PATH", speechPath)
+                ElseIf Not PathContainsDirectory(currentPath, speechPath) Then
+                    Environment.SetEnvironmentVariable("PATH", currentPath & Path.PathSeparator & speechPath)
+                End If
+
+                RuntimeOptions.LibraryPath = speechPath
+                'RuntimeOptions.RuntimeLibraryOrder = New List(Of RuntimeLibrary) From {RuntimeLibrary.Cuda, RuntimeLibrary.Cpu}
+
+                _runtimeConfigured = True
+            End SyncLock
+        End Sub
+
+        Private Shared Function PathContainsDirectory(pathValue As String, directoryPath As String) As Boolean
+            If String.IsNullOrWhiteSpace(pathValue) OrElse String.IsNullOrWhiteSpace(directoryPath) Then
+                Return False
+            End If
+
+            For Each part As String In pathValue.Split(Path.PathSeparator)
+                Dim candidate As String = part.Trim()
+
+                If candidate.Length = 0 Then
+                    Continue For
+                End If
+
+                If Not candidate.EndsWith(Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal) Then
+                    candidate &= Path.DirectorySeparatorChar
+                End If
+
+                If String.Equals(candidate, directoryPath, StringComparison.OrdinalIgnoreCase) Then
+                    Return True
+                End If
+            Next
+
+            Return False
+        End Function
 
         Public Function StartLiveAsync(opts As TranscriptionOptions, ct As CancellationToken) As Task Implements ITranscriptionEngine.StartLiveAsync
             Init(opts)

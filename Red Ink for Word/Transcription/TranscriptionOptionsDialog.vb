@@ -24,6 +24,7 @@ Imports System.Drawing
 Imports System.Linq
 Imports System.Windows.Forms
 Imports SharedLibrary.SharedLibrary
+Imports SharedLibrary.Transcription
 
 Namespace Transcription
 
