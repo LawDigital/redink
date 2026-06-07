@@ -1173,38 +1173,223 @@ PostProcess:
         End Function
 
 
+
         ''' <summary>
         ''' Sends an HTTP request using <see cref="System.Net.HttpWebRequest"/> as a fallback
         ''' for providers that are incompatible with <see cref="System.Net.Http.HttpClient"/>.
         ''' </summary>
-        Private Shared Async Function SendViaWebRequestAsync(endpoint As String,
-                                                             method As String,
-                                                             headerA As String,
-                                                             headerB As String,
-                                                             requestBody As String,
-                                                             timeoutValue As Long,
-                                                             ct As System.Threading.CancellationToken) As Task(Of (StatusCode As Integer, Body As String, ContentType As String))
+        Private Shared Async Function SendViaWebRequestAsync(
+        endpoint As String,
+        method As String,
+        headerA As String,
+        headerB As String,
+        requestBody As String,
+        timeoutMs As Long,
+        ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of (StatusCode As Integer, Body As String, ContentType As String))
+
             Dim req As System.Net.HttpWebRequest = DirectCast(System.Net.WebRequest.Create(endpoint), System.Net.HttpWebRequest)
-            req.Method = method.ToUpperInvariant()
-            req.Timeout = CInt(Math.Min(Integer.MaxValue, Math.Max(1L, timeoutValue)))
+
+            req.Method = method
+            req.Timeout = CInt(System.Math.Min(System.Int32.MaxValue, System.Math.Max(1L, timeoutMs)))
             req.ReadWriteTimeout = req.Timeout
             req.AutomaticDecompression = System.Net.DecompressionMethods.GZip Or System.Net.DecompressionMethods.Deflate
+
+            ' Important for incompatible/legacy receivers.
+            req.ContentType = "application/json; charset=utf-8"
+            req.Accept = "application/json"
+            req.ServicePoint.Expect100Continue = False
+            req.KeepAlive = True
             req.ProtocolVersion = System.Net.HttpVersion.Version11
 
-            If Not String.IsNullOrWhiteSpace(headerA) AndAlso Not String.IsNullOrWhiteSpace(headerB) Then
+            ' Apply headers using the same ¦-separated format.
+            If Not System.String.IsNullOrWhiteSpace(headerA) AndAlso Not System.String.IsNullOrWhiteSpace(headerB) Then
                 Dim sep As String = "¦"
-                Dim names() As String = headerA.Split(New String() {sep}, StringSplitOptions.None)
-                Dim values() As String = headerB.Split(New String() {sep}, StringSplitOptions.None)
-                Dim count As Integer = Math.Min(names.Length, values.Length)
+                Dim names() As String = headerA.Split(New String() {sep}, System.StringSplitOptions.None)
+                Dim values() As String = headerB.Split(New String() {sep}, System.StringSplitOptions.None)
+                Dim count As Integer = System.Math.Min(names.Length, values.Length)
 
                 For i As Integer = 0 To count - 1
                     Dim hName As String = names(i).Trim()
                     Dim hValue As String = values(i).Trim()
 
-                    If String.IsNullOrWhiteSpace(hName) OrElse String.IsNullOrWhiteSpace(hValue) Then
+                    If System.String.IsNullOrWhiteSpace(hName) OrElse System.String.IsNullOrWhiteSpace(hValue) Then
                         Continue For
                     End If
 
+                    If hName.Equals("Authorization", System.StringComparison.OrdinalIgnoreCase) Then
+                        req.Headers("Authorization") = hValue
+                    ElseIf hName.Equals("Content-Type", System.StringComparison.OrdinalIgnoreCase) Then
+                        req.ContentType = hValue
+                    ElseIf hName.Equals("Accept", System.StringComparison.OrdinalIgnoreCase) Then
+                        req.Accept = hValue
+                    Else
+                        req.Headers(hName) = hValue
+                    End If
+                Next
+            End If
+
+            ' GetRequestStreamAsync(), GetResponseAsync() and StreamReader.ReadToEndAsync()
+            ' do not reliably observe CancellationToken directly in .NET Framework.
+            ' Therefore the token aborts the underlying HttpWebRequest.
+            Dim ctRegistration As System.Threading.CancellationTokenRegistration =
+        ct.Register(
+            Sub()
+                Try
+                    req.Abort()
+                Catch
+                End Try
+            End Sub)
+
+            Try
+                ct.ThrowIfCancellationRequested()
+
+                ' Write request body for POST.
+                If method.Equals("POST", System.StringComparison.OrdinalIgnoreCase) AndAlso
+           Not System.String.IsNullOrEmpty(requestBody) Then
+
+                    Dim bodyBytes As Byte() = System.Text.Encoding.UTF8.GetBytes(requestBody)
+                    req.ContentLength = bodyBytes.Length
+
+                    Try
+                        Using reqStream As System.IO.Stream = Await req.GetRequestStreamAsync().ConfigureAwait(False)
+                            ct.ThrowIfCancellationRequested()
+                            Await reqStream.WriteAsync(bodyBytes, 0, bodyBytes.Length, ct).ConfigureAwait(False)
+                        End Using
+
+                    Catch ex As System.OperationCanceledException When ct.IsCancellationRequested
+                        Throw New System.Threading.Tasks.TaskCanceledException("The HTTP request was canceled while writing the request body.", ex)
+
+                    Catch webEx As System.Net.WebException When IsCancellationWebException(webEx, ct)
+                        Throw New System.Threading.Tasks.TaskCanceledException("The HTTP request was canceled while opening or writing the request stream.", webEx)
+                    End Try
+                End If
+
+                ct.ThrowIfCancellationRequested()
+
+                Dim caughtWebEx As System.Net.WebException = Nothing
+
+                Try
+                    Using resp As System.Net.HttpWebResponse =
+                DirectCast(Await req.GetResponseAsync().ConfigureAwait(False), System.Net.HttpWebResponse)
+
+                        ct.ThrowIfCancellationRequested()
+
+                        Dim responseBody As String
+
+                        Using sr As New System.IO.StreamReader(resp.GetResponseStream(), System.Text.Encoding.UTF8)
+                            responseBody = Await sr.ReadToEndAsync().ConfigureAwait(False)
+                        End Using
+
+                        ct.ThrowIfCancellationRequested()
+
+                        Return (CInt(resp.StatusCode), responseBody, resp.ContentType)
+                    End Using
+
+                Catch webEx As System.Net.WebException When IsCancellationWebException(webEx, ct)
+                    Throw New System.Threading.Tasks.TaskCanceledException("The HTTP request was canceled while waiting for the response.", webEx)
+
+                Catch ioEx As System.IO.IOException When ct.IsCancellationRequested
+                    Throw New System.Threading.Tasks.TaskCanceledException("The HTTP request was canceled while reading the response.", ioEx)
+
+                Catch objEx As System.ObjectDisposedException When ct.IsCancellationRequested
+                    Throw New System.Threading.Tasks.TaskCanceledException("The HTTP request was canceled while reading the response.", objEx)
+
+                Catch webEx As System.Net.WebException When webEx.Response IsNot Nothing
+                    caughtWebEx = webEx
+                End Try
+
+                ' Handle HTTP error responses outside the Catch block,
+                ' because Await is problematic in Catch blocks in older VB.NET / .NET Framework contexts.
+                If caughtWebEx IsNot Nothing Then
+                    Dim errResp As System.Net.HttpWebResponse = TryCast(caughtWebEx.Response, System.Net.HttpWebResponse)
+
+                    If errResp IsNot Nothing Then
+                        Using errResp
+                            ct.ThrowIfCancellationRequested()
+
+                            Dim errBody As String
+
+                            Try
+                                Using sr As New System.IO.StreamReader(errResp.GetResponseStream(), System.Text.Encoding.UTF8)
+                                    errBody = Await sr.ReadToEndAsync().ConfigureAwait(False)
+                                End Using
+
+                            Catch ioEx As System.IO.IOException When ct.IsCancellationRequested
+                                Throw New System.Threading.Tasks.TaskCanceledException("The HTTP request was canceled while reading the error response.", ioEx)
+
+                            Catch objEx As System.ObjectDisposedException When ct.IsCancellationRequested
+                                Throw New System.Threading.Tasks.TaskCanceledException("The HTTP request was canceled while reading the error response.", objEx)
+                            End Try
+
+                            ct.ThrowIfCancellationRequested()
+
+                            Return (CInt(errResp.StatusCode), errBody, errResp.ContentType)
+                        End Using
+                    End If
+
+                    Throw caughtWebEx
+                End If
+
+                Throw New System.Net.WebException("Request failed with no response.")
+
+            Catch webEx As System.Net.WebException When IsCancellationWebException(webEx, ct)
+                Throw New System.Threading.Tasks.TaskCanceledException("The HTTP request was canceled.", webEx)
+
+            Catch ioEx As System.IO.IOException When ct.IsCancellationRequested
+                Throw New System.Threading.Tasks.TaskCanceledException("The HTTP request was canceled.", ioEx)
+
+            Catch objEx As System.ObjectDisposedException When ct.IsCancellationRequested
+                Throw New System.Threading.Tasks.TaskCanceledException("The HTTP request was canceled.", objEx)
+
+            Finally
+                ctRegistration.Dispose()
+            End Try
+        End Function
+
+        Private Shared Function IsCancellationWebException(
+        webEx As System.Net.WebException,
+        ct As System.Threading.CancellationToken) As Boolean
+
+            Return ct.IsCancellationRequested OrElse
+           webEx.Status = System.Net.WebExceptionStatus.RequestCanceled
+        End Function
+
+
+
+        ''' <summary>
+        ''' Sends an HTTP request using <see cref="System.Net.HttpWebRequest"/> as a fallback
+        ''' for providers that are incompatible with <see cref="System.Net.Http.HttpClient"/>.
+        ''' </summary>
+        Private Shared Async Function oldSendViaWebRequestAsync(
+            endpoint As String,
+            method As String,
+            headerA As String,
+            headerB As String,
+            requestBody As String,
+            timeoutMs As Long,
+            ct As System.Threading.CancellationToken) As Task(Of (StatusCode As Integer, Body As String, ContentType As String))
+
+            Dim req As System.Net.HttpWebRequest = DirectCast(System.Net.WebRequest.Create(endpoint), System.Net.HttpWebRequest)
+            req.Method = method
+            req.Timeout = CInt(timeoutMs)
+            req.ReadWriteTimeout = CInt(timeoutMs)
+            req.AutomaticDecompression = System.Net.DecompressionMethods.GZip Or System.Net.DecompressionMethods.Deflate
+            req.ContentType = "application/json; charset=utf-8"
+            req.Accept = "application/json"
+            req.ServicePoint.Expect100Continue = False
+            req.KeepAlive = True
+            req.ProtocolVersion = System.Net.HttpVersion.Version11
+
+            ' Apply headers using the same ¦-separated format.
+            If Not String.IsNullOrWhiteSpace(headerA) AndAlso Not String.IsNullOrWhiteSpace(headerB) Then
+                Dim sep As String = "¦"
+                Dim names() As String = headerA.Split(New String() {sep}, StringSplitOptions.None)
+                Dim values() As String = headerB.Split(New String() {sep}, StringSplitOptions.None)
+                Dim count As Integer = Math.Min(names.Length, values.Length)
+                For i As Integer = 0 To count - 1
+                    Dim hName As String = names(i).Trim()
+                    Dim hValue As String = values(i).Trim()
+                    If String.IsNullOrWhiteSpace(hName) OrElse String.IsNullOrWhiteSpace(hValue) Then Continue For
                     If hName.Equals("Authorization", StringComparison.OrdinalIgnoreCase) Then
                         req.Headers("Authorization") = hValue
                     ElseIf hName.Equals("Content-Type", StringComparison.OrdinalIgnoreCase) Then
@@ -1217,75 +1402,67 @@ PostProcess:
                 Next
             End If
 
-            Dim ctRegistration As System.Threading.CancellationTokenRegistration =
-                ct.Register(
-                    Sub()
-                        Try
-                            req.Abort()
-                        Catch
-                        End Try
-                    End Sub)
+            ' Register cancellation token to abort the request.
+            ' GetResponseAsync() / ReadToEndAsync() do not observe CancellationToken natively,
+            ' so we abort the underlying HttpWebRequest which causes a WebException.
+            Dim ctRegistration As System.Threading.CancellationTokenRegistration = ct.Register(
+            Sub()
+                Try
+                    req.Abort()
+                Catch
+                End Try
+            End Sub)
 
             Try
-                ct.ThrowIfCancellationRequested()
-
-                If method.Equals("POST", StringComparison.OrdinalIgnoreCase) AndAlso
-                   Not String.IsNullOrEmpty(requestBody) Then
-
+                ' Write request body for POST.
+                If method.Equals("POST", StringComparison.OrdinalIgnoreCase) AndAlso Not String.IsNullOrEmpty(requestBody) Then
                     Dim bodyBytes As Byte() = System.Text.Encoding.UTF8.GetBytes(requestBody)
                     req.ContentLength = bodyBytes.Length
-
-                    Try
-                        Using reqStream = Await req.GetRequestStreamAsync().ConfigureAwait(False)
-                            ct.ThrowIfCancellationRequested()
-                            Await reqStream.WriteAsync(bodyBytes, 0, bodyBytes.Length, ct).ConfigureAwait(False)
-                        End Using
-                    Catch webEx As System.Net.WebException When ct.IsCancellationRequested OrElse
-                                                              webEx.Status = System.Net.WebExceptionStatus.RequestCanceled
-                        Throw New System.Threading.Tasks.TaskCanceledException()
-                    End Try
+                    Using reqStream = Await req.GetRequestStreamAsync().ConfigureAwait(False)
+                        Await reqStream.WriteAsync(bodyBytes, 0, bodyBytes.Length, ct).ConfigureAwait(False)
+                    End Using
                 End If
 
+                ' Send and read response.
+                ' Note: Await is not allowed in Catch blocks in VB.NET / .NET Framework,
+                ' so we capture the WebException and handle it after the Try block.
                 Dim caughtWebEx As System.Net.WebException = Nothing
-
                 Try
                     Using resp As System.Net.HttpWebResponse = DirectCast(
-                        Await req.GetResponseAsync().ConfigureAwait(False),
-                        System.Net.HttpWebResponse)
+                    Await req.GetResponseAsync().ConfigureAwait(False), System.Net.HttpWebResponse)
 
                         Dim responseBody As String
                         Using sr As New System.IO.StreamReader(resp.GetResponseStream(), System.Text.Encoding.UTF8)
                             responseBody = Await sr.ReadToEndAsync().ConfigureAwait(False)
                         End Using
-
                         Return (CInt(resp.StatusCode), responseBody, resp.ContentType)
                     End Using
-                Catch webEx As System.Net.WebException When ct.IsCancellationRequested OrElse
-                                                          webEx.Status = System.Net.WebExceptionStatus.RequestCanceled
+
+                Catch webEx As System.Net.WebException When webEx.Status = System.Net.WebExceptionStatus.RequestCanceled
+                    ' Safely throw generic TaskCanceled to be picked up cleanly by the outer loop
                     Throw New System.Threading.Tasks.TaskCanceledException()
                 Catch webEx As System.Net.WebException When webEx.Response IsNot Nothing
                     caughtWebEx = webEx
                 End Try
 
+                ' Handle the error response outside the Catch block so we can use Await.
                 If caughtWebEx IsNot Nothing Then
                     Dim errResp As System.Net.HttpWebResponse = DirectCast(caughtWebEx.Response, System.Net.HttpWebResponse)
                     Dim errBody As String
-
                     Using sr As New System.IO.StreamReader(errResp.GetResponseStream(), System.Text.Encoding.UTF8)
                         errBody = Await sr.ReadToEndAsync().ConfigureAwait(False)
                     End Using
-
                     Return (CInt(errResp.StatusCode), errBody, errResp.ContentType)
                 End If
 
+                ' Should not reach here, but just in case:
                 Throw New System.Net.WebException("Request failed with no response.")
-            Catch webEx As System.Net.WebException When ct.IsCancellationRequested OrElse
-                                                      webEx.Status = System.Net.WebExceptionStatus.RequestCanceled
-                Throw New System.Threading.Tasks.TaskCanceledException()
+
             Finally
                 ctRegistration.Dispose()
             End Try
         End Function
+
 
 
 
