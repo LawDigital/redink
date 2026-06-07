@@ -149,7 +149,6 @@ Namespace SharedLibrary
                     Dim ModelValue As String
                     Dim TimeoutValue As Long
                     Dim ResponseKey As String
-                    Dim DoubleS As Boolean
                     Dim NoThink As Boolean
 
                     ''' <summary>
@@ -197,7 +196,6 @@ Namespace SharedLibrary
                         HeaderB = Replace(Replace(context.INI_HeaderB_2, "{model}", ModelPlaceholder), "{apikey}", context.DecodedAPI_2)
                         APICall = context.INI_APICall_2
                         ResponseKey = context.INI_Response_2
-                        DoubleS = context.INI_DoubleS
 
                         TemperatureValue = If(String.IsNullOrEmpty(Temperature) OrElse Temperature = "Default", context.INI_Temperature_2, Temperature)
                         ModelValue = If(String.IsNullOrEmpty(Model) OrElse Model = "Default", ModelPlaceholder, Model)
@@ -217,7 +215,7 @@ Namespace SharedLibrary
                         HeaderB = Replace(Replace(context.INI_HeaderB, "{model}", ModelPlaceholder), "{apikey}", context.DecodedAPI)
                         APICall = context.INI_APICall
                         ResponseKey = context.INI_Response
-                        DoubleS = context.INI_DoubleS
+
                         TemperatureValue = If(String.IsNullOrEmpty(Temperature) OrElse Temperature = "Default", context.INI_Temperature, Temperature)
                         ModelValue = If(String.IsNullOrEmpty(Model) OrElse Model = "Default", ModelPlaceholder, Model)
                         TimeoutValue = If(Timeout = 0, context.INI_Timeout, Timeout)
@@ -1110,7 +1108,7 @@ Namespace SharedLibrary
                     End Try
 
 PostProcess:
-                    If DoubleS Then
+                    If context.INI_DoubleS Then
                         Returnvalue = Returnvalue.Replace(ChrW(223), "ss")
                     End If
                     If context.INI_NoDash Then

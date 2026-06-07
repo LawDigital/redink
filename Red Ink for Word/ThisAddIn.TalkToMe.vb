@@ -190,11 +190,12 @@ Public NotInheritable Class WordTalkToMeHostAdapter
             "Map 'select entire document' or 'select whole document' to select|entire|document|1. " &
             "Map 'next document' or 'switch to next document' to activate_document|next|1. " &
             "Map 'previous document' to activate_document|previous|1. " &
-                       "Use freestyle only when Red Ink itself should process document text, and only when CanWriteToDocument is true. " &
-            "A text selection is context only; it does NOT by itself mean that the selected text should be changed. " &
+            "Use freestyle only when Red Ink itself should process document text, and only when CanWriteToDocument is true. " &
+            "A text selection is context only; it does NOT by itself mean that the selected text should be changed, unless the user instructs so. " &
+            "If the user wants you to redraft or otherwise change the selected text, always do so in the language of the text, unless directed otherwise. If the user wants you to provide a comment, an analysis or response, provide it in the language of the user's instruction." &
             "When the user wants the selected text or other document text to be corrected, revised, translated, shortened, expanded, reformulated, improved, or otherwise transformed in the document, use freestyle and make instruction start exactly with 'Markup: ' followed by the instruction in the user's language. " &
             "When the user wants new text to be drafted for insertion into the document, use freestyle with an instruction in the user's language that does NOT start with 'Clip: '. " &
-            "When the user wants analysis, explanation, comments, feedback, an opinion, an answer, brainstorming, or any response that should NOT be inserted into the document, use freestyle and make instruction start exactly with 'Clip: ' followed by the instruction in the user's language. " &
+            "When the user wants analysis, explanation, comments, feedback, an opinion, an answer, brainstorming, or any response that should NOT be inserted into the document, use freestyle and make instruction start exactly with 'Clip: ' followed by the instruction." &
             "Use 'Clip: ' even if text is selected and even if the request is about that selected text. " &
             "Use 'Markup: ' only when the selected or referenced document text should actually be changed in the document. " &
             "Use 'Replace: ' only when the selected or referenced document text should actually be replaced in the document (for example because markup makes no sense, e.g., for a translation). " &
