@@ -333,6 +333,52 @@ Partial Public Class ThisAddIn
         Return GetWordSettingBoolean(AdvancedToolsEnabledSettingName, False)
     End Function
 
+    Private Function GetDiscussInkySelectedSkillAllowedToolNames(selectedToolNames As IEnumerable(Of String)) As List(Of String)
+        Dim result As New List(Of String)()
+
+        Try
+            Dim selectedSet As New HashSet(Of String)(
+                If(selectedToolNames, Enumerable.Empty(Of String)()).
+                    Where(Function(n) Not String.IsNullOrWhiteSpace(n)).
+                    Select(Function(n) n.Trim()),
+                StringComparer.OrdinalIgnoreCase)
+
+            If selectedSet.Count = 0 Then
+                Return result
+            End If
+
+            SharedLibrary.Agents.AgentResources.Refresh()
+
+            For Each skill As SharedLibrary.Agents.SkillDescriptor In SharedLibrary.Agents.AgentResources.Skills
+                If skill Is Nothing OrElse String.IsNullOrWhiteSpace(skill.Name) Then
+                    Continue For
+                End If
+
+                Dim skillToolName As String = "skill_" & skill.Name.Trim()
+
+                If Not selectedSet.Contains(skillToolName) Then
+                    Continue For
+                End If
+
+                If skill.AllowedTools Is Nothing Then
+                    Continue For
+                End If
+
+                For Each rawName As String In skill.AllowedTools
+                    Dim toolName As String = If(rawName, "").Trim()
+                    If toolName <> "" Then
+                        result.Add(toolName)
+                    End If
+                Next
+            Next
+        Catch ex As Exception
+            ToolingFileLogger.LogWarn("Failed to expand selected skill allowed-tools for Discuss Inky.", ex:=ex)
+        End Try
+
+        Return result.
+            Distinct(StringComparer.OrdinalIgnoreCase).
+            ToList()
+    End Function
     Public Function GetDiscussInkyEffectiveTools(Optional includeImplicitWorkspaceTools As Boolean = True) As List(Of ModelConfig)
         Dim mainNames = SplitPersistedToolNames(GetWordSettingString(SelectedMainToolNamesSettingName))
         Dim advancedNames = SplitPersistedToolNames(GetWordSettingString(SelectedAdvancedToolNamesSettingName))
@@ -344,18 +390,18 @@ Partial Public Class ThisAddIn
                 Dim legacySet As New HashSet(Of String)(legacy, StringComparer.OrdinalIgnoreCase)
 
                 mainNames =
-                    GetDiscussInkyMainSelectableTools().
-                        Where(Function(t) legacySet.Contains(t.ToolName)).
-                        Select(Function(t) t.ToolName).
-                        Distinct(StringComparer.OrdinalIgnoreCase).
-                        ToList()
+                GetDiscussInkyMainSelectableTools().
+                    Where(Function(t) legacySet.Contains(t.ToolName)).
+                    Select(Function(t) t.ToolName).
+                    Distinct(StringComparer.OrdinalIgnoreCase).
+                    ToList()
 
                 advancedNames =
-                    GetDiscussInkyAdvancedSelectableTools().
-                        Where(Function(t) legacySet.Contains(t.ToolName)).
-                        Select(Function(t) t.ToolName).
-                        Distinct(StringComparer.OrdinalIgnoreCase).
-                        ToList()
+                GetDiscussInkyAdvancedSelectableTools().
+                    Where(Function(t) legacySet.Contains(t.ToolName)).
+                    Select(Function(t) t.ToolName).
+                    Distinct(StringComparer.OrdinalIgnoreCase).
+                    ToList()
             End If
         End If
 
@@ -374,6 +420,25 @@ Partial Public Class ThisAddIn
         If advancedEnabled Then
             For Each tool In GetDiscussInkyAdvancedSelectableTools()
                 If advancedSet.Contains(tool.ToolName) Then
+                    result.Add(tool)
+                End If
+            Next
+        End If
+
+        Dim explicitlySelectedToolNames As New List(Of String)()
+        explicitlySelectedToolNames.AddRange(mainNames)
+        explicitlySelectedToolNames.AddRange(advancedNames)
+
+        Dim skillRequiredToolNames As List(Of String) =
+        GetDiscussInkySelectedSkillAllowedToolNames(explicitlySelectedToolNames)
+
+        If skillRequiredToolNames.Count > 0 Then
+            Dim requiredSet = BuildToolNameSet(skillRequiredToolNames)
+
+            For Each tool In GetAvailableTools()
+                If tool Is Nothing OrElse String.IsNullOrWhiteSpace(tool.ToolName) Then Continue For
+
+                If requiredSet.Contains(tool.ToolName) Then
                     result.Add(tool)
                 End If
             Next
