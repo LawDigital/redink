@@ -148,6 +148,8 @@ Namespace SharedLibrary
             Property INI_RedactionInstructionsPathLocal As String
             Property INI_SpeechModelPath As String
             Property INI_LocalModelPath As String
+            Property INI_DictionaryPath As String
+            Property INI_DictionaryPathLocal As String
             Property INI_TTSEndpoint As String
 
             Property INI_STT_Google As String
@@ -496,6 +498,8 @@ Namespace SharedLibrary
         Public Property INI_RedactionInstructionsPathLocal As String Implements ISharedContext.INI_RedactionInstructionsPathLocal
         Public Property INI_SpeechModelPath As String Implements ISharedContext.INI_SpeechModelPath
         Public Property INI_LocalModelPath As String Implements ISharedContext.INI_LocalModelPath
+        Public Property INI_DictionaryPath As String Implements ISharedContext.INI_DictionaryPath
+        Public Property INI_DictionaryPathLocal As String Implements ISharedContext.INI_DictionaryPathLocal
         Public Property INI_TTSEndpoint As String Implements ISharedContext.INI_TTSEndpoint
 
         Public Property INI_STT_Google As String Implements ISharedContext.INI_STT_Google

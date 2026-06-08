@@ -85,6 +85,7 @@ Namespace SharedLibrary
         Private WithEvents btnCollapse As Button
         Private WithEvents btnClear2 As Button
         Private WithEvents btnCopy2 As Button
+        Private WithEvents btnEditUserDictionary As Button
         Private lblSpinner As Label
         Private lblSpinner2 As Label
         Private mainTable As TableLayoutPanel
@@ -121,6 +122,7 @@ Namespace SharedLibrary
         ''' Async translation function: (textToTranslate, targetLanguage, sourceLanguage, cancellationToken) -> translated text.
         ''' </summary>
         Private ReadOnly _translateFunc As Func(Of String, String, String, CancellationToken, Task(Of String))
+        Private ReadOnly _editUserDictionaryAction As Action
 
         ' Default language from context
         ''' <summary>Default target language used when no target language is provided.</summary>
@@ -149,9 +151,11 @@ Namespace SharedLibrary
         ''' </param>
         ''' <param name="defaultLanguage">The default target language.</param>
         Public Sub New(translateFunc As Func(Of String, String, String, CancellationToken, Task(Of String)),
-                       defaultLanguage As String)
+                       defaultLanguage As String,
+                       Optional editUserDictionaryAction As Action = Nothing)
             _translateFunc = translateFunc
             _defaultLanguage = If(defaultLanguage, "English")
+            _editUserDictionaryAction = editUserDictionaryAction
             InitializeComponent()
             RestoreSettings()
         End Sub
@@ -368,6 +372,29 @@ Namespace SharedLibrary
             }
             rightFlow.Controls.Add(btnClear)
 
+            btnEditUserDictionary = New Button() With {
+                .Text = "📖",
+                .AutoSize = False,
+                .Font = New Font("Segoe UI Emoji", 10.0F, FontStyle.Regular, GraphicsUnit.Point),
+                .Size = New Size(30, btnClear.Height),
+                .MinimumSize = New Size(30, btnClear.Height),
+                .MaximumSize = New Size(30, btnClear.Height),
+                .Padding = New Padding(0),
+                .Margin = New Padding(5, 0, 0, 0),
+                .Visible = (_editUserDictionaryAction IsNot Nothing)
+            }
+            rightFlow.Controls.Add(btnEditUserDictionary)
+            toolTip.SetToolTip(btnEditUserDictionary, "Open the configured local user dictionary in the internal editor")
+            AddHandler btnEditUserDictionary.Click,
+                Sub()
+                    If _editUserDictionaryAction Is Nothing Then Return
+                    Try
+                        _editUserDictionaryAction.Invoke()
+                    Catch ex As Exception
+                        SharedMethods.ShowCustomMessageBox("Could not open the user dictionary: " & ex.Message)
+                    End Try
+                End Sub
+
             btnCollapse = New Button() With {
                 .Text = "◀ Collapse",
                 .AutoSize = True,
@@ -388,8 +415,11 @@ Namespace SharedLibrary
             ' Calculate Widths for Collapse Mode
             ' Left side: Input + Arrow + Target + Spinner + Margins (approx manually summed to be safe)
             Dim leftContentWidth As Integer = txtSourceLanguage.Width + 5 + lblArrow.PreferredWidth + 10 + txtLanguage.Width + 5 + lblSpinner.PreferredWidth + 15
-            ' Right side: Clear + Copy + Close + Margins
+            ' Right side: Clear + Copy + Close + optional Edit User Dictionary button + Margins
             Dim rightContentWidth As Integer = btnClear.PreferredSize.Width + 5 + btnCopy.PreferredSize.Width + 5 + btnClose.PreferredSize.Width + 5
+            If btnEditUserDictionary IsNot Nothing AndAlso btnEditUserDictionary.Visible Then
+                rightContentWidth += btnEditUserDictionary.Width + 5
+            End If
 
             ' Total width required (content + padding)
             Dim totalContentWidth As Integer = leftContentWidth + rightContentWidth + mainTable.Padding.Horizontal + 20

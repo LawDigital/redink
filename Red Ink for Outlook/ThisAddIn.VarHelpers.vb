@@ -586,7 +586,10 @@ Partial Public Class ThisAddIn
                                     cancellationToken:=token,
                                     EnsureUI:=False)
                 End Function,
-                INI_Language1)
+                INI_Language1,
+                Sub()
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.EditUserDictionaryFile(_context)
+                End Sub)
         End If
         _quickTranslateWidget.ShowWidget()
     End Sub

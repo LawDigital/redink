@@ -1008,6 +1008,10 @@ Namespace SharedLibrary
                     Return context.INI_SpeechModelPath
                 Case "LocalModelPath"
                     Return context.INI_LocalModelPath
+                Case "DictionaryPath"
+                    Return context.INI_DictionaryPath
+                Case "DictionaryPathLocal"
+                    Return context.INI_DictionaryPathLocal
                 Case "STT_Google"
                     Return context.INI_STT_Google
                 Case "STT_Google_ProjectID"
@@ -1378,6 +1382,10 @@ Namespace SharedLibrary
                     context.INI_SpeechModelPath = value
                 Case "LocalModelPath"
                     context.INI_LocalModelPath = value
+                Case "DictionaryPath"
+                    context.INI_DictionaryPath = value
+                Case "DictionaryPathLocal"
+                    context.INI_DictionaryPathLocal = value
                 Case "STT_Google"
                     context.INI_STT_Google = value
                 Case "STT_Google_ProjectID"
@@ -1838,6 +1846,8 @@ Namespace SharedLibrary
                     {"MailMoverPathLocal", context.INI_MailMoverPathLocal},
                     {"SpeechModelPath", context.INI_SpeechModelPath},
                     {"LocalModelPath", context.INI_LocalModelPath},
+                    {"DictionaryPath", context.INI_DictionaryPath},
+                    {"DictionaryPathLocal", context.INI_DictionaryPathLocal},
                     {"STT_Google", context.INI_STT_Google},
                     {"STT_Google_ProjectID", context.INI_STT_Google_ProjectID},
                     {"STT_OpenAI", context.INI_STT_OpenAI},
@@ -2453,6 +2463,8 @@ Namespace SharedLibrary
                     {"OAuth2ATExpiry_2", context.INI_OAuth2ATExpiry_2.ToString()},
                     {"SpeechModelPath", context.INI_SpeechModelPath},
                     {"LocalModelPath", context.INI_LocalModelPath},
+                    {"DictionaryPath", context.INI_DictionaryPath},
+                    {"DictionaryPathLocal", context.INI_DictionaryPathLocal},
                     {"STT_Google", context.INI_STT_Google},
                     {"STT_Google_ProjectID", context.INI_STT_Google_ProjectID},
                     {"STT_OpenAI", context.INI_STT_OpenAI},
@@ -2999,8 +3011,10 @@ Namespace SharedLibrary
                                     Tuple.Create("Prompt Library (Local)", context.INI_PromptLibPathLocal, True, "", ""),
                                     Tuple.Create("Prompt Library (Transcript)", context.INI_PromptLibPath_Transcript, True, "", ""),
                                     Tuple.Create("My Style", context.INI_MyStylePath, True, "", ""),
-                                    Tuple.Create("Discuss Personas", context.INI_DiscussInkyPath, True, "", ""),
+                                   Tuple.Create("Discuss Personas", context.INI_DiscussInkyPath, True, "", ""),
                                     Tuple.Create("Discuss Personas (Local)", context.INI_DiscussInkyPathLocal, True, "", ""),
+                                    Tuple.Create("Global Dictionary", context.INI_DictionaryPath, True, "", ""),
+                                    Tuple.Create("User Dictionary", context.INI_DictionaryPathLocal, True, "", ""),
                                     Tuple.Create("Extractor Library", context.INI_ExtractorPath, True, "", ""),
                                     Tuple.Create("Extractor Library (Local)", context.INI_ExtractorPathLocal, True, "", ""),
                                     Tuple.Create("Rename Library", context.INI_RenameLibPath, True, "", ""),
@@ -3292,6 +3306,8 @@ Namespace SharedLibrary
             variableValues.Add("MailMoverPathLocal", context.INI_MailMoverPathLocal)
             variableValues.Add("SpeechModelPath", context.INI_SpeechModelPath)
             variableValues.Add("LocalModelPath", context.INI_LocalModelPath)
+            variableValues.Add("DictionaryPath", context.INI_DictionaryPath)
+            variableValues.Add("DictionaryPathLocal", context.INI_DictionaryPathLocal)
             variableValues.Add("STT_Google", context.INI_STT_Google)
             variableValues.Add("STT_Google_ProjectID", context.INI_STT_Google_ProjectID)
             variableValues.Add("STT_OpenAI", context.INI_STT_OpenAI)
@@ -3673,6 +3689,8 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("MailMoverPathLocal") Then context.INI_MailMoverPathLocal = CStr(updatedValues("MailMoverPathLocal"))
                 If updatedValues.ContainsKey("SpeechModelPath") Then context.INI_SpeechModelPath = CStr(updatedValues("SpeechModelPath"))
                 If updatedValues.ContainsKey("LocalModelPath") Then context.INI_LocalModelPath = CStr(updatedValues("LocalModelPath"))
+                If updatedValues.ContainsKey("DictionaryPath") Then context.INI_DictionaryPath = CStr(updatedValues("DictionaryPath"))
+                If updatedValues.ContainsKey("DictionaryPathLocal") Then context.INI_DictionaryPathLocal = CStr(updatedValues("DictionaryPathLocal"))
                 If updatedValues.ContainsKey("STT_Google") Then context.INI_STT_Google = CStr(updatedValues("STT_Google"))
                 If updatedValues.ContainsKey("STT_Google_ProjectID") Then context.INI_STT_Google_ProjectID = CStr(updatedValues("STT_Google_ProjectID"))
                 If updatedValues.ContainsKey("STT_OpenAI") Then context.INI_STT_OpenAI = CStr(updatedValues("STT_OpenAI"))

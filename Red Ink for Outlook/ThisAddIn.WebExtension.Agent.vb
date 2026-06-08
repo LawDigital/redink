@@ -430,7 +430,7 @@ Partial Public Class ThisAddIn
     ''' on the chat agent's files. Must be called before ExecuteToolingLoop.
     ''' Returns the combined tool list (internal agent tools + selected external tools).
     ''' </summary>
-    Private Function ChatAgentSetupToolContext() As List(Of ModelConfig)
+    Private Function ChatAgentSetupToolContext(Optional selectedTools As List(Of ModelConfig) = Nothing) As List(Of ModelConfig)
         If String.IsNullOrWhiteSpace(_chatAgentTempDir) OrElse Not Directory.Exists(_chatAgentTempDir) Then
             _chatAgentTempDir = Path.Combine(Path.GetTempPath(), CA_TempPrefix & Guid.NewGuid().ToString("N"))
             Directory.CreateDirectory(_chatAgentTempDir)
@@ -471,7 +471,9 @@ Partial Public Class ThisAddIn
 
         Dim tools As New List(Of ModelConfig)()
 
-        If _selectedToolsForChat IsNot Nothing Then
+        If selectedTools IsNot Nothing Then
+            tools.AddRange(selectedTools)
+        ElseIf _selectedToolsForChat IsNot Nothing Then
             tools.AddRange(_selectedToolsForChat)
         End If
 
@@ -510,15 +512,29 @@ Partial Public Class ThisAddIn
     ''' cited by the LLM, copies them to Desktop\Inky\yymmdd_hh-mm\, and
     ''' opens the folder in Explorer.
     ''' </summary>
-    Private Function ChatAgentCollectAndCopyOutputs() As List(Of String)
+    Private Function ChatAgentCollectAndCopyOutputs(Optional extraFilePaths As IEnumerable(Of String) = Nothing) As List(Of String)
         Dim copiedFiles As New List(Of String)()
+        Dim filesToCopy As New List(Of String)()
 
-        If String.IsNullOrWhiteSpace(_chatAgentTempDir) OrElse Not Directory.Exists(_chatAgentTempDir) Then
-            Return copiedFiles
+        If Not String.IsNullOrWhiteSpace(_chatAgentTempDir) AndAlso Directory.Exists(_chatAgentTempDir) Then
+            Dim resultFiles = CollectResultAttachments(_chatAgentTempDir, _chatAgentFiles)
+            If resultFiles IsNot Nothing AndAlso resultFiles.Count > 0 Then
+                filesToCopy.AddRange(resultFiles)
+            End If
         End If
 
-        Dim resultFiles = CollectResultAttachments(_chatAgentTempDir, _chatAgentFiles)
-        If resultFiles Is Nothing OrElse resultFiles.Count = 0 Then
+        If extraFilePaths IsNot Nothing Then
+            filesToCopy.AddRange(
+                extraFilePaths.
+                    Where(Function(p) Not String.IsNullOrWhiteSpace(p) AndAlso File.Exists(p)))
+        End If
+
+        filesToCopy = filesToCopy.
+            Select(Function(p) Path.GetFullPath(p)).
+            Distinct(StringComparer.OrdinalIgnoreCase).
+            ToList()
+
+        If filesToCopy.Count = 0 Then
             Return copiedFiles
         End If
 
@@ -534,7 +550,7 @@ Partial Public Class ThisAddIn
 
         Directory.CreateDirectory(outputDir)
 
-        For Each srcPath In resultFiles
+        For Each srcPath In filesToCopy
             Try
                 Dim destName = Path.GetFileName(srcPath)
                 Dim destPath = Path.Combine(outputDir, destName)
@@ -561,6 +577,28 @@ Partial Public Class ThisAddIn
         End If
 
         Return copiedFiles
+    End Function
+
+    Private Shared Function ExtractCitedLocalFilePaths(markdown As String) As List(Of String)
+        Dim results As New List(Of String)()
+        If String.IsNullOrWhiteSpace(markdown) Then Return results
+
+        Dim rx As New System.Text.RegularExpressions.Regex(
+            "file:///[^\s\)>\]""']+",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+
+        For Each m As System.Text.RegularExpressions.Match In rx.Matches(markdown)
+            Dim raw As String = m.Value.TrimEnd("."c, ","c, ";"c, ":"c)
+            Try
+                Dim localPath As String = New Uri(raw).LocalPath
+                If Not String.IsNullOrWhiteSpace(localPath) AndAlso File.Exists(localPath) Then
+                    results.Add(Path.GetFullPath(localPath))
+                End If
+            Catch
+            End Try
+        Next
+
+        Return results.Distinct(StringComparer.OrdinalIgnoreCase).ToList()
     End Function
 
     ''' <summary>

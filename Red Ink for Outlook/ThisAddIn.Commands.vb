@@ -222,7 +222,11 @@ Partial Public Class ThisAddIn
 
                 Case "Translate"
                     TranslateLanguage = ""
-                    TranslateLanguage = SLib.ShowCustomInputBox("Enter your target language:", $"{AN} Translate", True, INI_Language2)
+                    TranslateLanguage = Global.SharedLibrary.SharedLibrary.SharedMethods.PromptForTargetLanguage(
+                        "Enter your target language:",
+                        $"{AN} Translate",
+                        INI_Language2,
+                        _context)
                     If String.IsNullOrEmpty(TranslateLanguage) Then Return
                     Command_InsertAfter(InterpolateAtRuntime(SP_Translate), False, INI_KeepFormat1, INI_ReplaceText1)
                 Case "PrimLang"
@@ -491,7 +495,11 @@ Partial Public Class ThisAddIn
 
                             If Command = "Translate" Then
                                 TranslateLanguage = ""
-                                TranslateLanguage = SLib.ShowCustomInputBox("Enter your target language:", $"{AN} Translate", True, INI_Language2)
+                                TranslateLanguage = Global.SharedLibrary.SharedLibrary.SharedMethods.PromptForTargetLanguage(
+                                    "Enter your target language:",
+                                    $"{AN} Translate",
+                                    INI_Language2,
+                                    _context)
                                 If String.IsNullOrEmpty(TranslateLanguage) Then Return
                             Else
                                 TranslateLanguage = INI_Language1
