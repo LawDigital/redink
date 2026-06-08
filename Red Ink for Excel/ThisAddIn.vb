@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Excel"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 7.6.2026
+' 8.6.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -56,7 +56,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.070626" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.080626" & SharedMethods.VersionQualifier
 
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
@@ -91,6 +91,7 @@ Partial Public Class ThisAddIn
     Public TranslateLanguage As String
     Public OutputLanguage As String
     Public FormulaInstruction As String
+    Public Dictionary As String = ""
     Public FileNameBody As String
     Public FileDate As String
     Public CurrentDate As String = "(Current Date: " & DateTime.Now.ToString("dd-MMM-yyyy", CultureInfo.GetCultureInfo("en-US")) & ")"

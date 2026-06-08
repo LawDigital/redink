@@ -1660,6 +1660,18 @@ Namespace My
                 Me("TalkToMeSpeechMicrophoneDeviceIndex") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property DiscussLastSessionStateXml() As String
+            Get
+                Return CType(Me("DiscussLastSessionStateXml"),String)
+            End Get
+            Set
+                Me("DiscussLastSessionStateXml") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

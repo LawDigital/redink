@@ -1787,9 +1787,10 @@ Partial Public Class ThisAddIn
             Dim payload As String = If(String.IsNullOrWhiteSpace(rtb.SelectedText), rtb.Text, rtb.SelectedText)
             Dim contextDocumentText As String = ""
             Dim contextDocumentPath As String = ""
+            Dim contextDocumentIsDirectory As Boolean = False
 
             Dim askContext As Integer = ShowCustomYesNoBox(
-                "Do you want to add a document as additional context for processing the transcript?",
+                "Do you want to add a document or folder as additional context for processing the transcript?",
                 "Yes",
                 "No",
                 Me.Text,
@@ -1803,13 +1804,14 @@ Partial Public Class ThisAddIn
             End If
 
             If askContext = 1 Then
-                DragDropFormLabel = "Context document"
+                DragDropFormLabel = "Context document or folder"
                 DragDropFormFilter = "Supported|*.txt;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.yaml;*.yml;*.vb;*.cs;*.js;*.ts;*.py;*.java;*.cpp;*.c;*.h;*.sql;*.rtf;*.doc;*.docx;*.xlsx;*.pptx;*.pdf;*.eml;*.msg|All|*.*"
 
                 Try
-                    Using f As New DragDropForm()
+                    Using f As New DragDropForm(DragDropMode.FileOrDirectory)
                         If f.ShowDialog() = DialogResult.OK Then
                             contextDocumentPath = f.SelectedFilePath
+                            contextDocumentIsDirectory = f.IsDirectory
                         End If
                     End Using
                 Finally
@@ -1818,17 +1820,44 @@ Partial Public Class ThisAddIn
                 End Try
 
                 If Not String.IsNullOrWhiteSpace(contextDocumentPath) Then
-                    Dim fileResult = Await Globals.ThisAddIn.GetFileContentEx(
-                        contextDocumentPath,
-                        Silent:=True,
-                        DoOCR:=True,
-                        AskUser:=True,
-                        AskWorksheetSelection:=True)
+                    If contextDocumentIsDirectory Then
+                        Dim ctx As New FileLoadingContext()
+                        Dim directoryResult As String = ""
 
-                    contextDocumentText = If(fileResult.Content, "").Trim()
+                        Try
+                            directoryResult = Await Globals.ThisAddIn.LoadDirectoryFilesAsync(
+                                contextDocumentPath,
+                                False,
+                                ctx,
+                                ensureProgressBar:=True)
+                        Finally
+                            ProgressBarModule.CancelOperation = True
+                        End Try
 
-                    If String.IsNullOrWhiteSpace(contextDocumentText) Then
-                        ShowTranscriptorMessageBox("The selected context document could not be read or returned no usable text.")
+                        If String.Equals(directoryResult, "ABORT", StringComparison.Ordinal) Then
+                            Return
+                        End If
+
+                        contextDocumentText = directoryResult.Trim()
+
+                        If String.IsNullOrWhiteSpace(contextDocumentText) Then
+                            ShowTranscriptorMessageBox("The selected context folder could not be read or returned no usable text.")
+                        End If
+                    ElseIf File.Exists(contextDocumentPath) Then
+                        Dim fileResult = Await Globals.ThisAddIn.GetFileContentEx(
+                            contextDocumentPath,
+                            Silent:=True,
+                            DoOCR:=True,
+                            AskUser:=True,
+                            AskWorksheetSelection:=True)
+
+                        contextDocumentText = If(fileResult.Content, "").Trim()
+
+                        If String.IsNullOrWhiteSpace(contextDocumentText) Then
+                            ShowTranscriptorMessageBox("The selected context document could not be read or returned no usable text.")
+                        End If
+                    Else
+                        ShowTranscriptorMessageBox("The selected context path could not be found.")
                     End If
                 End If
             End If
@@ -1836,8 +1865,26 @@ Partial Public Class ThisAddIn
             Dim combinedPayload As String = payload.Trim()
 
             If Not String.IsNullOrWhiteSpace(contextDocumentText) Then
+                Dim contextLabel As String = "Additional Context Document"
+                Dim contextName As String = Path.GetFileName(contextDocumentPath)
+
+                If contextDocumentIsDirectory Then
+                    contextLabel = "Additional Context Folder"
+
+                    Dim normalizedContextDirectoryPath As String =
+                        contextDocumentPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+
+                    contextName = Path.GetFileName(normalizedContextDirectoryPath)
+
+                    If String.IsNullOrWhiteSpace(contextName) Then
+                        contextName = normalizedContextDirectoryPath
+                    End If
+                ElseIf String.IsNullOrWhiteSpace(contextName) Then
+                    contextName = contextDocumentPath
+                End If
+
                 combinedPayload &= vbCrLf & vbCrLf &
-                    "=== Additional Context Document: " & Path.GetFileName(contextDocumentPath) & " ===" & vbCrLf &
+                    "=== " & contextLabel & ": " & contextName & " ===" & vbCrLf &
                     contextDocumentText
             End If
 
@@ -1851,7 +1898,6 @@ Partial Public Class ThisAddIn
                 InsertTextWithMarkdown(sel, result, True)
             End If
         End Sub
-
         Private Async Sub OnClosing(sender As Object, e As FormClosingEventArgs)
             If _isStopping Then
                 e.Cancel = True

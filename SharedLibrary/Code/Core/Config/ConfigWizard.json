@@ -1,4 +1,4 @@
-{
+﻿{
   "version": "1.0",
   "title": "Configuration Wizard",
   "groups": [
@@ -1085,106 +1085,120 @@
       "id": "content_resources",
       "title": "Content Libraries & Rule Sets",
       "description": "Shared and local files that power document-centric functions such as the resources for Red Ink's agentic features, WebAgent, Find Clause, Document Check, MyDocStyle, redaction and discussion personas. The local files can edited by the users themselves, whereas the shared files can be edited via the ''Expert Config'' menu. You can have these parameters set automatically by using the ''Get Sample Files'' feature in ''Settings'', which will also download sample files to give you an idea on how to build such files.",
-      "fields": [
-        {
-          "key": "AgentResourcesPath",
-          "label": "Agent Resources Directory",
-          "type": "path",
-          "default": "%APPDATA%\\microsoft\\word",
-          "description": "Path to the shared directory that contains agent scripts (inky.md, skills, agents). Use a central network location if the same resources should be shared across users. Example: N:\\AI\\Library. [AgentResourcesPath"
-        },
-        {
-          "key": "AgentResourcesPathLocal",
-          "label": "Agent Resources Directory (Local)",
-          "type": "path",
-          "default": "",
-          "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [AgentResourcesPathLocal]"
-        },
-        {
-          "key": "WebAgentPath",
-          "label": "Web Agent Directory",
-          "type": "path",
-          "default": "%APPDATA%\\microsoft\\word",
-          "description": "Path to the shared directory that contains WebAgent scripts. Use a central network location if the same resources should be shared across users; Red Ink looks for files named redink-ag-*.json. Example: N:\\AI\\Library. [WebAgentPath]"
-        },
-        {
-          "key": "WebAgentPathLocal",
-          "label": "Web Agent Directory (Local)",
-          "type": "path",
-          "default": "",
-          "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [WebAgentPathLocal]"
-        },
-        {
-          "key": "FindClausePath",
-          "label": "Find Clause Directory",
-          "type": "path",
-          "default": "%APPDATA%\\microsoft\\word",
-          "description": "Path to the shared directory that contains clause library files. Use a central network location if the same resources should be shared across users; Red Ink looks for files named redink-lib-*.txt. Example: N:\\AI\\Library. [FindClausePath]"
-        },
-        {
-          "key": "FindClausePathLocal",
-          "label": "Find Clause Directory (Local)",
-          "type": "path",
-          "default": "",
-          "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [FindClausePathLocal]"
-        },
-        {
-          "key": "DocCheckPath",
-          "label": "DocCheck Directory",
-          "type": "path",
-          "default": "%APPDATA%\\microsoft\\word",
-          "description": "Path to the shared directory that contains Document Check rule sets. Use a central network location if the same resources should be shared across users; Red Ink looks for files named redink-dc-*.txt. Example: N:\\AI\\Library. [DocCheckPath]"
-        },
-        {
-          "key": "DocCheckPathLocal",
-          "label": "DocCheck Directory (Local)",
-          "type": "path",
-          "default": "",
-          "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [DocCheckPathLocal]"
-        },
-        {
-          "key": "DocStylePath",
-          "label": "DocStyle Directory",
-          "type": "path",
-          "default": "%APPDATA%\\microsoft\\word",
-          "description": "Path to the shared directory that contains MyDocStyle templates. Use a central network location if the same resources should be shared across users; Red Ink looks for files named redink-ds-*.json. Example: N:\\AI\\Library. [DocStylePath]"
-        },
-        {
-          "key": "DocStylePathLocal",
-          "label": "DocStyle Directory (Local)",
-          "type": "path",
-          "default": "",
-          "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [DocStylePathLocal]"
-        },
-        {
-          "key": "RedactionInstructionsPath",
-          "label": "Redaction Instructions",
-          "type": "path",
-          "default": "%APPDATA%\\microsoft\\word\\redactionlib.txt",
-          "description": "Path to the shared file that contains redaction instructions. Use a central network location if the same resources should be shared across users; the file is used by the redaction feature. Example: N:\\AI\\redactions.txt. [RedactionInstructionsPath]"
-        },
-        {
-          "key": "RedactionInstructionsPathLocal",
-          "label": "Redaction Instructions (Local)",
-          "type": "path",
-          "default": "",
-          "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\redactionslocal.txt. [RedactionInstructionsPathLocal]"
-        },
-        {
-          "key": "DiscussInkyPath",
-          "label": "Discuss this Personas",
-          "type": "path",
-          "default": "%APPDATA%\\microsoft\\word\\personalib.txt",
-          "description": "Path to the shared persona file for the Discuss this function. Use a central network location if the same resources should be shared across users; the file defines reusable personas. Example: N:\\AI\\Library\\personalib.txt. [DiscussInkyPath]"
-        },
-        {
-          "key": "DiscussInkyPathLocal",
-          "label": "Discuss this Personas (Local)",
-          "type": "path",
-          "default": "",
-          "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\personaliblocal.txt. Note that ''Discuss this'' will save Mission files in the same directory by adding ''-missions.txt'' to the filename. [DiscussInkyPathLocal]"
-        }
-      ]
+        "fields": [
+            {
+                "key": "AgentResourcesPath",
+                "label": "Agent Resources Directory",
+                "type": "path",
+                "default": "%APPDATA%\\microsoft\\word",
+                "description": "Path to the shared directory that contains agent scripts (inky.md, skills, agents). Use a central network location if the same resources should be shared across users. Example: N:\\AI\\Library. [AgentResourcesPath"
+            },
+            {
+                "key": "AgentResourcesPathLocal",
+                "label": "Agent Resources Directory (Local)",
+                "type": "path",
+                "default": "",
+                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [AgentResourcesPathLocal]"
+            },
+            {
+                "key": "WebAgentPath",
+                "label": "Web Agent Directory",
+                "type": "path",
+                "default": "%APPDATA%\\microsoft\\word",
+                "description": "Path to the shared directory that contains WebAgent scripts. Use a central network location if the same resources should be shared across users; Red Ink looks for files named redink-ag-*.json. Example: N:\\AI\\Library. [WebAgentPath]"
+            },
+            {
+                "key": "WebAgentPathLocal",
+                "label": "Web Agent Directory (Local)",
+                "type": "path",
+                "default": "",
+                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [WebAgentPathLocal]"
+            },
+            {
+                "key": "FindClausePath",
+                "label": "Find Clause Directory",
+                "type": "path",
+                "default": "%APPDATA%\\microsoft\\word",
+                "description": "Path to the shared directory that contains clause library files. Use a central network location if the same resources should be shared across users; Red Ink looks for files named redink-lib-*.txt. Example: N:\\AI\\Library. [FindClausePath]"
+            },
+            {
+                "key": "FindClausePathLocal",
+                "label": "Find Clause Directory (Local)",
+                "type": "path",
+                "default": "",
+                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [FindClausePathLocal]"
+            },
+            {
+                "key": "DocCheckPath",
+                "label": "DocCheck Directory",
+                "type": "path",
+                "default": "%APPDATA%\\microsoft\\word",
+                "description": "Path to the shared directory that contains Document Check rule sets. Use a central network location if the same resources should be shared across users; Red Ink looks for files named redink-dc-*.txt. Example: N:\\AI\\Library. [DocCheckPath]"
+            },
+            {
+                "key": "DocCheckPathLocal",
+                "label": "DocCheck Directory (Local)",
+                "type": "path",
+                "default": "",
+                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [DocCheckPathLocal]"
+            },
+            {
+                "key": "DocStylePath",
+                "label": "DocStyle Directory",
+                "type": "path",
+                "default": "%APPDATA%\\microsoft\\word",
+                "description": "Path to the shared directory that contains MyDocStyle templates. Use a central network location if the same resources should be shared across users; Red Ink looks for files named redink-ds-*.json. Example: N:\\AI\\Library. [DocStylePath]"
+            },
+            {
+                "key": "DocStylePathLocal",
+                "label": "DocStyle Directory (Local)",
+                "type": "path",
+                "default": "",
+                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [DocStylePathLocal]"
+            },
+            {
+                "key": "RedactionInstructionsPath",
+                "label": "Redaction Instructions",
+                "type": "path",
+                "default": "%APPDATA%\\microsoft\\word\\redactionlib.txt",
+                "description": "Path to the shared file that contains redaction instructions. Use a central network location if the same resources should be shared across users; the file is used by the redaction feature. Example: N:\\AI\\redactions.txt. [RedactionInstructionsPath]"
+            },
+            {
+                "key": "RedactionInstructionsPathLocal",
+                "label": "Redaction Instructions (Local)",
+                "type": "path",
+                "default": "",
+                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\redactionslocal.txt. [RedactionInstructionsPathLocal]"
+            },
+            {
+                "key": "DiscussInkyPath",
+                "label": "Discuss this Personas",
+                "type": "path",
+                "default": "%APPDATA%\\microsoft\\word\\personalib.txt",
+                "description": "Path to the shared persona file for the Discuss this function. Use a central network location if the same resources should be shared across users; the file defines reusable personas. Example: N:\\AI\\Library\\personalib.txt. [DiscussInkyPath]"
+            },
+            {
+                "key": "DiscussInkyPathLocal",
+                "label": "Discuss this Personas (Local)",
+                "type": "path",
+                "default": "",
+                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\personaliblocal.txt. Note that ''Discuss this'' will save Mission files in the same directory by adding ''-missions.txt'' to the filename. [DiscussInkyPathLocal]"
+            },
+            {
+                "key": "DictionaryPath",
+                "label": "Global Dictionary",
+                "type": "path",
+                "default": "%APPDATA%\\microsoft\\word\\dictionary.txt",
+                "description": "Path to the shared translation dictionary text file. Use a central network location if the same dictionary should be shared across users. Its content is injected into translation prompts inside <globaldictionary>...</globaldictionary>. Example: N:\\AI\\Library\\dictionary.txt. [DictionaryPath]"
+            },
+            {
+                "key": "DictionaryPathLocal",
+                "label": "User Dictionary",
+                "type": "path",
+                "default": "",
+                "description": "Path to the user's local translation dictionary text file. Its content is injected into translation prompts inside <userdictionary>...</userdictionary>; if both dictionaries exist, the user dictionary takes precedence. Example: %APPDATA%\\Microsoft\\Word\\dictionary_local.txt. [DictionaryPathLocal]"
+            }
+        ]
     },
     {
       "id": "automation_resources",

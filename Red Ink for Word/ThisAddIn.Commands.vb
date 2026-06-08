@@ -92,7 +92,11 @@ Partial Public Class ThisAddIn
             Return
         End If
 
-        TranslateLanguage = SLib.ShowCustomInputBox("Enter your target language (e.g., English, German, French):", $"{AN} Translate", True)
+        TranslateLanguage = Global.SharedLibrary.SharedLibrary.SharedMethods.PromptForTargetLanguage(
+            "Enter your target language (e.g., English, German, French):",
+            $"{AN} Translate",
+            "",
+            _context)
         If Not String.IsNullOrEmpty(TranslateLanguage) Then
             Dim result As String = Await ProcessSelectedText(InterpolateAtRuntime(SP_Translate), True, INI_KeepFormat1, INI_KeepParaFormatInline, INI_ReplaceText1, False, 0, False, False, True, False, INI_KeepFormatCap, NoFormatAndFieldSaving:=Not INI_ReplaceText1)
         End If
@@ -989,7 +993,10 @@ Partial Public Class ThisAddIn
                                 cancellationToken:=token,
                                 EnsureUI:=False)
             End Function,
-            INI_Language1)
+            INI_Language1,
+            Sub()
+                Global.SharedLibrary.SharedLibrary.SharedMethods.EditUserDictionaryFile(_context)
+            End Sub)
         End If
         _quickTranslateWidget.ShowWidget()
     End Sub

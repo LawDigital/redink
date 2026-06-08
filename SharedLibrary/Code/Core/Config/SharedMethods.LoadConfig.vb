@@ -347,6 +347,8 @@ Namespace SharedLibrary
                 context.INI_SpeechModelPath = If(configDict.ContainsKey("SpeechModelPath"), configDict("SpeechModelPath"), "")
                 context.INI_TTSEndpoint = If(configDict.ContainsKey("TTSEndpoint"), configDict("TTSEndpoint"), "")
                 context.INI_LocalModelPath = If(configDict.ContainsKey("LocalModelPath"), configDict("LocalModelPath"), "")
+                context.INI_DictionaryPath = If(configDict.ContainsKey("DictionaryPath"), configDict("DictionaryPath"), "")
+                context.INI_DictionaryPathLocal = If(configDict.ContainsKey("DictionaryPathLocal"), configDict("DictionaryPathLocal"), "")
 
                 context.INI_STT_Google = If(configDict.ContainsKey("STT_Google"), configDict("STT_Google"), "")
                 context.INI_STT_OpenAI = If(configDict.ContainsKey("STT_OpenAI"), configDict("STT_OpenAI"), "")

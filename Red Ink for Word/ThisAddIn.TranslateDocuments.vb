@@ -504,9 +504,11 @@ Partial Public Class ThisAddIn
 
         If mode = DocumentProcessMode.Translate Then
             Dim defaultLanguage As String = If(String.IsNullOrWhiteSpace(INI_Language1), "English", INI_Language1)
-            targetLanguage = ShowCustomInputBox(
+            targetLanguage = Global.SharedLibrary.SharedLibrary.SharedMethods.PromptForTargetLanguage(
                 "Enter your target language (e.g., English, German, French):",
-                AN & " Translate Files", True, defaultLanguage)
+                AN & " Translate Files",
+                defaultLanguage,
+                _context)
 
             If String.IsNullOrWhiteSpace(targetLanguage) Then Exit Function
             targetLanguage = targetLanguage.Trim()

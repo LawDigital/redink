@@ -130,7 +130,7 @@ Partial Public Class ThisAddIn
 
         Dim app As Word.Application = Globals.ThisAddIn.Application
         Dim sel As Microsoft.Office.Interop.Word.Selection = app.Selection
-        Dim doc As Microsoft.Office.Interop.Word.Document = app.ActiveDocument
+        Dim doc As Microsoft.Office.Interop.Word.Document = sel.Range.Document
 
         Dim activeComment As Microsoft.Office.Interop.Word.Comment = Nothing
         Dim newtext As String = String.Empty
@@ -202,10 +202,14 @@ Partial Public Class ThisAddIn
                 targetRange = anchorRange.Duplicate
             End If
 
+            targetRange = targetRange.Duplicate
+
             Await EnsureUIThread()
-            ActivateProcessingContext(targetRange)
+            ActivateDocumentRangeContext(targetRange)
 
             ' Get merge prompt from user or cached value
+            ActivateDocumentRangeContext(targetRange)
+
             If Not Silent Or String.IsNullOrWhiteSpace(SP_MergePrompt2) Then
                 OtherPrompt = SLib.ShowCustomInputBox(
                     "If you want, you can amend the prompt that will be used to " &
@@ -237,6 +241,8 @@ Partial Public Class ThisAddIn
 
             ' Process merge with LLM against the main document selection.
             ' Call TrueProcessSelectedText directly to avoid the comment-bubble reroute in ProcessSelectedText.
+            ActivateDocumentRangeContext(targetRange)
+
             Dim result As String = Await TrueProcessSelectedText(
                 OtherPrompt & " " & SP_Add_MergePrompt & " <INSERT>" &
                 newtext & "</INSERT> ",
@@ -323,5 +329,27 @@ Partial Public Class ThisAddIn
             Return ONNX_initialized
         End If
     End Function
+
+
+    Private Sub ActivateDocumentRangeContext(ByVal targetRange As Word.Range)
+        Try
+            If targetRange Is Nothing Then Return
+
+            Dim targetWindow As Word.Window = Nothing
+            Try
+                targetWindow = targetRange.Document.ActiveWindow
+            Catch
+                targetWindow = Nothing
+            End Try
+
+            If targetWindow IsNot Nothing Then
+                targetWindow.Activate()
+            End If
+
+            targetRange.Select()
+        Catch ex As Exception
+            Debug.WriteLine($"ActivateDocumentRangeContext failed: {ex.Message}")
+        End Try
+    End Sub
 
 End Class
