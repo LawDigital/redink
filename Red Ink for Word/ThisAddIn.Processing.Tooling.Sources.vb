@@ -488,6 +488,94 @@ Partial Public Class ThisAddIn
     End Function
 
 
+
+    Private Function NormalizeKnowledgeToolContentFileUris(content As String) As String
+        If String.IsNullOrWhiteSpace(content) Then Return If(content, "")
+
+        Return Regex.Replace(
+            content,
+            "<KSDOCUMENT\b[^>]*>",
+            Function(m As Match) NormalizeKnowledgeToolDocumentTag(m.Value),
+            RegexOptions.IgnoreCase Or RegexOptions.Singleline)
+    End Function
+
+    Private Function NormalizeKnowledgeToolDocumentTag(tag As String) As String
+        If String.IsNullOrWhiteSpace(tag) Then Return tag
+
+        Dim storeName As String = GetKnowledgeToolDocumentAttribute(tag, "store")
+        If String.IsNullOrWhiteSpace(storeName) Then Return tag
+
+        Dim store = KnowledgeStoreCatalog.GetStoreByName(storeName, _context)
+        If store Is Nothing Then Return tag
+
+        Dim rewritten As String = tag
+        rewritten = RewriteKnowledgeToolDocumentAttribute(rewritten, "sourcePath", store.ResolvedSourcePath)
+
+        Dim wikiRoot As String = KnowledgeStoreCatalog.GetWikiPath(store, createIfMissing:=False)
+        If Not String.IsNullOrWhiteSpace(wikiRoot) Then
+            rewritten = RewriteKnowledgeToolDocumentAttribute(rewritten, "wikiPath", wikiRoot)
+        End If
+
+        Return rewritten
+    End Function
+
+    Private Shared Function GetKnowledgeToolDocumentAttribute(tag As String, attributeName As String) As String
+        If String.IsNullOrWhiteSpace(tag) OrElse String.IsNullOrWhiteSpace(attributeName) Then Return ""
+
+        Dim m As Match = Regex.Match(
+            tag,
+            "\b" & Regex.Escape(attributeName) & "=""""(?<v>[^""]*)""""",
+            RegexOptions.IgnoreCase)
+
+        If Not m.Success Then Return ""
+
+        Return System.Net.WebUtility.HtmlDecode(m.Groups("v").Value)
+    End Function
+
+    Private Shared Function RewriteKnowledgeToolDocumentAttribute(tag As String, attributeName As String, basePath As String) As String
+        Dim currentValue As String = GetKnowledgeToolDocumentAttribute(tag, attributeName)
+        If String.IsNullOrWhiteSpace(currentValue) Then Return tag
+
+        Dim rewrittenValue As String = BuildKnowledgeToolAbsoluteFileUri(currentValue, basePath)
+        If String.IsNullOrWhiteSpace(rewrittenValue) Then Return tag
+
+        Return Regex.Replace(
+            tag,
+            "\b" & Regex.Escape(attributeName) & "=""""[^""]*""""",
+            attributeName & "=""" & System.Security.SecurityElement.Escape(rewrittenValue) & """",
+            RegexOptions.IgnoreCase)
+    End Function
+
+    Private Shared Function BuildKnowledgeToolAbsoluteFileUri(value As String, basePath As String) As String
+        If String.IsNullOrWhiteSpace(value) Then Return ""
+
+        Dim candidate As String = System.Net.WebUtility.HtmlDecode(value).Trim()
+        If candidate = "" Then Return ""
+
+        Try
+            If candidate.StartsWith("file://", StringComparison.OrdinalIgnoreCase) Then
+                candidate = New Uri(candidate).LocalPath
+            End If
+        Catch
+        End Try
+
+        candidate = candidate.Replace("/"c, Path.DirectorySeparatorChar)
+
+        If Path.IsPathRooted(candidate) AndAlso File.Exists(candidate) Then
+            Return New Uri(Path.GetFullPath(candidate)).AbsoluteUri
+        End If
+
+        If Not String.IsNullOrWhiteSpace(basePath) Then
+            Dim trimmed As String = candidate.TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            Dim combined As String = Path.GetFullPath(Path.Combine(basePath, trimmed))
+            If File.Exists(combined) Then
+                Return New Uri(combined).AbsoluteUri
+            End If
+        End If
+
+        Return ""
+    End Function
+
     ''' <summary>
     ''' Creates a built-in internal knowledge store search tool configuration as a <see cref="ModelConfig"/>.
     ''' Only meaningful when <c>INI_KnowledgeStorePath</c> or <c>INI_KnowledgeStorePathLocal</c> is configured
@@ -629,7 +717,7 @@ Partial Public Class ThisAddIn
             End If
 
             response.Success = True
-            response.Response = resolved.Content
+            response.Response = NormalizeKnowledgeToolContentFileUris(resolved.Content)
 
             context.Log($"Knowledge search returned content ({resolved.Content.Length:N0} chars) from '{storeLabel}'.", "success")
 

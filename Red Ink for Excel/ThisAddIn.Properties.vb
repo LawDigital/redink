@@ -1854,6 +1854,24 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_DictionaryPath As String
+        Get
+            Return _context.INI_DictionaryPath
+        End Get
+        Set(value As String)
+            _context.INI_DictionaryPath = value
+        End Set
+    End Property
+
+    Public Shared Property INI_DictionaryPathLocal As String
+        Get
+            Return _context.INI_DictionaryPathLocal
+        End Get
+        Set(value As String)
+            _context.INI_DictionaryPathLocal = value
+        End Set
+    End Property
+
     Public Shared Property INI_RedactionInstructionsPath As String
         Get
             Return _context.INI_RedactionInstructionsPath

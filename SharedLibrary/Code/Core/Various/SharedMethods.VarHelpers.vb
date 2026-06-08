@@ -375,6 +375,128 @@ Namespace SharedLibrary
             Return String.IsNullOrWhiteSpace(str)
         End Function
 
+
+
+        Public Shared Function GetDictionaryFilePath(ByVal context As ISharedContext,
+                                                     Optional ByVal localDictionary As Boolean = False) As String
+            If context Is Nothing Then Return ""
+
+            Dim configuredPath As String = If(localDictionary, context.INI_DictionaryPathLocal, context.INI_DictionaryPath)
+            Return ExpandEnvironmentVariables(configuredPath)
+        End Function
+
+        Public Shared Function GetTranslationDictionaryText(ByVal context As ISharedContext) As String
+            If context Is Nothing Then Return ""
+
+            Dim globalDictionary As String = ReadTranslationDictionaryFile(GetDictionaryFilePath(context, False))
+            Dim userDictionary As String = ReadTranslationDictionaryFile(GetDictionaryFilePath(context, True))
+
+            Dim parts As New System.Collections.Generic.List(Of String)
+
+            If Not String.IsNullOrWhiteSpace(globalDictionary) Then
+                parts.Add("<globaldictionary>" & globalDictionary & "</globaldictionary>")
+            End If
+
+            If Not String.IsNullOrWhiteSpace(userDictionary) Then
+                Dim userPrefix As String = If(parts.Count > 0, "(the userdictionary takes precedence) ", "")
+                parts.Add("<userdictionary>" & userPrefix & userDictionary & "</userdictionary>")
+            End If
+
+            Return String.Join(" ", parts)
+        End Function
+
+        Public Shared Function PromptForTargetLanguage(ByVal prompt As String,
+                                                       ByVal header As String,
+                                                       ByVal defaultLanguage As String,
+                                                       ByVal context As ISharedContext) As String
+            Dim inputParams() As InputParameter = {
+                New InputParameter("", If(defaultLanguage, ""))
+            }
+
+            Dim confirmed As Boolean = ShowCustomVariableInputForm(
+                prompt,
+                header,
+                inputParams,
+                "Edit User Dictionary",
+                Sub()
+                    EditUserDictionaryFile(context)
+                End Sub,
+                False)
+
+            If Not confirmed Then Return ""
+
+            Return If(System.Convert.ToString(inputParams(0).Value), "").Trim()
+        End Function
+
+        Public Shared Sub EditUserDictionaryFile(ByVal context As ISharedContext)
+            Dim filePath As String = EnsureUserDictionaryFileExists(context)
+            If String.IsNullOrWhiteSpace(filePath) Then Return
+
+            ShowTextFileEditor(filePath, "Edit user dictionary: " & filePath, False, context)
+        End Sub
+
+        Private Shared Function EnsureUserDictionaryFileExists(ByVal context As ISharedContext) As String
+            Dim filePath As String = GetDictionaryFilePath(context, True)
+
+            If String.IsNullOrWhiteSpace(filePath) Then
+                ShowCustomMessageBox("No user dictionary file is configured.")
+                Return ""
+            End If
+
+            Try
+                filePath = Path.GetFullPath(filePath)
+
+                Dim directoryPath As String = Path.GetDirectoryName(filePath)
+                If String.IsNullOrWhiteSpace(directoryPath) Then
+                    ShowCustomMessageBox("Invalid user dictionary file path:" & vbCrLf & filePath)
+                    Return ""
+                End If
+
+                If Not Directory.Exists(directoryPath) Then
+                    Directory.CreateDirectory(directoryPath)
+                End If
+
+                If Not File.Exists(filePath) Then
+                    Dim initialContent As String =
+                        "; This is the user dictionary." & vbCrLf &
+                        "; It can contain instructions on how to translate certain words or expressions." & vbCrLf &
+                        "; Example: Translate ""share purchase agreement"" as ""Aktienkaufvertrag""." & vbCrLf
+
+                    File.WriteAllText(filePath, initialContent, New System.Text.UTF8Encoding(True))
+                End If
+
+                Return filePath
+            Catch ex As Exception
+                ShowCustomMessageBox("Could not create the user dictionary file:" & vbCrLf & ex.Message)
+                Return ""
+            End Try
+        End Function
+
+        Private Shared Function ReadTranslationDictionaryFile(ByVal filePath As String) As String
+            If String.IsNullOrWhiteSpace(filePath) OrElse Not File.Exists(filePath) Then Return ""
+
+            Dim content As String = ReadTextFile(filePath, False)
+            If String.IsNullOrWhiteSpace(content) Then Return ""
+
+            Dim normalized As String = content.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf)
+            Dim sb As New System.Text.StringBuilder()
+
+            For Each line As String In normalized.Split(New String() {vbLf}, StringSplitOptions.None)
+                If line.TrimStart().StartsWith(";", StringComparison.Ordinal) Then
+                    Continue For
+                End If
+
+                If sb.Length > 0 Then
+                    sb.Append(vbCrLf)
+                End If
+
+                sb.Append(line)
+            Next
+
+            Return sb.ToString().Trim()
+        End Function
+
+
         ''' <summary>
         ''' Expands environment variables and selected placeholder tokens in <paramref name="filePath"/>,
         ''' normalizes the resulting path, and returns its full path.

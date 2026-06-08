@@ -121,6 +121,7 @@ Imports Markdig
 Imports SharedLibrary.SharedLibrary
 Imports SharedLibrary.SharedLibrary.SharedContext
 Imports SharedLibrary.SharedLibrary.SharedMethods
+Imports System.Xml.Linq
 
 ''' <summary>
 ''' WinForms surface for persona-driven LLM discussions tied to knowledge files.
@@ -132,6 +133,8 @@ Public Class DiscussInky
 
     Private Const AssistantName As String = Globals.ThisAddIn.AN6
     Private Const PersistedKnowledgeFileName As String = "redink-discussknowledge.txt"
+    Private Const DialogueArchiveFolderName As String = "redink-discuss-dialogues"
+    Private Const DialogueArchiveFileExtension As String = ".dialogue.xml"
     Private Const ToolTrigger As String = "(a)"
     Private Const KBTrigger As String = "(kb)"  ' Trigger to supplement with knowledge store results.
 
@@ -237,6 +240,7 @@ Public Class DiscussInky
     Private ReadOnly _btnMission As Button = New Button() With {.Text = "Mission", .AutoSize = True}
     Private ReadOnly _btnEditPersona As Button = New Button() With {.Text = "Edit Local Persona Lib", .AutoSize = True}
     Private ReadOnly _btnKnowledge As Button = New Button() With {.Text = "Load Knowledge (Docs)", .AutoSize = True}
+    Private ReadOnly _btnArchive As Button = New Button() With {.Text = "Archive", .AutoSize = True}
     Private ReadOnly _btnAlternateModel As Button = New Button() With {.Text = "Alternate Model", .AutoSize = True}
     Private ReadOnly _chkIncludeActiveDoc As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = "Include active document", .AutoSize = True}
     Private ReadOnly _chkPersistKnowledge As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = "Persist knowledge temporarily", .AutoSize = True}
@@ -266,6 +270,9 @@ Public Class DiscussInky
     Private _isUpdatingPersistCheckbox As Boolean = False ' Prevents recursive event handling    
     Private _toolingControlsInitialized As Boolean = False
     Private _noPersonaLibraryConfigured As Boolean = False ' True when no persona path is defined
+    Private _activeDialogueArchiveName As String = ""
+    Private _activeDialogueArchiveFilePath As String = ""
+    Private _activeDialogueArchiveBaselineHash As String = ""
 
     ' Autorespond state
     Private _autoRespondInProgress As Boolean = False
@@ -381,6 +388,7 @@ Public Class DiscussInky
         pnlButtons.Controls.Add(_btnMission)
         pnlButtons.Controls.Add(_btnEditPersona)
         pnlButtons.Controls.Add(_btnKnowledge)
+        pnlButtons.Controls.Add(_btnArchive)
 
         ' Show alternate model button if either second API is configured or an alternate INI exists
         If _context.INI_SecondAPI OrElse Not String.IsNullOrWhiteSpace(_context.INI_AlternateModelPath) Then
@@ -423,6 +431,7 @@ Public Class DiscussInky
         AddHandler _btnMission.Click, AddressOf OnSelectMission
         AddHandler _btnEditPersona.Click, AddressOf OnEditLocalPersona
         AddHandler _btnKnowledge.Click, AddressOf OnLoadKnowledge
+        AddHandler _btnArchive.Click, AddressOf OnArchiveClick
         AddHandler _btnAlternateModel.Click, AddressOf OnAlternateModelClick
         AddHandler _txtInput.KeyDown, AddressOf OnInputKeyDown
         AddHandler _txtInput.KeyPress, AddressOf OnInputKeyPress
@@ -491,6 +500,10 @@ Public Class DiscussInky
             title &= $" [{_currentMissionName}]"
         End If
 
+        If Not String.IsNullOrWhiteSpace(_activeDialogueArchiveName) Then
+            title &= $" {{Archive: {_activeDialogueArchiveName}}}"
+        End If
+
         If Not String.IsNullOrEmpty(_knowledgeFilePath) Then
             title &= $" - {Path.GetFileName(_knowledgeFilePath)}"
         End If
@@ -525,6 +538,20 @@ Public Class DiscussInky
     Private Function GetDateContext() As String
         Dim now = DateTime.Now
         Return $"Today is {now:dd-MMM-yyyy}."
+    End Function
+
+    ''' <summary>
+    ''' Gets the Red Ink storage directory in the user's application data folder.
+    ''' </summary>
+    Private Function GetRedInkStorageDirectoryPath() As String
+        Dim storageDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "redink")
+        Try
+            If Not Directory.Exists(storageDir) Then
+                Directory.CreateDirectory(storageDir)
+            End If
+        Catch
+        End Try
+        Return storageDir
     End Function
 
     ''' <summary>
@@ -805,44 +832,58 @@ Public Class DiscussInky
 
         InitializeChatHtml()
 
-        ' Restore chat or load knowledge
-        Dim hasChat = False
-        Dim restoredHtmlHadAlternateModel = False
+        Dim restoredFromFullSessionState As Boolean = False
         Try
-            ' First, restore _history from plain transcript (this ensures LLM sees the conversation)
-            Dim savedTranscript = My.Settings.DiscussLastChat
-            If Not String.IsNullOrEmpty(savedTranscript) Then
-                RestoreHistoryFromTranscript(savedTranscript)
-            End If
-
-            ' Then restore the HTML display
-            Dim savedHtml = My.Settings.DiscussLastChatHtml
-            If Not String.IsNullOrEmpty(savedHtml) Then
-                ' Check if the restored HTML contains an alternate/secondary model switch message
-                restoredHtmlHadAlternateModel = ChatHtmlIndicatesAlternateModel(savedHtml)
-                AppendHtml(savedHtml)
-                hasChat = True
-            ElseIf Not String.IsNullOrEmpty(savedTranscript) Then
-                AppendTranscriptToHtml(savedTranscript)
-                hasChat = True
+            Dim savedSessionStateXml = My.Settings.DiscussLastSessionStateXml
+            If Not String.IsNullOrWhiteSpace(savedSessionStateXml) Then
+                restoredFromFullSessionState = RestoreSessionStateFromXml(savedSessionStateXml, "previous session", announceRestore:=False)
             End If
         Catch
         End Try
 
-        ' If restored chat indicated an alternate model was active, notify user we're back on primary
-        If hasChat AndAlso restoredHtmlHadAlternateModel Then
-            ' Ensure alternate model state is reset (it should be by default, but be explicit)
-            _alternateModelSelected = False
-            _alternateModelConfig = Nothing
-            _alternateModelDisplayName = Nothing
-            UpdateAlternateModelButtonText()
+        ' Restore chat or load knowledge
+        Dim hasChat = False
+        Dim restoredHtmlHadAlternateModel = False
 
-            ' Notify user in chat that we're back on primary
-            AppendSystemMessage($"Session restored. Now using primary model ({_context.INI_Model}).")
+        If restoredFromFullSessionState Then
+            hasChat = (_history.Count > 0)
+        Else
+            Try
+                ' First, restore _history from plain transcript (this ensures LLM sees the conversation)
+                Dim savedTranscript = My.Settings.DiscussLastChat
+                If Not String.IsNullOrEmpty(savedTranscript) Then
+                    RestoreHistoryFromTranscript(savedTranscript)
+                End If
+
+                ' Then restore the HTML display
+                Dim savedHtml = My.Settings.DiscussLastChatHtml
+                If Not String.IsNullOrEmpty(savedHtml) Then
+                    ' Check if the restored HTML contains an alternate/secondary model switch message
+                    restoredHtmlHadAlternateModel = ChatHtmlIndicatesAlternateModel(savedHtml)
+                    AppendHtml(savedHtml)
+                    hasChat = True
+                ElseIf Not String.IsNullOrEmpty(savedTranscript) Then
+                    AppendTranscriptToHtml(savedTranscript)
+                    hasChat = True
+                End If
+            Catch
+            End Try
+
+            ' If restored chat indicated an alternate model was active, notify user we're back on primary
+            If hasChat AndAlso restoredHtmlHadAlternateModel Then
+                ' Ensure alternate model state is reset (it should be by default, but be explicit)
+                _alternateModelSelected = False
+                _alternateModelConfig = Nothing
+                _alternateModelDisplayName = Nothing
+                UpdateAlternateModelButtonText()
+
+                ' Notify user in chat that we're back on primary
+                AppendSystemMessage($"Session restored. Now using primary model ({_context.INI_Model}).")
+            End If
+
+            ' Restore knowledge using the new loading flow
+            Await RestoreKnowledgeAsync()
         End If
-
-        ' Restore knowledge using the new loading flow
-        Await RestoreKnowledgeAsync()
 
         ' Only force persona selection if there are custom personas beyond the default
         ' (i.e., a persona library is configured and has entries)
@@ -1082,8 +1123,7 @@ Public Class DiscussInky
             If scope IsNot Nothing Then
                 Try : scope.Dispose() : Catch : End Try
             End If
-            PersistTranscriptLimited()
-            PersistChatHtml()
+            PersistCurrentSessionSettings(saveImmediately:=False)
             Try
                 RemoveHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
             Catch
@@ -1095,17 +1135,6 @@ Public Class DiscussInky
                 My.Settings.DiscussFormLocation = Me.RestoreBounds.Location
                 My.Settings.DiscussFormSize = Me.RestoreBounds.Size
             End If
-            My.Settings.DiscussIncludeActiveDoc = _chkIncludeActiveDoc.Checked
-            My.Settings.DiscussPersistKnowledge = _chkPersistKnowledge.Checked
-            My.Settings.DiscussSelectedPersona = _currentPersonaName
-            My.Settings.DiscussSelectedMission = _currentMissionName
-
-            ' Save the original path without " (directory)" suffix for proper restoration
-            Dim pathToSave = If(_knowledgeFilePath, "")
-            If pathToSave.EndsWith(" (directory)", StringComparison.OrdinalIgnoreCase) Then
-                pathToSave = pathToSave.Substring(0, pathToSave.Length - " (directory)".Length)
-            End If
-            My.Settings.DiscussKnowledgePath = pathToSave
 
             Globals.ThisAddIn.PersistDiscussInkyToolSelection(
                 Globals.ThisAddIn.SplitPersistedToolNames(CStr(My.Settings("SelectedMainToolNames"))),
@@ -2283,10 +2312,13 @@ Public Class DiscussInky
     Private Async Sub OnClear(sender As Object, e As EventArgs)
         Try
             _history.Clear()
+            ClearCurrentActiveDialogueArchive()
             InitializeChatHtml()
             My.Settings.DiscussLastChat = ""
             My.Settings.DiscussLastChatHtml = ""
+            My.Settings.DiscussLastSessionStateXml = ""
             My.Settings.Save()
+            UpdateWindowTitle()
             Await SafeGenerateWelcomeAsync().ConfigureAwait(False)
         Catch
         Finally
@@ -3101,6 +3133,7 @@ Public Class DiscussInky
                    Dim root = _chat.Document.GetElementById("chat")
                    If root Is Nothing Then Return
                    My.Settings.DiscussLastChatHtml = root.InnerHtml
+                   My.Settings.DiscussLastSessionStateXml = BuildSessionStateXml()
                    My.Settings.Save()
                Catch
                End Try
@@ -4684,6 +4717,951 @@ Public Class DiscussInky
             Return ""
         End Try
     End Function
+
+#End Region
+
+#Region "Dialogue Archive and Full Session State"
+
+    Private Class DialogueArchiveInfo
+        Public Property Name As String
+        Public Property FilePath As String
+        Public Property SavedAtLocal As DateTime
+
+        Public Overrides Function ToString() As String
+            Return $"{Name} - {SavedAtLocal:yyyy-MM-dd HH:mm}"
+        End Function
+    End Class
+
+    Private Function BuildDialogueArchiveManagerInfoText() As String
+        Dim sb As New StringBuilder()
+        sb.Append("Stored dialogues and persisted knowledge are kept in: ")
+        sb.Append(GetRedInkStorageDirectoryPath())
+        sb.Append(".")
+
+        If Not String.IsNullOrWhiteSpace(_activeDialogueArchiveName) Then
+            sb.Append(" Current linked archive: ")
+            sb.Append(_activeDialogueArchiveName)
+            sb.Append(If(IsCurrentDialogueArchiveDirty(), " (modified).", " (unchanged)."))
+        End If
+
+        sb.Append(" Select one to restore or delete, store the current dialogue as a new archive, or update the linked archive.")
+        Return sb.ToString()
+    End Function
+
+    Private Function GetDialogueArchiveDirectoryPath() As String
+        Return GetRedInkStorageDirectoryPath()
+    End Function
+
+    Private Function GetDialogueArchiveFilePath(archiveName As String) As String
+        Dim safeName = If(archiveName, "").Trim()
+        For Each ch In Path.GetInvalidFileNameChars()
+            safeName = safeName.Replace(ch, "_"c)
+        Next
+        If String.IsNullOrWhiteSpace(safeName) Then
+            safeName = "dialogue"
+        End If
+        Return Path.Combine(GetDialogueArchiveDirectoryPath(), safeName & DialogueArchiveFileExtension)
+    End Function
+
+    Private Function GetArchiveNameFromFilePath(filePath As String) As String
+        Dim fileName = Path.GetFileName(filePath)
+        If fileName.EndsWith(DialogueArchiveFileExtension, StringComparison.OrdinalIgnoreCase) Then
+            Return fileName.Substring(0, fileName.Length - DialogueArchiveFileExtension.Length)
+        End If
+        Return Path.GetFileNameWithoutExtension(filePath)
+    End Function
+
+    Private Function NormalizeKnowledgePathForSettings(pathValue As String) As String
+        Dim normalized = If(pathValue, "")
+        If normalized.EndsWith(" (directory)", StringComparison.OrdinalIgnoreCase) Then
+            normalized = normalized.Substring(0, normalized.Length - " (directory)".Length)
+        End If
+        If normalized.Equals("(Persisted Knowledge)", StringComparison.OrdinalIgnoreCase) Then
+            Return ""
+        End If
+        Return normalized
+    End Function
+
+    Private Function GetSettingStringSafe(settingName As String) As String
+        Try
+            Dim value = My.Settings(settingName)
+            Return If(value, "").ToString()
+        Catch
+            Return ""
+        End Try
+    End Function
+
+    Private Shared Function GetXmlAttributeValue(element As XElement,
+                                                 attributeName As String,
+                                                 Optional defaultValue As String = "") As String
+        If element Is Nothing Then Return defaultValue
+        Dim attr = element.Attribute(attributeName)
+        If attr Is Nothing Then Return defaultValue
+        Return attr.Value
+    End Function
+
+    Private Shared Function GetXmlAttributeBoolean(element As XElement,
+                                                   attributeName As String,
+                                                   Optional defaultValue As Boolean = False) As Boolean
+        Dim raw = GetXmlAttributeValue(element, attributeName, "")
+        Dim result As Boolean
+        If Boolean.TryParse(raw, result) Then
+            Return result
+        End If
+        Return defaultValue
+    End Function
+
+    Private Shared Function GetXmlAttributeInteger(element As XElement,
+                                                   attributeName As String,
+                                                   Optional defaultValue As Integer = 0) As Integer
+        Dim raw = GetXmlAttributeValue(element, attributeName, "")
+        Dim result As Integer
+        If Integer.TryParse(raw, result) Then
+            Return result
+        End If
+        Return defaultValue
+    End Function
+
+    Private Shared Function ComputeTextHash(text As String) As String
+        Try
+            Dim raw = Encoding.UTF8.GetBytes(If(text, ""))
+            Using sha = System.Security.Cryptography.SHA256.Create()
+                Return System.Convert.ToBase64String(sha.ComputeHash(raw))
+            End Using
+        Catch
+            Return ""
+        End Try
+    End Function
+
+    Private Function NormalizeSessionStateXmlForComparison(stateXml As String) As String
+        If String.IsNullOrWhiteSpace(stateXml) Then Return ""
+
+        Try
+            Dim doc = XDocument.Parse(stateXml)
+            Dim root = doc.Root
+            If root Is Nothing Then
+                Return stateXml.Trim()
+            End If
+
+            Dim savedAtElement = root.Element("SavedAtUtc")
+            If savedAtElement IsNot Nothing Then
+                savedAtElement.Remove()
+            End If
+
+            Dim archiveNameElement = root.Element("ArchiveName")
+            If archiveNameElement IsNot Nothing Then
+                archiveNameElement.Remove()
+            End If
+
+            Dim activeArchiveElement = root.Element("ActiveArchive")
+            If activeArchiveElement IsNot Nothing Then
+                activeArchiveElement.Remove()
+            End If
+
+            Dim transcriptHtmlElement = root.Element("TranscriptHtml")
+            If transcriptHtmlElement IsNot Nothing Then
+                transcriptHtmlElement.Remove()
+            End If
+
+            Return doc.ToString(SaveOptions.DisableFormatting)
+        Catch
+            Return stateXml.Trim()
+        End Try
+    End Function
+
+    Private Function GetCurrentSessionComparisonHash() As String
+        Return ComputeTextHash(NormalizeSessionStateXmlForComparison(BuildSessionStateXml()))
+    End Function
+
+    Private Sub SetCurrentActiveDialogueArchive(archiveName As String, archiveFilePath As String, baselineHash As String)
+        _activeDialogueArchiveName = If(archiveName, "").Trim()
+        _activeDialogueArchiveFilePath = If(archiveFilePath, "").Trim()
+        _activeDialogueArchiveBaselineHash = If(baselineHash, "").Trim()
+    End Sub
+
+    Private Sub ClearCurrentActiveDialogueArchive()
+        SetCurrentActiveDialogueArchive("", "", "")
+    End Sub
+
+    Private Function HasTrackedDialogueArchive() As Boolean
+        Return Not String.IsNullOrWhiteSpace(_activeDialogueArchiveName) AndAlso
+               Not String.IsNullOrWhiteSpace(_activeDialogueArchiveFilePath)
+    End Function
+
+    Private Function IsCurrentDialogueArchiveDirty() As Boolean
+        If Not HasTrackedDialogueArchive() Then Return False
+        If String.IsNullOrWhiteSpace(_activeDialogueArchiveBaselineHash) Then Return True
+        Return Not String.Equals(_activeDialogueArchiveBaselineHash, GetCurrentSessionComparisonHash(), StringComparison.Ordinal)
+    End Function
+
+    Private Function GetCurrentChatInnerHtml() As String
+        If Me.IsDisposed Then Return ""
+
+        If Me.InvokeRequired Then
+            Try
+                Return CStr(Me.Invoke(New Func(Of String)(AddressOf GetCurrentChatInnerHtml)))
+            Catch
+                Return ""
+            End Try
+        End If
+
+        Try
+            If _chat.Document Is Nothing Then Return ""
+            Dim root = _chat.Document.GetElementById("chat")
+            If root Is Nothing Then Return ""
+            Return If(root.InnerHtml, "")
+        Catch
+            Return ""
+        End Try
+    End Function
+
+    Private Function BuildSessionStateXml(Optional archiveName As String = "") As String
+        Dim historyElement As New XElement("History")
+
+        For Each entry In _history
+            historyElement.Add(
+                New XElement("Message",
+                    New XAttribute("role", If(entry.Role, "")),
+                    If(entry.Content, "")))
+        Next
+
+        Dim alternateMode As String = "Primary"
+        If _alternateModelSelected Then
+            If _alternateModelConfig Is Nothing AndAlso _context.INI_SecondAPI Then
+                alternateMode = "LegacySecondApi"
+            Else
+                alternateMode = "AlternateConfig"
+            End If
+        End If
+
+        Dim root As New XElement(
+            "DiscussInkyState",
+            New XAttribute("version", "1"),
+            New XElement("ArchiveName", If(archiveName, "")),
+            New XElement("SavedAtUtc", DateTime.UtcNow.ToString("o")),
+            New XElement(
+                "ActiveArchive",
+                New XAttribute("name", If(_activeDialogueArchiveName, "")),
+                New XAttribute("filePath", If(_activeDialogueArchiveFilePath, "")),
+                New XAttribute("baselineHash", If(_activeDialogueArchiveBaselineHash, ""))),
+            New XElement(
+                "Persona",
+                New XAttribute("name", If(_currentPersonaName, "")),
+                New XElement("Prompt", If(_currentPersonaPrompt, ""))),
+            New XElement(
+                "Mission",
+                New XAttribute("name", If(_currentMissionName, "")),
+                New XElement("Prompt", If(_currentMissionPrompt, ""))),
+            New XElement(
+                "Knowledge",
+                New XAttribute("path", If(_knowledgeFilePath, "")),
+                New XAttribute("persisted", _chkPersistKnowledge.Checked),
+                If(_knowledgeContent, "")),
+            New XElement(
+                "Flags",
+                New XAttribute("includeActiveDoc", _chkIncludeActiveDoc.Checked),
+                New XAttribute("enableTooling", _chkEnableTooling.Checked),
+                New XAttribute("advancedTools", _chkAdvancedTools.Checked),
+                New XAttribute("showToolingLog", _chkShowToolingLog.Checked),
+                New XAttribute("inkyMemory", _chkInkyMemory.Checked)),
+            New XElement(
+                "AlternateModel",
+                New XAttribute("selected", _alternateModelSelected),
+                New XAttribute("mode", alternateMode),
+                New XAttribute("displayName", If(_alternateModelDisplayName, ""))),
+            New XElement(
+                "ToolSelection",
+                New XAttribute("main", GetSettingStringSafe("SelectedMainToolNames")),
+                New XAttribute("advanced", GetSettingStringSafe("SelectedAdvancedToolNames"))),
+            New XElement(
+                "Ui",
+                New XAttribute("splitterDistance", _splitChat.SplitterDistance)),
+            New XElement("TranscriptHtml", GetCurrentChatInnerHtml()),
+            historyElement)
+
+        Return New XDocument(root).ToString(SaveOptions.DisableFormatting)
+    End Function
+
+    Private Sub PersistCurrentSessionSettings(Optional saveImmediately As Boolean = True)
+        Try
+            PersistTranscriptLimited()
+            My.Settings.DiscussLastChatHtml = GetCurrentChatInnerHtml()
+            My.Settings.DiscussLastSessionStateXml = BuildSessionStateXml()
+            My.Settings.DiscussIncludeActiveDoc = _chkIncludeActiveDoc.Checked
+            My.Settings.DiscussPersistKnowledge = _chkPersistKnowledge.Checked
+            My.Settings.DiscussSelectedPersona = _currentPersonaName
+            My.Settings.DiscussSelectedMission = _currentMissionName
+            My.Settings.DiscussKnowledgePath = NormalizeKnowledgePathForSettings(_knowledgeFilePath)
+            My.Settings.DiscussEnableTooling = _chkEnableTooling.Checked
+            If saveImmediately Then
+                My.Settings.Save()
+            End If
+        Catch
+        End Try
+    End Sub
+
+    Private Sub ApplyKnowledgePersistenceFromCurrentState()
+        If String.IsNullOrWhiteSpace(_knowledgeContent) Then
+            _knowledgeContent = Nothing
+            _cachedKnowledgeContent = Nothing
+            _cachedKnowledgeFilePath = Nothing
+        Else
+            _cachedKnowledgeContent = _knowledgeContent
+            _cachedKnowledgeFilePath = _knowledgeFilePath
+        End If
+
+        Dim persistPath = GetPersistedKnowledgeFilePath()
+
+        Try
+            If _chkPersistKnowledge.Checked AndAlso Not String.IsNullOrWhiteSpace(_knowledgeContent) Then
+                File.WriteAllText(persistPath, _knowledgeContent, Encoding.UTF8)
+            ElseIf File.Exists(persistPath) Then
+                File.Delete(persistPath)
+            End If
+        Catch
+        End Try
+
+        UpdatePersistKnowledgeTooltip()
+    End Sub
+
+    Private Function TryRestoreArchivedAlternateModel(displayName As String) As Boolean
+        If String.IsNullOrWhiteSpace(displayName) Then Return False
+        If String.IsNullOrWhiteSpace(_context.INI_AlternateModelPath) Then Return False
+
+        Try
+            Dim models = SharedMethods.LoadAlternativeModels(_context.INI_AlternateModelPath, _context, "Alternate Model")
+            Dim found = models.FirstOrDefault(
+                Function(m) String.Equals(If(m.ModelDescription, ""), displayName, StringComparison.OrdinalIgnoreCase))
+
+            If found Is Nothing Then
+                Return False
+            End If
+
+            _alternateModelSelected = True
+            _alternateModelConfig = found
+            _alternateModelDisplayName = displayName
+            UpdateAlternateModelButtonText()
+            Return True
+        Catch
+            Return False
+        End Try
+    End Function
+
+    Private Sub RenderHistoryToCurrentChat()
+        For Each msg In _history
+            Select Case msg.Role
+                Case "user"
+                    AppendUserHtml(msg.Content)
+
+                Case "assistant"
+                    Dim displayName = _currentPersonaName
+                    Dim messageText = msg.Content
+                    Dim colonIdx = messageText.IndexOf(": ", StringComparison.Ordinal)
+
+                    If colonIdx > 0 Then
+                        Dim possibleDisplayName = messageText.Substring(0, colonIdx)
+                        If possibleDisplayName.Contains("(Advocate)") OrElse
+                           possibleDisplayName.Contains("(Challenger)") OrElse
+                           possibleDisplayName.Contains("(2nd)") Then
+                            displayName = possibleDisplayName
+                            messageText = messageText.Substring(colonIdx + 2)
+                        End If
+                    End If
+
+                    AppendAssistantMarkdownWithName(messageText, displayName)
+
+                Case "autoresponder"
+                    Dim responderName = "Autoresponder"
+                    Dim responderText = msg.Content
+                    Dim colonIdx = responderText.IndexOf(": ", StringComparison.Ordinal)
+
+                    If colonIdx > 0 Then
+                        responderName = responderText.Substring(0, colonIdx)
+                        responderText = responderText.Substring(colonIdx + 2)
+                    End If
+
+                    AppendAutoResponderHtml(responderName, responderText)
+            End Select
+        Next
+    End Sub
+
+    Private Function RestoreSessionStateFromXml(stateXml As String,
+                                                sourceLabel As String,
+                                                Optional announceRestore As Boolean = True) As Boolean
+        If String.IsNullOrWhiteSpace(stateXml) Then Return False
+
+        Try
+            Dim doc = XDocument.Parse(stateXml)
+            Dim root = doc.Root
+            If root Is Nothing OrElse Not root.Name.LocalName.Equals("DiscussInkyState", StringComparison.OrdinalIgnoreCase) Then
+                Return False
+            End If
+
+            Dim activeArchiveElement = root.Element("ActiveArchive")
+            Dim personaElement = root.Element("Persona")
+            Dim missionElement = root.Element("Mission")
+            Dim knowledgeElement = root.Element("Knowledge")
+            Dim flagsElement = root.Element("Flags")
+            Dim alternateElement = root.Element("AlternateModel")
+            Dim toolSelectionElement = root.Element("ToolSelection")
+            Dim uiElement = root.Element("Ui")
+            Dim transcriptHtmlElement = root.Element("TranscriptHtml")
+            Dim historyElement = root.Element("History")
+
+            SetCurrentActiveDialogueArchive(
+                GetXmlAttributeValue(activeArchiveElement, "name", ""),
+                GetXmlAttributeValue(activeArchiveElement, "filePath", ""),
+                GetXmlAttributeValue(activeArchiveElement, "baselineHash", ""))
+
+            _currentPersonaName = GetXmlAttributeValue(personaElement, "name", DefaultPersonaName)
+            Dim restoredPersonaPrompt = ""
+            If personaElement IsNot Nothing Then
+                Dim promptElement = personaElement.Element("Prompt")
+                restoredPersonaPrompt = If(promptElement IsNot Nothing, promptElement.Value, "")
+            End If
+            _currentPersonaPrompt = If(String.IsNullOrWhiteSpace(restoredPersonaPrompt), DefaultPersonaPrompt, restoredPersonaPrompt)
+
+            _currentMissionName = GetXmlAttributeValue(missionElement, "name", "")
+            Dim restoredMissionPrompt = ""
+            If missionElement IsNot Nothing Then
+                Dim promptElement = missionElement.Element("Prompt")
+                restoredMissionPrompt = If(promptElement IsNot Nothing, promptElement.Value, "")
+            End If
+            _currentMissionPrompt = restoredMissionPrompt
+
+            _history.Clear()
+            If historyElement IsNot Nothing Then
+                For Each messageElement In historyElement.Elements("Message")
+                    Dim role = GetXmlAttributeValue(messageElement, "role", "")
+                    If String.IsNullOrWhiteSpace(role) Then Continue For
+                    _history.Add((role, messageElement.Value))
+                Next
+            End If
+
+            _chkIncludeActiveDoc.Checked = GetXmlAttributeBoolean(flagsElement, "includeActiveDoc", False)
+
+            _isUpdatingPersistCheckbox = True
+            _chkPersistKnowledge.Checked = GetXmlAttributeBoolean(knowledgeElement, "persisted", False)
+            _isUpdatingPersistCheckbox = False
+
+            _chkEnableTooling.Checked = GetXmlAttributeBoolean(flagsElement, "enableTooling", False)
+            _chkAdvancedTools.Checked = GetXmlAttributeBoolean(flagsElement, "advancedTools", False)
+            _chkShowToolingLog.Checked = GetXmlAttributeBoolean(flagsElement, "showToolingLog", _context.INI_ToolingLogWindow)
+            _chkInkyMemory.Checked = GetXmlAttributeBoolean(flagsElement, "inkyMemory", My.Settings.DiscussInkyMemory)
+            _lnkEditMemory.Visible = _chkInkyMemory.Checked
+
+            _knowledgeFilePath = GetXmlAttributeValue(knowledgeElement, "path", "")
+            _knowledgeContent = If(knowledgeElement IsNot Nothing, knowledgeElement.Value, Nothing)
+            ApplyKnowledgePersistenceFromCurrentState()
+
+            Try
+                Dim splitterDistance = GetXmlAttributeInteger(uiElement, "splitterDistance", _splitChat.SplitterDistance)
+                If splitterDistance > 0 Then
+                    _splitChat.SplitterDistance = splitterDistance
+                End If
+            Catch
+            End Try
+
+            Try
+                Globals.ThisAddIn.PersistDiscussInkyToolSelection(
+                    Globals.ThisAddIn.SplitPersistedToolNames(GetXmlAttributeValue(toolSelectionElement, "main", "")),
+                    Globals.ThisAddIn.SplitPersistedToolNames(GetXmlAttributeValue(toolSelectionElement, "advanced", "")),
+                    _chkAdvancedTools.Checked)
+                _selectedToolsForChat = Nothing
+            Catch
+            End Try
+
+            Dim alternateRestoreNotice As String = ""
+            _alternateModelSelected = False
+            _alternateModelConfig = Nothing
+            _alternateModelDisplayName = Nothing
+
+            Dim alternateMode = GetXmlAttributeValue(alternateElement, "mode", "Primary")
+            Dim alternateDisplayName = GetXmlAttributeValue(alternateElement, "displayName", "")
+
+            If String.Equals(alternateMode, "LegacySecondApi", StringComparison.OrdinalIgnoreCase) Then
+                If _context.INI_SecondAPI Then
+                    _alternateModelSelected = True
+                    _alternateModelConfig = Nothing
+                    _alternateModelDisplayName = If(String.IsNullOrWhiteSpace(alternateDisplayName), _context.INI_Model_2, alternateDisplayName)
+                Else
+                    alternateRestoreNotice = "The archived dialogue used the secondary model, but that model is no longer configured. Primary model is active."
+                End If
+            ElseIf GetXmlAttributeBoolean(alternateElement, "selected", False) Then
+                If Not TryRestoreArchivedAlternateModel(alternateDisplayName) Then
+                    alternateRestoreNotice = $"The archived dialogue requested alternate model '{alternateDisplayName}', but it could not be restored. Primary model is active."
+                End If
+            End If
+
+            UpdateAlternateModelButtonText()
+            UpdateWindowTitle()
+            UpdateSendButtonText()
+            UpdatePersistKnowledgeTooltip()
+            UpdateToolingControlsState()
+
+            InitializeChatHtml()
+
+            Dim transcriptHtml = If(transcriptHtmlElement IsNot Nothing, transcriptHtmlElement.Value, "")
+            If Not String.IsNullOrWhiteSpace(transcriptHtml) Then
+                AppendHtml(transcriptHtml)
+            Else
+                RenderHistoryToCurrentChat()
+            End If
+
+            PersistCurrentSessionSettings()
+
+            If announceRestore AndAlso Not String.IsNullOrWhiteSpace(sourceLabel) Then
+                AppendSystemMessage($"Dialogue restored: {sourceLabel}")
+            End If
+
+            If Not String.IsNullOrWhiteSpace(alternateRestoreNotice) Then
+                AppendSystemMessage(alternateRestoreNotice)
+            End If
+
+            Return True
+
+        Catch ex As Exception
+            AppendSystemMessage($"Failed to restore dialogue archive: {ex.Message}")
+            Return False
+        End Try
+    End Function
+
+    Private Function GetDialogueArchives() As List(Of DialogueArchiveInfo)
+        Dim result As New List(Of DialogueArchiveInfo)()
+        Dim archiveDir = GetDialogueArchiveDirectoryPath()
+
+        If Not Directory.Exists(archiveDir) Then
+            Return result
+        End If
+
+        For Each filePath In Directory.GetFiles(archiveDir, "*" & DialogueArchiveFileExtension, SearchOption.TopDirectoryOnly)
+            Try
+                Dim doc = XDocument.Load(filePath)
+                Dim root = doc.Root
+
+                Dim name = GetArchiveNameFromFilePath(filePath)
+                Dim savedAtLocal = File.GetLastWriteTime(filePath)
+
+                If root IsNot Nothing Then
+                    Dim archiveNameElement = root.Element("ArchiveName")
+                    If archiveNameElement IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(archiveNameElement.Value) Then
+                        name = archiveNameElement.Value.Trim()
+                    End If
+
+                    Dim savedAtElement = root.Element("SavedAtUtc")
+                    Dim parsedUtc As DateTime
+                    If savedAtElement IsNot Nothing AndAlso DateTime.TryParse(savedAtElement.Value, parsedUtc) Then
+                        savedAtLocal = parsedUtc.ToLocalTime()
+                    End If
+                End If
+
+                result.Add(New DialogueArchiveInfo With {
+                    .Name = name,
+                    .FilePath = filePath,
+                    .SavedAtLocal = savedAtLocal
+                })
+            Catch
+                result.Add(New DialogueArchiveInfo With {
+                    .Name = GetArchiveNameFromFilePath(filePath),
+                    .FilePath = filePath,
+                    .SavedAtLocal = File.GetLastWriteTime(filePath)
+                })
+            End Try
+        Next
+
+        Return result.OrderByDescending(Function(x) x.SavedAtLocal).ToList()
+    End Function
+
+    Private Function HasDialogueStateToArchive() As Boolean
+        If _history.Count > 0 Then Return True
+        If Not String.IsNullOrWhiteSpace(_knowledgeContent) Then Return True
+        If Not String.IsNullOrWhiteSpace(_currentMissionName) Then Return True
+        If Not String.Equals(_currentPersonaName, DefaultPersonaName, StringComparison.OrdinalIgnoreCase) Then Return True
+        Return False
+    End Function
+
+    Private Function SaveCurrentDialogueArchive(archiveName As String,
+                                               Optional overwriteWithoutPrompt As Boolean = False) As Boolean
+        If String.IsNullOrWhiteSpace(archiveName) Then Return False
+
+        Dim trimmedArchiveName = archiveName.Trim()
+        Dim filePath = GetDialogueArchiveFilePath(trimmedArchiveName)
+        Dim fileAlreadyExists = File.Exists(filePath)
+
+        If fileAlreadyExists AndAlso Not overwriteWithoutPrompt Then
+            Dim overwriteAnswer = ShowCustomYesNoBox(
+                $"An archived dialogue named '{trimmedArchiveName}' already exists. Do you want to overwrite it?",
+                "Yes, overwrite",
+                "No, keep existing",
+                $"{AN} - Overwrite Dialogue Archive")
+
+            If overwriteAnswer <> 1 Then
+                Return False
+            End If
+        End If
+
+        Dim previousArchiveName = _activeDialogueArchiveName
+        Dim previousArchiveFilePath = _activeDialogueArchiveFilePath
+        Dim previousBaselineHash = _activeDialogueArchiveBaselineHash
+
+        Try
+            Dim archiveDir = GetDialogueArchiveDirectoryPath()
+            If Not Directory.Exists(archiveDir) Then
+                Directory.CreateDirectory(archiveDir)
+            End If
+
+            SetCurrentActiveDialogueArchive(trimmedArchiveName, filePath, "")
+            Dim xmlToSave = BuildSessionStateXml(trimmedArchiveName)
+            File.WriteAllText(filePath, xmlToSave, Encoding.UTF8)
+
+            SetCurrentActiveDialogueArchive(
+                trimmedArchiveName,
+                filePath,
+                ComputeTextHash(NormalizeSessionStateXmlForComparison(xmlToSave)))
+
+            PersistCurrentSessionSettings()
+            UpdateWindowTitle()
+
+            If fileAlreadyExists Then
+                AppendSystemMessage($"Dialogue archive updated: '{trimmedArchiveName}'.")
+            Else
+                AppendSystemMessage($"Dialogue archived as '{trimmedArchiveName}'.")
+            End If
+
+            Return True
+
+        Catch ex As Exception
+            SetCurrentActiveDialogueArchive(previousArchiveName, previousArchiveFilePath, previousBaselineHash)
+            AppendSystemMessage($"Failed to archive dialogue: {ex.Message}")
+            Return False
+        End Try
+    End Function
+
+    Private Function PromptAndSaveCurrentDialogueArchive() As Boolean
+        If Not HasDialogueStateToArchive() Then
+            AppendSystemMessage("There is no dialogue state to archive.")
+            Return False
+        End If
+
+        Dim defaultArchiveName = If(_activeDialogueArchiveName, "")
+
+        Dim archiveName = ShowCustomInputBox(
+            "Enter a name for the archived dialogue:",
+            $"{AN} - Store Dialogue Archive",
+            True,
+            defaultArchiveName)
+
+        If String.IsNullOrWhiteSpace(archiveName) OrElse archiveName = "ESC" Then
+            Return False
+        End If
+
+        Return SaveCurrentDialogueArchive(archiveName.Trim())
+    End Function
+
+    Private Function PromptToPersistDirtyArchiveBackedDialogue() As Boolean
+        If HasTrackedDialogueArchive() Then
+            Dim answer = ShowCustomYesNoBox(
+                $"The current dialogue is linked to archive '{_activeDialogueArchiveName}' and has changed. Do you want to update that archive or store the dialogue as a new archive?",
+                "Update existing archive",
+                "Store as new archive",
+                $"{AN} - Save Dialogue Changes",
+                extraButtonText:="Cancel",
+                extraButtonAction:=Sub()
+                                   End Sub,
+                CloseAfterExtra:=True)
+
+            If answer = 1 Then
+                Return SaveCurrentDialogueArchive(_activeDialogueArchiveName, overwriteWithoutPrompt:=True)
+            End If
+
+            If answer = 2 Then
+                Return PromptAndSaveCurrentDialogueArchive()
+            End If
+
+            Return False
+        End If
+
+        Return PromptAndSaveCurrentDialogueArchive()
+    End Function
+
+    Private Function PromptToSaveCurrentDialogueBeforeSwitch() As Boolean
+        If Not HasTrackedDialogueArchive() Then
+            Return True
+        End If
+
+        If Not IsCurrentDialogueArchiveDirty() Then
+            Return True
+        End If
+
+        Dim answer = ShowCustomYesNoBox(
+            "The current dialogue has changed since it was restored or stored. Do you want to save those changes before switching?",
+            "Yes, save changes",
+            "No, switch without saving",
+            $"{AN} - Switch Dialogue",
+            extraButtonText:="Cancel",
+            extraButtonAction:=Sub()
+                               End Sub,
+            CloseAfterExtra:=True)
+
+        If answer = 1 Then
+            Return PromptToPersistDirtyArchiveBackedDialogue()
+        End If
+
+        If answer = 2 Then
+            Return True
+        End If
+
+        Return False
+    End Function
+
+    Private Function RestoreDialogueArchiveFromFile(filePath As String, displayName As String) As Boolean
+        Try
+            If String.IsNullOrWhiteSpace(filePath) OrElse Not File.Exists(filePath) Then
+                AppendSystemMessage("The selected dialogue archive no longer exists.")
+                Return False
+            End If
+
+            Dim stateXml = File.ReadAllText(filePath, Encoding.UTF8)
+            Dim restored = RestoreSessionStateFromXml(stateXml, displayName, announceRestore:=True)
+
+            If restored Then
+                SetCurrentActiveDialogueArchive(
+                    displayName,
+                    filePath,
+                    ComputeTextHash(NormalizeSessionStateXmlForComparison(stateXml)))
+                PersistCurrentSessionSettings()
+                UpdateWindowTitle()
+            End If
+
+            Return restored
+
+        Catch ex As Exception
+            AppendSystemMessage($"Failed to load dialogue archive: {ex.Message}")
+            Return False
+        End Try
+    End Function
+
+    Private Sub ShowDialogueArchiveManager()
+        Using frm As New Form() With {
+            .Text = $"{AN} - Dialogue Archive",
+            .StartPosition = FormStartPosition.CenterParent,
+            .Size = New System.Drawing.Size(780, 460),
+            .MinimumSize = New System.Drawing.Size(560, 360),
+            .FormBorderStyle = FormBorderStyle.Sizable,
+            .Font = New System.Drawing.Font("Segoe UI", 9.0F),
+            .AutoScaleDimensions = New System.Drawing.SizeF(96.0F, 96.0F),
+            .AutoScaleMode = AutoScaleMode.Dpi,
+            .ShowInTaskbar = False
+        }
+            Try
+                frm.Icon = Me.Icon
+            Catch
+            End Try
+
+            Dim layout As New TableLayoutPanel() With {
+                .Dock = DockStyle.Fill,
+                .ColumnCount = 1,
+                .RowCount = 3,
+                .Padding = New Padding(12)
+            }
+            layout.ColumnStyles.Add(New ColumnStyle(SizeType.Percent, 100.0F))
+            layout.RowStyles.Add(New RowStyle(SizeType.AutoSize))
+            layout.RowStyles.Add(New RowStyle(SizeType.Percent, 100.0F))
+            layout.RowStyles.Add(New RowStyle(SizeType.AutoSize))
+            frm.Controls.Add(layout)
+
+            Dim lblInfo As New Label() With {
+                .AutoSize = True,
+                .Dock = DockStyle.Top,
+                .Margin = New Padding(0, 0, 0, 8)
+            }
+
+            Dim listPanel As New Panel() With {
+                .Dock = DockStyle.Fill,
+                .Margin = New Padding(0)
+            }
+
+            Dim lstArchives As New ListBox() With {
+                .Dock = DockStyle.Fill,
+                .IntegralHeight = False
+            }
+            listPanel.Controls.Add(lstArchives)
+
+            Dim buttonBar As New FlowLayoutPanel() With {
+                .Dock = DockStyle.Fill,
+                .FlowDirection = FlowDirection.LeftToRight,
+                .AutoSize = True,
+                .AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                .WrapContents = True,
+                .Padding = New Padding(0, 6, 0, 0),
+                .Margin = New Padding(0)
+            }
+
+            Dim btnSave As New Button() With {.Text = "Store Current", .AutoSize = True}
+            Dim btnUpdate As New Button() With {.Text = "Update Current Archive", .AutoSize = True}
+            Dim btnRestore As New Button() With {.Text = "Restore Selected", .AutoSize = True}
+            Dim btnDelete As New Button() With {.Text = "Delete Selected", .AutoSize = True}
+            Dim btnClose As New Button() With {.Text = "Close", .AutoSize = True}
+
+            buttonBar.Controls.Add(btnSave)
+            buttonBar.Controls.Add(btnUpdate)
+            buttonBar.Controls.Add(btnRestore)
+            buttonBar.Controls.Add(btnDelete)
+            buttonBar.Controls.Add(btnClose)
+
+            layout.Controls.Add(lblInfo, 0, 0)
+            layout.Controls.Add(listPanel, 0, 1)
+            layout.Controls.Add(buttonBar, 0, 2)
+
+            frm.CancelButton = btnClose
+
+            Dim updateInfoLabel As System.Action =
+                Sub()
+                    Dim wrapWidth = Math.Max(250, layout.ClientSize.Width - layout.Padding.Horizontal)
+                    lblInfo.MaximumSize = New System.Drawing.Size(wrapWidth, 0)
+                    lblInfo.Text = BuildDialogueArchiveManagerInfoText()
+                End Sub
+
+            Dim refreshArchives As System.Action =
+                Sub()
+                    Dim previouslySelectedPath = ""
+                    Dim currentlySelected = TryCast(lstArchives.SelectedItem, DialogueArchiveInfo)
+                    If currentlySelected IsNot Nothing Then
+                        previouslySelectedPath = currentlySelected.FilePath
+                    End If
+
+                    Dim archives = GetDialogueArchives()
+
+                    lstArchives.BeginUpdate()
+                    lstArchives.Items.Clear()
+                    For Each archive In archives
+                        lstArchives.Items.Add(archive)
+                    Next
+                    lstArchives.EndUpdate()
+
+                    Dim restoredSelection As DialogueArchiveInfo = Nothing
+                    If previouslySelectedPath.Length > 0 Then
+                        For Each item As Object In lstArchives.Items
+                            Dim archive = TryCast(item, DialogueArchiveInfo)
+                            If archive IsNot Nothing AndAlso
+                               archive.FilePath.Equals(previouslySelectedPath, StringComparison.OrdinalIgnoreCase) Then
+                                restoredSelection = archive
+                                Exit For
+                            End If
+                        Next
+                    End If
+
+                    If restoredSelection IsNot Nothing Then
+                        lstArchives.SelectedItem = restoredSelection
+                    ElseIf lstArchives.Items.Count > 0 Then
+                        lstArchives.SelectedIndex = 0
+                    End If
+
+                    Dim hasSelection = (TryCast(lstArchives.SelectedItem, DialogueArchiveInfo) IsNot Nothing)
+                    btnRestore.Enabled = hasSelection
+                    btnDelete.Enabled = hasSelection
+                    btnUpdate.Enabled = Not String.IsNullOrWhiteSpace(_activeDialogueArchiveName)
+
+                    updateInfoLabel.Invoke()
+                End Sub
+
+            AddHandler frm.SizeChanged,
+                Sub()
+                    updateInfoLabel.Invoke()
+                End Sub
+
+            AddHandler lstArchives.SelectedIndexChanged,
+                Sub()
+                    Dim hasSelection = (TryCast(lstArchives.SelectedItem, DialogueArchiveInfo) IsNot Nothing)
+                    btnRestore.Enabled = hasSelection
+                    btnDelete.Enabled = hasSelection
+                End Sub
+
+            AddHandler btnClose.Click,
+                Sub()
+                    frm.Close()
+                End Sub
+
+            AddHandler btnSave.Click,
+                Sub()
+                    If PromptAndSaveCurrentDialogueArchive() Then
+                        refreshArchives.Invoke()
+                    End If
+                End Sub
+
+            AddHandler btnUpdate.Click,
+                Sub()
+                    If String.IsNullOrWhiteSpace(_activeDialogueArchiveName) Then
+                        AppendSystemMessage("There is no linked archive to update.")
+                        Return
+                    End If
+
+                    If SaveCurrentDialogueArchive(_activeDialogueArchiveName, overwriteWithoutPrompt:=True) Then
+                        refreshArchives.Invoke()
+                    End If
+                End Sub
+
+            AddHandler btnDelete.Click,
+                Sub()
+                    Dim selected = TryCast(lstArchives.SelectedItem, DialogueArchiveInfo)
+                    If selected Is Nothing Then Return
+
+                    Dim deleteAnswer = ShowCustomYesNoBox(
+                        $"Do you want to delete the archived dialogue '{selected.Name}'?",
+                        "Yes, delete",
+                        "No, keep",
+                        $"{AN} - Delete Dialogue Archive")
+
+                    If deleteAnswer <> 1 Then
+                        Return
+                    End If
+
+                    Try
+                        File.Delete(selected.FilePath)
+
+                        If String.Equals(selected.FilePath, _activeDialogueArchiveFilePath, StringComparison.OrdinalIgnoreCase) Then
+                            ClearCurrentActiveDialogueArchive()
+                            PersistCurrentSessionSettings()
+                            UpdateWindowTitle()
+                        End If
+
+                        AppendSystemMessage($"Archived dialogue deleted: {selected.Name}")
+                        refreshArchives.Invoke()
+                    Catch ex As Exception
+                        AppendSystemMessage($"Failed to delete archived dialogue: {ex.Message}")
+                    End Try
+                End Sub
+
+            AddHandler btnRestore.Click,
+                Sub()
+                    Dim selected = TryCast(lstArchives.SelectedItem, DialogueArchiveInfo)
+                    If selected Is Nothing Then Return
+
+                    If Not PromptToSaveCurrentDialogueBeforeSwitch() Then
+                        Return
+                    End If
+
+                    If RestoreDialogueArchiveFromFile(selected.FilePath, selected.Name) Then
+                        frm.DialogResult = DialogResult.OK
+                        frm.Close()
+                    End If
+                End Sub
+
+            AddHandler lstArchives.DoubleClick,
+                Sub()
+                    If btnRestore.Enabled Then
+                        btnRestore.PerformClick()
+                    End If
+                End Sub
+
+            refreshArchives.Invoke()
+            frm.ShowDialog(Me)
+        End Using
+    End Sub
+
+    Private Sub OnArchiveClick(sender As Object, e As EventArgs)
+        ShowDialogueArchiveManager()
+    End Sub
 
 #End Region
 

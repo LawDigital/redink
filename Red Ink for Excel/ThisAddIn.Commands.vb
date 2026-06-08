@@ -882,7 +882,11 @@ Partial Public Class ThisAddIn
     Public Async Function InOther() As Task(Of Boolean)
         System.Windows.Forms.Application.DoEvents()
         Dim selectedRange As Excel.Range = TryCast(Globals.ThisAddIn.Application.Selection, Excel.Range)
-        TranslateLanguage = SLib.ShowCustomInputBox("Enter your target language:", $"{AN} Translate", True)
+        TranslateLanguage = Global.SharedLibrary.SharedLibrary.SharedMethods.PromptForTargetLanguage(
+            "Enter your target language:",
+            $"{AN} Translate",
+            "",
+            _context)
         If Not String.IsNullOrEmpty(TranslateLanguage) Then
             If selectedRange IsNot Nothing Then
                 selectedRange.Select()
@@ -897,7 +901,11 @@ Partial Public Class ThisAddIn
     ''' <returns>Task(Of Boolean). Result variable not explicitly returned.</returns>
     Public Async Function InOtherFormulas() As Task(Of Boolean)
         System.Windows.Forms.Application.DoEvents()
-        TranslateLanguage = SLib.ShowCustomInputBox("Enter your target language:", $"{AN} Translate", True)
+        TranslateLanguage = Global.SharedLibrary.SharedLibrary.SharedMethods.PromptForTargetLanguage(
+            "Enter your target language:",
+            $"{AN} Translate",
+            "",
+            _context)
         If Not String.IsNullOrEmpty(TranslateLanguage) Then
             Dim result As Boolean = Await ProcessSelectedRange(SP_Translate, True, False, True, False, True, False)
         End If

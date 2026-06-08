@@ -585,15 +585,32 @@ Namespace SharedLibrary
         Private Shared Function BuildFileUri(filePath As String) As String
             If String.IsNullOrWhiteSpace(filePath) Then Return ""
             Try
-                ' Use Uri to properly percent-encode spaces and special characters
-                ' so that the resulting file:/// link is clickable and valid.
-                Dim fullPath = Path.GetFullPath(filePath)
+                Dim candidate = filePath.Trim()
+
+                If candidate.StartsWith("file://", StringComparison.OrdinalIgnoreCase) Then
+                    Return candidate
+                End If
+
+                If Not Path.IsPathRooted(candidate) Then
+                    Return candidate.Replace("\"c, "/"c)
+                End If
+
+                Dim fullPath = Path.GetFullPath(candidate)
                 Dim uri As New Uri(fullPath)
                 Return uri.AbsoluteUri
             Catch
-                ' Fallback: manually construct a file URI with spaces encoded
                 Try
-                    Dim fullPath = Path.GetFullPath(filePath)
+                    Dim candidate = filePath.Trim()
+
+                    If candidate.StartsWith("file://", StringComparison.OrdinalIgnoreCase) Then
+                        Return candidate
+                    End If
+
+                    If Not Path.IsPathRooted(candidate) Then
+                        Return candidate.Replace("\"c, "/"c)
+                    End If
+
+                    Dim fullPath = Path.GetFullPath(candidate)
                     Return "file:///" & fullPath.Replace("\"c, "/"c).Replace(" ", "%20")
                 Catch
                     Return ""

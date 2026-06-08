@@ -1341,7 +1341,7 @@ Partial Public Class ThisAddIn
         End If
 
         _chatToolingEnabled = enabled
-        _chatAdvancedToolsEnabled = enabled AndAlso supportsTooling AndAlso Not _apActive
+        _chatAdvancedToolsEnabled = st.AgentModeEnabled AndAlso enabled AndAlso supportsTooling AndAlso Not _apActive
 
         Return enabled
     End Function
@@ -1594,11 +1594,11 @@ Partial Public Class ThisAddIn
         html.AppendLine("button:disabled{opacity:.5;cursor:not-allowed} ")
         html.AppendLine("button.is-pressed,.chatTab.is-pressed{transform:translateY(1px);box-shadow:var(--press-shadow);filter:brightness(.92);} ")
         html.AppendLine("button:active:not(:disabled){transform:translateY(1px);box-shadow:var(--press-shadow);filter:brightness(.9);} ")
-        html.AppendLine(".chat{flex:1;overflow:auto;padding:1rem;} ")
-        html.AppendLine(".row{display:flex;margin:0 auto 1rem auto;max-width:none;width:100%;padding:0 .25rem;} ")
+        html.AppendLine(".chat{flex:1;overflow-y:auto;overflow-x:hidden;padding:1rem;box-sizing:border-box;} ")
+        html.AppendLine(".row{display:flex;margin:0 auto 1rem auto;max-width:100%;width:100%;padding:0 .25rem;box-sizing:border-box;min-width:0;} ")
         html.AppendLine(".row.bot{justify-content:flex-start} ")
         html.AppendLine(".row.user{justify-content:flex-end} ")
-        html.AppendLine(".bubble{max-width:88%;padding:1rem;border:1px solid var(--border);background:var(--card);border-radius:1rem;box-shadow:0 1px 3px rgba(0,0,0,.25)} ")
+        html.AppendLine(".bubble{max-width:85%;min-width:0;box-sizing:border-box;padding:1rem;border:1px solid var(--border);background:var(--card);border-radius:1rem;box-shadow:0 1px 3px rgba(0,0,0,.25);overflow-wrap:anywhere;word-break:break-word;} ")
         html.AppendLine(".bot .bubble{border-top-right-radius:.35rem} ")
         html.AppendLine(".user .bubble{border-top-left-radius:.35rem} ")
         html.AppendLine(".role{font-size:.75rem;color:var(--muted);margin-bottom:.25rem} ")
@@ -1609,7 +1609,8 @@ Partial Public Class ThisAddIn
         html.AppendLine(":root.light a{text-decoration-color:rgba(0,0,0,.4)} ")
         html.AppendLine("a:hover{filter:brightness(1.15)} ")
         html.AppendLine("code,pre{font-family:ui-monospace,Consolas,monospace;font-size:.85rem} ")
-        html.AppendLine("pre{overflow:auto;padding:.75rem;border:1px solid var(--border);border-radius:.6rem;position:relative;background:var(--elev);} ")
+        html.AppendLine("pre{overflow-x:auto;max-width:100%;padding:.75rem;border:1px solid var(--border);border-radius:.6rem;position:relative;background:var(--elev);box-sizing:border-box;} ")
+        html.AppendLine("table{display:block;max-width:100%;overflow-x:auto;border-collapse:collapse;margin:6px 0;} ")
         html.AppendLine(".code-copy-btn{position:absolute;top:6px;right:6px;padding:4px 8px;font-size:.65rem;line-height:1;border:1px solid var(--border);border-radius:4px;background:rgba(0,0,0,.45);backdrop-filter:blur(3px);cursor:pointer;display:flex;align-items:center;gap:6px;color:var(--fg);opacity:0;transition:opacity .18s,background .18s;} ")
         html.AppendLine("pre:hover .code-copy-btn{opacity:1} ")
         html.AppendLine(".code-copy-btn svg{width:16px;height:16px;display:block} ")
@@ -1904,7 +1905,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("sendBtn.addEventListener('click',send);")
         html.AppendLine("pureBtn.addEventListener('click',pureSend);")
         html.AppendLine("cancelBtn.addEventListener('click',async()=>{if(!__currentJobId)return;__jobCanceled=true;await api('inky_cancel',{Job:__currentJobId});});")
-        html.AppendLine("chatEl.addEventListener('click',e=>{const a=e.target&&e.target.closest&&e.target.closest('a[href]');if(!a)return;if(a.target!=='_blank'){a.target='_blank';a.rel='noopener noreferrer';}});")
+        html.AppendLine("chatEl.addEventListener('click',async e=>{const a=e.target&&e.target.closest&&e.target.closest('a[href]');if(!a)return;const href=String(a.getAttribute('href')||'').trim();if(!href)return;if(/^file:\/\//i.test(href)||/^[A-Za-z]:[\\/]/.test(href)){e.preventDefault();const r=await api('inky_openpath',{Path:href});if(!r||!r.ok)alert((r&&r.error)||'Could not open file link');return;}if(a.target!=='_blank'){a.target='_blank';a.rel='noopener noreferrer';}});")
         html.AppendLine("async function switchChat(n){if(__currentJobId)return;const r=await api('inky_switch',{Chat:String(n)});if(!r.ok){alert(r.error||'Switch failed');return;}setActiveChatBtn(r.activeChat||n);render(r.history||[]);if(r.greeting){msgEl.placeholder=r.greeting;}if(r.models&&r.models.length){modelSel.innerHTML='';for(const m of r.models){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}}if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}syncAdvancedToolsUi({advancedToolsEnabled:r.advancedToolsEnabled===true,agentWorkspace:r.agentWorkspace,agentFiles:r.agentFiles||[],agentModelAvailable:r.agentModelAvailable===true,agentModelActive:r.agentModelActive===true});updateModelTooltip();adjustModelSel();}")
         html.AppendLine("chat1Btn.addEventListener('click',()=>switchChat(1));")
         html.AppendLine("chat2Btn.addEventListener('click',()=>switchChat(2));")
@@ -2451,6 +2452,34 @@ Partial Public Class ThisAddIn
                             Return JsonOk(New With {.ok = True})
                         Catch ex As Exception
                             Return JsonErr("Failed to open workspace: " & ex.Message)
+                        End Try
+
+                    Case "inky_openpath"
+                        Try
+                            Dim rawPath As String = j("Path")?.ToString()
+                            If String.IsNullOrWhiteSpace(rawPath) Then
+                                Return JsonErr("Missing path.")
+                            End If
+
+                            Dim fullPath As String = rawPath.Trim()
+
+                            If fullPath.StartsWith("file://", StringComparison.OrdinalIgnoreCase) Then
+                                fullPath = New Uri(fullPath).LocalPath
+                            End If
+
+                            fullPath = Path.GetFullPath(fullPath)
+
+                            If File.Exists(fullPath) Then
+                                Process.Start("explorer.exe", "/select,""" & fullPath & """")
+                            ElseIf Directory.Exists(fullPath) Then
+                                Process.Start("explorer.exe", """" & fullPath & """")
+                            Else
+                                Return JsonErr("The referenced path does not exist.")
+                            End If
+
+                            Return JsonOk(New With {.ok = True})
+                        Catch ex As Exception
+                            Return JsonErr("Failed to open path: " & ex.Message)
                         End Try
 
                     Case "inky_settoolinglog"
@@ -3099,6 +3128,11 @@ Partial Public Class ThisAddIn
 
                         Dim useSecondApiLocal As Boolean = st.UseSecondApi
                         Dim selectedModelKeyLocal As String = st.SelectedModelKey
+                        Dim supportsToolingForJob As Boolean = CurrentModelSupportsTooling(st)
+                        Dim toolingEnabledForJob As Boolean = st.ToolingEnabled AndAlso supportsToolingForJob
+                        Dim agentModeEnabledForJob As Boolean = st.AgentModeEnabled AndAlso toolingEnabledForJob
+                        Dim selectedToolsForJob As List(Of ModelConfig) =
+                            GetLocalChatEffectiveSelection(st, includeInteractiveM365Tools:=True)
                         ' Capture file object (may be Nothing after extraction)
                         Dim finalFileObject As String = fileObject
                         Dim tempUploadPathCopy As String = uploadedTempPath
@@ -3168,21 +3202,10 @@ Partial Public Class ThisAddIn
                                         End Try
                                     End If
                                     ' (2) Run LLM - with or without tooling
-                                    Dim stForTooling = LoadInkyState()
-                                    Dim useAgentMode As Boolean = _chatAdvancedToolsEnabled AndAlso stForTooling.AgentModeEnabled AndAlso Not _apActive
-
-                                    ' Safety: reload _selectedToolsForChat from persisted state if it was
-                                    ' unexpectedly cleared (e.g. by SyncToolingState in another request)
-                                    If _selectedToolsForChat Is Nothing OrElse _selectedToolsForChat.Count = 0 Then
-                                        If stForTooling.SelectedToolNames IsNot Nothing AndAlso stForTooling.SelectedToolNames.Count > 0 Then
-                                            Try
-                                                Dim availTools = GetAvailableTools(includeInteractiveM365Tools:=True)
-                                                Dim nameSet = New HashSet(Of String)(stForTooling.SelectedToolNames, StringComparer.OrdinalIgnoreCase)
-                                                _selectedToolsForChat = availTools.Where(Function(tl) Not String.IsNullOrWhiteSpace(tl.ToolName) AndAlso nameSet.Contains(tl.ToolName)).ToList()
-                                            Catch
-                                            End Try
-                                        End If
-                                    End If
+                                    Dim useAgentMode As Boolean =
+                                        agentModeEnabledForJob AndAlso
+                                        supportsToolingForJob AndAlso
+                                        Not _apActive
 
                                     Dim agentToolsForJob As List(Of ModelConfig) = Nothing
 
@@ -3203,17 +3226,17 @@ Partial Public Class ThisAddIn
                                     End If
 
                                     If useAgentMode Then
-                                        agentToolsForJob = ChatAgentSetupToolContext()
+                                        agentToolsForJob = ChatAgentSetupToolContext(selectedToolsForJob)
                                     End If
 
                                     Try
-                                        If useToolTrigger AndAlso _selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0 Then
+                                        If useToolTrigger AndAlso selectedToolsForJob IsNot Nothing AndAlso selectedToolsForJob.Count > 0 Then
                                             ' (t) trigger path: use ToolDefaultModel with selected sources
                                             ' Respects INI_ToolingLogWindow (same as Form1.vb chkShowToolingLog)
                                             localOutput = ExecuteToolingLoop(
                                                     sysPromptBase,
                                                     "",
-                                                    _selectedToolsForChat,
+                                                    selectedToolsForJob,
                                                     True,
                                                     finalFileObject,
                                                     False, "",
@@ -3277,7 +3300,15 @@ Partial Public Class ThisAddIn
                                             RemoveUncitedKnowledgeSourceCopies(localOutput)
 
                                             ' Collect outputs to Desktop\Inky\...
-                                            agentOutputFiles = ChatAgentCollectAndCopyOutputs()
+                                            Dim citedExternalFiles =
+                                                ExtractCitedLocalFilePaths(localOutput).
+                                                    Where(Function(p)
+                                                              If String.IsNullOrWhiteSpace(_chatAgentTempDir) Then Return True
+                                                              Return Not IsPathWithinOrEqual(p, _chatAgentTempDir)
+                                                          End Function).
+                                                    ToList()
+
+                                            agentOutputFiles = ChatAgentCollectAndCopyOutputs(citedExternalFiles)
 
                                             If agentAbortDetected Then
                                                 localOutput = BuildChatAgentAbortReport(
@@ -3293,11 +3324,11 @@ Partial Public Class ThisAddIn
                                                 End If
                                             End If
 
-                                        ElseIf ShouldUseTooling(stForTooling) AndAlso _selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0 Then
+                                        ElseIf toolingEnabledForJob AndAlso selectedToolsForJob IsNot Nothing AndAlso selectedToolsForJob.Count > 0 Then
                                             localOutput = ExecuteToolingLoop(
                                                     sysPromptBase,
                                                     "",
-                                                    _selectedToolsForChat,
+                                                    selectedToolsForJob,
                                                     useSecondApiLocal,
                                                     finalFileObject,
                                                     False, "",
@@ -3745,12 +3776,22 @@ Partial Public Class ThisAddIn
                         End Try
                         ' Check if new model supports tooling
                         Dim supportsTooling = CurrentModelSupportsTooling(st)
-                        If Not supportsTooling AndAlso st.ToolingEnabled Then
+
+                        If Not supportsTooling Then
+                            Dim hadAnyToolingState As Boolean =
+                                st.ToolingEnabled OrElse
+                                st.AgentModeEnabled OrElse
+                                _chatToolingEnabled OrElse
+                                _chatAdvancedToolsEnabled
+
                             st.ToolingEnabled = False
+                            st.AgentModeEnabled = False
                             _chatToolingEnabled = False
-                        End If
-                        If Not supportsTooling AndAlso st.ToolingEnabled Then
-                            ChatAgentClearFiles()
+                            _chatAdvancedToolsEnabled = False
+
+                            If hadAnyToolingState Then
+                                ChatAgentClearFiles()
+                            End If
                         End If
 
                         ' Auto-enable tooling when switching TO a tooling-capable model
@@ -3886,10 +3927,11 @@ Partial Public Class ThisAddIn
                 ' ─── 1  guard clauses ─────────────────────────────────────────
                 If String.IsNullOrWhiteSpace(textBody0) Then Return ""
                 Dim targetLang As String = Await SwitchToUi(Function()
-                                                                Return SLib.ShowCustomInputBox(
+                                                                Return Global.SharedLibrary.SharedLibrary.SharedMethods.PromptForTargetLanguage(
                                                                     "Enter your target language:",
                                                                     AN & " Translate (for Browser)",
-                                                                    True, INI_Language1)
+                                                                    INI_Language1,
+                                                                    _context)
                                                             End Function)
                 If String.IsNullOrWhiteSpace(targetLang) OrElse targetLang = "ESC" Then
                     Return ""

@@ -2197,13 +2197,18 @@ Namespace SharedLibrary
                 Dim param = params(i)
                 Dim rawValue As Object = param.Value
 
-                Dim lbl As New System.Windows.Forms.Label() With {
-                    .Text = param.Name & ":",
-                    .AutoSize = True,
-                    .Anchor = AnchorStyles.Left,
-                    .Margin = New Padding(0, 0, 8, 8)
-                }
-                mainLayout.Controls.Add(lbl, 0, i + 1)
+                Dim showLabel As Boolean = Not String.IsNullOrWhiteSpace(param.Name)
+                Dim lbl As System.Windows.Forms.Label = Nothing
+
+                If showLabel Then
+                    lbl = New System.Windows.Forms.Label() With {
+                        .Text = param.Name & ":",
+                        .AutoSize = True,
+                        .Anchor = AnchorStyles.Left,
+                        .Margin = New Padding(0, 0, 8, 8)
+                    }
+                    mainLayout.Controls.Add(lbl, 0, i + 1)
+                End If
 
                 Dim ctrl As Control
 
@@ -2305,7 +2310,9 @@ Namespace SharedLibrary
                             txt.WordWrap = True
                             txt.MinimumSize = New Size(400, multilineHeight)
                             txt.Size = New Size(400, multilineHeight)
-                            lbl.Anchor = AnchorStyles.Left Or AnchorStyles.Top
+                            If lbl IsNot Nothing Then
+                                lbl.Anchor = AnchorStyles.Left Or AnchorStyles.Top
+                            End If
                         Else
                             txt.MinimumSize = New Size(400, 0)
                         End If
@@ -2322,7 +2329,12 @@ Namespace SharedLibrary
                 End If
 
                 param.InputControl = ctrl
-                mainLayout.Controls.Add(ctrl, 1, i + 1)
+                If showLabel Then
+                    mainLayout.Controls.Add(ctrl, 1, i + 1)
+                Else
+                    mainLayout.Controls.Add(ctrl, 0, i + 1)
+                    mainLayout.SetColumnSpan(ctrl, 2)
+                End If
             Next
 
             ' Buttons.
