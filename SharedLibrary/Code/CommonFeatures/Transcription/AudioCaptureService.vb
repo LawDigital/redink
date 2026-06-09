@@ -54,6 +54,7 @@ Namespace Transcription
         Public Event CaptureError As EventHandler(Of TranscriptionErrorEventArgs)
 
         Public Property MicDeviceIndex As Integer = 0
+        Public Property MicDeviceId As String = ""
         Public Property SourceMode As AudioSourceMode = AudioSourceMode.MicrophoneOnly
         Public Property SystemAudioRenderDeviceId As String = ""
         Public Property MultiChannelStereo As Boolean = False
@@ -69,6 +70,7 @@ Namespace Transcription
         Private Shared ReadOnly FloatSubFormat As New Guid("00000003-0000-0010-8000-00aa00389b71")
 
         Private _waveIn As WaveInEvent
+        Private _micCapture As WasapiCapture
         Private _loopbackCapture As WasapiLoopbackCapture
         Private _debugWriter As WaveFileWriter
         Private _running As Boolean
@@ -86,13 +88,29 @@ Namespace Transcription
             Dim targetFormat As New WaveFormat(TARGET_SAMPLE_RATE, TARGET_BITS_PER_SAMPLE, TARGET_CHANNELS)
 
             If SourceMode <> AudioSourceMode.SystemAudioOnly Then
-                _waveIn = New WaveInEvent() With {
-                    .DeviceNumber = MicDeviceIndex,
-                    .WaveFormat = targetFormat,
-                    .BufferMilliseconds = TARGET_FRAME_MILLISECONDS
-                }
+                If Not String.IsNullOrWhiteSpace(MicDeviceId) Then
+                    Try
+                        Dim micDevice As MMDevice = New MMDeviceEnumerator().GetDevice(MicDeviceId)
+                        _micCapture = New WasapiCapture(micDevice)
+                        AddHandler _micCapture.DataAvailable, AddressOf OnMicWasapiData
+                    Catch ex As Exception
+                        RaiseEvent CaptureError(Me, New TranscriptionErrorEventArgs(
+                            "Selected microphone is no longer available. Falling back to the legacy input device selection.",
+                            ex,
+                            False))
+                        _micCapture = Nothing
+                    End Try
+                End If
 
-                AddHandler _waveIn.DataAvailable, AddressOf OnMicData
+                If _micCapture Is Nothing Then
+                    _waveIn = New WaveInEvent() With {
+                        .DeviceNumber = MicDeviceIndex,
+                        .WaveFormat = targetFormat,
+                        .BufferMilliseconds = TARGET_FRAME_MILLISECONDS
+                    }
+
+                    AddHandler _waveIn.DataAvailable, AddressOf OnMicData
+                End If
             End If
 
             If SourceMode <> AudioSourceMode.MicrophoneOnly Then
@@ -128,6 +146,23 @@ Namespace Transcription
             End If
 
             _running = True
+
+            If _micCapture IsNot Nothing Then
+                Try
+                    _micCapture.StartRecording()
+                Catch ex As Exception
+                    RaiseEvent CaptureError(Me, New TranscriptionErrorEventArgs("Cannot start microphone capture: " & ex.Message, ex, False))
+                    Try
+                        RemoveHandler _micCapture.DataAvailable, AddressOf OnMicWasapiData
+                    Catch
+                    End Try
+                    Try
+                        _micCapture.Dispose()
+                    Catch
+                    End Try
+                    _micCapture = Nothing
+                End Try
+            End If
 
             If _loopbackCapture IsNot Nothing Then
                 Try
@@ -176,6 +211,33 @@ Namespace Transcription
                 EmitFrame(micBuf, micBytes, sysBuf, sysBytes)
             Catch ex As Exception
                 RaiseEvent CaptureError(Me, New TranscriptionErrorEventArgs("OnMicData: " & ex.Message, ex, False))
+            End Try
+        End Sub
+
+        Private Sub OnMicWasapiData(sender As Object, e As WaveInEventArgs)
+            If Not _running OrElse _micCapture Is Nothing Then
+                Return
+            End If
+
+            Try
+                Dim micBuf As Byte() = ConvertToTargetPcm(e.Buffer, e.BytesRecorded, _micCapture.WaveFormat)
+                Dim micBytes As Integer = If(micBuf IsNot Nothing, micBuf.Length, 0)
+
+                If micBytes <= 0 Then
+                    Return
+                End If
+
+                If SourceMode = AudioSourceMode.MicrophoneOnly Then
+                    EmitFrame(micBuf, micBytes, Nothing, 0)
+                    Return
+                End If
+
+                Dim sysBuf As Byte() = DequeueSystemPcm(micBytes)
+                Dim sysBytes As Integer = If(sysBuf IsNot Nothing, sysBuf.Length, 0)
+
+                EmitFrame(micBuf, micBytes, sysBuf, sysBytes)
+            Catch ex As Exception
+                RaiseEvent CaptureError(Me, New TranscriptionErrorEventArgs("OnMicWasapiData: " & ex.Message, ex, False))
             End Try
         End Sub
 
@@ -539,6 +601,16 @@ Namespace Transcription
                     _waveIn.StopRecording()
                     _waveIn.Dispose()
                     _waveIn = Nothing
+                End If
+            Catch
+            End Try
+
+            Try
+                If _micCapture IsNot Nothing Then
+                    RemoveHandler _micCapture.DataAvailable, AddressOf OnMicWasapiData
+                    _micCapture.StopRecording()
+                    _micCapture.Dispose()
+                    _micCapture = Nothing
                 End If
             Catch
             End Try

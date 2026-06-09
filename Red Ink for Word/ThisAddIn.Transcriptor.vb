@@ -99,7 +99,19 @@ Partial Public Class ThisAddIn
             Public ModelOrTag As String
         End Class
 
+        Private Class AudioInputDeviceChoice
+            Public Property DeviceId As String = ""
+            Public Property WaveDeviceIndex As Integer = 0
+            Public Property DisplayText As String = ""
+            Public Property ToolTipText As String = ""
+
+            Public Overrides Function ToString() As String
+                Return DisplayText
+            End Function
+        End Class
+
         Private _engines As New List(Of EngineDescriptor)()
+        Private _audioInputDevices As New List(Of AudioInputDeviceChoice)()
         Private _promptTitles As New List(Of String)()
         Private _promptBodies As New List(Of String)()
 
@@ -305,7 +317,19 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
-            Dim text As String = If(cbo.SelectedItem IsNot Nothing, cbo.SelectedItem.ToString(), cbo.Text)
+            Dim text As String = ""
+
+            If cbo Is cboDevice Then
+                Dim choice As AudioInputDeviceChoice = TryCast(cbo.SelectedItem, AudioInputDeviceChoice)
+                If choice IsNot Nothing Then
+                    text = choice.ToolTipText
+                End If
+            End If
+
+            If String.IsNullOrWhiteSpace(text) Then
+                text = If(cbo.SelectedItem IsNot Nothing, cbo.SelectedItem.ToString(), cbo.Text)
+            End If
+
             tt.SetToolTip(cbo, text)
         End Sub
 
@@ -899,14 +923,114 @@ Partial Public Class ThisAddIn
 
         Private Sub LoadAudioInputDevices()
             cboDevice.Items.Clear()
+            _audioInputDevices.Clear()
 
-            For i As Integer = 0 To WaveInEvent.DeviceCount - 1
-                cboDevice.Items.Add($"{i}: {WaveInEvent.GetCapabilities(i).ProductName}")
+            Try
+                Dim enumr As New MMDeviceEnumerator()
+                Dim devs = enumr.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active)
+
+                For Each d In devs
+                    Dim friendlyName As String = If(d.FriendlyName, "").Trim()
+                    If friendlyName.Length = 0 Then
+                        friendlyName = d.ID
+                    End If
+
+                    _audioInputDevices.Add(New AudioInputDeviceChoice With {
+                        .DeviceId = d.ID,
+                        .WaveDeviceIndex = FindLegacyWaveInputDeviceIndex(friendlyName),
+                        .DisplayText = friendlyName,
+                        .ToolTipText = friendlyName
+                    })
+                Next
+            Catch
+            End Try
+
+            If _audioInputDevices.Count = 0 Then
+                For i As Integer = 0 To WaveInEvent.DeviceCount - 1
+                    Dim productName As String = WaveInEvent.GetCapabilities(i).ProductName
+
+                    _audioInputDevices.Add(New AudioInputDeviceChoice With {
+                        .DeviceId = "",
+                        .WaveDeviceIndex = i,
+                        .DisplayText = $"{i}: {productName}",
+                        .ToolTipText = productName
+                    })
+                Next
+            End If
+
+            For Each choice As AudioInputDeviceChoice In _audioInputDevices
+                cboDevice.Items.Add(choice)
             Next
 
             If cboDevice.Items.Count > 0 Then
                 cboDevice.SelectedIndex = 0
             End If
+        End Sub
+
+        Private Shared Function FindLegacyWaveInputDeviceIndex(friendlyName As String) As Integer
+            Dim normalizedFriendlyName As String = If(friendlyName, "").Trim()
+
+            For i As Integer = 0 To WaveInEvent.DeviceCount - 1
+                Dim waveName As String = If(WaveInEvent.GetCapabilities(i).ProductName, "").Trim()
+
+                If String.Equals(waveName, normalizedFriendlyName, StringComparison.OrdinalIgnoreCase) Then
+                    Return i
+                End If
+
+                If normalizedFriendlyName.IndexOf(waveName, StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+                   waveName.IndexOf(normalizedFriendlyName, StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    Return i
+                End If
+            Next
+
+            Return 0
+        End Function
+
+        Private Function GetSelectedAudioInputDeviceChoice() As AudioInputDeviceChoice
+            Return TryCast(cboDevice.SelectedItem, AudioInputDeviceChoice)
+        End Function
+
+        Private Sub RestoreAudioInputSelection()
+            Dim preferredDeviceId As String = ""
+
+            If _opts IsNot Nothing Then
+                preferredDeviceId = If(_opts.PreferredMicrophoneDeviceId, "").Trim()
+            End If
+
+            If preferredDeviceId.Length > 0 Then
+                For i As Integer = 0 To _audioInputDevices.Count - 1
+                    If String.Equals(_audioInputDevices(i).DeviceId, preferredDeviceId, StringComparison.OrdinalIgnoreCase) Then
+                        cboDevice.SelectedIndex = i
+                        Return
+                    End If
+                Next
+            End If
+
+            If My.Settings.LastAudioInputDeviceIndex >= 0 AndAlso My.Settings.LastAudioInputDeviceIndex < cboDevice.Items.Count Then
+                cboDevice.SelectedIndex = My.Settings.LastAudioInputDeviceIndex
+                Return
+            End If
+
+            If cboDevice.Items.Count > 0 Then
+                cboDevice.SelectedIndex = 0
+            End If
+        End Sub
+
+        Private Sub UpdateSelectedMicrophonePreference()
+            If _opts Is Nothing Then
+                _opts = New TranscriptionOptions()
+            End If
+
+            Dim choice As AudioInputDeviceChoice = GetSelectedAudioInputDeviceChoice()
+
+            If choice Is Nothing Then
+                _opts.PreferredMicrophoneDeviceId = ""
+                _opts.PreferredMicrophoneDisplayName = ""
+                Return
+            End If
+
+            _opts.PreferredMicrophoneDeviceId = choice.DeviceId
+            _opts.PreferredMicrophoneDisplayName = choice.ToolTipText
         End Sub
 
         Private Function GetAudioOutputDeviceChoices() As List(Of KeyValuePair(Of String, String))
@@ -948,16 +1072,14 @@ Partial Public Class ThisAddIn
                     cboLang.SelectedIndex = 0
                 End If
 
-                If My.Settings.LastAudioInputDeviceIndex >= 0 AndAlso My.Settings.LastAudioInputDeviceIndex < cboDevice.Items.Count Then
-                    cboDevice.SelectedIndex = My.Settings.LastAudioInputDeviceIndex
-                End If
-
                 If Not String.IsNullOrEmpty(My.Settings.LastEngineOptionsJson) Then
                     Try
                         _opts = JsonConvert.DeserializeObject(Of TranscriptionOptions)(My.Settings.LastEngineOptionsJson)
                     Catch
                     End Try
                 End If
+
+                RestoreAudioInputSelection()
             Catch
             End Try
 
@@ -979,6 +1101,7 @@ Partial Public Class ThisAddIn
 
             Try
                 SaveCurrentEngineSelection()
+                UpdateSelectedMicrophonePreference()
                 My.Settings.LastAudioInputDeviceIndex = cboDevice.SelectedIndex
                 My.Settings.LastEngineOptionsJson = JsonConvert.SerializeObject(_opts)
                 SaveCurrentLanguageForCurrentEngine()
@@ -1317,13 +1440,13 @@ Partial Public Class ThisAddIn
                 selectedLanguage = CStr(cboLang.SelectedItem)
             End If
 
-            Dim selectedDeviceText As String = ""
-            If cboDevice.SelectedItem IsNot Nothing Then
-                selectedDeviceText = CStr(cboDevice.SelectedItem)
-            End If
-
-            Dim micDeviceIndex As Integer = ParseDeviceIndexFromText(selectedDeviceText)
+            Dim selectedDevice As AudioInputDeviceChoice = GetSelectedAudioInputDeviceChoice()
+            Dim selectedDeviceText As String = If(selectedDevice IsNot Nothing, selectedDevice.DisplayText, If(cboDevice.Text, ""))
+            Dim micDeviceIndex As Integer = If(selectedDevice IsNot Nothing, selectedDevice.WaveDeviceIndex, ParseDeviceIndexFromText(selectedDeviceText))
+            Dim micDeviceId As String = If(selectedDevice IsNot Nothing, selectedDevice.DeviceId, "")
             Dim sourceMode As AudioSourceMode = GetConfiguredSourceMode()
+
+            UpdateSelectedMicrophonePreference()
 
             If d.Kind <> EngineKind.Vosk AndAlso Not String.IsNullOrWhiteSpace(selectedLanguage) Then
                 _opts.LanguageCode = selectedLanguage
@@ -1381,6 +1504,7 @@ Partial Public Class ThisAddIn
             If EngineNeedsLocalAudioCapture(d.Kind) Then
                 _capture = New AudioCaptureService With {
                     .MicDeviceIndex = micDeviceIndex,
+                    .MicDeviceId = micDeviceId,
                     .SourceMode = sourceMode,
                     .SystemAudioRenderDeviceId = GetConfiguredOutputDeviceId(),
                     .MultiChannelStereo = _opts.MultiChannelDiarization AndAlso _engine.SupportsMultiChannelDiarization,

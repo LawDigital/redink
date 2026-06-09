@@ -769,7 +769,7 @@ Partial Public Class ThisAddIn
                 "and merge settings) from your description.",
                 AN & " Library Entry Builder",
                 False,
-                "")
+                "", Context:=_context)
 
             If String.IsNullOrWhiteSpace(description) OrElse description = "ESC" Then Return False
 

@@ -35,6 +35,7 @@ Imports System.Reflection
 Imports System.Runtime.InteropServices
 Imports System.Threading
 Imports System.Windows.Forms
+Imports SharedLibrary.SharedLibrary.SharedContext
 
 Namespace SharedLibrary
     Partial Public Class SharedMethods
@@ -353,7 +354,8 @@ Namespace SharedLibrary
                                                     Optional DefaultValue As String = "",
                                                     Optional CtrlP As String = "",
                                                     Optional OptionalButtons As System.Tuple(Of System.String, System.String, System.String)() = Nothing,
-                                                    Optional InsertButtons As System.Tuple(Of System.String, System.String, System.String)() = Nothing
+                                                    Optional InsertButtons As System.Tuple(Of System.String, System.String, System.String)() = Nothing,
+                                                    Optional Context As ISharedContext = Nothing
                                                 ) As String
 
             ' Screen working area (accounts for taskbar, etc.).
@@ -567,6 +569,31 @@ Namespace SharedLibrary
                                                          e.SuppressKeyPress = True
                                                      End If
                                                  End Sub
+            End If
+
+            ' Slash-triggered prompt library insertion for multi-line mode.
+            If Not SimpleInput AndAlso Context IsNot Nothing AndAlso Context.INI_PromptLib Then
+                Dim promptLibraryPath As String = Context.INI_PromptLibPath
+                Dim promptLibraryPathLocal As String = Context.INI_PromptLibPathLocal
+                Dim promptLibraryContext As ISharedContext = Context
+
+                AddHandler inputTextBox.KeyPress,
+                    Sub(sender, e)
+                        If e.KeyChar <> "/"c Then Return
+
+                        Dim slashAction As SharedMethods.PromptLibrarySlashAction =
+                            SharedMethods.HandlePromptLibrarySlash(
+                                inputTextBox,
+                                promptLibraryPath,
+                                promptLibraryPathLocal,
+                                promptLibraryContext,
+                                CtrlP
+                            )
+
+                        If slashAction <> SharedMethods.PromptLibrarySlashAction.NotTriggered Then
+                            e.Handled = True
+                        End If
+                    End Sub
             End If
 
             ' After AutoSize computed, clamp to screen, set MinimumSize (so buttons stay visible),

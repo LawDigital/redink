@@ -1065,6 +1065,7 @@ Public Class M365SearchTestForm
             "show the relevant ones." & lastPromptInstruct,
             "AI Mail Search",
             SimpleInput:=False,
+            Context:=_context,
             CtrlP:=lastPrompt)
         Catch
         End Try
