@@ -291,7 +291,7 @@ Partial Public Class ThisAddIn
 
                 Dim querytext As String = Await LLM(SP_QueryPrompt, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>", "", "", 0, False)
 
-                querytext = SLib.ShowCustomInputBox("This prompt has been generated based on your selection; modify it as you wish:", $"{AN} Query Assistant", False, querytext.Trim()).Trim()
+                querytext = SLib.ShowCustomInputBox("This prompt has been generated based on your selection; modify it as you wish:", $"{AN} Query Assistant", False, querytext.Trim(), Context:=_context).Trim()
                 If String.IsNullOrWhiteSpace(querytext) OrElse querytext.ToLower() = "esc" Then
                     Return
                 End If

@@ -1049,7 +1049,7 @@ Partial Public Class ThisAddIn
             My.Settings.Save()
 
             If CleanText Then
-                CleanTextPrompt = ShowCustomInputBox("Please enter the prompt to 'clean' the text with (each paragraph will be submitted to this prompt)", "Create Audio", False, CleanTextPrompt).Trim()
+                CleanTextPrompt = ShowCustomInputBox("Please enter the prompt to 'clean' the text with (each paragraph will be submitted to this prompt)", "Create Audio", False, CleanTextPrompt, Context:=_context).Trim()
                 If CleanTextPrompt = "ESC" Then Return
                 If CleanTextPrompt = "" Then
                     CleanText = False

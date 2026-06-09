@@ -1,4 +1,4 @@
-' Part of "Red Ink for Word"
+﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
 ' =============================================================================
@@ -77,7 +77,9 @@ Namespace Transcription
 
         Private _connectionId As String = ""
         Private _requestId As String = ""
+        Private _languageCode As String = DefaultLanguage
         Private _stopStarted As Integer = 0
+        Private _turnRestartPending As Integer = 0
 
         Private _bytesSinceSpeechStart As Integer = 0
         Private _speechBytesSinceStart As Integer = 0
@@ -407,53 +409,41 @@ Namespace Transcription
             End If
 
             System.Threading.Interlocked.Exchange(_stopStarted, 0)
-            _connectionId = NewGuidN()
-            _requestId = NewGuidN()
-            _turnFinishedTcs = New System.Threading.Tasks.TaskCompletionSource(Of Boolean)()
+            System.Threading.Interlocked.Exchange(_turnRestartPending, 0)
 
             SyncLock _completedPhraseKeys
                 _completedPhraseKeys.Clear()
             End SyncLock
 
             ResetAudioState()
-
-            Dim languageCode As String = NormalizeLanguageCode(opts)
-            Dim accessToken As String = Await GetAccessTokenAsync(ct).ConfigureAwait(False)
-
+            _languageCode = NormalizeLanguageCode(opts)
             _cts = System.Threading.CancellationTokenSource.CreateLinkedTokenSource(ct)
-            _ws = CreateWebSocket(accessToken)
+
+            Dim startException As System.Exception = Nothing
+
+            Await _sendLock.WaitAsync(_cts.Token).ConfigureAwait(False)
 
             Try
-                RaiseStatusMessage("Connecting to Azure Speech streaming transcription…")
-                Await _ws.ConnectAsync(BuildRealtimeUri(languageCode), _cts.Token).ConfigureAwait(False)
-            Catch ex As System.Exception
-                Dim detail As String = "Azure Speech connection failed: " & GetDetailedExceptionMessage(ex)
-
                 Try
-                    _ws.Dispose()
-                Catch
+                    Await ConnectSocketUnderLockAsync(_cts.Token, False).ConfigureAwait(False)
+                Catch ex As System.Exception
+                    startException = ex
                 End Try
-
-                _ws = Nothing
-                RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs(detail, ex, True))
-                Throw New System.InvalidOperationException(detail, ex)
+            Finally
+                _sendLock.Release()
             End Try
 
-            _readerTask = System.Threading.Tasks.Task.Run(Function() ReadLoop(_cts.Token))
+            If startException IsNot Nothing Then
+                Dim detail As String = "Azure Speech connection failed: " & GetDetailedExceptionMessage(startException)
+                RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs(detail, startException, True))
+                Throw New System.InvalidOperationException(detail, startException)
+            End If
 
-            Try
-                Await SendSpeechConfigAsync(_cts.Token).ConfigureAwait(False)
-            Catch ex As System.Exception
-                Dim detail As String = "Azure Speech stream configuration failed: " & GetDetailedExceptionMessage(ex)
-                RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs(detail, ex, True))
-                Throw New System.InvalidOperationException(detail, ex)
-            End Try
-
-            RaiseStatusMessage("Azure Speech streaming session opened (" & languageCode & ").")
+            RaiseStatusMessage("Azure Speech streaming session opened (" & _languageCode & ").")
         End Function
 
         Public Async Function PushAudioAsync(pcm As Byte(), bytesValid As Integer, ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task Implements ITranscriptionEngine.PushAudioAsync
-            If _ws Is Nothing OrElse _ws.State <> System.Net.WebSockets.WebSocketState.Open OrElse pcm Is Nothing OrElse bytesValid <= 0 Then
+            If IsStopRequested() OrElse pcm Is Nothing OrElse bytesValid <= 0 Then
                 Return
             End If
 
@@ -499,23 +489,30 @@ Namespace Transcription
                 Return
             End If
 
-            Dim wsToClose As System.Net.WebSockets.ClientWebSocket = _ws
-            Dim readerToAwait As System.Threading.Tasks.Task = _readerTask
-            Dim ctsToCancel As System.Threading.CancellationTokenSource = _cts
+            Dim wsToClose As System.Net.WebSockets.ClientWebSocket = Nothing
+            Dim readerToAwait As System.Threading.Tasks.Task = Nothing
+            Dim ctsToCancel As System.Threading.CancellationTokenSource = Nothing
+            Dim requestIdToClose As String = ""
+
+            Await _sendLock.WaitAsync().ConfigureAwait(False)
 
             Try
+                wsToClose = _ws
+                readerToAwait = _readerTask
+                ctsToCancel = _cts
+                requestIdToClose = _requestId
+
+                _ws = Nothing
+                _readerTask = Nothing
+                _cts = Nothing
+                _connectionId = ""
+                _requestId = ""
+                _turnFinishedTcs = Nothing
+                System.Threading.Interlocked.Exchange(_turnRestartPending, 0)
+
                 If wsToClose IsNot Nothing AndAlso wsToClose.State = System.Net.WebSockets.WebSocketState.Open Then
                     Try
-                        Await SendAudioEndAsync(System.Threading.CancellationToken.None).ConfigureAwait(False)
-                    Catch
-                    End Try
-
-                    Try
-                        If _turnFinishedTcs IsNot Nothing Then
-                            Await System.Threading.Tasks.Task.WhenAny(
-                                _turnFinishedTcs.Task,
-                                System.Threading.Tasks.Task.Delay(1500)).ConfigureAwait(False)
-                        End If
+                        Await SendAudioEndFrameAsync(wsToClose, requestIdToClose, System.Threading.CancellationToken.None).ConfigureAwait(False)
                     Catch
                     End Try
 
@@ -527,7 +524,8 @@ Namespace Transcription
                     Catch
                     End Try
                 End If
-            Catch
+            Finally
+                _sendLock.Release()
             End Try
 
             Try
@@ -567,19 +565,85 @@ Namespace Transcription
                 End Try
             End If
 
-            _ws = Nothing
-            _readerTask = Nothing
-            _cts = Nothing
-            _connectionId = ""
-            _requestId = ""
-            _turnFinishedTcs = Nothing
             ResetAudioState()
-
             RaiseStatusMessage("Azure Speech stopped.")
         End Function
 
         Public Function TranscribeFileAsync(filePath As String, opts As TranscriptionOptions, ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task Implements ITranscriptionEngine.TranscribeFileAsync
             Throw New System.NotSupportedException("Azure Speech streaming is live-only. Use Azure fast transcription or batch transcription REST for files.")
+        End Function
+
+        Private Sub BeginNewTurn()
+            _requestId = NewGuidN()
+            _turnFinishedTcs = New System.Threading.Tasks.TaskCompletionSource(Of Boolean)()
+            System.Threading.Interlocked.Exchange(_turnRestartPending, 0)
+        End Sub
+
+        Private Function IsStopRequested() As Boolean
+            Return System.Threading.Interlocked.CompareExchange(_stopStarted, 0, 0) <> 0
+        End Function
+
+        Private Async Function ConnectSocketUnderLockAsync(ct As System.Threading.CancellationToken, reconnecting As Boolean) As System.Threading.Tasks.Task
+            If IsStopRequested() Then
+                Return
+            End If
+
+            Dim wsToDispose As System.Net.WebSockets.ClientWebSocket = _ws
+            Dim readerToAwait As System.Threading.Tasks.Task = _readerTask
+
+            _ws = Nothing
+            _readerTask = Nothing
+
+            If wsToDispose IsNot Nothing Then
+                Try
+                    wsToDispose.Dispose()
+                Catch
+                End Try
+            End If
+
+            If readerToAwait IsNot Nothing Then
+                Try
+                    Await System.Threading.Tasks.Task.WhenAny(
+                        readerToAwait,
+                        System.Threading.Tasks.Task.Delay(1500)).ConfigureAwait(False)
+                Catch
+                End Try
+            End If
+
+            Dim accessToken As String = Await GetAccessTokenAsync(ct).ConfigureAwait(False)
+
+            _connectionId = NewGuidN()
+
+            Dim ws As System.Net.WebSockets.ClientWebSocket = CreateWebSocket(accessToken)
+
+            RaiseStatusMessage(If(reconnecting,
+                                  "Azure Speech streaming session timed out. Reopening…",
+                                  "Connecting to Azure Speech streaming transcription…"))
+
+            Await ws.ConnectAsync(BuildRealtimeUri(_languageCode), _cts.Token).ConfigureAwait(False)
+
+            _ws = ws
+            _readerTask = System.Threading.Tasks.Task.Run(Function() ReadLoop(ws, _cts.Token))
+
+            BeginNewTurn()
+            Await SendSpeechConfigFrameUnderLockAsync(ct).ConfigureAwait(False)
+        End Function
+
+        Private Async Function EnsureReadyForAudioUnderLockAsync(ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task
+            If IsStopRequested() Then
+                Return
+            End If
+
+            If _ws Is Nothing OrElse _ws.State <> System.Net.WebSockets.WebSocketState.Open Then
+                Await ConnectSocketUnderLockAsync(ct, True).ConfigureAwait(False)
+                Return
+            End If
+
+            If System.Threading.Interlocked.CompareExchange(_turnRestartPending, 0, 0) <> 0 OrElse _turnFinishedTcs Is Nothing Then
+                BeginNewTurn()
+                Await SendSpeechConfigFrameUnderLockAsync(ct).ConfigureAwait(False)
+                RaiseStatusMessage("Azure Speech streaming turn reopened.")
+            End If
         End Function
 
         Private Function ShouldResetLocalSpeechWindow() As Boolean
@@ -700,7 +764,11 @@ Namespace Transcription
             Return result
         End Function
 
-        Private Async Function SendSpeechConfigAsync(ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task
+        Private Async Function SendSpeechConfigFrameUnderLockAsync(ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task
+            If _ws Is Nothing OrElse _ws.State <> System.Net.WebSockets.WebSocketState.Open Then
+                Throw New System.InvalidOperationException("Azure Speech websocket is not open.")
+            End If
+
             Dim speechConfig As New Newtonsoft.Json.Linq.JObject From {
                 {"context", New Newtonsoft.Json.Linq.JObject From {
                     {"system", New Newtonsoft.Json.Linq.JObject From {
@@ -723,33 +791,92 @@ Namespace Transcription
                 "application/json; charset=utf-8",
                 speechConfig.ToString(Newtonsoft.Json.Formatting.None))
 
-            Await SendTextAsync(message, ct).ConfigureAwait(False)
+            Await SendTextFrameUnderLockAsync(message, ct).ConfigureAwait(False)
             RaiseStatusMessage("Azure Speech stream configured.")
         End Function
 
         Private Async Function SendAudioAsync(audio As Byte(), ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task
-            If audio Is Nothing OrElse audio.Length = 0 Then
+            If audio Is Nothing OrElse audio.Length = 0 OrElse IsStopRequested() Then
                 Return
             End If
 
+            Dim sendCt As System.Threading.CancellationToken = GetSendCancellationToken(ct)
+
+            Await _sendLock.WaitAsync(sendCt).ConfigureAwait(False)
+
+            Try
+                If IsStopRequested() Then
+                    Return
+                End If
+
+                Dim sendException As System.Exception = Nothing
+
+                Try
+                    Await EnsureReadyForAudioUnderLockAsync(sendCt).ConfigureAwait(False)
+                    Await SendAudioFrameUnderLockAsync(audio, sendCt).ConfigureAwait(False)
+                Catch ex As System.Exception
+                    sendException = ex
+                End Try
+
+                If sendException Is Nothing Then
+                    Return
+                End If
+
+                If Not IsStopRequested() Then
+                    Dim retryException As System.Exception = Nothing
+
+                    Try
+                        Await ConnectSocketUnderLockAsync(sendCt, True).ConfigureAwait(False)
+                        Await SendAudioFrameUnderLockAsync(audio, sendCt).ConfigureAwait(False)
+                        RaiseStatusMessage("Azure Speech streaming session resumed.")
+                        Return
+                    Catch ex As System.Exception
+                        retryException = ex
+                    End Try
+
+                    sendException = retryException
+                End If
+
+                If sendException Is Nothing OrElse IsStopRequested() Then
+                    Return
+                End If
+
+                Dim detail As String = "Azure Speech WS audio send failed: " & GetDetailedExceptionMessage(sendException)
+                RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs(detail, sendException, False))
+                Throw New System.InvalidOperationException(detail, sendException)
+            Finally
+                _sendLock.Release()
+            End Try
+        End Function
+
+        Private Async Function SendAudioFrameUnderLockAsync(audio As Byte(), ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task
             Dim message As Byte() = BuildBinaryMessage(
                 "audio",
                 _requestId,
                 "audio/x-wav;codec=audio/pcm;samplerate=16000",
                 audio)
 
-            Await SendBinaryAsync(message, ct).ConfigureAwait(False)
+            Await SendBinaryFrameUnderLockAsync(message, ct).ConfigureAwait(False)
         End Function
 
-        Private Async Function SendAudioEndAsync(ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task
-            Dim empty As Byte() = New Byte() {}
+        Private Shared Async Function SendAudioEndFrameAsync(ws As System.Net.WebSockets.ClientWebSocket,
+                                                             requestId As String,
+                                                             ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task
+            If ws Is Nothing OrElse ws.State <> System.Net.WebSockets.WebSocketState.Open Then
+                Return
+            End If
+
             Dim message As Byte() = BuildBinaryMessage(
                 "audio",
-                _requestId,
+                requestId,
                 "audio/x-wav;codec=audio/pcm;samplerate=16000",
-                empty)
+                System.Array.Empty(Of Byte)())
 
-            Await SendBinaryAsync(message, ct).ConfigureAwait(False)
+            Await ws.SendAsync(
+                New System.ArraySegment(Of Byte)(message),
+                System.Net.WebSockets.WebSocketMessageType.Binary,
+                True,
+                ct).ConfigureAwait(False)
         End Function
 
         Private Function GetSendCancellationToken(fallback As System.Threading.CancellationToken) As System.Threading.CancellationToken
@@ -760,71 +887,50 @@ Namespace Transcription
             Return fallback
         End Function
 
-        Private Async Function SendTextAsync(text As String, ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task
+        Private Async Function SendTextFrameUnderLockAsync(text As String, ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task
             If _ws Is Nothing OrElse _ws.State <> System.Net.WebSockets.WebSocketState.Open Then
-                Return
+                Throw New System.InvalidOperationException("Azure Speech websocket is not open.")
             End If
 
-            Dim sendCt As System.Threading.CancellationToken = GetSendCancellationToken(ct)
+            Dim bytes As Byte() = System.Text.Encoding.UTF8.GetBytes(text)
 
-            Await _sendLock.WaitAsync(sendCt).ConfigureAwait(False)
-
-            Try
-                Dim bytes As Byte() = System.Text.Encoding.UTF8.GetBytes(text)
-                Await _ws.SendAsync(
-                    New System.ArraySegment(Of Byte)(bytes),
-                    System.Net.WebSockets.WebSocketMessageType.Text,
-                    True,
-                    sendCt).ConfigureAwait(False)
-            Catch ex As System.Exception
-                Dim detail As String = "Azure Speech WS text send failed: " & GetDetailedExceptionMessage(ex)
-                RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs(detail, ex, False))
-                Throw New System.InvalidOperationException(detail, ex)
-            Finally
-                _sendLock.Release()
-            End Try
+            Await _ws.SendAsync(
+                New System.ArraySegment(Of Byte)(bytes),
+                System.Net.WebSockets.WebSocketMessageType.Text,
+                True,
+                ct).ConfigureAwait(False)
         End Function
 
-        Private Async Function SendBinaryAsync(bytes As Byte(), ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task
-            If _ws Is Nothing OrElse _ws.State <> System.Net.WebSockets.WebSocketState.Open Then
-                Return
-            End If
-
+        Private Async Function SendBinaryFrameUnderLockAsync(bytes As Byte(), ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task
             If bytes Is Nothing Then
                 Return
             End If
 
-            Dim sendCt As System.Threading.CancellationToken = GetSendCancellationToken(ct)
+            If _ws Is Nothing OrElse _ws.State <> System.Net.WebSockets.WebSocketState.Open Then
+                Throw New System.InvalidOperationException("Azure Speech websocket is not open.")
+            End If
 
-            Await _sendLock.WaitAsync(sendCt).ConfigureAwait(False)
-
-            Try
-                Await _ws.SendAsync(
-                    New System.ArraySegment(Of Byte)(bytes),
-                    System.Net.WebSockets.WebSocketMessageType.Binary,
-                    True,
-                    sendCt).ConfigureAwait(False)
-            Catch ex As System.Exception
-                Dim detail As String = "Azure Speech WS audio send failed: " & GetDetailedExceptionMessage(ex)
-                RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs(detail, ex, False))
-                Throw New System.InvalidOperationException(detail, ex)
-            Finally
-                _sendLock.Release()
-            End Try
+            Await _ws.SendAsync(
+                New System.ArraySegment(Of Byte)(bytes),
+                System.Net.WebSockets.WebSocketMessageType.Binary,
+                True,
+                ct).ConfigureAwait(False)
         End Function
 
-        Private Async Function ReadLoop(ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task
+        Private Async Function ReadLoop(ws As System.Net.WebSockets.ClientWebSocket,
+                                        ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task
             Dim buf(64 * 1024 - 1) As Byte
 
             Try
-                While _ws IsNot Nothing AndAlso _ws.State = System.Net.WebSockets.WebSocketState.Open AndAlso Not ct.IsCancellationRequested
+                While ws IsNot Nothing AndAlso ws.State = System.Net.WebSockets.WebSocketState.Open AndAlso Not ct.IsCancellationRequested
                     Dim ms As New System.IO.MemoryStream()
                     Dim r As System.Net.WebSockets.WebSocketReceiveResult
 
                     Do
-                        r = Await _ws.ReceiveAsync(New System.ArraySegment(Of Byte)(buf), ct).ConfigureAwait(False)
+                        r = Await ws.ReceiveAsync(New System.ArraySegment(Of Byte)(buf), ct).ConfigureAwait(False)
 
                         If r.MessageType = System.Net.WebSockets.WebSocketMessageType.Close Then
+                            System.Threading.Interlocked.Exchange(_turnRestartPending, 1)
                             Return
                         End If
 
@@ -841,7 +947,16 @@ Namespace Transcription
                 End While
             Catch ex As System.OperationCanceledException
             Catch ex As System.Exception
-                RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs("Azure Speech WS read failed: " & GetDetailedExceptionMessage(ex), ex, False))
+                If Not IsStopRequested() Then
+                    System.Threading.Interlocked.Exchange(_turnRestartPending, 1)
+
+                    Try
+                        ws.Abort()
+                    Catch
+                    End Try
+
+                    RaiseStatusMessage("Azure Speech connection interrupted. Reconnecting…")
+                End If
             End Try
         End Function
 
@@ -888,7 +1003,9 @@ Namespace Transcription
                             Catch
                             End Try
                         End If
-                        RaiseStatusMessage("Azure Speech turn ended.")
+
+                        System.Threading.Interlocked.Exchange(_turnRestartPending, 1)
+                        RaiseStatusMessage("Azure Speech turn ended. Waiting for more audio…")
 
                     Case Else
                         System.Diagnostics.Debug.WriteLine("[Azure Speech] Unhandled WS path: " & path & " " & TruncateForLog(bodyText, 1000))

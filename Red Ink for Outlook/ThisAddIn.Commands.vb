@@ -1165,7 +1165,7 @@ Partial Public Class ThisAddIn
                     $"{AN} Answers",
                     False,
                     "",
-                    My.Settings.LastPromptReply).Trim()
+                    My.Settings.LastPromptReply, Context:=_context).Trim()
                 If OtherPrompt = "ESC" Then Return
 
                 If Not String.IsNullOrWhiteSpace(OtherPrompt) Then
@@ -1627,14 +1627,14 @@ Partial Public Class ThisAddIn
                             System.Tuple.Create("OK, do a new doc", $"Use this to automatically insert '{NewDocPrefix}' as a prefix.", NewDocPrefix),
                             System.Tuple.Create("OK, do a markup", $"Use this to automatically insert '{MarkupPrefix}' as a prefix.", MarkupPrefix)
                         }
-                OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute on the selected text ({MarkupInstruct}, {InplaceInstruct}, {ClipboardInstruct}){PromptLibInstruct}{AddOnInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons)
+                OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute on the selected text ({MarkupInstruct}, {InplaceInstruct}, {ClipboardInstruct}){PromptLibInstruct}{AddOnInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons, Context:=_context)
             Else
                 Dim OptionalButtons As System.Tuple(Of String, String, String)() = {
                             System.Tuple.Create("OK, use window", $"Use this to automatically insert '{ClipboardPrefix}' as a prefix.", ClipboardPrefix),
                             System.Tuple.Create("OK, do a new doc", $"Use this to automatically insert '{NewDocPrefix}' as a prefix.", NewDocPrefix)
                         }
 
-                OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute ({ClipboardInstruct}){PromptLibInstruct}{AddOnInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons)
+                OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute ({ClipboardInstruct}){PromptLibInstruct}{AddOnInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons, Context:=_context)
             End If
 
             If String.IsNullOrEmpty(OtherPrompt) AndAlso OtherPrompt <> "ESC" AndAlso INI_PromptLib Then
@@ -1997,60 +1997,7 @@ Partial Public Class ThisAddIn
                 TypeOf curr Is Microsoft.Office.Interop.Outlook.MailItem
 
             If Not haveMail Then
-                ' Explorer context: copy to clipboard (with UI switch only for message box)
-                Dim displayText As String = If(result.Length > 11000, result.Substring(0, 11000) & "…", result)
-
-                ' Build DataObject outside UI (RTF conversion may be expensive)
-                Dim dataObj As New System.Windows.Forms.DataObject()
-                Dim includeRtf As Boolean = result.Length < 350000 ' Skip massive RTF
-                If includeRtf Then
-                    Try
-                        Dim rtfText = MarkdownToRtfConverter.Convert(result)
-                        If Not String.IsNullOrEmpty(rtfText) Then
-                            dataObj.SetData(System.Windows.Forms.DataFormats.Rtf, rtfText)
-                        End If
-                    Catch
-                        ' Ignore RTF failure
-                    End Try
-                End If
-                dataObj.SetData(System.Windows.Forms.DataFormats.UnicodeText, result)
-                dataObj.SetData(System.Windows.Forms.DataFormats.Text, result)
-
-                ' Explorer path: ConfigureAwait(False) is OK here because we
-                ' marshal back explicitly via SwitchToUi below.
-                Dim clipOk = Await SetClipboardRobustAsync(dataObj).ConfigureAwait(False)
-
-                Await SwitchToUi(
-                    Sub()
-                        If clipOk Then
-                            SLib.ShowCustomMessageBox($"The content has been copied to the clipboard:{Environment.NewLine}{Environment.NewLine}{displayText}")
-                        Else
-                            ' Fallback window
-                            Dim edited As String = SLib.ShowCustomWindow(
-                                "Clipboard is busy. You can copy the result below manually (Ctrl+A, Ctrl+C) or edit it and click OK:",
-                                result,
-                                "If copying still fails, the text will be saved to a temporary file.",
-                                AN, False)
-
-                            If Not String.IsNullOrWhiteSpace(edited) Then
-                                Dim editedObj As New DataObject()
-                                editedObj.SetData(DataFormats.UnicodeText, edited)
-                                editedObj.SetData(DataFormats.Text, edited)
-                                Dim editedOk = SetClipboardRobustAsync(editedObj).GetAwaiter().GetResult()
-                                If Not editedOk Then
-                                    Dim tmp = SaveTextToTempFile(edited)
-                                    If Not String.IsNullOrWhiteSpace(tmp) Then
-                                        SLib.ShowCustomMessageBox($"Clipboard is locked. The result was saved to: {tmp}")
-                                    Else
-                                        SLib.ShowCustomMessageBox("Clipboard is locked and saving failed.")
-                                    End If
-                                Else
-                                    SLib.ShowCustomMessageBox("Your edited text has been copied to the clipboard.")
-                                End If
-                            End If
-                        End If
-                    End Sub).ConfigureAwait(False)
-
+                Await HandleNoInsertableMailAsync(result).ConfigureAwait(False)
                 Return
             End If
 
@@ -2131,17 +2078,10 @@ Partial Public Class ThisAddIn
                 If inserted Then
                     Try : inspector.Display() : Catch : End Try
                 Else
-                    ' Body refused the edit – fall back to clipboard so the user
-                    ' can paste manually rather than losing the AI result.
-                    Await FallbackToClipboardAsync(result,
-                        "The mail body is currently locked for editing. " &
-                        "The result has been copied to the clipboard instead.")
+                    Await HandleNoInsertableMailAsync(result).ConfigureAwait(False)
                 End If
             Else
-                ' No usable editor (mail sent, read-only, switched to reading pane, …)
-                Await FallbackToClipboardAsync(result,
-                    "The mail editor is not available for editing. " &
-                    "The result has been copied to the clipboard instead.")
+                Await HandleNoInsertableMailAsync(result).ConfigureAwait(False)
             End If
 
             If wordEditor IsNot Nothing Then Marshal.ReleaseComObject(wordEditor) : wordEditor = Nothing
@@ -2163,39 +2103,62 @@ Partial Public Class ThisAddIn
     End Function
 
     ''' <summary>
-    ''' Copies the given text to the clipboard (RTF + Unicode) and shows a message.
-    ''' Used as a fallback when the Outlook body cannot be edited.
+    ''' Uses the same clipboard/window flow as the original Not haveMail path.
+    ''' This is used whenever there is no mail editor that can actually accept insertion.
     ''' </summary>
-    Private Async Function FallbackToClipboardAsync(text As String, message As String) As System.Threading.Tasks.Task
-        Try
-            Dim dataObj As New System.Windows.Forms.DataObject()
-            If text.Length < 350000 Then
-                Try
-                    Dim rtf = MarkdownToRtfConverter.Convert(text)
-                    If Not String.IsNullOrEmpty(rtf) Then
-                        dataObj.SetData(System.Windows.Forms.DataFormats.Rtf, rtf)
-                    End If
-                Catch
-                End Try
-            End If
-            dataObj.SetData(System.Windows.Forms.DataFormats.UnicodeText, text)
-            dataObj.SetData(System.Windows.Forms.DataFormats.Text, text)
+    Private Async Function HandleNoInsertableMailAsync(result As String) As System.Threading.Tasks.Task
+        Dim displayText As String = If(result.Length > 11000, result.Substring(0, 11000) & "…", result)
 
-            Dim ok = Await SetClipboardRobustAsync(dataObj)
-            If ok Then
-                SLib.ShowCustomMessageBox(message)
-            Else
-                Dim tmp = SaveTextToTempFile(text)
-                If Not String.IsNullOrWhiteSpace(tmp) Then
-                    SLib.ShowCustomMessageBox($"Clipboard is locked. The result was saved to: {tmp}")
-                Else
-                    SLib.ShowCustomMessageBox("Clipboard and editor are both unavailable; the result could not be saved.")
+        Dim dataObj As New System.Windows.Forms.DataObject()
+        Dim includeRtf As Boolean = result.Length < 350000
+
+        If includeRtf Then
+            Try
+                Dim rtfText As String = MarkdownToRtfConverter.Convert(result)
+                If Not String.IsNullOrEmpty(rtfText) Then
+                    dataObj.SetData(System.Windows.Forms.DataFormats.Rtf, rtfText)
                 End If
-            End If
-        Catch ex As System.Exception
-            SLib.ShowCustomMessageBox($"Fallback failed: {ex.Message}")
-        End Try
+            Catch
+            End Try
+        End If
+
+        dataObj.SetData(System.Windows.Forms.DataFormats.UnicodeText, result)
+        dataObj.SetData(System.Windows.Forms.DataFormats.Text, result)
+
+        Dim clipOk As Boolean = Await SetClipboardRobustAsync(dataObj).ConfigureAwait(False)
+
+        Await SwitchToUi(
+            Sub()
+                If clipOk Then
+                    SLib.ShowCustomMessageBox($"The content has been copied to the clipboard:{Environment.NewLine}{Environment.NewLine}{displayText}")
+                Else
+                    Dim edited As String = SLib.ShowCustomWindow(
+                        "Clipboard is busy. You can copy the result below manually (Ctrl+A, Ctrl+C) or edit it and click OK:",
+                        result,
+                        "If copying still fails, the text will be saved to a temporary file.",
+                        AN, False)
+
+                    If Not String.IsNullOrWhiteSpace(edited) Then
+                        Dim editedObj As New System.Windows.Forms.DataObject()
+                        editedObj.SetData(System.Windows.Forms.DataFormats.UnicodeText, edited)
+                        editedObj.SetData(System.Windows.Forms.DataFormats.Text, edited)
+
+                        Dim editedOk As Boolean = SetClipboardRobustAsync(editedObj).GetAwaiter().GetResult()
+                        If Not editedOk Then
+                            Dim tmp As String = SaveTextToTempFile(edited)
+                            If Not String.IsNullOrWhiteSpace(tmp) Then
+                                SLib.ShowCustomMessageBox($"Clipboard is locked. The result was saved to: {tmp}")
+                            Else
+                                SLib.ShowCustomMessageBox("Clipboard is locked and saving failed.")
+                            End If
+                        Else
+                            SLib.ShowCustomMessageBox("Your edited text has been copied to the clipboard.")
+                        End If
+                    End If
+                End If
+            End Sub).ConfigureAwait(False)
     End Function
+
 
     ''' <summary>
     ''' Attempts to set clipboard persistently with retries on UI and dedicated STA thread. Returns True if set and verified.

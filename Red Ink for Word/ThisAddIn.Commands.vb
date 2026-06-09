@@ -788,7 +788,7 @@ Partial Public Class ThisAddIn
         ' Get addition instructions
 
         OtherPrompt = ""
-        OtherPrompt = SLib.ShowCustomInputBox("You can provide additional instructions for the analysis (e.g., Internet links to check [if your model will understand so], aspects to focus on etc.). This is optional.", $"{AN} Define MyStyle", False).Trim()
+        OtherPrompt = SLib.ShowCustomInputBox("You can provide additional instructions for the analysis (e.g., Internet links to check [if your model will understand so], aspects to focus on etc.). This is optional.", $"{AN} Define MyStyle", False, Context:=_context).Trim()
 
         If OtherPrompt = "ESC" Then
             Return
