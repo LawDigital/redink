@@ -95,6 +95,8 @@ Namespace Transcription
         Public Property VoskSimilarityThreshold As Double = 1.0
         Public Property MultiChannelDiarization As Boolean = False
         Public Property AudioDebugDump As Boolean = False
+        Public Property PreferredMicrophoneDeviceId As String = ""
+        Public Property PreferredMicrophoneDisplayName As String = ""
         Public Property TurnDetection As String = "server_vad"
         Public Property Prompt As String = ""
     End Class

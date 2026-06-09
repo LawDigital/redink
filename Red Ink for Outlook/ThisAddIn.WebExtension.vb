@@ -4008,7 +4008,7 @@ Partial Public Class ThisAddIn
                     }
                 End If
                 OtherPrompt = Await SwitchToUi(Function()
-                                                   Return SLib.ShowCustomInputBox(promptMsg, promptCaption, False, "", My.Settings.LastPrompt, If(wordInstalled, OptionalButtons, Nothing))
+                                                   Return SLib.ShowCustomInputBox(promptMsg, promptCaption, False, "", My.Settings.LastPrompt, If(wordInstalled, OptionalButtons, Nothing), Context:=_context)
                                                End Function)
                 Dim doMarkupFlag As Boolean = False
                 Dim doInsertFlag As Boolean = False

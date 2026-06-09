@@ -1870,6 +1870,7 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
         If EngineNeedsLocalAudioCapture(d.Kind) Then
             _capture = New AudioCaptureService With {
                 .MicDeviceIndex = micDeviceIndex,
+                .MicDeviceId = "",
                 .SourceMode = sourceMode,
                 .SystemAudioRenderDeviceId = GetConfiguredOutputDeviceId(),
                 .MultiChannelStereo = _opts.MultiChannelDiarization AndAlso _engine.SupportsMultiChannelDiarization,

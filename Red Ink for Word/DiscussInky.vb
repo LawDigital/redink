@@ -3809,7 +3809,7 @@ Public Class DiscussInky
         Dim userInstruction = ShowCustomInputBox(
             "Enter your instruction for the discussion. The two bots will sort out this issue based on the conversation so far and the loaded knowledge." & vbCrLf & vbCrLf &
             "Example: ""In the discussion so far, I received the advice to cancel the contract. Now, please discuss whether this really makes sense.""" & vbCrLf,
-            $"{AN} - Sort It Out Discussion", False)
+            $"{AN} - Sort It Out Discussion", False, Context:=_context)
 
         If String.IsNullOrWhiteSpace(userInstruction) Or userInstruction = "ESC" Then
             Return ' User cancelled

@@ -114,7 +114,7 @@ Partial Public Class ThisAddIn
             ShowCustomMessageBox("Please select the text in your document with which your selection in the pane shall be merged.")
             Return
         End If
-        OtherPrompt = SLib.ShowCustomInputBox("If you want, you can amend the prompt that will be used to intelligently merge your selection into your document:", $"{AN} Intelligent Merge", False, SP_MergePrompt_Cached).Trim()
+        OtherPrompt = SLib.ShowCustomInputBox("If you want, you can amend the prompt that will be used to intelligently merge your selection into your document:", $"{AN} Intelligent Merge", False, SP_MergePrompt_Cached, Context:=_context).Trim()
         If String.IsNullOrEmpty(OtherPrompt) Or OtherPrompt = "ESC" Then Return
         Dim result As String = Await ProcessSelectedText(OtherPrompt & " " & SP_Add_MergePrompt & " <INSERT>" & newtext & "</INSERT> ", True, INI_KeepFormat2, INI_KeepParaFormatInline, Override(INI_ReplaceText2, INI_ReplaceText2Override), INI_DoMarkupWord, Override(INI_MarkupMethodWord, INI_MarkupMethodWordOverride), False, False, True, False, INI_KeepFormatCap)
     End Sub
@@ -214,7 +214,7 @@ Partial Public Class ThisAddIn
                 OtherPrompt = SLib.ShowCustomInputBox(
                     "If you want, you can amend the prompt that will be used to " &
                     "intelligently merge your comment into your document:",
-                    $"{AN} Intelligent Merge", False, SP_MergePrompt2).Trim()
+                    $"{AN} Intelligent Merge", False, SP_MergePrompt2, Context:=_context).Trim()
 
                 If String.IsNullOrEmpty(OtherPrompt) OrElse OtherPrompt = "ESC" Then Return
             Else
@@ -294,7 +294,7 @@ Partial Public Class ThisAddIn
             ShowCustomMessageBox("Please select the text in your document with which your selection in the pane shall be merged.")
             Return
         End If
-        OtherPrompt = SLib.ShowCustomInputBox("If you want, you can amend the prompt that will be used to intelligently merge your selection into your document:", $"{AN} Intelligent Merge", False, SP_MergePrompt_Cached).Trim()
+        OtherPrompt = SLib.ShowCustomInputBox("If you want, you can amend the prompt that will be used to intelligently merge your selection into your document:", $"{AN} Intelligent Merge", False, SP_MergePrompt_Cached, Context:=_context).Trim()
         If String.IsNullOrEmpty(OtherPrompt) Or OtherPrompt = "ESC" Then Return
         Dim result As String = Await ProcessSelectedText(OtherPrompt & " " & SP_Add_MergePrompt & " <INSERT>" & newtext & "</INSERT> ", True, INI_KeepFormat2, INI_KeepParaFormatInline, Override(INI_ReplaceText2, INI_ReplaceText2Override), INI_DoMarkupWord, Override(INI_MarkupMethodWord, INI_MarkupMethodWordOverride), False, False, True, False, INI_KeepFormatCap)
     End Sub
