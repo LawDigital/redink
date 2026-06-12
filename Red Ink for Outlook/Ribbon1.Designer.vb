@@ -352,9 +352,9 @@ Partial Class Ribbon1
     Public Async Function UpdateRibbon() As Task
 
         If String.IsNullOrWhiteSpace(ThisAddIn.INI_APICall_Object) Then
-            Me.RI_Clipboard.Visible = False
+            SetRibbonControlVisibleByAvailability(Me.RI_Clipboard, False)
         Else
-            Me.RI_Clipboard.Visible = True
+            SetRibbonControlVisibleByAvailability(Me.RI_Clipboard, True)
         End If
 
         Dim BrandedVersion As String = ThisAddIn.INI_BrandingName
@@ -371,12 +371,14 @@ Partial Class Ribbon1
                         "(model: " & ThisAddIn.INI_Model & ")"
 
         If Trim(ThisAddIn.INI_MyStylePath) = "" Then
-            Me.RI_DefineMyStyle.Visible = False
-            Me.RI_ApplyMyStyle.Visible = False
+            SetRibbonControlVisibleByAvailability(Me.RI_DefineMyStyle, False)
+            SetRibbonControlVisibleByAvailability(Me.RI_ApplyMyStyle, False)
         Else
-            Me.RI_DefineMyStyle.Visible = True
-            Me.RI_ApplyMyStyle.Visible = True
+            SetRibbonControlVisibleByAvailability(Me.RI_DefineMyStyle, True)
+            SetRibbonControlVisibleByAvailability(Me.RI_ApplyMyStyle, True)
         End If
+
+        ApplyRibbonVisibilityConfiguration()
 
     End Function
 
@@ -847,9 +849,9 @@ Partial Class Ribbon2
     Public Async Function UpdateRibbon() As Task
 
         If String.IsNullOrWhiteSpace(ThisAddIn.INI_APICall_Object) Then
-            Me.RI_Clipboard.Visible = False
+            SetRibbonControlVisibleByAvailability(Me.RI_Clipboard, False)
         Else
-            Me.RI_Clipboard.Visible = True
+            SetRibbonControlVisibleByAvailability(Me.RI_Clipboard, True)
         End If
 
         Dim BrandedVersion As String = ThisAddIn.INI_BrandingName
@@ -866,19 +868,19 @@ Partial Class Ribbon2
         "(model: " & ThisAddIn.INI_Model & ")"
 
         If Trim(ThisAddIn.INI_MyStylePath) = "" Then
-            Me.RI_DefineMyStyle.Visible = False
-            Me.RI_ApplyMyStyle.Visible = False
+            SetRibbonControlVisibleByAvailability(Me.RI_DefineMyStyle, False)
+            SetRibbonControlVisibleByAvailability(Me.RI_ApplyMyStyle, False)
         Else
-            Me.RI_DefineMyStyle.Visible = True
-            Me.RI_ApplyMyStyle.Visible = True
+            SetRibbonControlVisibleByAvailability(Me.RI_DefineMyStyle, True)
+            SetRibbonControlVisibleByAvailability(Me.RI_ApplyMyStyle, True)
         End If
 
-        Me.RI_AutoPilot.Visible = ThisAddIn.IsAutoPilotPermitted()
+        SetRibbonControlVisibleByAvailability(Me.RI_AutoPilot, ThisAddIn.IsAutoPilotPermitted())
 
         If String.IsNullOrWhiteSpace(ThisAddIn.INI_MailMoverPath) And String.IsNullOrWhiteSpace(ThisAddIn.INI_MailMoverPathLocal) Then
-            Me.RI_MailMover.Visible = False
+            SetRibbonControlVisibleByAvailability(Me.RI_MailMover, False)
         Else
-            Me.RI_MailMover.Visible = True
+            SetRibbonControlVisibleByAvailability(Me.RI_MailMover, True)
         End If
 
         If String.IsNullOrWhiteSpace(ThisAddIn.INI_KnowledgeStorePath) And String.IsNullOrWhiteSpace(ThisAddIn.INI_KnowledgeStorePathLocal) Then
@@ -895,6 +897,7 @@ Partial Class Ribbon2
 
 
         ApplyThemeAwareMenuIcon()
+        ApplyRibbonVisibilityConfiguration()
 
     End Function
 

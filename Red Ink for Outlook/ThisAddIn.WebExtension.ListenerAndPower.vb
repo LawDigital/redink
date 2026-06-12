@@ -285,7 +285,7 @@ Partial Public Class ThisAddIn
                         ' Restart only if user was present pre-suspend
                         If userPresent AndAlso wasListenerRunningBeforeSleep Then
                             Try
-                                StartupHttpListener()
+                                StartupHttpListener(INI_WebServerBlock)
                             Catch
                             End Try
                         End If
@@ -334,7 +334,12 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Initializes listener generation, cancellation token source, logs, and starts listener loop.
     ''' </summary>
-    Private Sub StartupHttpListener()
+    Private Sub StartupHttpListener(WebServerBlock)
+
+        ' WebServerBlock: 1 = no webserver, 2 = no Local Chatbot, 3 = no Edge extension receiver
+
+        If WebServerBlock = 1 Then Return
+
         isShuttingDown = False
 
         ResetInkyServerLogIfNeeded()
@@ -808,7 +813,7 @@ Partial Public Class ThisAddIn
                                 Catch
                                 End Try
                                 Try
-                                    StartupHttpListener()
+                                    StartupHttpListener(INI_WebServerBlock)
                                 Catch
                                 End Try
                             End Function)

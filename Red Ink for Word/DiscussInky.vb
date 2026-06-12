@@ -234,6 +234,7 @@ Public Class DiscussInky
 
     Private ReadOnly _btnClear As Button = New Button() With {.Text = "Clear", .AutoSize = True}
     Private ReadOnly _btnSendToDoc As Button = New Button() With {.Text = "Send to Doc", .AutoSize = True}
+    Private ReadOnly _btnInsertSelectionToDoc As Button = New Button() With {.Text = "Insert in Doc", .AutoSize = True}
     Private ReadOnly _btnClose As Button = New Button() With {.Text = "Close", .AutoSize = True}
     Private ReadOnly _btnSend As Button = New Button() With {.Text = $"Send", .AutoSize = True}
     Private ReadOnly _btnPersona As Button = New Button() With {.Text = "Persona", .AutoSize = True}
@@ -398,6 +399,7 @@ Public Class DiscussInky
 
         pnlButtons.Controls.Add(_btnClear)
         pnlButtons.Controls.Add(_btnSendToDoc)
+        pnlButtons.Controls.Add(_btnInsertSelectionToDoc)
         pnlButtons.Controls.Add(_btnClose)
         pnlButtons.Controls.Add(_btnAutoRespond)
         pnlButtons.Controls.Add(_btnSortOut)
@@ -415,6 +417,8 @@ Public Class DiscussInky
         table.Controls.Add(pnlButtons, 0, 1)
         Me.Controls.Add(table)
 
+        InitializeButtonToolTips()
+
         _mdPipeline = New MarkdownPipelineBuilder().
             UseAdvancedExtensions().
             UseSoftlineBreakAsHardlineBreak().
@@ -426,6 +430,7 @@ Public Class DiscussInky
         AddHandler _btnSend.Click, AddressOf OnSend
         AddHandler _btnClear.Click, AddressOf OnClear
         AddHandler _btnSendToDoc.Click, AddressOf OnSendToDoc
+        AddHandler _btnInsertSelectionToDoc.Click, AddressOf OnInsertSelectionToDoc
         AddHandler _btnClose.Click, AddressOf OnClose
         AddHandler _btnPersona.Click, AddressOf OnSelectPersona
         AddHandler _btnMission.Click, AddressOf OnSelectMission
@@ -522,6 +527,49 @@ Public Class DiscussInky
     Private Sub UpdateSendButtonText()
         Ui(Sub() _btnSend.Text = $"Send to {_currentPersonaName}")
     End Sub
+
+    ''' <summary>
+    ''' Initializes tooltips for the action buttons.
+    ''' </summary>
+    Private Sub InitializeButtonToolTips()
+        _toolTip.SetToolTip(_btnSend, "Send the current prompt to the selected discussion persona.")
+        _toolTip.SetToolTip(_btnPersona, "Select the persona for this discussion.")
+        _toolTip.SetToolTip(_btnMission, "Select or clear the current mission.")
+        _toolTip.SetToolTip(_btnEditPersona, "Open the local persona library for editing.")
+        _toolTip.SetToolTip(_btnKnowledge, "Load a knowledge file or a folder of knowledge files.")
+        _toolTip.SetToolTip(_btnArchive, "Store, restore, update, or delete archived discussions.")
+        _toolTip.SetToolTip(_btnAlternateModel, "Switch between the primary model and an alternate or secondary model.")
+        _toolTip.SetToolTip(_btnClear, "Clear the current discussion and start a new one.")
+        _toolTip.SetToolTip(_btnSendToDoc, "Export the full discussion to a new Word document.")
+        _toolTip.SetToolTip(_btnInsertSelectionToDoc, "Insert the selected chat text into the active Word document at the current selection or cursor.")
+        _toolTip.SetToolTip(_btnClose, "Close this discussion window.")
+        _toolTip.SetToolTip(_btnAutoRespond, "Start an automated back-and-forth discussion.")
+        _toolTip.SetToolTip(_btnSortOut, "Run a structured Advocate versus Challenger discussion.")
+        _toolTip.SetToolTip(_btnTools, $"Select the {Globals.ThisAddIn.ToolFriendlyName.ToLower} available for this discussion.")
+    End Sub
+
+    ''' <summary>
+    ''' Gets the currently selected text from the discussion thread.
+    ''' </summary>
+    Private Function GetSelectedChatText() As String
+        Try
+            If _chat.Document Is Nothing Then
+                Return ""
+            End If
+
+            Dim selectedTextObject As Object = _chat.Document.InvokeScript("getSelectedText")
+            Dim selectedText As String = If(selectedTextObject, "").ToString()
+
+            If String.IsNullOrWhiteSpace(selectedText) Then
+                Return ""
+            End If
+
+            selectedText = selectedText.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf).Replace(vbLf, vbCrLf)
+            Return selectedText.Trim()
+        Catch
+            Return ""
+        End Try
+    End Function
 
     ''' <summary>
     ''' Returns a random adverb used to vary assistant tone.
@@ -2326,7 +2374,49 @@ Public Class DiscussInky
         End Try
     End Sub
 
-    ' Replace the OnSendToDoc method to properly handle autoresponder messages:
+    ''' <summary>
+    ''' Inserts the selected chat text into the active Word document at the current selection or cursor.
+    ''' </summary>
+    Private Sub OnInsertSelectionToDoc(sender As Object, e As EventArgs)
+        Try
+            Dim selectedChatText As String = GetSelectedChatText()
+            If String.IsNullOrWhiteSpace(selectedChatText) Then
+                AppendSystemMessage("Select text in the discussion thread first.")
+                Return
+            End If
+
+            Dim app As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
+            If app Is Nothing OrElse Not Globals.ThisAddIn.IsDocumentEditable(silent:=True) Then
+                AppendSystemMessage("Open an editable Word document first.")
+                Return
+            End If
+
+            Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
+            Dim sel As Microsoft.Office.Interop.Word.Selection = Nothing
+
+            Try
+                doc = app.ActiveDocument
+                sel = app.Selection
+            Catch
+            End Try
+
+            If doc Is Nothing OrElse sel Is Nothing Then
+                AppendSystemMessage("Open an editable Word document first.")
+                Return
+            End If
+
+            If app.ActiveWindow Is Nothing OrElse
+               app.ActiveWindow.Type <> Microsoft.Office.Interop.Word.WdWindowType.wdWindowDocument Then
+                AppendSystemMessage("Open an editable Word document first.")
+                Return
+            End If
+
+            sel.TypeText(selectedChatText)
+            AppendSystemMessage("Selected chat text inserted into the active document.")
+        Catch ex As Exception
+            AppendSystemMessage($"Error inserting selected chat text into document: {ex.Message}")
+        End Try
+    End Sub
 
     ''' <summary>
     ''' Creates a new Word document with the chat transcript, excluding system messages.
@@ -2959,6 +3049,7 @@ Public Class DiscussInky
                     <meta charset=""utf-8"">
                     <style>{css}</style>
                     <script>
+                    var lastSelectedText = '';
                     function appendMessage(html) {{
                       var c=document.getElementById('chat'); if(!c) return;
                       var temp=document.createElement('div'); temp.innerHTML=html;
@@ -2968,6 +3059,30 @@ Public Class DiscussInky
                     function removeById(id) {{
                       var el=document.getElementById(id); if(!el||!el.parentNode) return;
                       el.parentNode.removeChild(el);
+                    }}
+                    function getWindowSelectionText() {{
+                      try {{
+                        if (window.getSelection) {{
+                          return window.getSelection().toString();
+                        }}
+                        if (document.selection) {{
+                          return document.selection.createRange().text;
+                        }}
+                      }} catch (e) {{
+                      }}
+                      return '';
+                    }}
+                    function captureSelection() {{
+                      var text = getWindowSelectionText();
+                      if (text && text.replace(/\s+/g, ' ').replace(/^\s+|\s+$/g, '').length > 0) {{
+                        lastSelectedText = text;
+                      }}
+                    }}
+                    document.onmouseup = captureSelection;
+                    document.onkeyup = captureSelection;
+                    function getSelectedText() {{
+                      captureSelection();
+                      return lastSelectedText || '';
                     }}
                     </script>
                     </head>

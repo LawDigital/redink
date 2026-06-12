@@ -505,6 +505,7 @@ Partial Class Ribbon1
         ' Start initialization in background (asynchronously)
         Await InitializeAppAsync()
         ApplyThemeAwareMenuIcon()
+        ApplyRibbonVisibilityConfiguration()
     End Sub
 
 
@@ -520,16 +521,16 @@ Partial Class Ribbon1
             Me.RI_FreestyleAM.Enabled = True
         End If
         If Trim(ThisAddIn.INI_Language2) = "" Then
-            Me.RI_SecLang.Visible = False
+            SetRibbonControlVisibleByAvailability(Me.RI_SecLang, False)
         Else
-            Me.RI_SecLang.Visible = True
+            SetRibbonControlVisibleByAvailability(Me.RI_SecLang, True)
         End If
         If Trim(ThisAddIn.INI_Language1) = "" Then
-            Me.RI_Primlang.Visible = False
+            SetRibbonControlVisibleByAvailability(Me.RI_Primlang, False)
             Me.RI_PrimLang2.Label = "(not defined)"
             Me.RI_PrimLang2.Enabled = False
         Else
-            Me.RI_Primlang.Visible = True
+            SetRibbonControlVisibleByAvailability(Me.RI_Primlang, True)
             Me.RI_PrimLang2.Enabled = True
         End If
 
@@ -543,6 +544,7 @@ Partial Class Ribbon1
         Me.Menu1.SuperTip = $"{AN} " & ThisAddIn.Version & BrandedVersion &
                         $" {SharedLibrary.SharedLibrary.SharedMethods.CopyrightNotice} " &
                         "(model: " & ThisAddIn.INI_Model & ")"
+        ApplyRibbonVisibilityConfiguration()
         UpdateUndoButton()
     End Function
 

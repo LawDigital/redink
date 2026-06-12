@@ -618,7 +618,8 @@ Namespace SharedLibrary
                                                     {"MarkupAuthor", "MarkupAuthor"},
                                                     {"KnowledgeStoreBackgroundIndexing", "EnableKBBackgroundIndexing"},
                                                     {"KnowledgeStoreBackgroundIndexingWindow", "KnowledgeStoreBackgroundIndexingWindow"},
-                                                    {"FormulaInstruction", "FormulaInstruction"}
+                                                    {"FormulaInstruction", "FormulaInstruction"},
+                                                    {"SimpleMenuOverride", "SimpleMenuOverride"}
                                                 }
 
                                            For Each settingKey In settingControls.Keys
@@ -813,8 +814,8 @@ Namespace SharedLibrary
         Public Shared Function IsBooleanSetting(settingKey As String) As Boolean
             ' Determine if a setting is a Boolean based on its key
             Dim booleanSettings As New List(Of String) From {
-        "DoubleS", "NoEmDash", "Clean", "MarkdownBubbles", "KeepFormat1", "MarkdownConvert", "ReplaceText1",
-        "KeepFormat2", "KeepParaFormatInline", "ReplaceText2", "DoMarkupOutlook", "DoMarkupWord",
+        "DoubleS", "NoEmDash", "Clean", "MarkdownBubbles", "KeepFormat1", "MarkdownConvert", "ReplaceText1", "SimpleMenuOverride",
+        "KeepFormat2", "KeepParaFormatInline", "ReplaceText2", "DoMarkupOutlook", "DoMarkupWord", "SimpleMenuDefault",
         "APIDebug", "AutoPilotAutoStart", "AutoPilotSchedulerLocalChat", "ISearch_Approve", "ISearch", "Lib", "ContextMenu", "NoLocalConfig", "SecondAPI", "APIEncrypted", "APIEncrypted_2",
         "OAuth2", "OAuth2_2", "PromptLib", "Ignore", "ToolingLogWindow", "ToolingDryRun", "ForceDrawioLocal", "AllowLegacyDocFiles", "EnablePrivacyForSearch",
         "UpdateIni", "UpdateIniAllowRemote", "UpdateIniNoSignature", "UpdateIniSilentLog", "NoHelperDownload", "KnowledgeStoreUseLLMIndex", "KnowledgeStoreBackgroundIndexing"
@@ -956,6 +957,16 @@ Namespace SharedLibrary
                     Return context.INI_MarkupRegexCap.ToString()
                 Case "MarkupAuthor"
                     Return context.INI_MarkupAuthor
+                Case "SimpleMenuOverride"
+                    Return context.INI_SimpleMenuOverride.ToString()
+                Case "SimpleMenuHide"
+                    Return context.INI_SimpleMenuHide
+                Case "MenuBlock"
+                    Return context.INI_MenuBlock
+                Case "WebServerBlock"
+                    Return context.INI_WebServerBlock.ToString()
+                Case "SimpleMenuDefault"
+                    Return context.INI_SimpleMenuDefault.ToString()
                 Case "ChatCap"
                     Return context.INI_ChatCap.ToString()
                 Case "PreCorrection"
@@ -1330,6 +1341,16 @@ Namespace SharedLibrary
                     context.INI_MarkupRegexCap = Integer.Parse(value)
                 Case "MarkupAuthor"
                     context.INI_MarkupAuthor = value
+                Case "SimpleMenuOverride"
+                    context.INI_SimpleMenuOverride = Boolean.Parse(value)
+                Case "SimpleMenuHide"
+                    context.INI_SimpleMenuHide = value
+                Case "MenuBlock"
+                    context.INI_MenuBlock = value
+                Case "WebServerBlock"
+                    context.INI_WebServerBlock = Integer.Parse(value)
+                Case "SimpleMenuDefault"
+                    context.INI_SimpleMenuDefault = Boolean.Parse(value)
                 Case "ChatCap"
                     context.INI_ChatCap = Integer.Parse(value)
                 Case "PreCorrection"
@@ -1796,6 +1817,11 @@ Namespace SharedLibrary
                     {"OAuth2Scopes_2", context.INI_OAuth2Scopes_2},
                     {"OAuth2Endpoint_2", context.INI_OAuth2Endpoint_2},
                     {"OAuth2ATExpiry_2", context.INI_OAuth2ATExpiry_2.ToString()},
+                    {"SimpleMenuOverride", context.INI_SimpleMenuOverride.ToString()},
+                    {"SimpleMenuHide", context.INI_SimpleMenuHide},
+                    {"SimpleMenuDefault", context.INI_SimpleMenuDefault.ToString()},
+                    {"MenuBlock", context.INI_MenuBlock},
+                    {"WebServerBlock", context.INI_WebServerBlock.ToString()},
                     {"M365ClientID", context.INI_M365ClientId},
                     {"M365TenantID", context.INI_M365TenantId},
                     {"M365Scopes", context.INI_M365Scopes},
@@ -1824,6 +1850,11 @@ Namespace SharedLibrary
                     {"MarkupMethodWordOverride", context.INI_MarkupMethodWordOverride},
                     {"MarkupMethodOutlookOverride", context.INI_MarkupMethodOutlookOverride},
                     {"MarkupAuthor", context.INI_MarkupAuthor},
+                    {"SimpleMenuOverride", context.INI_SimpleMenuOverride.ToString()},
+                    {"SimpleMenuHide", context.INI_SimpleMenuHide},
+                    {"SimpleMenuDefault", context.INI_SimpleMenuDefault.ToString()},
+                    {"MenuBlock", context.INI_MenuBlock},
+                    {"WebServerBlock", context.INI_WebServerBlock.ToString()},
                     {"ShortcutsWordExcel", context.INI_ShortcutsWordExcel},
                     {"ContextMenu", context.INI_ContextMenu.ToString()},
                     {"NoLocalConfig", context.INI_NoLocalConfig.ToString()},
@@ -2014,7 +2045,8 @@ Namespace SharedLibrary
                     {"MarkupAuthor", "MarkupAuthor"},
                     {"KnowledgeStoreBackgroundIndexing", "EnableKBBackgroundIndexing"},
                     {"KnowledgeStoreBackgroundIndexingWindow", "KnowledgeStoreBackgroundIndexingWindow"},
-                    {"FormulaInstruction", "FormulaInstruction"}
+                    {"FormulaInstruction", "FormulaInstruction"},
+                    {"SimpleMenuOverride", "SimpleMenuOverride"}
                 }
 
                 ' Accumulate settings to persist to My.Settings at the end
@@ -3260,6 +3292,11 @@ Namespace SharedLibrary
             variableValues.Add("M365ClientID", context.INI_M365ClientId)
             variableValues.Add("M365TenantID", context.INI_M365TenantId)
             variableValues.Add("M365Scopes", context.INI_M365Scopes)
+            variableValues.Add("SimpleMenuOverride", context.INI_SimpleMenuOverride)
+            variableValues.Add("SimpleMenuHide", context.INI_SimpleMenuHide)
+            variableValues.Add("SimpleMenuDefault", context.INI_SimpleMenuDefault)
+            variableValues.Add("MenuBlock", context.INI_MenuBlock)
+            variableValues.Add("WebServerBlock", context.INI_WebServerBlock)
             variableValues.Add("ISearch", context.INI_ISearch)
             variableValues.Add("ISearch_Approve", context.INI_ISearch_Approve)
             variableValues.Add("ISearch_URL", context.INI_ISearch_URL)
@@ -3285,6 +3322,11 @@ Namespace SharedLibrary
             variableValues.Add("MarkupMethodWordOverride", context.INI_MarkupMethodWordOverride)
             variableValues.Add("MarkupMethodOutlookOverride", context.INI_MarkupMethodOutlookOverride)
             variableValues.Add("MarkupAuthor", context.INI_MarkupAuthor)
+            variableValues.Add("SimpleMenuOverride", context.INI_SimpleMenuOverride)
+            variableValues.Add("SimpleMenuHide", context.INI_SimpleMenuHide)
+            variableValues.Add("SimpleMenuDefault", context.INI_SimpleMenuDefault)
+            variableValues.Add("MenuBlock", context.INI_MenuBlock)
+            variableValues.Add("WebServerBlock", context.INI_WebServerBlock)
             variableValues.Add("ContextMenu", context.INI_ContextMenu)
             variableValues.Add("NoLocalConfig", context.INI_NoLocalConfig)
             variableValues.Add("CentralConfigClients", context.INI_CentralConfigClients)
@@ -3667,6 +3709,11 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("MarkupMethodWordOverride") Then context.INI_MarkupMethodWordOverride = CStr(updatedValues("MarkupMethodWordOverride"))
                 If updatedValues.ContainsKey("MarkupMethodOutlookOverride") Then context.INI_MarkupMethodOutlookOverride = CStr(updatedValues("MarkupMethodOutlookOverride"))
                 If updatedValues.ContainsKey("MarkupAuthor") Then context.INI_MarkupAuthor = CStr(updatedValues("MarkupAuthor"))
+                If updatedValues.ContainsKey("SimpleMenuOverride") Then context.INI_SimpleMenuOverride = CBool(updatedValues("SimpleMenuOverride"))
+                If updatedValues.ContainsKey("SimpleMenuHide") Then context.INI_SimpleMenuHide = CStr(updatedValues("SimpleMenuHide"))
+                If updatedValues.ContainsKey("SimpleMenuDefault") Then context.INI_SimpleMenuDefault = CBool(updatedValues("SimpleMenuDefault"))
+                If updatedValues.ContainsKey("MenuBlock") Then context.INI_MenuBlock = CStr(updatedValues("MenuBlock"))
+                If updatedValues.ContainsKey("WebServerBlock") Then context.INI_WebServerBlock = CInt(updatedValues("WebServerBlock"))
                 If updatedValues.ContainsKey("ShortcutsWordExcel") Then context.INI_ShortcutsWordExcel = CStr(updatedValues("ShortcutsWordExcel"))
                 If updatedValues.ContainsKey("ContextMenu") Then context.INI_ContextMenu = CBool(updatedValues("ContextMenu"))
                 If updatedValues.ContainsKey("NoLocalConfig") Then context.INI_NoLocalConfig = CBool(updatedValues("NoLocalConfig"))

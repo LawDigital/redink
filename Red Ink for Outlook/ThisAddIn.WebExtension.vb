@@ -66,6 +66,32 @@ Partial Public Class ThisAddIn
 
     Private Const LegacyWebExtensionRoute As String = "/redink"
 
+    Private Function IsLocalChatAndInkyPlayEnabled() As System.Boolean
+        Return INI_WebServerBlock <> 2
+    End Function
+
+    Private Function IsLegacyEdgeExtensionReceiverEnabled() As System.Boolean
+        Return INI_WebServerBlock <> 3
+    End Function
+
+    Private Sub SendFeatureBlockedResponse(
+        ByVal res As System.Net.HttpListenerResponse,
+        ByVal requestId As System.String,
+        ByVal message As System.String,
+        Optional ByVal addCors As System.Boolean = False
+    )
+        Dim payload() As System.Byte = System.Text.Encoding.UTF8.GetBytes(message)
+
+        SendBufferedHttpResponse(
+            res,
+            403,
+            "text/plain; charset=utf-8",
+            payload,
+            requestId,
+            "feature-blocked",
+            addCors:=addCors)
+    End Sub
+
     Private Const AllToolUse As String = "Advanced tools"
     Private Const AllToolUseDescription As String =
         "Turns selected advanced tools on or off. Configure which advanced tools are callable through the Agents button."
@@ -142,11 +168,43 @@ Partial Public Class ThisAddIn
         Dim requestMethod As System.String = If(req.HttpMethod, System.String.Empty)
         Dim debugEnabled As System.Boolean = INI_APIDebug
 
+        Dim isLegacyWebExtensionRequest As System.Boolean =
+            System.String.Equals(requestPath, LegacyWebExtensionRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
+            System.String.Equals(requestPath, LegacyWebExtensionRoute & "/", System.StringComparison.OrdinalIgnoreCase)
+
+        Dim isLocalChatRequest As System.Boolean =
+            System.String.Equals(requestPath, "/", System.StringComparison.OrdinalIgnoreCase) OrElse
+            System.String.Equals(requestPath, "/inky/ping", System.StringComparison.OrdinalIgnoreCase) OrElse
+            System.String.Equals(requestPath, InkyUiRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
+            System.String.Equals(requestPath, InkyUiRoute & "/", System.StringComparison.OrdinalIgnoreCase) OrElse
+            System.String.Equals(requestPath, InkyPlayRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
+            System.String.Equals(requestPath, InkyPlayRoute & "/", System.StringComparison.OrdinalIgnoreCase) OrElse
+            System.String.Equals(requestPath, InkyApiRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
+            System.String.Equals(requestPath, InkyApiRoute & "/", System.StringComparison.OrdinalIgnoreCase)
+
         System.Threading.Interlocked.Increment(activeRequests)
 
         Dim hb As System.Threading.Timer = Nothing
 
         Try
+            If isLocalChatRequest AndAlso Not IsLocalChatAndInkyPlayEnabled() Then
+                SendFeatureBlockedResponse(
+                    res,
+                    requestId,
+                    "Local chat and InkyPlay are disabled by WebServerBlock.",
+                    addCors:=True)
+                Return
+            End If
+
+            If isLegacyWebExtensionRequest AndAlso Not IsLegacyEdgeExtensionReceiverEnabled() Then
+                SendFeatureBlockedResponse(
+                    res,
+                    requestId,
+                    "The Edge extension receiver is disabled by WebServerBlock.",
+                    addCors:=True)
+                Return
+            End If
+
             If debugEnabled Then
                 Dim rawUrl As System.String = ""
                 Dim hostHeader As System.String = ""

@@ -903,6 +903,18 @@ Namespace My
                 Me("TalkToMeIncludeFullDocument") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property SimpleMenuOverride() As Boolean
+            Get
+                Return CType(Me("SimpleMenuOverride"),Boolean)
+            End Get
+            Set
+                Me("SimpleMenuOverride") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

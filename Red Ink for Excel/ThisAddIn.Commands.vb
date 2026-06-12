@@ -1414,6 +1414,7 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Public Sub ShowSettings()
         Dim Settings As New Dictionary(Of String, String) From {
+            {"SimpleMenuOverride", "Simple menu:"},
             {"Temperature", "Temperature of {model}"},
             {"Timeout", "Timeout of {model}"},
             {"Temperature_2", "Temperature of {model2}"},
@@ -1434,6 +1435,7 @@ Partial Public Class ThisAddIn
             {"FormulaInstruction", "Additional formula instructions:"}
         }
         Dim SettingsTips As New Dictionary(Of String, String) From {
+            {"SimpleMenuOverride", "Only show the simple menu features in this add-in (can be defined)"},
             {"Temperature", "The higher, the more creative the LLM will be (0.0-2.0)"},
             {"Timeout", "In milliseconds"},
             {"Temperature_2", "The higher, the more creative the LLM will be (0.0-2.0)"},

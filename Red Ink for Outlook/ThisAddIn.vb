@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 9.6.2026
+' 12.6.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -60,7 +60,7 @@ Partial Public Class ThisAddIn
     Public Const AN6 As String = "Inky"
     Public Const AN4 As String = "redink_"
 
-    Public Shared Version As String = "V.090626" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.120626" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -383,10 +383,12 @@ Partial Public Class ThisAddIn
 
             UpdateHandler.PeriodicCheckForUpdates(INI_UpdateCheckInterval, "Outlook", INI_UpdatePath, _context)
             Dim result = Globals.Ribbons.Ribbon1.UpdateRibbon()
+            Globals.Ribbons.Ribbon1.ApplyRibbonVisibilityConfiguration()
             result = Globals.Ribbons.Ribbon2.UpdateRibbon()
+            Globals.Ribbons.Ribbon2.ApplyRibbonVisibilityConfiguration()
             mainThreadControl.CreateControl()
             StartListenerWatchdog()
-            StartupHttpListener()
+            StartupHttpListener(INI_WebServerBlock)
 
             ' Initialize Knowledge Store background indexing service
             InitializeKnowledgeStoreService()
