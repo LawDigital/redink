@@ -2321,6 +2321,8 @@ Namespace SharedLibrary
                 {"UpdateCheckInterval", DefaultUpdateIntervalDays},
                 {"AssembleExecMaxChars", DEFAULT_ASSEMBLE_EXEC_MAX_CHARS},
                 {"AssembleMaxContextSummaryChars", DEFAULT_ASSEMBLE_MAX_CONTEXT_SUMMARY_CHARS},
+                {"SimpleMenuDefault", DEFAULT_SIMPLEMENUDEFAULT},
+                {"SimpleMenuHide", DEFAULT_SIMPLEMENUHIDE},
                 {"SP_Assemble_Plan", Default_SP_Assemble_Plan},
                 {"SP_Assemble_Execute", Default_SP_Assemble_Execute},
                 {"SP_Assemble_Summarize", Default_SP_Assemble_Summarize}

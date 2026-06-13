@@ -2301,7 +2301,7 @@ Partial Public Class ThisAddIn
     Public Sub ShowSettings()
 
         Dim Settings As New Dictionary(Of String, String) From {
-                        {"SimpleMenuOverride", "Simple menu:"},
+                        {"SimpleMenuOverride", "Simple menu"},
                         {"Temperature", "Temperature of {model}"},
                         {"Timeout", "Timeout of {model}"},
                         {"Temperature_2", "Temperature of {model2}"},

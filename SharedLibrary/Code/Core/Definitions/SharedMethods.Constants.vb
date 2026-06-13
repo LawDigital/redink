@@ -212,7 +212,7 @@ Namespace SharedLibrary
                                         }
                                        }
 
-        Public Const GetMoreStuffURL As String = "https//redink.ai/get-more"
+        Public Const GetMoreStuffURL As String = "https://redink.ai/get-more"
         Public Shared SampleFilesListURL As String = $"{AppsUrl}{AppsUrlDir}{AN2}-samplefilesloadlist.txt"
 
         ' Default Prompts
@@ -357,6 +357,9 @@ Namespace SharedLibrary
         ' M365
         Public Const DEFAULT_M365SCOPES As String = "openid profile Calendars.Read Chat.Read ChannelMessage.Read.All Files.Read Mail.Read Notes.Read.All offline_access Sites.Read.All User.Read"
 
+        ' Simple Menu
+        Public Const DEFAULT_SIMPLEMENUHIDE As String = "Markup Time Span; Regex Search && Replace; Context Search; Talk to me!; Create Podcast; Apply Comment (Edit);  Apply Comment To Para (Edit); Freestyle (redo); Apply MyStyle; Define MyStyle; Document Check; Find Clause; Add Clause; Run WebAgent; Edit WebAgent; Convert Markdown; Remove Content Controls; Propose PDF Redactions; Finalize PDF Redactions; Anonymize Text (terms); Edit Instructions; Filibuster (Expand Text); Apply MyDocStyle; Learn MyDocStyle; Edit/Create Diagrams (draw.io); Snapshot && Compare; Remove RI: Reference; Flowchart to Webapp; Store Clause for Justification; Justify Markup; Stamp PDF Exhibits; Switch Model; Flatten PDFs To Images; Create Audio; Transcriptor; Switch Party; Tabular Overview; Mail Mover; Expert Tools; Microsoft 365 Mail Search; Excel Helpers; Analyze Tools"
+        Public Const DEFAULT_SIMPLEMENUDEFAULT As Boolean = True
 
         ' Language defaults
         Public Const DEFAULT_LANGUAGE_1 As String = "English"

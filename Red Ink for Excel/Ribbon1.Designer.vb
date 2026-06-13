@@ -219,7 +219,7 @@ Partial Class Ribbon1
         Me.Menu3.Items.Add(Me.RI_TXTAnalyze)
         Me.Menu3.Items.Add(Me.RI_Extractor)
         Me.Menu3.Items.Add(Me.RI_Renamer)
-        Me.Menu3.Label = "Analyze"
+        Me.Menu3.Label = "Analyze Tools"
         Me.Menu3.Name = "Menu3"
         Me.Menu3.OfficeImageId = "WhatIfAnalysisMenu"
         Me.Menu3.ScreenTip = "Functions that analyze CSV files, extract data from documents and change file nam" &

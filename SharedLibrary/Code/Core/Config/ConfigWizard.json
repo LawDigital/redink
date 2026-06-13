@@ -1020,20 +1020,20 @@
                 "key": "SimpleMenuDefault",
                 "label": "Simple Menu Default",
                 "type": "boolean",
-                "default": "False",
+                "default": "True",
                 "description": "Enable this if Red Ink should start in simple-menu mode by default, meaning the menu items listed in SimpleMenuHide are hidden unless the user turns off the simple mode in 'Settings'. Example: True. [SimpleMenuDefault]"
             },
             {
                 "key": "SimpleMenuHide",
                 "label": "Simple Menu Hide List",
-                "type": "string",
-                "default": "",
+                "type": "multiline",
+                "default": "Markup Time Span; Regex Search && Replace; Context Search; Talk to me!; Create Podcast; Apply Comment (Edit);  Apply Comment To Para (Edit); Freestyle (redo); Apply MyStyle; Define MyStyle; Document Check; Find Clause; Add Clause; Run WebAgent; Edit WebAgent; Convert Markdown; Remove Content Controls; Propose PDF Redactions; Finalize PDF Redactions; Anonymize Text (terms); Edit Instructions; Filibuster (Expand Text); Apply MyDocStyle; Learn MyDocStyle; Edit/Create Diagrams (draw.io); Snapshot && Compare; Remove RI: Reference; Flowchart to Webapp; Store Clause for Justification; Justify Markup; Stamp PDF Exhibits; Switch Model; Flatten PDFs To Images; Create Audio; Transcriptor; Switch Party; Tabular Overview; Mail Mover; Expert Tools; Microsoft 365 Mail Search; Excel Helpers; Analyze Tools",
                 "description": "List of menu items to hide when Simple Menu mode is active. You may use exact internal control names such as RI_Correct (in Word, you can retrieve them with the Freestyle short command 'menunames') or exact visible labels such as Correct Text/Files. Separate entries with commas or semicolons. This works across all add-ins. Example: RI_Correct;RI_Translate;Task. [SimpleMenuHide]"
             },
             {
                 "key": "MenuBlock",
                 "label": "Always Hidden Menu Items",
-                "type": "string",
+                "type": "multiline",
                 "default": "",
                 "description": "List of menu items that must always stay hidden, regardless of Simple Menu mode or later ribbon updates. You may use exact internal control names (in Word, you can retrieve them with the Freestyle short command 'menunames') or exact visible labels. Separate entries with commas or semicolons. This works across all add-ins. Example: RI_Primlang;RI_Improve;Help me, Inky. [MenuBlock]"
             },
@@ -1061,7 +1061,7 @@
             {
                 "key": "ShortcutsWordExcel",
                 "label": "Keyboard Shortcuts",
-                "type": "string",
+                "type": "multiline",
                 "default": "",
                 "description": "Define keyboard shortcuts in the format Menu item=Key combination, separated by semicolons. The menu text must match the visible command name exactly. This only works if the Word and/or Excel helper is installed. Example: To English=Ctrl-Shift-E;Freestyle=Ctrl-Shift-P. [ShortcutsWordExcel]"
             },

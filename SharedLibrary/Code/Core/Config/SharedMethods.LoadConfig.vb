@@ -263,7 +263,7 @@ Namespace SharedLibrary
                 context.INI_MarkupRegexCap = If(configDict.ContainsKey("MarkupRegexCap"), CInt(configDict("MarkupRegexCap")), DEFAULT_MARKUP_REGEX_CAP)
                 context.INI_ChatCap = If(configDict.ContainsKey("ChatCap"), CInt(configDict("ChatCap")), DEFAULT_CHAT_CAP)
                 context.INI_InkyMemoryCap = If(configDict.ContainsKey("InkyMemoryCap"), CInt(configDict("InkyMemoryCap")), DEFAULT_INKY_MEMORY_CAP)
-                context.INI_SimpleMenuHide = If(configDict.ContainsKey("SimpleMenuHide"), configDict("SimpleMenuHide"), "")
+                context.INI_SimpleMenuHide = If(configDict.ContainsKey("SimpleMenuHide"), configDict("SimpleMenuHide"), DEFAULT_SIMPLEMENUHIDE)
                 context.INI_MenuBlock = If(configDict.ContainsKey("MenuBlock"), configDict("MenuBlock"), "")
                 context.INI_WebServerBlock = If(configDict.ContainsKey("WebServerBlock"), CInt(configDict("WebServerBlock")), 0)
 
@@ -290,7 +290,7 @@ Namespace SharedLibrary
                 context.INI_DoMarkupOutlook = ParseBoolean(configDict, "DoMarkupOutlook", DEFAULT_BOOL_DOMARKUPOUTLOOK)
                 context.INI_DoMarkupWord = ParseBoolean(configDict, "DoMarkupWord", DEFAULT_BOOL_DOMARKUPWORD)
                 context.INI_RoastMe = ParseBoolean(configDict, "RoastMe", False)
-                context.INI_SimpleMenuDefault = ParseBoolean(configDict, "SimpleMenuDefault")
+                context.INI_SimpleMenuDefault = ParseBoolean(configDict, "SimpleMenuDefault", DEFAULT_SIMPLEMENUDEFAULT)
                 context.INI_APIDebug = ParseBoolean(configDict, "APIDebug")
                 context.INI_AutoPilotAutoStart = ParseBoolean(configDict, "AutoPilotAutoStart")
                 context.INI_AutoPilotSchedulerLocalChat = ParseBoolean(configDict, "AutoPilotSchedulerLocalChat")
