@@ -382,6 +382,7 @@ Namespace SharedLibrary
                 context.INI_AgentResourcesPathLocal = If(configDict.ContainsKey("AgentResourcesPathLocal"), configDict("AgentResourcesPathLocal"), "")
                 Agents.AgentResources.SetPaths(context.INI_AgentResourcesPath, context.INI_AgentResourcesPathLocal)
 
+                context.INI_ChunkOCR = If(configDict.ContainsKey("ChunkOCR"), CInt(configDict("ChunkOCR")), DEFAULT_CHUNK_OCR_PAGES)
 
                 ' Logo paths
                 context.INI_LogoPath = If(configDict.ContainsKey("LogoPath"), configDict("LogoPath"), "")

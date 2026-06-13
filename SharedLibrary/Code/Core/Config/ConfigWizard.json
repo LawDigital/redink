@@ -1059,6 +1059,13 @@
                 "description": "Maximum number of characters from earlier chatbot conversation that Red Ink should keep in memory. Lower values reduce cost and help preserve space for the active document. Example: 50000. [ChatCap]"
             },
             {
+                "key": "ChunkOCR",
+                "label": "Chunk OCR Pages",
+                "type": "integer",
+                "default": "0",
+                "description": "Number of pages to process in each chunk when doing OCR (in order not to overwhelm the model). Set to 0 to turn off chunking during OCR. Example: 25. [ChunkOCR]"
+            },
+            {
                 "key": "ShortcutsWordExcel",
                 "label": "Keyboard Shortcuts",
                 "type": "multiline",

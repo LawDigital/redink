@@ -941,6 +941,8 @@ Namespace SharedLibrary
                     Return context.INI_DoMarkupOutlook.ToString()
                 Case "DoMarkupWord"
                     Return context.INI_DoMarkupWord.ToString()
+                Case "ChunkOCR"
+                    Return context.INI_ChunkOCR.ToString()
                 Case "MarkupMethodHelper"
                     Return context.INI_MarkupMethodHelper.ToString()
                 Case "MarkupMethodWord"
@@ -1341,6 +1343,8 @@ Namespace SharedLibrary
                     context.INI_MarkupRegexCap = Integer.Parse(value)
                 Case "MarkupAuthor"
                     context.INI_MarkupAuthor = value
+                Case "ChunkOCR"
+                    context.INI_ChunkOCR = Integer.Parse(value)
                 Case "SimpleMenuOverride"
                     context.INI_SimpleMenuOverride = Boolean.Parse(value)
                 Case "SimpleMenuHide"
@@ -1786,6 +1790,7 @@ Namespace SharedLibrary
                     {"MarkupMethodOutlook", context.INI_MarkupMethodOutlook.ToString()},
                     {"MarkupDiffCap", context.INI_MarkupDiffCap.ToString()},
                     {"MarkupRegexCap", context.INI_MarkupRegexCap.ToString()},
+                    {"ChunkOCR", context.INI_ChunkOCR.ToString()},
                     {"ChatCap", context.INI_ChatCap.ToString()},
                     {"APIDebug", context.INI_APIDebug.ToString()},
                     {"AutoPilotAutoStart", context.INI_AutoPilotAutoStart.ToString()},
@@ -2294,6 +2299,7 @@ Namespace SharedLibrary
                 {"MarkupMethodOutlook", DEFAULT_MARKUP_METHOD_OUTLOOK},
                 {"MarkupDiffCap", DEFAULT_MARKUP_DIFF_CAP},
                 {"MarkupRegexCap", DEFAULT_MARKUP_REGEX_CAP},
+                {"ChunkOCR", DEFAULT_CHUNK_OCR_PAGES},
                 {"ChatCap", DEFAULT_CHAT_CAP},
                 {"Lib_Timeout", DEFAULT_TIMEOUT_LIB},
                 {"UpdateIniSilentMode", DEFAULT_UPDATE_INI_SILENT_MODE},
@@ -3291,6 +3297,7 @@ Namespace SharedLibrary
             variableValues.Add("ReplaceText2Override", context.INI_ReplaceText2Override)
             variableValues.Add("DoMarkupOutlook", context.INI_DoMarkupOutlook)
             variableValues.Add("DoMarkupWord", context.INI_DoMarkupWord)
+            variableValues.Add("ChunkOCR", context.INI_ChunkOCR)
             variableValues.Add("M365ClientID", context.INI_M365ClientId)
             variableValues.Add("M365TenantID", context.INI_M365TenantId)
             variableValues.Add("M365Scopes", context.INI_M365Scopes)
@@ -3581,6 +3588,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("ReplaceText2Override") Then context.INI_ReplaceText2Override = CStr(updatedValues("ReplaceText2Override"))
                 If updatedValues.ContainsKey("DoMarkupOutlook") Then context.INI_DoMarkupOutlook = CBool(updatedValues("DoMarkupOutlook"))
                 If updatedValues.ContainsKey("DoMarkupWord") Then context.INI_DoMarkupWord = CBool(updatedValues("DoMarkupWord"))
+                If updatedValues.ContainsKey("ChunkOCR") Then context.INI_ChunkOCR = CInt(updatedValues("ChunkOCR"))
                 If updatedValues.ContainsKey("SP_Translate") Then context.SP_Translate = CStr(updatedValues("SP_Translate"))
                 If updatedValues.ContainsKey("SP_Translate_Multi") Then context.SP_Translate_Multi = CStr(updatedValues("SP_Translate_Multi"))
                 If updatedValues.ContainsKey("SP_Translate_Multi_Source") Then context.SP_Translate_Multi_Source = CStr(updatedValues("SP_Translate_Multi_Source"))
