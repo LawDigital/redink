@@ -979,9 +979,9 @@ Namespace SharedLibrary
                     Return context.INI_Language2.ToString()
                 Case "ShortcutsWordExcel"
                     Return context.INI_ShortcutsWordExcel
-                Case "PromptLibPath"
+                Case "PromptLibPath", "Promptlib"
                     Return context.INI_PromptLibPath
-                Case "PromptLibPathLocal"
+                Case "PromptLibPathLocal", "PromptLibLocal"
                     Return context.INI_PromptLibPathLocal
                 Case "MyStylePath"
                     Return context.INI_MyStylePath
@@ -1013,7 +1013,7 @@ Namespace SharedLibrary
                     Return context.INI_DocStylePath
                 Case "DocStylePathLocal"
                     Return context.INI_DocStylePathLocal
-                Case "PromptLibPath_Transcript"
+                Case "PromptLibPath_Transcript", "PromptLib_Transcript"
                     Return context.INI_PromptLibPath_Transcript
                 Case "SpeechModelPath"
                     Return context.INI_SpeechModelPath
@@ -1363,13 +1363,13 @@ Namespace SharedLibrary
                     context.INI_Language2 = value
                 Case "ShortcutsWordExcel"
                     context.INI_ShortcutsWordExcel = value
-                Case "PromptLibPath"
+                Case "PromptLibPath", "Promptlib"
                     context.INI_PromptLibPath = value
-                Case "PromptLibPathLocal"
+                Case "PromptLibPathLocal", "PromptLibLocal"
                     context.INI_PromptLibPathLocal = value
                 Case "MyStylePath"
                     context.INI_MyStylePath = value
-                Case "PromptLibPath_Transcript"
+                Case "PromptLibPath_Transcript", "PromptLib_Transcript"
                     context.INI_PromptLibPath_Transcript = value
                 Case "AlternateModelPath"
                     context.INI_AlternateModelPath = value
@@ -3322,11 +3322,6 @@ Namespace SharedLibrary
             variableValues.Add("MarkupMethodWordOverride", context.INI_MarkupMethodWordOverride)
             variableValues.Add("MarkupMethodOutlookOverride", context.INI_MarkupMethodOutlookOverride)
             variableValues.Add("MarkupAuthor", context.INI_MarkupAuthor)
-            variableValues.Add("SimpleMenuOverride", context.INI_SimpleMenuOverride)
-            variableValues.Add("SimpleMenuHide", context.INI_SimpleMenuHide)
-            variableValues.Add("SimpleMenuDefault", context.INI_SimpleMenuDefault)
-            variableValues.Add("MenuBlock", context.INI_MenuBlock)
-            variableValues.Add("WebServerBlock", context.INI_WebServerBlock)
             variableValues.Add("ContextMenu", context.INI_ContextMenu)
             variableValues.Add("NoLocalConfig", context.INI_NoLocalConfig)
             variableValues.Add("CentralConfigClients", context.INI_CentralConfigClients)

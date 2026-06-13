@@ -984,67 +984,95 @@
       ]
     },
     {
-      "id": "app_config",
-      "title": "Application Behaviour",
-      "description": "General behaviour for the add-ins, including chat memory, shortcut handling, debugging and help/manual integration.",
-      "fields": [
-        {
-          "key": "ChatCap",
-          "label": "Chat Character Cap",
-          "type": "integer",
-          "default": "80000",
-          "description": "Maximum number of characters from earlier chatbot conversation that Red Ink should keep in memory. Lower values reduce cost and help preserve space for the active document. Example: 50000. [ChatCap]"
-        },
-        {
-          "key": "ContextMenu",
-          "label": "Context Menu",
-          "type": "boolean",
-          "default": "True",
-          "description": "Enable this if the Red Ink context menu should appear in Word and Excel when the helper add-ins are installed. Example: True. [ContextMenu]"
-        },
-        {
-          "key": "ShortcutsWordExcel",
-          "label": "Keyboard Shortcuts",
-          "type": "string",
-          "default": "",
-          "description": "Define keyboard shortcuts in the format Menu item=Key combination, separated by semicolons. The menu text must match the visible command name exactly. This only works if the Word and/or Excel helper is installed. Example: To English=Ctrl-Shift-E;Freestyle=Ctrl-Shift-P. [ShortcutsWordExcel]"
-        },
-        {
-          "key": "APIDebug",
-          "label": "API Debug Mode",
-          "type": "boolean",
-          "default": "False",
-          "description": "Enable this to write the full request and response payloads for troubleshooting to debug files on the desktop. Avoid enabling it in production unless you really need diagnostics. Example: False. [APIDebug]"
-        },
-        {
-          "key": "Language1",
-          "label": "Language 1",
-          "type": "string",
-          "default": "English",
-          "description": "Enter the first quick-translation language name in English. This controls the first direct translation button in the ribbon. Example: English. [Language1]"
-        },
-        {
-          "key": "Language2",
-          "label": "Language 2",
-          "type": "string",
-          "default": "German",
-          "description": "Enter the second quick-translation language name in English. This controls the second direct translation button in the ribbon. Example: German. [Language2]"
-        },
-        {
-          "key": "UsageRestrictions",
-          "label": "Usage Restrictions Tooltip",
-          "type": "multiline",
-          "default": "",
-          "description": "Optional policy text shown when users hover over the Red Ink logo. Use this to communicate internal usage rules or confidentiality guidance. Example: You may use Red Ink for all kinds of data, including professional secrecy data. [UsageRestrictions]"
-        },
-        {
-          "key": "HelpMeInkyPath",
-          "label": "Help Me Inky Source",
-          "type": "string",
-          "default": "",
-          "description": "Optional path or URL to the manual file used as the knowledge base for the Help me, Inky chatbot (can be .txt, .docx or .pdf). If left empty, Red Ink uses the standard manual from the Red Ink server. Example: https://intranet.example.com/red_ink_guide.txt. [HelpMeInkyPath]"
-        }
-      ]
+        "id": "app_config",
+        "title": "Application Behaviour",
+        "description": "General behaviour for the add-ins, including standard translation languages, menu and shortcut handling, user info, help file source, chat memory, and debugging.",
+        "fields": [
+            {
+                "key": "Language1",
+                "label": "Language 1",
+                "type": "string",
+                "default": "English",
+                "description": "Enter the first quick-translation language name in English. This controls the first direct translation button in the ribbon. Example: English. [Language1]"
+            },
+            {
+                "key": "Language2",
+                "label": "Language 2",
+                "type": "string",
+                "default": "German",
+                "description": "Enter the second quick-translation language name in English. This controls the second direct translation button in the ribbon. Example: German. [Language2]"
+            },
+            {
+                "key": "UsageRestrictions",
+                "label": "Usage Restrictions Tooltip",
+                "type": "multiline",
+                "default": "",
+                "description": "Optional policy text shown when users hover over the Red Ink logo. Use this to communicate internal usage rules or confidentiality guidance. Example: You may use Red Ink for all kinds of data, including professional secrecy data. [UsageRestrictions]"
+            },
+            {
+                "key": "HelpMeInkyPath",
+                "label": "Help Me Inky Source",
+                "type": "string",
+                "default": "",
+                "description": "Optional path or URL to the manual file used as the knowledge base for the Help me, Inky chatbot (can be .txt, .docx or .pdf). If left empty, Red Ink uses the standard manual from the Red Ink server. Example: https://intranet.example.com/red_ink_guide.txt. [HelpMeInkyPath]"
+            },
+            {
+                "key": "SimpleMenuDefault",
+                "label": "Simple Menu Default",
+                "type": "boolean",
+                "default": "False",
+                "description": "Enable this if Red Ink should start in simple-menu mode by default, meaning the menu items listed in SimpleMenuHide are hidden unless the user turns off the simple mode in 'Settings'. Example: True. [SimpleMenuDefault]"
+            },
+            {
+                "key": "SimpleMenuHide",
+                "label": "Simple Menu Hide List",
+                "type": "string",
+                "default": "",
+                "description": "List of menu items to hide when Simple Menu mode is active. You may use exact internal control names such as RI_Correct (in Word, you can retrieve them with the Freestyle short command 'menunames') or exact visible labels such as Correct Text/Files. Separate entries with commas or semicolons. This works across all add-ins. Example: RI_Correct;RI_Translate;Task. [SimpleMenuHide]"
+            },
+            {
+                "key": "MenuBlock",
+                "label": "Always Hidden Menu Items",
+                "type": "string",
+                "default": "",
+                "description": "List of menu items that must always stay hidden, regardless of Simple Menu mode or later ribbon updates. You may use exact internal control names (in Word, you can retrieve them with the Freestyle short command 'menunames') or exact visible labels. Separate entries with commas or semicolons. This works across all add-ins. Example: RI_Primlang;RI_Improve;Help me, Inky. [MenuBlock]"
+            },
+            {
+                "key": "ContextMenu",
+                "label": "Context Menu",
+                "type": "boolean",
+                "default": "True",
+                "description": "Enable this if the Red Ink context menu should appear in Word and Excel when the helper add-ins are installed. Example: True. [ContextMenu]"
+            },
+            {
+                "key": "WebServerBlock",
+                "label": "Web Server Block Level",
+                "type": "integer",
+                "default": "0",
+                "description": "Controls whether and how Red Ink's integrated local web server in Outlook and Word should be blocked or restricted. 0 = all turned on, 1 = all turned off, 2 Local Chat/InkyPlay turned off, 3 = Edge/Chrome extension back-end turned off. Example: 0. [WebServerBlock]"
+            },
+            {
+                "key": "ChatCap",
+                "label": "Chat Character Cap",
+                "type": "integer",
+                "default": "80000",
+                "description": "Maximum number of characters from earlier chatbot conversation that Red Ink should keep in memory. Lower values reduce cost and help preserve space for the active document. Example: 50000. [ChatCap]"
+            },
+            {
+                "key": "ShortcutsWordExcel",
+                "label": "Keyboard Shortcuts",
+                "type": "string",
+                "default": "",
+                "description": "Define keyboard shortcuts in the format Menu item=Key combination, separated by semicolons. The menu text must match the visible command name exactly. This only works if the Word and/or Excel helper is installed. Example: To English=Ctrl-Shift-E;Freestyle=Ctrl-Shift-P. [ShortcutsWordExcel]"
+            },
+            {
+                "key": "APIDebug",
+                "label": "API Debug Mode",
+                "type": "boolean",
+                "default": "False",
+                "description": "Enable this to write the full request and response payloads for troubleshooting to debug files on the desktop as well as more log files (e.g., for tooling). Avoid enabling it in production unless you really need diagnostics. Example: False. [APIDebug]"
+            }
+        ]
     },
     {
       "id": "prompt_resources",
@@ -1086,20 +1114,6 @@
       "title": "Content Libraries & Rule Sets",
       "description": "Shared and local files that power document-centric functions such as the resources for Red Ink's agentic features, WebAgent, Find Clause, Document Check, MyDocStyle, redaction and discussion personas. The local files can edited by the users themselves, whereas the shared files can be edited via the ''Expert Config'' menu. You can have these parameters set automatically by using the ''Get Sample Files'' feature in ''Settings'', which will also download sample files to give you an idea on how to build such files.",
         "fields": [
-            {
-                "key": "AgentResourcesPath",
-                "label": "Agent Resources Directory",
-                "type": "path",
-                "default": "%APPDATA%\\microsoft\\word",
-                "description": "Path to the shared directory that contains agent scripts (inky.md, skills, agents). Use a central network location if the same resources should be shared across users. Example: N:\\AI\\Library. [AgentResourcesPath"
-            },
-            {
-                "key": "AgentResourcesPathLocal",
-                "label": "Agent Resources Directory (Local)",
-                "type": "path",
-                "default": "",
-                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [AgentResourcesPathLocal]"
-            },
             {
                 "key": "WebAgentPath",
                 "label": "Web Agent Directory",
@@ -1436,15 +1450,7 @@
           "condition": "ISearch == True",
           "description": "Enable this to enforce privacy constraints on internet search queries. When enabled, the model is instructed never to include personal data, confidential information, or non-public details in search queries sent to external search engines. This affects both the tool definition and the prompt instructions. Example: True. [EnablePrivacyForSearch]"
         },
-        {
-          "key": "ISearch_Timeout",
-          "label": "Timeout (ms)",
-          "type": "integer",
-          "default": "30000",
-          "condition": "ISearch == True",
-          "description": "Maximum time in seconds Red Ink should spend on a single internet-search hit before moving on. Example: 3. [ISearch_Timeout]"
-        },
-        {
+           {
           "key": "ISearch_Timeout",
           "label": "Timeout (ms)",
           "type": "integer",
