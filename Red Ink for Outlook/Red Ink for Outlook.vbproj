@@ -499,6 +499,7 @@
     <Compile Include="ThisAddIn.AutoPilot.PdfRedactor.vb" />
     <Compile Include="ThisAddIn.AutoPilot.RegistryBackup.vb" />
     <Compile Include="ThisAddIn.AutoPilot.Scheduler.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.Tools.Office.Interop.vb" />
     <Compile Include="ThisAddIn.AutoPIlot.Tools.Other.vb" />
     <Compile Include="ThisAddIn.AutoPIlot.Tools.PDF.vb" />
     <Compile Include="ThisAddIn.AutoPIlot.Tools.Office.vb" />

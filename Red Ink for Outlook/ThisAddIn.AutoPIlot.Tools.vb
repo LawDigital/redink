@@ -120,6 +120,9 @@ Partial Public Class ThisAddIn
     Private Const AP_Tool_CreatePdfFromText As String = "create_pdf_from_text"
     Private Const AP_Tool_DescribeBinary As String = "describe_binary_attachment"
     Private Const AP_Tool_ExtractExcelData As String = "extract_excel_data"
+    Private Const AP_Tool_ExcelListLiveWorksheets As String = "excel_list_live_worksheets"
+    Private Const AP_Tool_ExcelReadLiveRange As String = "excel_read_live_range"
+    Private Const AP_Tool_ExcelCompleteLiveWorkbook As String = "excel_complete_live_workbook"
     Private Const AP_Tool_SplitPdf As String = "split_pdf"
     Private Const AP_Tool_AddPdfWatermark As String = "add_pdf_watermark"
     Private Const AP_Tool_WordToPdf As String = "word_to_pdf"
@@ -405,14 +408,95 @@ Partial Public Class ThisAddIn
             .ModelDescription = "Extract Excel Data (built-in)",
             .ToolInstructionsPrompt =
                 AP_Tool_ExtractExcelData & ": Reads data from an Excel attachment (.xlsx/.xls) with control over which sheet to read. " &
-                "Returns data in CSV-like tabular format.",
+                "Returns data in CSV-like tabular format. " &
+                "Use this as the normal Excel reader. " &
+                "For existing workbooks that must be understood or completed live through Excel Interop " &
+                "(for example when formulas, dropdowns, validations, comments, recalculation, or current workbook state matter), " &
+                "prefer excel_list_live_worksheets first, then excel_read_live_range, and then excel_complete_live_workbook.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_ExtractExcelData & """," &
-                """description"":""Reads data from an Excel spreadsheet attachment with sheet selection. Returns tabular data.""," &
+                """description"":""Reads data from an Excel spreadsheet attachment with sheet selection. Returns tabular data. " &
+                "This is the normal Excel reader. For live Excel form completion or inspection of evaluated workbook state, " &
+                "prefer excel_list_live_worksheets, excel_read_live_range, and excel_complete_live_workbook.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """attachment_name"":{""type"":""string"",""description"":""Filename of the Excel attachment""}," &
                 """sheet_name"":{""type"":""string"",""description"":""Optional: name of the specific sheet to read. If omitted, reads all sheets.""}" &
                 "},""required"":[""attachment_name""]}}"
+        })
+
+        ' ── excel_list_live_worksheets ──
+        tools.Add(New ModelConfig() With {
+            .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ExcelListLiveWorksheets,
+            .ModelDescription = "List Live Excel Worksheets (built-in)",
+            .ToolPriority = 970,
+            .ToolInstructionsPrompt =
+                AP_Tool_ExcelListLiveWorksheets & ": Lists the worksheets in an existing Excel attachment by opening it through live Excel Interop. " &
+                "Use this before reading or completing an existing workbook when the current workbook structure matters. " &
+                "This is especially important for Excel forms, templates, or workbooks with formulas, dropdowns, validations, or protected sheets. " &
+                "If an agentic loop needs to complete an existing Excel workbook, first call this tool, then excel_read_live_range, then excel_complete_live_workbook.",
+            .ToolDefinition =
+                "{""name"":""" & AP_Tool_ExcelListLiveWorksheets & """," &
+                """description"":""Lists worksheet names and basic sheet metadata from an existing Excel attachment by opening the workbook through live Excel Interop. " &
+                "Prefer this before filling an existing workbook so the agent understands which worksheet to read and complete.""," &
+                """parameters"":{""type"":""object"",""properties"":{" &
+                """attachment_name"":{""type"":""string"",""description"":""Filename of the Excel attachment to inspect""}" &
+                "},""required"":[""attachment_name""]}}"
+        })
+
+        ' ── excel_read_live_range ──
+        tools.Add(New ModelConfig() With {
+            .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ExcelReadLiveRange,
+            .ModelDescription = "Read Live Excel Range (built-in)",
+            .ToolPriority = 980,
+            .ToolInstructionsPrompt =
+                AP_Tool_ExcelReadLiveRange & ": Reads the live contents of an existing Excel attachment through Excel Interop, not through XML/OpenXML parsing. " &
+                "Use this for existing workbooks whenever formulas, dropdowns, validations, comments, threaded comments, recalculated values, colors, or current workbook state matter. " &
+                "For form completion or updating an existing workbook, call excel_list_live_worksheets first, then this tool to understand the live sheet content and options, and only then call excel_complete_live_workbook. " &
+                "If worksheet_name is omitted, the first worksheet is used. If range_address is omitted, the worksheet's used range is read. " &
+                "By default include_formulas is false and include_color is true.",
+            .ToolDefinition =
+                "{""name"":""" & AP_Tool_ExcelReadLiveRange & """," &
+                """description"":""Reads a worksheet or range from an existing Excel attachment through live Excel Interop. " &
+                "This is the preferred reader for existing workbooks that may contain active formulas, dropdowns, validations, recalculated values, comments, or protected sheets. " &
+                "Defaults: first worksheet if worksheet_name is omitted, used range if range_address is omitted, include_formulas=false, include_color=true.""," &
+                """parameters"":{""type"":""object"",""properties"":{" &
+                """attachment_name"":{""type"":""string"",""description"":""Filename of the Excel attachment to read""}," &
+                """worksheet_name"":{""type"":""string"",""description"":""Optional worksheet name. If omitted, the first worksheet is used.""}," &
+                """range_address"":{""type"":""string"",""description"":""Optional Excel range in A1 notation, for example 'A1:D20'. If omitted, the worksheet's used range is read.""}," &
+                """include_formulas"":{""type"":""boolean"",""description"":""Optional. Default false. Include cell formulas in the output.""}," &
+                """include_color"":{""type"":""boolean"",""description"":""Optional. Default true. Include font and background color information in the output.""}" &
+                "},""required"":[""attachment_name""]}}"
+        })
+
+        ' ── excel_complete_live_workbook ──
+        tools.Add(New ModelConfig() With {
+            .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ExcelCompleteLiveWorkbook,
+            .ModelDescription = "Complete Live Excel Workbook (built-in)",
+            .ToolPriority = 990,
+            .ToolInstructionsPrompt =
+                AP_Tool_ExcelCompleteLiveWorkbook & ": Completes or updates an existing Excel attachment through live Excel Interop and saves a new '_completed.xlsx' copy. " &
+                "Use this for any Excel form completion or update task when formulas, dropdowns, validations, recalculation, protection, or current workbook state matter. " &
+                "Do not use normal XML-based Excel editing for such tasks. " &
+                "Before filling an existing workbook, first call excel_list_live_worksheets and then excel_read_live_range so the tool loop understands the current workbook structure, live values, and available options. " &
+                "Updates are provided as JSON. Each update targets a single cell and can set a value, a formula, and/or a comment. " &
+                "If worksheet_name is omitted, the first worksheet is used. A per-update worksheet_name may override the default worksheet. " &
+                "For formulas, prefer English Excel formulas with comma separators when possible. The tool includes locale-safe fallbacks for localized Excel installations and different list separators.",
+            .ToolDefinition =
+                "{""name"":""" & AP_Tool_ExcelCompleteLiveWorkbook & """," &
+                """description"":""Updates an existing Excel attachment through live Excel Interop and saves a new '_completed.xlsx' copy. " &
+                "This is the preferred tool for completing existing Excel workbooks that may contain active formulas, dropdowns, validations, recalculation, or protected sheets with LiftLock markers. " &
+                "Use JSON-based cell updates. Prefer English Excel formulas with comma separators; locale fallbacks are built in.""," &
+                """parameters"":{""type"":""object"",""properties"":{" &
+                """attachment_name"":{""type"":""string"",""description"":""Filename of the Excel attachment to complete or update""}," &
+                """worksheet_name"":{""type"":""string"",""description"":""Optional default worksheet name. If omitted, the first worksheet is used.""}," &
+                """updates"":{""type"":""array"",""description"":""Array of cell updates to apply. Each update targets one cell."",""items"":{""type"":""object"",""properties"":{" &
+                """worksheet_name"":{""type"":""string"",""description"":""Optional worksheet override for this update. If omitted, the tool-level worksheet_name or the first worksheet is used.""}," &
+                """cell"":{""type"":""string"",""description"":""Target cell address in A1 notation, for example 'B12'""}," &
+                """value"":{""description"":""Optional cell value. Use JSON string, number, boolean, or null.""}," &
+                """formula"":{""type"":""string"",""description"":""Optional Excel formula for the cell. Prefer English function names and comma separators, starting with '='. Locale-safe fallbacks are applied automatically.""}," &
+                """comment"":{""type"":""string"",""description"":""Optional comment text to add as a threaded comment or reply where supported.""}" &
+                "},""required"":[""cell""]}}" &
+                "},""required"":[""attachment_name"",""updates""]}}"
         })
 
         ' ── split_pdf ──
@@ -1258,6 +1342,12 @@ Partial Public Class ThisAddIn
                 response = ExecuteCreatePdfFromTextTool(toolCall, context)
             Case AP_Tool_ExtractExcelData
                 response = ExecuteExtractExcelDataTool(toolCall, context)
+            Case AP_Tool_ExcelListLiveWorksheets
+                response = Await ExecuteExcelListLiveWorksheetsTool(toolCall, context, cancellationToken)
+            Case AP_Tool_ExcelReadLiveRange
+                response = Await ExecuteExcelReadLiveRangeTool(toolCall, context, cancellationToken)
+            Case AP_Tool_ExcelCompleteLiveWorkbook
+                response = Await ExecuteExcelCompleteLiveWorkbookTool(toolCall, context, cancellationToken)
             Case AP_Tool_SplitPdf
                 response = ExecuteSplitPdfTool(toolCall, context)
             Case AP_Tool_AddPdfWatermark
@@ -1573,7 +1663,9 @@ Partial Public Class ThisAddIn
 
         Dim found = _apCurrentAttachments.FirstOrDefault(
             Function(a) a.OriginalFileName.Equals(trimmedName, StringComparison.OrdinalIgnoreCase))
-        If found IsNot Nothing Then Return found
+        If found IsNot Nothing Then
+            Return EnsureSessionAttachmentAvailable(found)
+        End If
 
         For Each att In _apCurrentAttachments
             If att.OutputFiles Is Nothing Then Continue For
@@ -1876,38 +1968,41 @@ Partial Public Class ThisAddIn
     Friend Function IsAutoPilotInternalTool(toolName As String) As Boolean
         Select Case toolName
             Case AP_Tool_ProcessWordDoc,
-                 AP_Tool_CommentWordDoc,
-                 AP_Tool_ExtractPdfText,
-                 AP_Tool_MergePdfs,
-                 AP_Tool_ReadAttachment,
-                 AP_Tool_ListAttachments,
-                 AP_Tool_DescribeBinary,
-                 AP_Tool_CompareWordDocs,
-                 AP_Tool_ReadWordDocDetails,
-                 AP_Tool_CreatePdfFromText,
-                 AP_Tool_ExtractExcelData,
-                 AP_Tool_SplitPdf,
-                 AP_Tool_AddPdfWatermark,
-                 AP_Tool_WordToPdf,
-                 AP_Tool_SearchInAttachments,
-                 AP_Tool_SummarizeThread,
-                 AP_Tool_PdfToWord,
-                 AP_Tool_CreateWordDoc,
-                 AP_Tool_CreateExcel,
-                 AP_Tool_CreatePowerPoint,
-                 AP_Tool_CreateCodeFile,
-                 AP_Tool_CommentPdf,
-                 AP_Tool_ExtractDataFromAttachments,
-                 AP_Tool_RedactPdf,
-                 AP_Tool_OverlayPdf,
-                 AP_Tool_CreateAudioFile,
-                 AP_Tool_GenerateImage,
-                 AP_Tool_WebGrounding,
-                 AP_Tool_ManageScheduledTasks,
-                 AP_Tool_ManageUserMemory,
-                 AP_Tool_ManageUserFiles,
-                 AP_Tool_CompleteWordTables,
-                 AP_Tool_ReportInability
+     AP_Tool_CommentWordDoc,
+     AP_Tool_ExtractPdfText,
+     AP_Tool_MergePdfs,
+     AP_Tool_ReadAttachment,
+     AP_Tool_ListAttachments,
+     AP_Tool_DescribeBinary,
+     AP_Tool_CompareWordDocs,
+     AP_Tool_ReadWordDocDetails,
+     AP_Tool_CreatePdfFromText,
+     AP_Tool_ExtractExcelData,
+     AP_Tool_ExcelListLiveWorksheets,
+     AP_Tool_ExcelReadLiveRange,
+     AP_Tool_ExcelCompleteLiveWorkbook,
+     AP_Tool_SplitPdf,
+     AP_Tool_AddPdfWatermark,
+     AP_Tool_WordToPdf,
+     AP_Tool_SearchInAttachments,
+     AP_Tool_SummarizeThread,
+     AP_Tool_PdfToWord,
+     AP_Tool_CreateWordDoc,
+     AP_Tool_CreateExcel,
+     AP_Tool_CreatePowerPoint,
+     AP_Tool_CreateCodeFile,
+     AP_Tool_CommentPdf,
+     AP_Tool_ExtractDataFromAttachments,
+     AP_Tool_RedactPdf,
+     AP_Tool_OverlayPdf,
+     AP_Tool_CreateAudioFile,
+     AP_Tool_GenerateImage,
+     AP_Tool_WebGrounding,
+     AP_Tool_ManageScheduledTasks,
+     AP_Tool_ManageUserMemory,
+     AP_Tool_ManageUserFiles,
+     AP_Tool_CompleteWordTables,
+     AP_Tool_ReportInability
                 Return True
             Case Else
                 Return False

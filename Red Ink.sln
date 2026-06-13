@@ -38,6 +38,7 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Documentation and more", "D
 		Documentation and more\Red_Ink_Guide.txt = Documentation and more\Red_Ink_Guide.txt
 		Documentation and more\Red_Ink_Kurzanleitung.pdf = Documentation and more\Red_Ink_Kurzanleitung.pdf
 		Documentation and more\Red_Ink_Quick_Reference.pdf = Documentation and more\Red_Ink_Quick_Reference.pdf
+		Documentation and more\Red_Ink_Tool_List.md = Documentation and more\Red_Ink_Tool_List.md
 		Documentation and more\Red_Ink_UseCases.pdf = Documentation and more\Red_Ink_UseCases.pdf
 		Documentation and more\renamelib.txt = Documentation and more\renamelib.txt
 		Documentation and more\Deployment\Reset-And-Reinstall-RedInk.ps1 = Documentation and more\Deployment\Reset-And-Reinstall-RedInk.ps1

@@ -133,6 +133,7 @@ Public Class DiscussInky
 
     Private Const AssistantName As String = Globals.ThisAddIn.AN6
     Private Const PersistedKnowledgeFileName As String = "redink-discussknowledge.txt"
+    Private Const AutoPersistKnowledgeThresholdChars As Integer = 25000
     Private Const DialogueArchiveFolderName As String = "redink-discuss-dialogues"
     Private Const DialogueArchiveFileExtension As String = ".dialogue.xml"
     Private Const ToolTrigger As String = "(a)"
@@ -769,6 +770,59 @@ Public Class DiscussInky
             _toolTip.SetToolTip(_chkPersistKnowledge, "")
         End If
     End Sub
+
+    ''' <summary>
+    ''' Automatically enables temporary knowledge persistence when loaded knowledge is large enough.
+    ''' </summary>
+    ''' <param name="loadedFileCount">Number of knowledge files loaded for the current operation.</param>
+    ''' <returns>True if knowledge was persisted or persistence was already enabled; otherwise False.</returns>
+    Private Function AutoEnablePersistKnowledgeIfLarge(loadedFileCount As Integer) As Boolean
+        If String.IsNullOrWhiteSpace(_knowledgeContent) Then Return False
+
+        If _knowledgeContent.Length <= AutoPersistKnowledgeThresholdChars Then
+            Return _chkPersistKnowledge.Checked
+        End If
+
+        Try
+            Dim persistPath As String = GetPersistedKnowledgeFilePath()
+
+            System.IO.File.WriteAllText(persistPath, _knowledgeContent, System.Text.Encoding.UTF8)
+
+            _isUpdatingPersistCheckbox = True
+            _chkPersistKnowledge.Checked = True
+            _isUpdatingPersistCheckbox = False
+
+            My.Settings.DiscussPersistKnowledge = True
+            My.Settings.Save()
+
+            UpdatePersistKnowledgeTooltip()
+
+            ShowCustomMessageBox(
+            $"Knowledge is large ({_knowledgeContent.Length:N0} characters, threshold {AutoPersistKnowledgeThresholdChars:N0})." &
+            vbCrLf & vbCrLf &
+            "Temporary knowledge persistence has been turned on automatically for this session." &
+            vbCrLf & vbCrLf &
+            $"Stored in: {persistPath}")
+
+            AppendSystemMessage($"Knowledge loaded and persisted automatically ({_knowledgeContent.Length:N0} characters from {loadedFileCount} file(s)).")
+            Return True
+
+        Catch ex As System.Exception
+            _isUpdatingPersistCheckbox = True
+            _chkPersistKnowledge.Checked = False
+            _isUpdatingPersistCheckbox = False
+
+            Try
+                My.Settings.DiscussPersistKnowledge = False
+                My.Settings.Save()
+            Catch
+            End Try
+
+            UpdatePersistKnowledgeTooltip()
+            AppendSystemMessage($"Knowledge loaded ({_knowledgeContent.Length:N0} characters) but failed to auto-persist: {ex.Message}")
+            Return False
+        End Try
+    End Function
 
     ''' <summary>
     ''' Restores persisted settings, persona, mission, knowledge cache, transcript, and optionally triggers a welcome.
@@ -2249,16 +2303,18 @@ Public Class DiscussInky
             _cachedKnowledgeContent = _knowledgeContent
             _cachedKnowledgeFilePath = _knowledgeFilePath
 
-            ' Persist if checkbox is checked
-            If _chkPersistKnowledge.Checked Then
+            ' Auto-enable persistence for large knowledge; otherwise persist only if user already enabled it.
+            Dim persistedOrAlreadyEnabled As Boolean = AutoEnablePersistKnowledgeIfLarge(ctx.LoadedFiles.Count)
+
+            If _chkPersistKnowledge.Checked AndAlso Not persistedOrAlreadyEnabled Then
                 Try
-                    Dim persistPath = GetPersistedKnowledgeFilePath()
-                    File.WriteAllText(persistPath, _knowledgeContent, Encoding.UTF8)
+                    Dim persistPath As String = GetPersistedKnowledgeFilePath()
+                    System.IO.File.WriteAllText(persistPath, _knowledgeContent, System.Text.Encoding.UTF8)
                     AppendSystemMessage($"Knowledge loaded and persisted ({_knowledgeContent.Length:N0} characters from {ctx.LoadedFiles.Count} file(s)).")
-                Catch ex As Exception
+                Catch ex As System.Exception
                     AppendSystemMessage($"Knowledge loaded ({_knowledgeContent.Length:N0} characters) but failed to persist: {ex.Message}")
                 End Try
-            Else
+            ElseIf Not _chkPersistKnowledge.Checked Then
                 AppendSystemMessage($"Knowledge loaded: {ctx.LoadedFiles.Count} file(s), {_knowledgeContent.Length:N0} characters total.")
             End If
 
