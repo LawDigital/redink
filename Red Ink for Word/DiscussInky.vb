@@ -263,6 +263,7 @@ Public Class DiscussInky
     ' State
     Private _htmlReady As Boolean = False
     Private ReadOnly _htmlQueue As New List(Of String)()
+    Private _persistAfterHtmlFlush As Boolean = False
     Private _lastThinkingId As String = Nothing
     Private ReadOnly _history As New List(Of (Role As String, Content As String))()
     Private _knowledgeContent As String = Nothing
@@ -934,58 +935,42 @@ Public Class DiscussInky
 
         InitializeChatHtml()
 
-        Dim restoredFromFullSessionState As Boolean = False
+        ' Restore the running chat only from the normal last-chat storage.
+        ' Do NOT call RestoreSessionStateFromXml here: that is reserved for explicit archive/session restore.
+        Dim hasChat As Boolean = False
+        Dim restoredHtmlHadAlternateModel As Boolean = False
+
         Try
-            Dim savedSessionStateXml = My.Settings.DiscussLastSessionStateXml
-            If Not String.IsNullOrWhiteSpace(savedSessionStateXml) Then
-                restoredFromFullSessionState = RestoreSessionStateFromXml(savedSessionStateXml, "previous session", announceRestore:=False)
+            ' First, restore _history from plain transcript. This keeps the LLM context intact.
+            Dim savedTranscript As String = My.Settings.DiscussLastChat
+            If Not String.IsNullOrEmpty(savedTranscript) Then
+                RestoreHistoryFromTranscript(savedTranscript)
             End If
-        Catch
+
+            ' Then restore the visible HTML transcript.
+            Dim savedHtml As String = My.Settings.DiscussLastChatHtml
+            If Not String.IsNullOrEmpty(savedHtml) Then
+                restoredHtmlHadAlternateModel = ChatHtmlIndicatesAlternateModel(savedHtml)
+                AppendHtml(savedHtml)
+                hasChat = True
+            ElseIf Not String.IsNullOrEmpty(savedTranscript) Then
+                AppendTranscriptToHtml(savedTranscript)
+                hasChat = True
+            End If
+
+        Catch ex As System.Exception
+            AppendSystemMessage($"Failed to restore previous chat: {ex.Message}")
         End Try
 
-        ' Restore chat or load knowledge
-        Dim hasChat = False
-        Dim restoredHtmlHadAlternateModel = False
-
-        If restoredFromFullSessionState Then
-            hasChat = (_history.Count > 0)
-        Else
-            Try
-                ' First, restore _history from plain transcript (this ensures LLM sees the conversation)
-                Dim savedTranscript = My.Settings.DiscussLastChat
-                If Not String.IsNullOrEmpty(savedTranscript) Then
-                    RestoreHistoryFromTranscript(savedTranscript)
-                End If
-
-                ' Then restore the HTML display
-                Dim savedHtml = My.Settings.DiscussLastChatHtml
-                If Not String.IsNullOrEmpty(savedHtml) Then
-                    ' Check if the restored HTML contains an alternate/secondary model switch message
-                    restoredHtmlHadAlternateModel = ChatHtmlIndicatesAlternateModel(savedHtml)
-                    AppendHtml(savedHtml)
-                    hasChat = True
-                ElseIf Not String.IsNullOrEmpty(savedTranscript) Then
-                    AppendTranscriptToHtml(savedTranscript)
-                    hasChat = True
-                End If
-            Catch
-            End Try
-
-            ' If restored chat indicated an alternate model was active, notify user we're back on primary
-            If hasChat AndAlso restoredHtmlHadAlternateModel Then
-                ' Ensure alternate model state is reset (it should be by default, but be explicit)
-                _alternateModelSelected = False
-                _alternateModelConfig = Nothing
-                _alternateModelDisplayName = Nothing
-                UpdateAlternateModelButtonText()
-
-                ' Notify user in chat that we're back on primary
-                AppendSystemMessage($"Session restored. Now using primary model ({_context.INI_Model}).")
-            End If
-
-            ' Restore knowledge using the new loading flow
-            Await RestoreKnowledgeAsync()
+        If hasChat AndAlso restoredHtmlHadAlternateModel Then
+            _alternateModelSelected = False
+            _alternateModelConfig = Nothing
+            _alternateModelDisplayName = Nothing
+            UpdateAlternateModelButtonText()
+            AppendSystemMessage($"Previous chat restored. Now using primary model ({_context.INI_Model}).")
         End If
+
+        Await RestoreKnowledgeAsync()
 
         ' Only force persona selection if there are custom personas beyond the default
         ' (i.e., a persona library is configured and has entries)
@@ -3151,18 +3136,39 @@ Public Class DiscussInky
     ''' <summary>
     ''' Flushes queued HTML fragments once the browser document is ready.
     ''' </summary>
-    Private Sub Chat_DocumentCompleted(sender As Object, e As WebBrowserDocumentCompletedEventArgs)
-        _htmlReady = True
-        If _htmlQueue.Count > 0 Then
-            Try
-                For Each frag In _htmlQueue
-                    _chat.Document.InvokeScript("appendMessage", New Object() {frag})
-                Next
-            Catch
-            Finally
-                _htmlQueue.Clear()
-            End Try
-        End If
+    Private Sub Chat_DocumentCompleted(sender As System.Object, e As System.Windows.Forms.WebBrowserDocumentCompletedEventArgs)
+        Try
+            If _chat.Document Is Nothing Then Return
+
+            Dim chatRoot As System.Windows.Forms.HtmlElement = _chat.Document.GetElementById("chat")
+            If chatRoot Is Nothing Then Return
+
+            _htmlReady = True
+
+            If _htmlQueue.Count > 0 Then
+                Dim queuedFragments As New System.Collections.Generic.List(Of String)(_htmlQueue)
+
+                Try
+                    For Each frag As String In queuedFragments
+                        _chat.Document.InvokeScript("appendMessage", New System.Object() {frag})
+                    Next
+
+                    _htmlQueue.Clear()
+
+                Catch ex As System.Exception
+                    _htmlReady = False
+                    Return
+                End Try
+            End If
+
+            If _persistAfterHtmlFlush Then
+                _persistAfterHtmlFlush = False
+                PersistCurrentSessionSettings()
+            End If
+
+        Catch ex As System.Exception
+            _htmlReady = False
+        End Try
     End Sub
 
     ''' <summary>
@@ -5257,8 +5263,9 @@ Public Class DiscussInky
     End Sub
 
     Private Function RestoreSessionStateFromXml(stateXml As String,
-                                                sourceLabel As String,
-                                                Optional announceRestore As Boolean = True) As Boolean
+                                            sourceLabel As String,
+                                            Optional announceRestore As Boolean = True,
+                                            Optional resetChatHtml As Boolean = True) As Boolean
         If String.IsNullOrWhiteSpace(stateXml) Then Return False
 
         Try
@@ -5370,7 +5377,9 @@ Public Class DiscussInky
             UpdatePersistKnowledgeTooltip()
             UpdateToolingControlsState()
 
-            InitializeChatHtml()
+            If resetChatHtml Then
+                InitializeChatHtml()
+            End If
 
             Dim transcriptHtml = If(transcriptHtmlElement IsNot Nothing, transcriptHtmlElement.Value, "")
             If Not String.IsNullOrWhiteSpace(transcriptHtml) Then
@@ -5379,7 +5388,11 @@ Public Class DiscussInky
                 RenderHistoryToCurrentChat()
             End If
 
-            PersistCurrentSessionSettings()
+            If _htmlReady AndAlso _chat.Document IsNot Nothing Then
+                PersistCurrentSessionSettings()
+            Else
+                _persistAfterHtmlFlush = True
+            End If
 
             If announceRestore AndAlso Not String.IsNullOrWhiteSpace(sourceLabel) Then
                 AppendSystemMessage($"Dialogue restored: {sourceLabel}")
