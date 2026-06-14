@@ -71,6 +71,13 @@ Partial Public Class ThisAddIn
     Private Const AP_ScheduleWorkspaceSubdir As String = "workspace"
     Private Const AP_ScheduleWorkspaceMaxBytes As Long = 100 * 1024 * 1024  ' 100 MB per task
     Private Const AP_SchedulerCheckIntervalSeconds As Integer = 30
+    Private Const AP_SchedulerLocalChatSnoozeMinutes As Integer = 15
+    Private Const AP_SchedulerLocalChatUrl As String = "http://127.0.0.1:12333/inky"
+    Private Const AP_SchedulerLocalChatId As Integer = 2
+    Private Const AP_TaskExecutionModeEmail As String = "email"
+    Private Const AP_TaskExecutionModeBrowserPrompt As String = "browser_prompt"
+    Private Const AP_TaskLocalExecutionStateQueued As String = "queued"
+    Private Const AP_TaskLocalExecutionStateRunning As String = "running"
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  SCHEDULER STATE
@@ -78,6 +85,7 @@ Partial Public Class ThisAddIn
 
     Private _apSchedulerTimer As System.Threading.Timer = Nothing
     Private _apSchedulerCheckRunning As Integer = 0
+    Private _apLocalSchedulerCts As CancellationTokenSource = Nothing
 
 
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -139,6 +147,18 @@ Partial Public Class ThisAddIn
 
         ''' <summary>Subject line for the result e-mail.</summary>
         Public Property Subject As String = ""
+
+        ''' <summary>
+        ''' Execution mode: "email" = classic AutoPilot e-mail delivery,
+        ''' "browser_prompt" = Local Agent popup approval + browser execution.
+        ''' </summary>
+        Public Property ExecutionMode As String = "email"
+
+        ''' <summary>UTC snooze-until timestamp for Local Agent prompting (MinValue = not snoozed).</summary>
+        Public Property SnoozeUntilUtc As DateTime = DateTime.MinValue
+
+        ''' <summary>Local Agent execution state: "", "queued", or "running".</summary>
+        Public Property LocalExecutionState As String = ""
     End Class
 
     ''' <summary>Root object for the schedule JSON file.</summary>
@@ -181,8 +201,17 @@ Partial Public Class ThisAddIn
             If Not File.Exists(filePath) Then Return New ScheduleFile()
             Dim json = File.ReadAllText(filePath, Encoding.UTF8)
             If String.IsNullOrWhiteSpace(json) Then Return New ScheduleFile()
+
             Dim sf = JsonConvert.DeserializeObject(Of ScheduleFile)(json)
-            Return If(sf, New ScheduleFile())
+            sf = If(sf, New ScheduleFile())
+
+            If sf.Tasks Is Nothing Then sf.Tasks = New List(Of ScheduledTask)()
+
+            For Each task In sf.Tasks
+                NormalizeScheduledTask(task)
+            Next
+
+            Return sf
         Catch ex As System.Exception
             ApDashboardLog($"📅 ERROR reading schedule file: {ex.Message}", "error")
             Return New ScheduleFile()
@@ -209,6 +238,37 @@ Partial Public Class ThisAddIn
             ApDashboardLog($"📅 ERROR writing schedule file: {ex.Message}", "error")
         End Try
     End Sub
+
+    Private Sub NormalizeScheduledTask(task As ScheduledTask)
+        If task Is Nothing Then Return
+
+        If task.DeliverTo Is Nothing Then task.DeliverTo = New List(Of String)()
+        If task.AttachmentFiles Is Nothing Then task.AttachmentFiles = New List(Of String)()
+        If task.WorkspaceFiles Is Nothing Then task.WorkspaceFiles = New List(Of String)()
+
+        If String.IsNullOrWhiteSpace(task.Status) Then task.Status = "active"
+        If String.IsNullOrWhiteSpace(task.Subject) Then task.Subject = "Scheduled Task Result"
+
+        task.ExecutionMode = NormalizeScheduledTaskExecutionMode(task.ExecutionMode)
+
+        If task.SnoozeUntilUtc = DateTime.MaxValue Then
+            task.SnoozeUntilUtc = DateTime.MinValue
+        End If
+
+        If task.LocalExecutionState Is Nothing Then
+            task.LocalExecutionState = ""
+        End If
+    End Sub
+
+    Private Shared Function NormalizeScheduledTaskExecutionMode(mode As String) As String
+        If String.IsNullOrWhiteSpace(mode) Then Return AP_TaskExecutionModeEmail
+
+        If mode.Equals(AP_TaskExecutionModeBrowserPrompt, StringComparison.OrdinalIgnoreCase) Then
+            Return AP_TaskExecutionModeBrowserPrompt
+        End If
+
+        Return AP_TaskExecutionModeEmail
+    End Function
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  TASK CRUD (called by the manage_scheduled_tasks tool executor)
@@ -459,21 +519,69 @@ Partial Public Class ThisAddIn
         ApDashboardLog("📅 Scheduler timer started.", "info")
     End Sub
 
+    ''' <summary>Starts the local scheduler runtime when Local Agent scheduling is enabled and the listener is live.</summary>
+    Friend Sub EnsureLocalSchedulerTimerStarted()
+        If Not IsLocalSchedulerEnabled() Then Return
+
+        If _apLocalSchedulerCts Is Nothing OrElse _apLocalSchedulerCts.IsCancellationRequested Then
+            Try : _apLocalSchedulerCts?.Dispose() : Catch : End Try
+            _apLocalSchedulerCts = New CancellationTokenSource()
+        End If
+
+        StartSchedulerTimer()
+    End Sub
+
     ''' <summary>Stops the scheduler timer. Called from StopAutoPilot.</summary>
     Friend Sub StopSchedulerTimer()
         Try : _apSchedulerTimer?.Dispose() : Catch : End Try
         _apSchedulerTimer = Nothing
     End Sub
 
+    ''' <summary>Stops the Local Agent scheduler runtime without affecting the AutoPilot runtime.</summary>
+    Friend Sub StopLocalSchedulerRuntime()
+        Try : _apLocalSchedulerCts?.Cancel() : Catch : End Try
+        Try : _apLocalSchedulerCts?.Dispose() : Catch : End Try
+        _apLocalSchedulerCts = Nothing
+
+        If Not _apActive Then
+            StopSchedulerTimer()
+        End If
+    End Sub
+
+    Private Function IsLocalSchedulerEnabled() As Boolean
+        If INI_WebServerBlock = 4 Then Return False
+        If _apActive Then Return False
+
+        Try
+            Return httpListener IsNot Nothing AndAlso httpListener.IsListening
+        Catch
+            Return False
+        End Try
+    End Function
+
+    Private Function IsSchedulerRuntimeAvailable() As Boolean
+        If INI_WebServerBlock = 4 Then Return False
+        If _apActive Then Return True
+        Return IsLocalSchedulerEnabled()
+    End Function
+
     ''' <summary>Timer callback that checks for and executes due tasks.</summary>
     Private Async Sub SchedulerTimerCallback(state As Object)
-        If Not _apActive Then Return
+        If Not IsSchedulerRuntimeAvailable() Then Return
         If Interlocked.CompareExchange(_apSchedulerCheckRunning, 1, 0) <> 0 Then Return
 
         Try
-            Dim ct = _apCts?.Token
-            If ct Is Nothing OrElse ct.Value.IsCancellationRequested Then Return
-            Await CheckAndExecuteDueTasks(ct.Value)
+            Dim effectiveCt As CancellationToken
+
+            If _apActive Then
+                If _apCts Is Nothing OrElse _apCts.IsCancellationRequested Then Return
+                effectiveCt = _apCts.Token
+            Else
+                If _apLocalSchedulerCts Is Nothing OrElse _apLocalSchedulerCts.IsCancellationRequested Then Return
+                effectiveCt = _apLocalSchedulerCts.Token
+            End If
+
+            Await CheckAndExecuteDueTasks(effectiveCt)
         Catch ex As OperationCanceledException
             ' Expected during shutdown
         Catch ex As System.Exception
@@ -517,13 +625,26 @@ Partial Public Class ThisAddIn
 
     ''' <summary>Checks for due tasks and executes them sequentially.</summary>
     Private Async Function CheckAndExecuteDueTasks(ct As CancellationToken) As Task
+        If Not IsSchedulerRuntimeAvailable() Then Return
+
         Dim schedule = ReadScheduleFile()
         Dim now = DateTime.UtcNow
 
         For Each task In schedule.Tasks.ToList()
             ct.ThrowIfCancellationRequested()
+
             If task.Status <> "active" Then Continue For
+            If task.SnoozeUntilUtc > now Then Continue For
             If task.NextDueUtc > now Then Continue For
+
+            If IsLocalInteractiveScheduledTask(task) Then
+                If task.LocalExecutionState.Equals(AP_TaskLocalExecutionStateQueued, StringComparison.OrdinalIgnoreCase) Then Continue For
+                If task.LocalExecutionState.Equals(AP_TaskLocalExecutionStateRunning, StringComparison.OrdinalIgnoreCase) Then Continue For
+
+                Await HandleDueLocalInteractiveTaskAsync(task, ct)
+                Continue For
+            End If
+
             If task.LastExecutedUtc >= task.NextDueUtc Then Continue For
 
             ' This task is due — execute it
@@ -698,8 +819,9 @@ Partial Public Class ThisAddIn
                 ' Filter out manage_scheduled_tasks — the LLM must not create/modify
                 ' tasks while executing inside a scheduled task
                 Dim schedulerTools = _apSelectedTools.Where(
-                    Function(t) Not t.ToolName.Equals(AP_ToolPrefix & AP_Tool_ManageScheduledTasks,
-                                                       StringComparison.OrdinalIgnoreCase)).ToList()
+                    Function(t) t IsNot Nothing AndAlso
+                                Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                                Not t.ToolName.Equals(AP_Tool_ManageScheduledTasks, StringComparison.OrdinalIgnoreCase)).ToList()
 
                 response = Await ExecuteToolingLoop(
                     systemPrompt, userPrompt.ToString(),
@@ -795,7 +917,44 @@ Partial Public Class ThisAddIn
         Dim newMail As MailItem = Nothing
         Try
             newMail = Application.CreateItem(OlItemType.olMailItem)
-            newMail.To = String.Join("; ", task.DeliverTo)
+
+            Dim safeRecipients As New List(Of String)()
+
+            If Not _apActive Then
+                If Not INI_AutoPilotSchedulerLocalChat Then
+                    Throw New InvalidOperationException("Local Chat scheduled e-mail delivery is disabled.")
+                End If
+
+                Dim currentMailboxAddress As String = GetLocalChatPrimaryMailboxSmtpAddress()
+
+                If String.IsNullOrWhiteSpace(currentMailboxAddress) Then
+                    Throw New InvalidOperationException("Could not determine the current mailbox address for Local Chat scheduled e-mail delivery.")
+                End If
+
+                safeRecipients.Add(currentMailboxAddress.Trim())
+            Else
+                If task.DeliverTo IsNot Nothing Then
+                    safeRecipients = task.DeliverTo.
+                        Where(Function(addr) Not String.IsNullOrWhiteSpace(addr) AndAlso
+                                             Not String.IsNullOrWhiteSpace(task.CreatedBy) AndAlso
+                                             addr.Trim().Equals(task.CreatedBy.Trim(), StringComparison.OrdinalIgnoreCase)).
+                        Select(Function(addr) addr.Trim()).
+                        Distinct(StringComparer.OrdinalIgnoreCase).
+                        ToList()
+                End If
+
+                If safeRecipients.Count = 0 AndAlso Not String.IsNullOrWhiteSpace(task.CreatedBy) Then
+                    safeRecipients.Add(task.CreatedBy.Trim())
+                End If
+            End If
+
+            If safeRecipients.Count = 0 Then
+                Throw New InvalidOperationException("Scheduled task has no authorized delivery recipient.")
+            End If
+
+            task.DeliverTo = safeRecipients
+
+            newMail.To = String.Join("; ", safeRecipients)
             newMail.Subject = If(Not String.IsNullOrWhiteSpace(task.Subject),
                                  $"{AN6} Scheduled Task: {task.Subject}",
                                  $"{AN6} Scheduled Task Result")
@@ -856,6 +1015,332 @@ Partial Public Class ThisAddIn
         Finally
             If newMail IsNot Nothing Then Try : Marshal.ReleaseComObject(newMail) : Catch : End Try
         End Try
+    End Sub
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  LOCAL AGENT SCHEDULER HELPERS
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    Private Function IsLocalInteractiveScheduledTask(task As ScheduledTask) As Boolean
+        If task Is Nothing Then Return False
+        Return NormalizeScheduledTaskExecutionMode(task.ExecutionMode).
+            Equals(AP_TaskExecutionModeBrowserPrompt, StringComparison.OrdinalIgnoreCase)
+    End Function
+
+    Private Function ResolveScheduledTaskExecutionMode(isLocalChatOrigin As Boolean,
+                                                       deliverTo As IEnumerable(Of String)) As String
+        If Not isLocalChatOrigin Then
+            Return AP_TaskExecutionModeEmail
+        End If
+
+        Dim recipients As List(Of String) =
+            If(deliverTo, Enumerable.Empty(Of String)()).
+                Where(Function(addr) Not String.IsNullOrWhiteSpace(addr)).
+                Select(Function(addr) addr.Trim()).
+                Distinct(StringComparer.OrdinalIgnoreCase).
+                ToList()
+
+        If recipients.Count > 0 Then
+            Return AP_TaskExecutionModeEmail
+        End If
+
+        Return AP_TaskExecutionModeBrowserPrompt
+    End Function
+
+    Private Async Function HandleDueLocalInteractiveTaskAsync(task As ScheduledTask, ct As CancellationToken) As Task
+        If task Is Nothing Then Return
+        If Not IsLocalSchedulerEnabled() Then Return
+        If HasPendingScheduledBrowserTask() Then Return
+        If _chatAgentActive Then Return
+        If Interlocked.CompareExchange(activeJobs, 0, 0) > 0 Then Return
+
+        Dim choice As Integer =
+            Await SwitchToUi(Function() PromptForLocalScheduledTaskAction(task))
+
+        If choice = 0 Then choice = 2
+
+        Select Case choice
+            Case 1
+                If QueueScheduledTaskForLocalBrowserRun(task) Then
+                    task.LocalExecutionState = AP_TaskLocalExecutionStateQueued
+                    task.SnoozeUntilUtc = DateTime.MinValue
+                    task.LastResult = $"Queued for Local Agent browser execution at {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss UTC}"
+                    SchedulerUpdateTask(task)
+                    ApDashboardLog($"📅 Local Agent task queued: {task.Id.Substring(0, 8)}...", "info")
+                Else
+                    task.LocalExecutionState = ""
+                    task.SnoozeUntilUtc = DateTime.UtcNow.AddMinutes(AP_SchedulerLocalChatSnoozeMinutes)
+                    task.LastResult = $"Failed to queue Local Agent execution at {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss UTC} — snoozed for {AP_SchedulerLocalChatSnoozeMinutes} minutes"
+                    SchedulerUpdateTask(task)
+                    ApDashboardLog($"📅 Local Agent queue failed — snoozed task {task.Id.Substring(0, 8)}...", "warn")
+                End If
+
+            Case 2
+                task.LocalExecutionState = ""
+                task.SnoozeUntilUtc = DateTime.UtcNow.AddMinutes(AP_SchedulerLocalChatSnoozeMinutes)
+                task.LastResult = $"Snoozed by user at {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss UTC} for {AP_SchedulerLocalChatSnoozeMinutes} minutes"
+                SchedulerUpdateTask(task)
+                ApDashboardLog($"📅 Local Agent task snoozed: {task.Id.Substring(0, 8)}...", "step")
+
+            Case 3
+                task.LocalExecutionState = ""
+                task.SnoozeUntilUtc = DateTime.MinValue
+                task.LastExecutedUtc = DateTime.UtcNow
+                task.LastResult = $"Skipped by user at {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss UTC}"
+                AdvanceTaskSchedule(task)
+                SchedulerUpdateTask(task)
+                ApDashboardLog($"📅 Local Agent task skipped: {task.Id.Substring(0, 8)}...", "step")
+        End Select
+    End Function
+
+    Private Function PromptForLocalScheduledTaskAction(task As ScheduledTask) As Integer
+        Dim options As New List(Of SelectionItem) From {
+            New SelectionItem("Run now — open browser and execute task", 1),
+            New SelectionItem($"Snooze {AP_SchedulerLocalChatSnoozeMinutes} minutes", 2),
+            New SelectionItem("Skip this occurrence", 3)
+        }
+
+        Dim body As New StringBuilder()
+        body.AppendLine("A scheduled Local Agent task is due.")
+        body.AppendLine()
+        body.AppendLine($"Instruction: {Truncate(task.Instruction, 200)}")
+        body.AppendLine($"Schedule: {If(task.ScheduleDescription, "one-time")}")
+        body.AppendLine($"Due: {task.NextDueUtc.ToLocalTime():yyyy-MM-dd HH:mm} (local)")
+        body.AppendLine()
+        body.AppendLine("Choose whether the browser may be opened and the task may run now.")
+
+        Return SelectValue(
+            options,
+            1,
+            prompt:=body.ToString().TrimEnd(),
+            header:=$"{AN6} Scheduler")
+    End Function
+
+    Private Function QueueScheduledTaskForLocalBrowserRun(task As ScheduledTask) As Boolean
+        If task Is Nothing Then Return False
+        If HasPendingScheduledBrowserTask() Then Return False
+        If Not PrepareScheduledTaskForLocalChat(task) Then Return False
+
+        QueuePendingScheduledBrowserTask(task.Id, task.Instruction, AP_SchedulerLocalChatId)
+
+        If Not OpenLocalSchedulerBrowser() Then
+            ClearPendingScheduledBrowserTask(task.Id)
+            Return False
+        End If
+
+        Return True
+    End Function
+
+    Private Function PrepareScheduledTaskForLocalChat(task As ScheduledTask) As Boolean
+        Try
+            ChatAgentClearFiles()
+
+            If String.IsNullOrWhiteSpace(_chatAgentTempDir) OrElse Not Directory.Exists(_chatAgentTempDir) Then
+                _chatAgentTempDir = Path.Combine(Path.GetTempPath(), CA_TempPrefix & Guid.NewGuid().ToString("N"))
+                Directory.CreateDirectory(_chatAgentTempDir)
+            End If
+
+            Dim preparedFiles As New List(Of AutoPilotAttachmentInfo)()
+            Dim inputFileNames As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+            If Not String.IsNullOrWhiteSpace(task.AttachmentDir) Then
+                Dim fullAttDir = Path.Combine(Path.GetDirectoryName(GetScheduleFilePath()), task.AttachmentDir)
+                If Directory.Exists(fullAttDir) Then
+                    For Each filePath In Directory.GetFiles(fullAttDir)
+                        Dim att = CopyScheduledTaskFileToChatAgentSession(
+                            filePath,
+                            Path.GetFileName(filePath),
+                            "OK (scheduled input)")
+                        If att IsNot Nothing Then
+                            preparedFiles.Add(att)
+                            inputFileNames.Add(att.OriginalFileName)
+                        End If
+                    Next
+                End If
+            End If
+
+            Dim wsDir = GetTaskWorkspaceDir(task.Id)
+            If Directory.Exists(wsDir) Then
+                For Each filePath In Directory.GetFiles(wsDir)
+                    Dim fileName = Path.GetFileName(filePath)
+                    Dim desiredName = fileName
+
+                    If inputFileNames.Contains(desiredName) Then
+                        desiredName = "ws_" & desiredName
+                    End If
+
+                    Dim att = CopyScheduledTaskFileToChatAgentSession(
+                        filePath,
+                        desiredName,
+                        "OK (scheduled workspace)")
+                    If att IsNot Nothing Then
+                        preparedFiles.Add(att)
+                    End If
+                Next
+            End If
+
+            _chatAgentFiles = preparedFiles
+            ResetChatAgentDeliverableTrackingForNewTurn()
+            PrepareLocalScheduledChatState(AP_SchedulerLocalChatId)
+
+            Return True
+        Catch ex As System.Exception
+            ApDashboardLog($"📅 Failed to prepare Local Agent task files: {ex.Message}", "warn")
+            Return False
+        End Try
+    End Function
+
+    Private Sub PrepareLocalScheduledChatState(chatId As Integer)
+        Dim sourceChatId = If(activeChatId = chatId, 1, activeChatId)
+        Dim sourceState = LoadInkyState(sourceChatId)
+        Dim targetState = LoadInkyState(chatId)
+
+        targetState.History = New List(Of ChatTurn)()
+        targetState.LastAssistantText = ""
+        targetState.DarkMode = True
+        targetState.UseSecondApi = sourceState.UseSecondApi
+        targetState.SelectedModelKey = sourceState.SelectedModelKey
+        targetState.ToolingEnabled = True
+        targetState.AgentModeEnabled = True
+        targetState.AgentModelActive = sourceState.AgentModelActive
+        targetState.PreAgentModelKey = sourceState.PreAgentModelKey
+        targetState.PreAgentUseSecondApi = sourceState.PreAgentUseSecondApi
+        targetState.SelectedToolNames = New List(Of String)(If(sourceState.SelectedToolNames, New List(Of String)()))
+        targetState.SelectedMainToolNames = New List(Of String)(If(sourceState.SelectedMainToolNames, New List(Of String)()))
+        targetState.SelectedAdvancedToolNames = New List(Of String)(If(sourceState.SelectedAdvancedToolNames, New List(Of String)()))
+
+        MigrateLocalChatToolSelections(targetState, includeInteractiveM365Tools:=True)
+        targetState.SelectedAdvancedToolNames =
+            ResolveLocalChatAdvancedToolNamesForEnabledState(
+                targetState.SelectedAdvancedToolNames,
+                includeInteractiveM365Tools:=True)
+
+        Try
+            targetState.SupportsFileUploads = ComputeSupportsFiles(targetState.UseSecondApi, targetState.SelectedModelKey)
+        Catch
+            targetState.SupportsFileUploads = False
+        End Try
+
+        SaveInkyState(targetState, chatId)
+
+        activeChatId = chatId
+        _chatAdvancedToolsEnabled = targetState.AgentModeEnabled
+        _selectedToolsForChat = GetLocalChatEffectiveSelection(targetState, includeInteractiveM365Tools:=True)
+
+        Try
+            My.Settings.Inky_LastChat = chatId
+            My.Settings.Save()
+        Catch
+        End Try
+    End Sub
+
+    Private Function CopyScheduledTaskFileToChatAgentSession(sourceFilePath As String,
+                                                             desiredFileName As String,
+                                                             statusMessage As String) As AutoPilotAttachmentInfo
+        If String.IsNullOrWhiteSpace(sourceFilePath) OrElse Not File.Exists(sourceFilePath) Then Return Nothing
+
+        Dim destName = desiredFileName
+        If String.IsNullOrWhiteSpace(destName) Then
+            destName = Path.GetFileName(sourceFilePath)
+        End If
+
+        Dim destPath = Path.Combine(_chatAgentTempDir, destName)
+        Dim counter = 1
+
+        While File.Exists(destPath)
+            destPath = Path.Combine(
+                _chatAgentTempDir,
+                Path.GetFileNameWithoutExtension(destName) & $"_{counter}" & Path.GetExtension(destName))
+            counter += 1
+        End While
+
+        File.Copy(sourceFilePath, destPath, overwrite:=True)
+
+        Dim fi = New FileInfo(destPath)
+        Return New AutoPilotAttachmentInfo() With {
+            .OriginalFileName = Path.GetFileName(destPath),
+            .TempFilePath = destPath,
+            .SourcePath = sourceFilePath,
+            .Extension = fi.Extension.ToLowerInvariant(),
+            .SizeBytes = fi.Length,
+            .IsOverSizeLimit = False,
+            .StatusMessage = statusMessage,
+            .CreatedTime = fi.CreationTimeUtc,
+            .LastModifiedTime = fi.LastWriteTimeUtc,
+            .OutputFiles = New List(Of String)(),
+            .IsToolOutput = False
+        }
+    End Function
+
+    Private Function OpenLocalSchedulerBrowser() As Boolean
+        Try
+            Dim startInfo As New ProcessStartInfo(AP_SchedulerLocalChatUrl) With {
+                .UseShellExecute = True
+            }
+            Process.Start(startInfo)
+            Return True
+        Catch ex As System.Exception
+            ApDashboardLog($"📅 Failed to open Local Agent browser: {ex.Message}", "warn")
+            Return False
+        End Try
+    End Function
+
+    Friend Sub SchedulerMarkLocalTaskRunning(taskId As String)
+        Dim task = SchedulerFindTask(taskId)
+        If task Is Nothing Then Return
+
+        task.LocalExecutionState = AP_TaskLocalExecutionStateRunning
+        task.SnoozeUntilUtc = DateTime.MinValue
+        task.LastResult = $"Local Agent execution started at {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss UTC}"
+        SchedulerUpdateTask(task)
+    End Sub
+
+    Friend Sub SchedulerPersistLocalBrowserOutputs(taskId As String, resultFiles As IEnumerable(Of String))
+        If resultFiles Is Nothing Then Return
+
+        Dim storedAny As Boolean = False
+
+        For Each filePath In resultFiles
+            If String.IsNullOrWhiteSpace(filePath) Then Continue For
+            If Not File.Exists(filePath) Then Continue For
+
+            If SchedulerStoreWorkspaceFile(taskId, filePath) Then
+                storedAny = True
+            End If
+        Next
+
+        If storedAny Then
+            Dim task = SchedulerFindTask(taskId)
+            If task IsNot Nothing Then
+                SyncWorkspaceFileList(task)
+                SchedulerUpdateTask(task)
+            End If
+        End If
+    End Sub
+
+    Friend Sub SchedulerCompleteLocalBrowserTask(taskId As String, resultSummary As String)
+        Dim task = SchedulerFindTask(taskId)
+        If task Is Nothing Then Return
+
+        task.LocalExecutionState = ""
+        task.SnoozeUntilUtc = DateTime.MinValue
+        task.LastExecutedUtc = DateTime.UtcNow
+        task.LastResult = $"Completed via Local Agent browser at {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss UTC}: {Truncate(If(resultSummary, ""), 160)}"
+
+        AdvanceTaskSchedule(task)
+        SchedulerUpdateTask(task)
+    End Sub
+
+    Friend Sub SchedulerFailLocalBrowserTask(taskId As String,
+                                             failureSummary As String,
+                                             Optional snoozeMinutes As Integer = AP_SchedulerLocalChatSnoozeMinutes)
+        Dim task = SchedulerFindTask(taskId)
+        If task Is Nothing Then Return
+
+        task.LocalExecutionState = ""
+        task.SnoozeUntilUtc = DateTime.UtcNow.AddMinutes(snoozeMinutes)
+        task.LastResult = $"Local Agent execution failed at {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss UTC}: {Truncate(If(failureSummary, ""), 160)}"
+        SchedulerUpdateTask(task)
     End Sub
 
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -1158,7 +1643,7 @@ Partial Public Class ThisAddIn
     Private Function CreateSchedulerDashboardForm() As Form
         Dim frm As New Form() With {
             .Text = $"{AN6} AutoPilot — Scheduled Tasks",
-            .Width = 900,
+            .Width = 1200,
             .Height = 450,
             .StartPosition = FormStartPosition.CenterScreen,
             .FormBorderStyle = FormBorderStyle.Sizable,
@@ -1210,18 +1695,24 @@ Partial Public Class ThisAddIn
         dgv.Columns.Add("colInstruction", "Instruction")
         dgv.Columns.Add("colSchedule", "Schedule")
         dgv.Columns.Add("colStatus", "Status")
+        dgv.Columns.Add("colExecutionMode", "Execution Mode")
+        dgv.Columns.Add("colLocalState", "Local State")
+        dgv.Columns.Add("colSnoozeUntil", "Snoozed Until")
         dgv.Columns.Add("colNextDue", "Next Due")
         dgv.Columns.Add("colLastExec", "Last Executed")
         dgv.Columns.Add("colDeliverTo", "Deliver To")
         dgv.Columns.Add("colLastResult", "Last Result")
 
-        dgv.Columns("colId").FillWeight = 8
-        dgv.Columns("colInstruction").FillWeight = 25
-        dgv.Columns("colSchedule").FillWeight = 13
+        dgv.Columns("colId").FillWeight = 7
+        dgv.Columns("colInstruction").FillWeight = 20
+        dgv.Columns("colSchedule").FillWeight = 11
         dgv.Columns("colStatus").FillWeight = 7
-        dgv.Columns("colNextDue").FillWeight = 12
-        dgv.Columns("colLastExec").FillWeight = 12
-        dgv.Columns("colDeliverTo").FillWeight = 13
+        dgv.Columns("colExecutionMode").FillWeight = 10
+        dgv.Columns("colLocalState").FillWeight = 8
+        dgv.Columns("colSnoozeUntil").FillWeight = 11
+        dgv.Columns("colNextDue").FillWeight = 10
+        dgv.Columns("colLastExec").FillWeight = 10
+        dgv.Columns("colDeliverTo").FillWeight = 11
         dgv.Columns("colLastResult").FillWeight = 15
 
         mainPanel.Controls.Add(dgv, 0, 0)
@@ -1311,6 +1802,10 @@ Partial Public Class ThisAddIn
 
         For Each t In tasks
             Dim shortId = If(t.Id.Length > 8, t.Id.Substring(0, 8), t.Id)
+            Dim executionMode = NormalizeScheduledTaskExecutionMode(t.ExecutionMode)
+            Dim localState = If(String.IsNullOrWhiteSpace(t.LocalExecutionState), "—", t.LocalExecutionState)
+            Dim snoozeUntil = If(t.SnoozeUntilUtc > DateTime.MinValue AndAlso t.SnoozeUntilUtc < DateTime.MaxValue,
+                                 t.SnoozeUntilUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm"), "—")
             Dim nextDue = If(t.NextDueUtc < DateTime.MaxValue,
                              t.NextDueUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm"), "—")
             Dim lastExec = If(t.LastExecutedUtc > DateTime.MinValue,
@@ -1324,6 +1819,9 @@ Partial Public Class ThisAddIn
                 Truncate(t.Instruction, 80),
                 If(t.ScheduleDescription, "one-time"),
                 t.Status,
+                executionMode,
+                localState,
+                snoozeUntil,
                 nextDue,
                 lastExec,
                 deliver,

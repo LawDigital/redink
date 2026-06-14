@@ -336,7 +336,11 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Sub StartupHttpListener(WebServerBlock)
 
-        ' WebServerBlock: 1 = no webserver, 2 = no Local Chatbot, 3 = no Edge extension receiver
+        ' WebServerBlock:
+        '   1 = no webserver
+        '   2 = no Local Chatbot / InkyPlay
+        '   3 = no Edge extension receiver
+        '   4 = scheduler disabled
 
         If WebServerBlock = 1 Then Return
 
@@ -367,6 +371,10 @@ Partial Public Class ThisAddIn
 
         lastListenerProgressUtc = System.DateTime.UtcNow
         listenerTask = StartHttpListener(cts.Token, gen)
+
+        If Not _apActive Then
+            EnsureLocalSchedulerTimerStarted()
+        End If
     End Sub
 
     ''' <summary>
@@ -431,6 +439,10 @@ Partial Public Class ThisAddIn
         Finally
             cts = Nothing
         End Try
+
+        If Not _apActive Then
+            StopLocalSchedulerRuntime()
+        End If
 
         System.Diagnostics.Debug.WriteLine(
             "HttpListener STOP at " &

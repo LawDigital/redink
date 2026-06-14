@@ -1049,7 +1049,7 @@
                 "label": "Web Server Block Level",
                 "type": "integer",
                 "default": "0",
-                "description": "Controls whether and how Red Ink's integrated local web server in Outlook and Word should be blocked or restricted. 0 = all turned on, 1 = all turned off, 2 Local Chat/InkyPlay turned off, 3 = Edge/Chrome extension back-end turned off. Example: 0. [WebServerBlock]"
+                "description": "Controls whether and how Red Ink's integrated local web server in Outlook and Word should be blocked or restricted. 0 = all turned on, 1 = all turned off, 2 = Local Chat/InkyPlay turned off, 3 = Edge/Chrome extension back-end turned off, 4 = Local Chat Scheduler turned off. Example: 0. [WebServerBlock]"
             },
             {
                 "key": "ChatCap",
@@ -1518,10 +1518,10 @@
         },
         {
           "key": "AutoPilotSchedulerLocalChat",
-          "label": "Permit AutoPilot Scheduler in Local Chat",
+          "label": "Permit Scheduler in Local Chat to Send Emails",
           "type": "boolean",
           "default": "False",
-          "description": "Enable this if Local Chat users should be able to access the AutoPilot Scheduler (not only via e-mail). This may allow them to misuse e-mail addresses of others. Example: True. [AutoPilotSchedulerLocalChat]"
+          "description": "Enable this if Local Chat users should be able to create scheduling tasks that are performed by automatically sending an e-mail to the user (under the user's name to the user's mailbox). If this is not allowed, the tasks are executed in the Local Chat browser. Example: True. [AutoPilotSchedulerLocalChat]"
         },
         {
           "key": "ForceDrawioLocal",

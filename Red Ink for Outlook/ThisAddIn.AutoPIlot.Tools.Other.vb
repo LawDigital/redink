@@ -89,6 +89,7 @@ Imports System.Text
 Imports System.Threading
 Imports System.Threading.Tasks
 Imports System.Xml
+Imports Microsoft.Office.Interop.Outlook
 Imports Newtonsoft.Json
 Imports Newtonsoft.Json.Linq
 Imports SharedLibrary
@@ -271,7 +272,7 @@ Partial Public Class ThisAddIn
             response.Success = False
             response.ErrorMessage = "Operation was cancelled."
             response.Response = response.ErrorMessage
-        Catch ex As Exception
+        Catch ex As System.Exception
             response.Success = False
             response.ErrorMessage = ex.Message
             response.Response = $"Error generating image: {ex.Message}"
@@ -329,7 +330,7 @@ Partial Public Class ThisAddIn
             response.ErrorMessage = "Operation was cancelled."
             response.Response = response.ErrorMessage
 
-        Catch ex As Exception
+        Catch ex As System.Exception
             response.Success = False
             response.ErrorMessage = ex.Message
             response.Response = $"Error during web grounding: {ex.Message}"
@@ -399,7 +400,7 @@ Partial Public Class ThisAddIn
             response.Response = $"Analysis of '{fileName}':" & vbCrLf & llmResult
             ApDashboardLog($"✓ Binary analysis completed for: {fileName} ({llmResult.Length:N0} chars)", "info")
 
-        Catch ex As Exception
+        Catch ex As System.Exception
             response.Success = False
             response.ErrorMessage = ex.Message
             response.Response = $"Error analyzing binary attachment: {ex.Message}"
@@ -497,7 +498,7 @@ Partial Public Class ThisAddIn
                     response.Response)
             End If
 
-        Catch ex As Exception
+        Catch ex As System.Exception
             response.Success = False
             response.ErrorMessage = ex.Message
             response.Response = $"Error reading attachment: {ex.Message}"
@@ -575,7 +576,7 @@ Partial Public Class ThisAddIn
             response.Success = True
             response.Response = sb.ToString().TrimEnd()
 
-        Catch ex As Exception
+        Catch ex As System.Exception
             response.Success = False
             response.ErrorMessage = ex.Message
             response.Response = $"Error listing attachments: {ex.Message}"
@@ -667,7 +668,7 @@ Partial Public Class ThisAddIn
                 response.Response = $"No matches found for '{searchTerm}' in any attachment."
             End If
 
-        Catch ex As Exception
+        Catch ex As System.Exception
             response.Success = False
             response.ErrorMessage = ex.Message
             response.Response = $"Error searching attachments: {ex.Message}"
@@ -818,7 +819,7 @@ Partial Public Class ThisAddIn
             response.Response = sb.ToString().TrimEnd()
             ApDashboardLog($"✓ Thread extracted: {displayIdx - 1} message(s)", "info")
 
-        Catch ex As Exception
+        Catch ex As System.Exception
             response.Success = False
             response.ErrorMessage = ex.Message
             response.Response = $"Error extracting email thread: {ex.Message}"
@@ -1090,7 +1091,7 @@ Partial Public Class ThisAddIn
             response.Success = False
             response.ErrorMessage = "Operation was cancelled."
             response.Response = response.ErrorMessage
-        Catch ex As Exception
+        Catch ex As System.Exception
             response.Success = False
             response.ErrorMessage = ex.Message
             response.Response = $"Error extracting data from attachments: {ex.Message}"
@@ -1190,6 +1191,260 @@ Partial Public Class ThisAddIn
     End Function
 
 
+    Private Shared Function TryParseSchedulerUtcArgument(value As Object, ByRef utcValue As DateTime) As Boolean
+        utcValue = DateTime.MinValue
+
+        If value Is Nothing Then Return False
+
+        Dim token As JToken = TryCast(value, JToken)
+
+        If token Is Nothing Then
+            Try
+                token = JToken.FromObject(value)
+            Catch
+                token = Nothing
+            End Try
+        End If
+
+        Return TryParseSchedulerUtcToken(token, utcValue)
+    End Function
+
+    Private Shared Function TryParseSchedulerUtcToken(token As JToken, ByRef utcValue As DateTime) As Boolean
+        If token Is Nothing OrElse
+           token.Type = JTokenType.Null OrElse
+           token.Type = JTokenType.Undefined Then
+            Return False
+        End If
+
+        Select Case token.Type
+            Case JTokenType.String, JTokenType.Date
+                Dim parsed As DateTime
+                If DateTime.TryParse(
+                    token.ToString(),
+                    Nothing,
+                    Globalization.DateTimeStyles.AdjustToUniversal Or Globalization.DateTimeStyles.AssumeUniversal,
+                    parsed) Then
+
+                    utcValue = parsed.ToUniversalTime()
+                    Return True
+                End If
+
+            Case JTokenType.Object
+                Dim obj = DirectCast(token, JObject)
+
+                Dim preferredPropertyNames As String() = {
+                    "next_due_utc",
+                    "end_date_utc",
+                    "utc",
+                    "value",
+                    "text",
+                    "timestamp",
+                    "iso",
+                    "iso8601",
+                    "result"
+                }
+
+                For Each propertyName In preferredPropertyNames
+                    Dim child = obj(propertyName)
+                    If child IsNot Nothing AndAlso TryParseSchedulerUtcToken(child, utcValue) Then
+                        Return True
+                    End If
+                Next
+
+                For Each prop In obj.Properties()
+                    If TryParseSchedulerUtcToken(prop.Value, utcValue) Then
+                        Return True
+                    End If
+                Next
+
+            Case JTokenType.Array
+                For Each child As JToken In DirectCast(token, JArray)
+                    If TryParseSchedulerUtcToken(child, utcValue) Then
+                        Return True
+                    End If
+                Next
+
+            Case Else
+                Dim parsed As DateTime
+                If DateTime.TryParse(
+                    token.ToString(Newtonsoft.Json.Formatting.None),
+                    Nothing,
+                    Globalization.DateTimeStyles.AdjustToUniversal Or Globalization.DateTimeStyles.AssumeUniversal,
+                    parsed) Then
+
+                    utcValue = parsed.ToUniversalTime()
+                    Return True
+                End If
+        End Select
+
+        Return False
+    End Function
+
+    Private Function GetLocalChatPrimaryMailboxSmtpAddress() As String
+        Try
+            Dim ns As Microsoft.Office.Interop.Outlook.NameSpace = Application.GetNamespace("MAPI")
+            Dim targetStore As Microsoft.Office.Interop.Outlook.Store = Nothing
+
+            Try
+                Dim explorer As Microsoft.Office.Interop.Outlook.Explorer = Application.ActiveExplorer()
+                If explorer IsNot Nothing Then
+                    Dim currentFolder As Microsoft.Office.Interop.Outlook.MAPIFolder =
+                        TryCast(explorer.CurrentFolder, Microsoft.Office.Interop.Outlook.MAPIFolder)
+                    If currentFolder IsNot Nothing Then
+                        targetStore = currentFolder.Store
+                    End If
+                End If
+            Catch
+            End Try
+
+            If targetStore Is Nothing Then
+                Try
+                    targetStore = ns.DefaultStore
+                Catch
+                End Try
+            End If
+
+            If targetStore IsNot Nothing Then
+                For i As Integer = 1 To ns.Accounts.Count
+                    Try
+                        Dim acct As Microsoft.Office.Interop.Outlook.Account = ns.Accounts(i)
+                        If acct Is Nothing Then Continue For
+
+                        Dim deliveryStore As Microsoft.Office.Interop.Outlook.Store = Nothing
+                        Try : deliveryStore = acct.DeliveryStore : Catch : End Try
+
+                        If deliveryStore IsNot Nothing AndAlso
+                           deliveryStore.StoreID.Equals(targetStore.StoreID, StringComparison.OrdinalIgnoreCase) AndAlso
+                           Not String.IsNullOrWhiteSpace(acct.SmtpAddress) Then
+                            Return acct.SmtpAddress.Trim()
+                        End If
+                    Catch
+                    End Try
+                Next
+            End If
+
+            For i As Integer = 1 To ns.Accounts.Count
+                Try
+                    Dim acct As Microsoft.Office.Interop.Outlook.Account = ns.Accounts(i)
+                    If acct IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(acct.SmtpAddress) Then
+                        Return acct.SmtpAddress.Trim()
+                    End If
+                Catch
+                End Try
+            Next
+        Catch
+        End Try
+
+        Return ""
+    End Function
+    Private Function GetSchedulerCallerOwnerAddress() As String
+        If _apCurrentMailInfo IsNot Nothing AndAlso
+           Not String.IsNullOrWhiteSpace(_apCurrentMailInfo.SenderEmail) Then
+            Return _apCurrentMailInfo.SenderEmail.Trim()
+        End If
+
+        Return GetLocalChatPrimaryMailboxSmtpAddress()
+    End Function
+
+    Private Function TryNormalizeSchedulerDeliverToForCaller(rawValue As Object,
+                                                             ownerAddress As String,
+                                                             allowEmpty As Boolean,
+                                                             ByRef normalizedDeliverTo As List(Of String),
+                                                             ByRef errorMessage As String) As Boolean
+        normalizedDeliverTo = New List(Of String)()
+        errorMessage = ""
+
+        Dim requested As New List(Of String)()
+
+        If rawValue Is Nothing Then
+            If Not allowEmpty AndAlso Not String.IsNullOrWhiteSpace(ownerAddress) Then
+                normalizedDeliverTo.Add(ownerAddress)
+            End If
+
+            Return True
+        End If
+
+        If TypeOf rawValue Is JArray Then
+            requested.AddRange(
+                DirectCast(rawValue, JArray).
+                    Select(Function(t) t.ToString().Trim()).
+                    Where(Function(s) s.Length > 0))
+        Else
+            Dim rawText As String = rawValue.ToString().Trim()
+            If rawText <> "" Then
+                requested.AddRange(
+                    rawText.Split({","c, ";"c}, StringSplitOptions.RemoveEmptyEntries).
+                        Select(Function(s) s.Trim()).
+                        Where(Function(s) s.Length > 0))
+            End If
+        End If
+
+        requested = requested.
+            Distinct(StringComparer.OrdinalIgnoreCase).
+            ToList()
+
+        If requested.Count = 0 Then
+            If Not allowEmpty AndAlso Not String.IsNullOrWhiteSpace(ownerAddress) Then
+                normalizedDeliverTo.Add(ownerAddress)
+            End If
+
+            Return True
+        End If
+
+        If String.IsNullOrWhiteSpace(ownerAddress) Then
+            errorMessage = "Could not determine the permitted mailbox address for this scheduled task."
+            Return False
+        End If
+
+        If requested.Count > 1 Then
+            errorMessage = $"Only the mailbox address '{ownerAddress}' may be stored for this scheduled task."
+            Return False
+        End If
+
+        If Not requested(0).Equals(ownerAddress, StringComparison.OrdinalIgnoreCase) Then
+            errorMessage = $"Only the mailbox address '{ownerAddress}' may be stored for this scheduled task."
+            Return False
+        End If
+
+        normalizedDeliverTo.Add(ownerAddress)
+        Return True
+    End Function
+
+    Private Function IsSchedulerTaskOwnedByCaller(task As ScheduledTask, ownerAddress As String) As Boolean
+        If task Is Nothing OrElse String.IsNullOrWhiteSpace(ownerAddress) Then
+            Return False
+        End If
+
+        If Not String.IsNullOrWhiteSpace(task.CreatedBy) Then
+            Return task.CreatedBy.Trim().Equals(ownerAddress.Trim(), StringComparison.OrdinalIgnoreCase)
+        End If
+
+        Return task.DeliverTo IsNot Nothing AndAlso
+            task.DeliverTo.Any(Function(addr) Not String.IsNullOrWhiteSpace(addr) AndAlso
+                                             addr.Trim().Equals(ownerAddress.Trim(), StringComparison.OrdinalIgnoreCase))
+    End Function
+
+    Private Function FindOwnedScheduledTask(idOrQuery As String, ownerAddress As String) As ScheduledTask
+        If String.IsNullOrWhiteSpace(idOrQuery) Then
+            Return Nothing
+        End If
+
+        Dim ownedTasks = SchedulerListTasks().
+            Where(Function(t) IsSchedulerTaskOwnedByCaller(t, ownerAddress)).
+            ToList()
+
+        Dim byId = ownedTasks.FirstOrDefault(
+            Function(t) t.Id.Equals(idOrQuery, StringComparison.OrdinalIgnoreCase) OrElse
+                         t.Id.StartsWith(idOrQuery, StringComparison.OrdinalIgnoreCase))
+        If byId IsNot Nothing Then
+            Return byId
+        End If
+
+        Return ownedTasks.FirstOrDefault(
+            Function(t) Not String.IsNullOrWhiteSpace(t.Instruction) AndAlso
+                         t.Instruction.IndexOf(idOrQuery, StringComparison.OrdinalIgnoreCase) >= 0)
+    End Function
+
     ' ═══════════════════════════════════════════════════════════════════════════
     '  MANAGE_SCHEDULED_TASKS TOOL EXECUTOR
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -1206,6 +1461,7 @@ Partial Public Class ThisAddIn
             .Timestamp = DateTime.Now
         }
 
+
         Try
             Dim args = toolCall.Arguments
             If args Is Nothing Then
@@ -1215,8 +1471,23 @@ Partial Public Class ThisAddIn
                 Return response
             End If
 
+            If Not _apActive Then
+                If INI_WebServerBlock = 4 Then
+                    response.Success = False
+                    response.Response = "Error: scheduling is disabled because WebServerBlock = 4."
+                    Return response
+                End If
+            End If
+
             Dim action As String = ""
             If args.ContainsKey("action") Then action = args("action")?.ToString()?.Trim()?.ToLowerInvariant()
+
+            Dim schedulerOwnerAddress As String = GetSchedulerCallerOwnerAddress()
+            If String.IsNullOrWhiteSpace(schedulerOwnerAddress) Then
+                response.Success = False
+                response.Response = "Error: could not determine the mailbox identity for scheduler access."
+                Return response
+            End If
 
             Select Case action
                 Case "create"
@@ -1232,10 +1503,9 @@ Partial Public Class ThisAddIn
 
                     ' Parse next_due_utc
                     If args.ContainsKey("next_due_utc") Then
-                        Dim parsed As DateTime
-                        If DateTime.TryParse(args("next_due_utc")?.ToString(), Nothing,
-                                             Globalization.DateTimeStyles.AdjustToUniversal Or Globalization.DateTimeStyles.AssumeUniversal, parsed) Then
-                            task.NextDueUtc = parsed.ToUniversalTime()
+                        Dim parsedUtc As DateTime
+                        If TryParseSchedulerUtcArgument(args("next_due_utc"), parsedUtc) Then
+                            task.NextDueUtc = parsedUtc
                         End If
                     End If
 
@@ -1248,10 +1518,9 @@ Partial Public Class ThisAddIn
 
                     ' Parse end_date_utc
                     If args.ContainsKey("end_date_utc") Then
-                        Dim parsed As DateTime
-                        If DateTime.TryParse(args("end_date_utc")?.ToString(), Nothing,
-                                             Globalization.DateTimeStyles.AdjustToUniversal Or Globalization.DateTimeStyles.AssumeUniversal, parsed) Then
-                            task.EndDateUtc = parsed.ToUniversalTime()
+                        Dim parsedUtc As DateTime
+                        If TryParseSchedulerUtcArgument(args("end_date_utc"), parsedUtc) Then
+                            task.EndDateUtc = parsedUtc
                         End If
                     End If
 
@@ -1261,26 +1530,61 @@ Partial Public Class ThisAddIn
                         If Integer.TryParse(args("remaining_occurrences")?.ToString(), occ) Then task.RemainingOccurrences = occ
                     End If
 
-                    ' Parse deliver_to
+                    Dim isLocalChatOrigin As Boolean =
+                        (Not _apActive AndAlso INI_WebServerBlock <> 4)
+
+                    Dim rawDeliverTo As Object = Nothing
                     If args.ContainsKey("deliver_to") Then
-                        Dim deliverObj = args("deliver_to")
-                        If TypeOf deliverObj Is JArray Then
-                            task.DeliverTo = DirectCast(deliverObj, JArray).Select(Function(t) t.ToString().Trim()).
-                                Where(Function(s) s.Length > 0).ToList()
-                        ElseIf TypeOf deliverObj Is String Then
-                            task.DeliverTo = CStr(deliverObj).Split({","c, ";"c}, StringSplitOptions.RemoveEmptyEntries).
-                                Select(Function(s) s.Trim()).Where(Function(s) s.Length > 0).ToList()
-                        End If
+                        rawDeliverTo = args("deliver_to")
                     End If
 
-                    ' Fallback: use sender address from current mail
-                    If task.DeliverTo.Count = 0 AndAlso _apCurrentMailInfo IsNot Nothing Then
-                        If Not String.IsNullOrWhiteSpace(_apCurrentMailInfo.SenderEmail) Then
-                            task.DeliverTo.Add(_apCurrentMailInfo.SenderEmail)
+                    If isLocalChatOrigin AndAlso Not INI_AutoPilotSchedulerLocalChat AndAlso rawDeliverTo IsNot Nothing Then
+                        Dim requestedLocalDelivery As New List(Of String)()
+
+                        If TypeOf rawDeliverTo Is JArray Then
+                            requestedLocalDelivery.AddRange(
+                                DirectCast(rawDeliverTo, JArray).
+                                    Select(Function(t) t.ToString().Trim()).
+                                    Where(Function(s) s.Length > 0))
+                        Else
+                            Dim rawText As String = rawDeliverTo.ToString().Trim()
+                            If rawText <> "" Then
+                                requestedLocalDelivery.AddRange(
+                                    rawText.Split({","c, ";"c}, StringSplitOptions.RemoveEmptyEntries).
+                                        Select(Function(s) s.Trim()).
+                                        Where(Function(s) s.Length > 0))
+                            End If
                         End If
+
+                        If requestedLocalDelivery.Count > 0 Then
+                            response.Success = False
+                            response.ErrorCode = "scheduler_localchat_email_disabled"
+                            response.ErrorMessage = "Local Chat scheduled e-mail delivery is disabled."
+                            response.Response = "Error: Local Chat scheduled e-mail delivery is disabled."
+                            Return response
+                        End If
+
+                        rawDeliverTo = Nothing
                     End If
 
-                    task.CreatedBy = If(task.DeliverTo.FirstOrDefault(), "")
+                    Dim deliverToError As String = ""
+                    If Not TryNormalizeSchedulerDeliverToForCaller(
+                        rawDeliverTo,
+                        schedulerOwnerAddress,
+                        allowEmpty:=isLocalChatOrigin,
+                        normalizedDeliverTo:=task.DeliverTo,
+                        errorMessage:=deliverToError) Then
+
+                        response.Success = False
+                        response.ErrorCode = "scheduler_delivery_not_allowed"
+                        response.ErrorMessage = deliverToError
+                        response.Response = "Error: " & deliverToError
+                        Return response
+                    End If
+
+                    task.ExecutionMode = ResolveScheduledTaskExecutionMode(isLocalChatOrigin, task.DeliverTo)
+                    task.CreatedBy = schedulerOwnerAddress
+
 
                     ' Store attachments from current mail if requested
                     Dim storeNames As List(Of String) = Nothing
@@ -1306,24 +1610,42 @@ Partial Public Class ThisAddIn
                     End If
 
                     response.Success = True
+
+                    Dim modeLabel As String =
+                        If(task.ExecutionMode.Equals("browser_prompt", StringComparison.OrdinalIgnoreCase),
+                           "Local Agent browser (interactive approval required)",
+                           "E-mail delivery")
+
                     Dim apWarning = ""
-                    If Not _apActive Then
-                        apWarning = vbCrLf & "⚠ AutoPilot is not currently running. " &
-                            "This task will be executed once AutoPilot is started."
+                    If task.ExecutionMode.Equals(AP_TaskExecutionModeBrowserPrompt, StringComparison.OrdinalIgnoreCase) Then
+                        apWarning = vbCrLf &
+                            "⚠ This task will run only while the local webserver is running, and each due execution will first ask the user for approval."
+                    ElseIf Not _apActive Then
+                        apWarning = vbCrLf &
+                            "⚠ This task will run while the local webserver is running and will send the result by e-mail to the mailbox recorded for this task."
                     End If
+
                     response.Response = $"Task created successfully." & vbCrLf &
                         $"Task ID: {taskId}" & vbCrLf &
-                        $"Instruction: {Truncate(task.Instruction, 100)}" & vbCrLf &
+                        "Instruction:" & vbCrLf &
+                        If(task.Instruction, "") & vbCrLf &
                         $"Schedule: {If(task.ScheduleDescription, "one-time")}" & vbCrLf &
-                        $"Next execution: {task.NextDueUtc.ToLocalTime():yyyy-MM-dd HH:mm} (local)" & vbCrLf &
-                        $"Deliver to: {String.Join(", ", task.DeliverTo)}" &
+                        $"Execution mode: {modeLabel}" & vbCrLf &
+                        $"Next execution: {task.NextDueUtc.ToLocalTime():yyyy-MM-dd HH:mm} (local)" &
+                        If(task.DeliverTo IsNot Nothing AndAlso task.DeliverTo.Count > 0,
+                           vbCrLf & $"Deliver to: {String.Join(", ", task.DeliverTo)}",
+                           "") &
                         If(task.AttachmentFiles.Count > 0, vbCrLf & $"Stored attachments: {String.Join(", ", task.AttachmentFiles)}", "") &
                         apWarning
 
                 Case "list"
                     Dim statusFilter As String = Nothing
                     If args.ContainsKey("status_filter") Then statusFilter = args("status_filter")?.ToString()
-                    Dim tasks = SchedulerListTasks(statusFilter)
+
+                    Dim tasks = SchedulerListTasks(statusFilter).
+                        Where(Function(t) IsSchedulerTaskOwnedByCaller(t, schedulerOwnerAddress)).
+                        ToList()
+
                     response.Success = True
                     response.Response = FormatTaskListForDisplay(tasks)
 
@@ -1335,7 +1657,7 @@ Partial Public Class ThisAddIn
                         response.Response = "Error: task_id is required for the 'get' action."
                         Return response
                     End If
-                    Dim task = SchedulerFindTask(taskId)
+                    Dim task = FindOwnedScheduledTask(taskId, schedulerOwnerAddress)
                     If task Is Nothing Then
                         response.Success = False
                         response.Response = $"No task found matching '{taskId}'."
@@ -1352,7 +1674,7 @@ Partial Public Class ThisAddIn
                         response.Response = "Error: task_id is required for the 'update' action."
                         Return response
                     End If
-                    Dim task = SchedulerFindTask(taskId)
+                    Dim task = FindOwnedScheduledTask(taskId, schedulerOwnerAddress)
                     If task Is Nothing Then
                         response.Success = False
                         response.Response = $"No task found matching '{taskId}'."
@@ -1368,30 +1690,81 @@ Partial Public Class ThisAddIn
                     If args.ContainsKey("status") Then task.Status = args("status")?.ToString()
 
                     If args.ContainsKey("next_due_utc") Then
-                        Dim parsed As DateTime
-                        If DateTime.TryParse(args("next_due_utc")?.ToString(), Nothing,
-                                             Globalization.DateTimeStyles.AdjustToUniversal Or Globalization.DateTimeStyles.AssumeUniversal, parsed) Then
-                            task.NextDueUtc = parsed.ToUniversalTime()
+                        Dim parsedUtc As DateTime
+                        If TryParseSchedulerUtcArgument(args("next_due_utc"), parsedUtc) Then
+                            task.NextDueUtc = parsedUtc
                         End If
                     End If
                     If args.ContainsKey("end_date_utc") Then
-                        Dim parsed As DateTime
-                        If DateTime.TryParse(args("end_date_utc")?.ToString(), Nothing,
-                                             Globalization.DateTimeStyles.AdjustToUniversal Or Globalization.DateTimeStyles.AssumeUniversal, parsed) Then
-                            task.EndDateUtc = parsed.ToUniversalTime()
+                        Dim parsedUtc As DateTime
+                        If TryParseSchedulerUtcArgument(args("end_date_utc"), parsedUtc) Then
+                            task.EndDateUtc = parsedUtc
                         End If
                     End If
                     If args.ContainsKey("remaining_occurrences") Then
                         Dim occ As Integer
                         If Integer.TryParse(args("remaining_occurrences")?.ToString(), occ) Then task.RemainingOccurrences = occ
                     End If
+
+
+                    Dim isLocalChatOrigin As Boolean =
+                        task.ExecutionMode.Equals(AP_TaskExecutionModeBrowserPrompt, StringComparison.OrdinalIgnoreCase) OrElse
+                        (Not _apActive AndAlso INI_WebServerBlock <> 4)
+
+                    Dim rawDeliverTo As Object = Nothing
                     If args.ContainsKey("deliver_to") Then
-                        Dim deliverObj = args("deliver_to")
-                        If TypeOf deliverObj Is JArray Then
-                            task.DeliverTo = DirectCast(deliverObj, JArray).Select(Function(t) t.ToString().Trim()).
-                                Where(Function(s) s.Length > 0).ToList()
-                        End If
+                        rawDeliverTo = args("deliver_to")
+                    ElseIf task.DeliverTo IsNot Nothing AndAlso task.DeliverTo.Count > 0 AndAlso
+                           (Not isLocalChatOrigin OrElse INI_AutoPilotSchedulerLocalChat) Then
+                        rawDeliverTo = New JArray(task.DeliverTo)
                     End If
+
+                    If isLocalChatOrigin AndAlso Not INI_AutoPilotSchedulerLocalChat AndAlso args.ContainsKey("deliver_to") Then
+                        Dim requestedLocalDelivery As New List(Of String)()
+
+                        If TypeOf rawDeliverTo Is JArray Then
+                            requestedLocalDelivery.AddRange(
+                                DirectCast(rawDeliverTo, JArray).
+                                    Select(Function(t) t.ToString().Trim()).
+                                    Where(Function(s) s.Length > 0))
+                        ElseIf rawDeliverTo IsNot Nothing Then
+                            Dim rawText As String = rawDeliverTo.ToString().Trim()
+                            If rawText <> "" Then
+                                requestedLocalDelivery.AddRange(
+                                    rawText.Split({","c, ";"c}, StringSplitOptions.RemoveEmptyEntries).
+                                        Select(Function(s) s.Trim()).
+                                        Where(Function(s) s.Length > 0))
+                            End If
+                        End If
+
+                        If requestedLocalDelivery.Count > 0 Then
+                            response.Success = False
+                            response.ErrorCode = "scheduler_localchat_email_disabled"
+                            response.ErrorMessage = "Local Chat scheduled e-mail delivery is disabled."
+                            response.Response = "Error: Local Chat scheduled e-mail delivery is disabled."
+                            Return response
+                        End If
+
+                        rawDeliverTo = Nothing
+                    End If
+
+                    Dim deliverToError As String = ""
+                    If Not TryNormalizeSchedulerDeliverToForCaller(
+                        rawDeliverTo,
+                        schedulerOwnerAddress,
+                        allowEmpty:=isLocalChatOrigin,
+                        normalizedDeliverTo:=task.DeliverTo,
+                        errorMessage:=deliverToError) Then
+
+                        response.Success = False
+                        response.ErrorCode = "scheduler_delivery_not_allowed"
+                        response.ErrorMessage = deliverToError
+                        response.Response = "Error: " & deliverToError
+                        Return response
+                    End If
+
+                    task.ExecutionMode = ResolveScheduledTaskExecutionMode(isLocalChatOrigin, task.DeliverTo)
+                    task.CreatedBy = schedulerOwnerAddress
 
                     ' Store new attachments from current mail if requested
                     Dim storeNames As List(Of String) = Nothing
@@ -1433,7 +1806,7 @@ Partial Public Class ThisAddIn
                         response.Response = "Error: task_id is required for the 'delete' action."
                         Return response
                     End If
-                    Dim task = SchedulerFindTask(taskId)
+                    Dim task = FindOwnedScheduledTask(taskId, schedulerOwnerAddress)
                     If task Is Nothing Then
                         response.Success = False
                         response.Response = $"No task found matching '{taskId}'."
@@ -1455,7 +1828,7 @@ Partial Public Class ThisAddIn
 
         Catch ex As OperationCanceledException
             Throw
-        Catch ex As Exception
+        Catch ex As System.Exception
             response.Success = False
             response.ErrorMessage = ex.Message
             response.Response = $"Scheduler error: {ex.Message}"
@@ -1675,7 +2048,7 @@ Partial Public Class ThisAddIn
         Catch ex As OperationCanceledException
             response.Success = False
             response.Response = "Operation was cancelled."
-        Catch ex As Exception
+        Catch ex As System.Exception
             response.Success = False
             response.Response = $"Error managing user memory: {ex.Message}"
         End Try
@@ -1815,7 +2188,7 @@ Partial Public Class ThisAddIn
         Catch ex As OperationCanceledException
             response.Success = False
             response.Response = "Operation was cancelled."
-        Catch ex As Exception
+        Catch ex As System.Exception
             response.Success = False
             response.Response = $"Error managing user files: {ex.Message}"
         End Try

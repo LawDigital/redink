@@ -151,6 +151,62 @@ Partial Public Class ThisAddIn
     '  TOOL REGISTRATION
     ' ═══════════════════════════════════════════════════════════════════════════
 
+    Private Function BuildManageScheduledTasksTool() As ModelConfig
+        Return New ModelConfig() With {
+            .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ManageScheduledTasks,
+            .ModelDescription = "Manage Scheduled Tasks (built-in)",
+            .ToolInstructionsPrompt =
+                AP_Tool_ManageScheduledTasks & ": Manages the AutoPilot task scheduler. " &
+                "Users can schedule tasks to be executed automatically at specific times (one-time or recurring) " &
+                "with results delivered by e-mail or, in Local Chat mode, through the Local Agent browser workflow after user confirmation. " &
+                "Supports creating, listing, querying, updating, and deleting scheduled tasks. " &
+                "If the user asks to schedule, remind, repeat, recur, or do something every X minutes/hours/days, you SHOULD use this tool instead of claiming that scheduling is unavailable. " &
+                "The user gives natural-language scheduling instructions like 'every Monday at 8am', " &
+                "'every first Sunday of the month at 10:00', 'three times starting tomorrow at 14:00 every 2 days', " &
+                "'between now and end of October every second day at 09:00', or 'tell me a joke every five minutes'. " &
+                "You MUST translate these into structured fields: " &
+                "- schedule_description: the human-readable schedule text as stated by the user " &
+                "- rrule: an iCalendar RRULE string (e.g. FREQ=WEEKLY;INTERVAL=1;BYDAY=MO or FREQ=MONTHLY;INTERVAL=1;BYDAY=1SU or FREQ=DAILY;INTERVAL=2) " &
+                "- time_of_day_local: the local time in HH:mm format (e.g. '08:00', '14:30') " &
+                "- next_due_utc: the ISO 8601 UTC timestamp of the FIRST execution " &
+                "- end_date_utc: the ISO 8601 UTC end date if specified (otherwise omit) " &
+                "- remaining_occurrences: number of times to execute if count-limited (e.g. 'three times' → 3), otherwise 0 for unlimited " &
+                "When the user says 'every Monday at 8am' and today is Wednesday, the next_due_utc should be next Monday at 08:00 local time converted to UTC. " &
+                "The machine timezone offset is used for UTC conversion (current local time: " & DateTime.Now.ToString("yyyy-MM-dd HH:mm") & ", " &
+                "UTC offset: " & DateTimeOffset.Now.Offset.ToString() & "). " &
+                "For the 'list' action, return ALL tasks including their IDs, instructions, schedules, and status. " &
+                "For 'delete' or 'update', match by task ID prefix or instruction text. " &
+                "The deliver_to field is the e-mail address(es) for result delivery. " &
+                "When invoked from an e-mail, use the sender's address as deliver_to unless the user specifies otherwise. " &
+                "When invoked from Local Chat, deliver_to may be omitted — the task will run in the Local Agent browser workflow after user confirmation rather than by sending the result by e-mail. " &
+                "Tasks can reference attached files — use store_attachment_names to copy the current e-mail's attachments " &
+                "into the task's permanent storage for use during execution.",
+            .ToolDefinition =
+                "{""name"":""" & AP_Tool_ManageScheduledTasks & """," &
+                """description"":""Manages the AutoPilot task scheduler. Supports creating, listing, querying, updating, and deleting " &
+                "scheduled tasks that execute automatically and deliver results by e-mail or, in Local Chat mode, via the Local Agent browser workflow after user confirmation. " &
+                "Use this when the user asks to schedule, remind, repeat, recur, or run something every X minutes/hours/days. " &
+                "Translate natural-language schedules into structured rrule/time_of_day_local/next_due_utc fields.""," &
+                """parameters"":{""type"":""object"",""properties"":{" &
+                """action"":{""type"":""string"",""enum"":[""create"",""list"",""get"",""update"",""delete""]," &
+                """description"":""The operation to perform""}," &
+                """task_id"":{""type"":""string"",""description"":""Task ID (or prefix) for get/update/delete actions""}," &
+                """instruction"":{""type"":""string"",""description"":""The task instruction/prompt to execute (for create/update)""}," &
+                """subject"":{""type"":""string"",""description"":""Subject line for the result e-mail (for create/update)""}," &
+                """deliver_to"":{""type"":""array"",""items"":{""type"":""string""},""description"":""E-mail addresses for result delivery (for create/update)""}," &
+                """schedule_description"":{""type"":""string"",""description"":""Human-readable schedule description (e.g. 'every Monday at 08:00')""}," &
+                """rrule"":{""type"":""string"",""description"":""iCalendar RRULE string (e.g. 'FREQ=WEEKLY;INTERVAL=1;BYDAY=MO'). Empty for one-time tasks.""}," &
+                """time_of_day_local"":{""type"":""string"",""description"":""Local time of execution in HH:mm format (e.g. '08:00')""}," &
+                """next_due_utc"":{""type"":""string"",""description"":""ISO 8601 UTC timestamp for the first/next execution (e.g. '2026-03-30T06:00:00Z')""}," &
+                """end_date_utc"":{""type"":""string"",""description"":""ISO 8601 UTC end date for recurrence (omit for no end date)""}," &
+                """remaining_occurrences"":{""type"":""integer"",""description"":""Number of remaining executions for count-limited tasks (0 = unlimited)""}," &
+                """status"":{""type"":""string"",""enum"":[""active"",""paused""],""description"":""Task status (for update)""}," &
+                """store_attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of current e-mail attachments to copy into the task's permanent storage""}," &
+                """status_filter"":{""type"":""string"",""description"":""Filter for list action (e.g. 'active', 'completed', 'paused'). Omit to list all.""}" &
+                "},""required"":[""action""]}}"
+        }
+    End Function
+
     ''' <summary>
     ''' Builds and returns the full set of AutoPilot internal tool definitions.
     ''' </summary>
@@ -1135,56 +1191,9 @@ Partial Public Class ThisAddIn
 
 
         ' ── manage_scheduled_tasks ──
-        If _apConfig IsNot Nothing AndAlso _apConfig.EnableScheduler Then
-            tools.Add(New ModelConfig() With {
-                .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ManageScheduledTasks,
-                .ModelDescription = "Manage Scheduled Tasks (built-in)",
-                .ToolInstructionsPrompt =
-                    AP_Tool_ManageScheduledTasks & ": Manages the AutoPilot task scheduler. " &
-                    "Users can schedule tasks to be executed automatically at specific times (one-time or recurring) " &
-                    "with results delivered by e-mail. Supports creating, listing, querying, updating, and deleting scheduled tasks. " &
-                    "The user gives natural-language scheduling instructions like 'every Monday at 8am', " &
-                    "'every first Sunday of the month at 10:00', 'three times starting tomorrow at 14:00 every 2 days', " &
-                    "'between now and end of October every second day at 09:00'. " &
-                    "You MUST translate these into structured fields: " &
-                    "- schedule_description: the human-readable schedule text as stated by the user " &
-                    "- rrule: an iCalendar RRULE string (e.g. FREQ=WEEKLY;INTERVAL=1;BYDAY=MO or FREQ=MONTHLY;INTERVAL=1;BYDAY=1SU or FREQ=DAILY;INTERVAL=2) " &
-                    "- time_of_day_local: the local time in HH:mm format (e.g. '08:00', '14:30') " &
-                    "- next_due_utc: the ISO 8601 UTC timestamp of the FIRST execution " &
-                    "- end_date_utc: the ISO 8601 UTC end date if specified (otherwise omit) " &
-                    "- remaining_occurrences: number of times to execute if count-limited (e.g. 'three times' → 3), otherwise 0 for unlimited " &
-                    "When the user says 'every Monday at 8am' and today is Wednesday, the next_due_utc should be next Monday at 08:00 local time converted to UTC. " &
-                    "The machine timezone offset is used for UTC conversion (current local time: " & DateTime.Now.ToString("yyyy-MM-dd HH:mm") & ", " &
-                    "UTC offset: " & DateTimeOffset.Now.Offset.ToString() & "). " &
-                    "For the 'list' action, return ALL tasks including their IDs, instructions, schedules, and status. " &
-                    "For 'delete' or 'update', match by task ID prefix or instruction text. " &
-                    "The deliver_to field is the e-mail address(es) for result delivery. " &
-                    "When invoked from an e-mail, use the sender's address as deliver_to unless the user specifies otherwise. " &
-                    "Tasks can reference attached files — use store_attachment_names to copy the current e-mail's attachments " &
-                    "into the task's permanent storage for use during execution.",
-                .ToolDefinition =
-                    "{""name"":""" & AP_Tool_ManageScheduledTasks & """," &
-                    """description"":""Manages the AutoPilot task scheduler. Supports creating, listing, querying, updating, and deleting " &
-                    "scheduled tasks that execute automatically and deliver results by e-mail. " &
-                    "Translate natural-language schedules into structured rrule/time_of_day_local/next_due_utc fields.""," &
-                    """parameters"":{""type"":""object"",""properties"":{" &
-                    """action"":{""type"":""string"",""enum"":[""create"",""list"",""get"",""update"",""delete""]," &
-                    """description"":""The operation to perform""}," &
-                    """task_id"":{""type"":""string"",""description"":""Task ID (or prefix) for get/update/delete actions""}," &
-                    """instruction"":{""type"":""string"",""description"":""The task instruction/prompt to execute (for create/update)""}," &
-                    """subject"":{""type"":""string"",""description"":""Subject line for the result e-mail (for create/update)""}," &
-                    """deliver_to"":{""type"":""array"",""items"":{""type"":""string""},""description"":""E-mail addresses for result delivery (for create/update)""}," &
-                    """schedule_description"":{""type"":""string"",""description"":""Human-readable schedule description (e.g. 'every Monday at 08:00')""}," &
-                    """rrule"":{""type"":""string"",""description"":""iCalendar RRULE string (e.g. 'FREQ=WEEKLY;INTERVAL=1;BYDAY=MO'). Empty for one-time tasks.""}," &
-                    """time_of_day_local"":{""type"":""string"",""description"":""Local time of execution in HH:mm format (e.g. '08:00')""}," &
-                    """next_due_utc"":{""type"":""string"",""description"":""ISO 8601 UTC timestamp for the first/next execution (e.g. '2026-03-30T06:00:00Z')""}," &
-                    """end_date_utc"":{""type"":""string"",""description"":""ISO 8601 UTC end date for recurrence (omit for no end date)""}," &
-                    """remaining_occurrences"":{""type"":""integer"",""description"":""Number of remaining executions for count-limited tasks (0 = unlimited)""}," &
-                    """status"":{""type"":""string"",""enum"":[""active"",""paused""],""description"":""Task status (for update)""}," &
-                    """store_attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of current e-mail attachments to copy into the task's permanent storage""}," &
-                    """status_filter"":{""type"":""string"",""description"":""Filter for list action (e.g. 'active', 'completed', 'paused'). Omit to list all.""}" &
-                    "},""required"":[""action""]}}"
-            })
+        If (_apConfig IsNot Nothing AndAlso _apConfig.EnableScheduler) OrElse
+           (Not _apActive AndAlso INI_AutoPilotSchedulerLocalChat AndAlso INI_WebServerBlock <> 4) Then
+            tools.Add(BuildManageScheduledTasksTool())
         End If
 
         ' ── manage_user_memory ──

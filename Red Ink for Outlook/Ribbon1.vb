@@ -944,6 +944,11 @@ Public Class Ribbon2
         End Using
     End Sub
 
+    Private Sub RI_SchedulerDashboard_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_SchedulerDashboard.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "SchedulerDashboard_Outlook invoked")
+        Globals.ThisAddIn.ShowSchedulerDashboard()
+    End Sub
+
     Private Sub RI_HelpMe_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_HelpMe.Click
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "HelpMe_Outlook invoked")
         Globals.ThisAddIn.HelpMeInky()
