@@ -121,7 +121,7 @@ Partial Public Class ThisAddIn
     Private Const FormPrefix As String = "Form:"
     Private Const RefreshTrigger As String = "(refresh)"
     Private Const ToolSelectionTrigger As String = "(agents)"  ' Trigger in OtherPrompt to re-select tools for tooling-enabled models.
-    Private Const ToolTrigger As String = "(a)"
+    Private Const ToolTrigger As String = "(ag)"
     Public Const ToolFriendlyName As String = "Agents"  ' How to refer to tools (e.g., sources) towards the user
     Private Const KbTrigger As String = SharedLibrary.SharedLibrary.KnowledgeTriggerHelper.KbTrigger          ' "(kb)"
     Private Const KbTriggerPrefix As String = SharedLibrary.SharedLibrary.KnowledgeTriggerHelper.KbTriggerPrefix ' "(kb:"

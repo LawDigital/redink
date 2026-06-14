@@ -136,7 +136,7 @@ Public Class DiscussInky
     Private Const AutoPersistKnowledgeThresholdChars As Integer = 25000
     Private Const DialogueArchiveFolderName As String = "redink-discuss-dialogues"
     Private Const DialogueArchiveFileExtension As String = ".dialogue.xml"
-    Private Const ToolTrigger As String = "(a)"
+    Private Const ToolTrigger As String = "(ag)"
     Private Const KBTrigger As String = "(kb)"  ' Trigger to supplement with knowledge store results.
 
     ' Default fallback persona used when no persona library is configured
@@ -373,6 +373,7 @@ Public Class DiscussInky
         table.RowStyles.Add(New RowStyle(SizeType.AutoSize))
 
         _txtInput.Margin = New Padding(0, 0, 0, 0)
+        _txtInput.Font = New System.Drawing.Font(_txtInput.Font.FontFamily, 10.0F, _txtInput.Font.Style)
 
         ' Place chat and input into the SplitContainer
         _splitChat.Panel1.Controls.Add(_chat)
@@ -455,6 +456,7 @@ Public Class DiscussInky
         AddHandler _chkShowToolingLog.CheckedChanged, AddressOf OnShowToolingLogChanged
         AddHandler _chkInkyMemory.CheckedChanged, AddressOf OnInkyMemoryChanged
         AddHandler _lnkEditMemory.LinkClicked, AddressOf OnEditMemoryClicked
+        AddHandler _txtInput.MouseWheel, AddressOf OnInputMouseWheel
         AddHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
 
     End Sub
@@ -494,6 +496,30 @@ Public Class DiscussInky
         Else
             action.Invoke()
         End If
+    End Sub
+
+    Private Sub BringDiscussFormToFront()
+        If Me.IsDisposed Then Return
+
+        Try
+            If Me.InvokeRequired Then
+                Me.BeginInvoke(New System.Windows.Forms.MethodInvoker(AddressOf BringDiscussFormToFront))
+                Return
+            End If
+
+            If Me.WindowState = System.Windows.Forms.FormWindowState.Minimized Then
+                Me.WindowState = System.Windows.Forms.FormWindowState.Normal
+            End If
+
+            SharedMethods.EnsureVisibleOnScreen(Me)
+
+            Me.Show()
+            Me.Activate()
+            Me.BringToFront()
+            _txtInput.Focus()
+
+        Catch
+        End Try
     End Sub
 
     ''' <summary>
@@ -1017,7 +1043,7 @@ Public Class DiscussInky
                     _cachedKnowledgeFilePath = _knowledgeFilePath
 
                     UpdateWindowTitle()
-                    AppendSystemMessage($"Knowledge restored from persisted storage ({_knowledgeContent.Length:N0} characters).")
+                    AppendSystemMessage($"Knowledge restored from persisted storage ({GetKnowledgeSummaryText()}).")
                     Return
                 Catch ex As Exception
                     AppendSystemMessage($"Failed to restore persisted knowledge: {ex.Message}")
@@ -1120,6 +1146,7 @@ Public Class DiscussInky
 
                         ctx.GlobalDocumentCounter += 1
                         ctx.LoadedFiles.Add(Tuple.Create(filePath, content.Length))
+                        loadedCount += 1
 
                         If useDocumentTags Then
                             Dim docNum = ctx.GlobalDocumentCounter
@@ -1171,11 +1198,11 @@ Public Class DiscussInky
     ''' Persists the current knowledge content to the temp file.
     ''' </summary>
     Private Sub PersistKnowledgeToTempFile()
-        If String.IsNullOrWhiteSpace(_cachedKnowledgeContent) Then Return
+        If String.IsNullOrWhiteSpace(_knowledgeContent) Then Return
 
         Try
-            Dim persistPath = GetPersistedKnowledgeFilePath()
-            File.WriteAllText(persistPath, _cachedKnowledgeContent, Encoding.UTF8)
+            Dim persistPath As String = GetPersistedKnowledgeFilePath()
+            System.IO.File.WriteAllText(persistPath, _knowledgeContent, System.Text.Encoding.UTF8)
         Catch
             ' Silently fail - not critical
         End Try
@@ -2006,6 +2033,80 @@ Public Class DiscussInky
 
 #Region "Knowledge File Management"
 
+    Private Function GetKnowledgeDocumentCount(Optional content As String = Nothing) As Integer
+        Dim source As String = If(content, _knowledgeContent)
+
+        If String.IsNullOrWhiteSpace(source) Then
+            Return 0
+        End If
+
+        Dim matches As System.Text.RegularExpressions.MatchCollection =
+            System.Text.RegularExpressions.Regex.Matches(
+                source,
+                "<document\d+\b",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+
+        If matches.Count > 0 Then
+            Return matches.Count
+        End If
+
+        Return 1
+    End Function
+
+    Private Function GetNextKnowledgeDocumentNumber(existingContent As String) As Integer
+        If String.IsNullOrWhiteSpace(existingContent) Then
+            Return 1
+        End If
+
+        Dim maxNumber As Integer = 0
+
+        Dim matches As System.Text.RegularExpressions.MatchCollection =
+            System.Text.RegularExpressions.Regex.Matches(
+                existingContent,
+                "<document(?<n>\d+)\b",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+
+        For Each m As System.Text.RegularExpressions.Match In matches
+            Dim n As Integer = 0
+            If Integer.TryParse(m.Groups("n").Value, n) Then
+                If n > maxNumber Then
+                    maxNumber = n
+                End If
+            End If
+        Next
+
+        Return maxNumber + 1
+    End Function
+
+    Private Function GetKnowledgeSummaryText(Optional content As String = Nothing) As String
+        Dim source As String = If(content, _knowledgeContent)
+
+        If String.IsNullOrWhiteSpace(source) Then
+            Return "0 item(s), 0 characters"
+        End If
+
+        Return $"{GetKnowledgeDocumentCount(source):N0} item(s), {source.Length:N0} characters"
+    End Function
+
+    Private Function GetKnowledgeDisplayName() As String
+        If String.IsNullOrWhiteSpace(_knowledgeFilePath) Then
+            Return "None loaded"
+        End If
+
+        Return $"{System.IO.Path.GetFileName(_knowledgeFilePath)} ({GetKnowledgeSummaryText()})"
+    End Function
+
+    Private Function GetKnowledgePathLabelAfterLoad(selectedPath As String, isFile As Boolean, appendToExisting As Boolean) As String
+        If appendToExisting Then
+            Return "(Combined Knowledge)"
+        End If
+
+        If isFile Then
+            Return selectedPath
+        End If
+
+        Return selectedPath & " (directory)"
+    End Function
 
     Private Sub DeleteCurrentKnowledge()
         _knowledgeContent = Nothing
@@ -2036,6 +2137,7 @@ Public Class DiscussInky
     ''' </summary>
     Private Async Sub OnLoadKnowledge(sender As Object, e As EventArgs)
         Await PromptForKnowledgeAsync()
+        BringDiscussFormToFront()
     End Sub
 
     ''' <summary>
@@ -2050,7 +2152,7 @@ Public Class DiscussInky
             Dim selectedPath As String = ""
 
             Using frm As New DragDropForm(DragDropMode.FileOrDirectory)
-                If frm.ShowDialog() = DialogResult.OK Then
+                If frm.ShowDialog(Me) = System.Windows.Forms.DialogResult.OK Then
                     selectedPath = frm.SelectedFilePath
                 End If
             End Using
@@ -2079,6 +2181,24 @@ Public Class DiscussInky
             If Not isFile AndAlso Not isDirectory Then
                 AppendSystemMessage("Selected path does not exist.")
                 Return
+            End If
+
+            Dim appendToExisting As Boolean = False
+            Dim existingKnowledgeSummary As String = GetKnowledgeSummaryText()
+
+            If Not String.IsNullOrWhiteSpace(_knowledgeContent) Then
+                Dim appendAnswer = ShowCustomYesNoBox(
+                    "There is already knowledge loaded:" &
+                    vbCrLf & vbCrLf &
+                    existingKnowledgeSummary &
+                    vbCrLf & vbCrLf &
+                    "Do you want to add the selected knowledge to the existing knowledge, or replace the existing knowledge?",
+                    "Add to existing", "Replace existing")
+                If appendAnswer = 0 Then
+                    ' User cancelled
+                    Return
+                End If
+                appendToExisting = (appendAnswer = 1)
             End If
 
             ' Create loading context
@@ -2157,7 +2277,8 @@ Public Class DiscussInky
             ShowAssistantThinking()
 
             Dim resultBuilder As New StringBuilder()
-            Dim useDocumentTags = (filesToProcess.Count > 1)
+            Dim useDocumentTags As Boolean = appendToExisting OrElse filesToProcess.Count > 1
+            Dim firstDocumentNumber As Integer = If(appendToExisting, GetNextKnowledgeDocumentNumber(_knowledgeContent), 1)
 
             For Each filePath In filesToProcess
                 Try
@@ -2204,11 +2325,18 @@ Public Class DiscussInky
                     ctx.LoadedFiles.Add(Tuple.Create(filePath, content.Length))
 
                     If useDocumentTags Then
-                        Dim docNum = ctx.GlobalDocumentCounter
-                        Dim fileName = Path.GetFileName(filePath)
-                        Dim openTag = $"<document{docNum} name=""{fileName}"">"
-                        Dim closeTag = $"</document{docNum}>"
-                        resultBuilder.Append(openTag).Append(content).Append(closeTag)
+                        Dim docNum As Integer = If(appendToExisting, firstDocumentNumber + ctx.GlobalDocumentCounter - 1, ctx.GlobalDocumentCounter)
+                        Dim fileName As String = System.IO.Path.GetFileName(filePath)
+                        Dim openTag As String = $"<document{docNum} name=""{fileName}"">"
+                        Dim closeTag As String = $"</document{docNum}>"
+
+                        resultBuilder.
+                            Append(openTag).
+                            AppendLine().
+                            Append(content).
+                            AppendLine().
+                            Append(closeTag).
+                            AppendLine()
                     Else
                         resultBuilder.Append(content)
                     End If
@@ -2281,29 +2409,42 @@ Public Class DiscussInky
             End If
 
             ' Update state
-            _knowledgeContent = combinedContent
-            _knowledgeFilePath = If(isFile, selectedPath, selectedPath & " (directory)")
+            If appendToExisting Then
+                _knowledgeContent =
+                    If(_knowledgeContent, "").TrimEnd() &
+                    vbCrLf & vbCrLf &
+                    combinedContent.TrimStart()
+            Else
+                _knowledgeContent = combinedContent
+            End If
+
+            _knowledgeFilePath = GetKnowledgePathLabelAfterLoad(selectedPath, isFile, appendToExisting)
 
             ' Update runtime cache
             _cachedKnowledgeContent = _knowledgeContent
             _cachedKnowledgeFilePath = _knowledgeFilePath
 
             ' Auto-enable persistence for large knowledge; otherwise persist only if user already enabled it.
-            Dim persistedOrAlreadyEnabled As Boolean = AutoEnablePersistKnowledgeIfLarge(ctx.LoadedFiles.Count)
+            Dim autoPersisted As Boolean = AutoEnablePersistKnowledgeIfLarge(ctx.LoadedFiles.Count)
 
-            If _chkPersistKnowledge.Checked AndAlso Not persistedOrAlreadyEnabled Then
+            If _chkPersistKnowledge.Checked AndAlso Not autoPersisted Then
                 Try
-                    Dim persistPath As String = GetPersistedKnowledgeFilePath()
-                    System.IO.File.WriteAllText(persistPath, _knowledgeContent, System.Text.Encoding.UTF8)
-                    AppendSystemMessage($"Knowledge loaded and persisted ({_knowledgeContent.Length:N0} characters from {ctx.LoadedFiles.Count} file(s)).")
+                    PersistKnowledgeToTempFile()
+                    AppendSystemMessage(
+                        $"Knowledge {If(appendToExisting, "added and persisted", "loaded and persisted")} " &
+                        $"({GetKnowledgeSummaryText()}, {ctx.LoadedFiles.Count:N0} new file(s)).")
                 Catch ex As System.Exception
-                    AppendSystemMessage($"Knowledge loaded ({_knowledgeContent.Length:N0} characters) but failed to persist: {ex.Message}")
+                    AppendSystemMessage(
+                        $"Knowledge {If(appendToExisting, "added", "loaded")} ({GetKnowledgeSummaryText()}) but failed to persist: {ex.Message}")
                 End Try
             ElseIf Not _chkPersistKnowledge.Checked Then
-                AppendSystemMessage($"Knowledge loaded: {ctx.LoadedFiles.Count} file(s), {_knowledgeContent.Length:N0} characters total.")
+                AppendSystemMessage(
+                    $"Knowledge {If(appendToExisting, "added", "loaded")}: " &
+                    $"{ctx.LoadedFiles.Count:N0} new file(s), {GetKnowledgeSummaryText()} total.")
             End If
 
             UpdateWindowTitle()
+            BringDiscussFormToFront()
 
             Try
                 My.Settings.DiscussKnowledgePath = selectedPath  ' Save both files AND directories
@@ -2314,6 +2455,7 @@ Public Class DiscussInky
         Catch ex As Exception
             RemoveAssistantThinking()
             AppendSystemMessage($"Error loading knowledge: {ex.Message}")
+            BringDiscussFormToFront()
         End Try
     End Function
 
@@ -2577,6 +2719,34 @@ Public Class DiscussInky
         Me.Close()
     End Sub
 
+
+    Private Sub OnInputMouseWheel(sender As Object, e As System.Windows.Forms.MouseEventArgs)
+        Try
+            If System.Windows.Forms.Control.ModifierKeys <> System.Windows.Forms.Keys.Control Then
+                Return
+            End If
+
+            Dim oldFont As System.Drawing.Font = _txtInput.Font
+            Dim newSize As Single = oldFont.Size
+
+            If e.Delta > 0 Then
+                newSize += 1.0F
+            ElseIf e.Delta < 0 Then
+                newSize -= 1.0F
+            End If
+
+            newSize = System.Math.Max(8.0F, System.Math.Min(24.0F, newSize))
+
+            If newSize <> oldFont.Size Then
+                _txtInput.Font = New System.Drawing.Font(oldFont.FontFamily, newSize, oldFont.Style, oldFont.Unit)
+                oldFont.Dispose()
+            End If
+
+        Catch ex As System.Exception
+            AppendSystemMessage($"Error changing input font size: {ex.Message}")
+        End Try
+    End Sub
+
     ''' <summary>
     ''' Handles slash-triggered prompt library insertion for the DiscussInky input box.
     ''' </summary>
@@ -2671,7 +2841,7 @@ Public Class DiscussInky
 
         ' Knowledge document info
         If Not String.IsNullOrEmpty(_knowledgeFilePath) Then
-            sb.Append($" | Knowledge: {Path.GetFileName(_knowledgeFilePath)}")
+            sb.Append($" | Knowledge: {GetKnowledgeDisplayName()}")
         Else
             sb.Append(" | Knowledge: None loaded")
         End If
