@@ -352,9 +352,9 @@ Partial Class Ribbon1
     Public Async Function UpdateRibbon() As Task
 
         If String.IsNullOrWhiteSpace(ThisAddIn.INI_APICall_Object) Then
-            Me.RI_Clipboard.Visible = False
+            SetRibbonControlVisibleByAvailability(Me.RI_Clipboard, False)
         Else
-            Me.RI_Clipboard.Visible = True
+            SetRibbonControlVisibleByAvailability(Me.RI_Clipboard, True)
         End If
 
         Dim BrandedVersion As String = ThisAddIn.INI_BrandingName
@@ -371,12 +371,14 @@ Partial Class Ribbon1
                         "(model: " & ThisAddIn.INI_Model & ")"
 
         If Trim(ThisAddIn.INI_MyStylePath) = "" Then
-            Me.RI_DefineMyStyle.Visible = False
-            Me.RI_ApplyMyStyle.Visible = False
+            SetRibbonControlVisibleByAvailability(Me.RI_DefineMyStyle, False)
+            SetRibbonControlVisibleByAvailability(Me.RI_ApplyMyStyle, False)
         Else
-            Me.RI_DefineMyStyle.Visible = True
-            Me.RI_ApplyMyStyle.Visible = True
+            SetRibbonControlVisibleByAvailability(Me.RI_DefineMyStyle, True)
+            SetRibbonControlVisibleByAvailability(Me.RI_ApplyMyStyle, True)
         End If
+
+        ApplyRibbonVisibilityConfiguration()
 
     End Function
 
@@ -493,6 +495,7 @@ Partial Class Ribbon2
         Me.RI_DefineMyStyle = Me.Factory.CreateRibbonButton
         Me.SearchTools = Me.Factory.CreateRibbonMenu
         Me.RI_KnowledgeStores = Me.Factory.CreateRibbonButton
+        Me.RI_SchedulerDashboard = Me.Factory.CreateRibbonButton
         Me.RI_PSTExport = Me.Factory.CreateRibbonButton
         Me.RI_AutoPilot = Me.Factory.CreateRibbonButton
         Me.RI_OpenChat = Me.Factory.CreateRibbonButton
@@ -737,6 +740,7 @@ Partial Class Ribbon2
         'SearchTools
         '
         Me.SearchTools.Items.Add(Me.RI_KnowledgeStores)
+        Me.SearchTools.Items.Add(Me.RI_SchedulerDashboard)
         Me.SearchTools.Items.Add(Me.RI_PSTExport)
         Me.SearchTools.Label = "Expert Tools"
         Me.SearchTools.Name = "SearchTools"
@@ -751,6 +755,14 @@ Partial Class Ribbon2
         Me.RI_KnowledgeStores.OfficeImageId = "DatabaseCopyDatabaseFile"
         Me.RI_KnowledgeStores.ScreenTip = "Configure and manage Knowledge Stores"
         Me.RI_KnowledgeStores.ShowImage = True
+        '
+        'RI_SchedulerDashboard
+        '
+        Me.RI_SchedulerDashboard.Label = "Scheduler Dashboard"
+        Me.RI_SchedulerDashboard.Name = "RI_SchedulerDashboard"
+        Me.RI_SchedulerDashboard.OfficeImageId = "ProposeNewTime"
+        Me.RI_SchedulerDashboard.ScreenTip = "Lets you see and manage the tasks that you have scheduled for the local chat agent to execute."
+        Me.RI_SchedulerDashboard.ShowImage = True
         '
         'RI_PSTExport
         '
@@ -847,9 +859,9 @@ Partial Class Ribbon2
     Public Async Function UpdateRibbon() As Task
 
         If String.IsNullOrWhiteSpace(ThisAddIn.INI_APICall_Object) Then
-            Me.RI_Clipboard.Visible = False
+            SetRibbonControlVisibleByAvailability(Me.RI_Clipboard, False)
         Else
-            Me.RI_Clipboard.Visible = True
+            SetRibbonControlVisibleByAvailability(Me.RI_Clipboard, True)
         End If
 
         Dim BrandedVersion As String = ThisAddIn.INI_BrandingName
@@ -866,19 +878,19 @@ Partial Class Ribbon2
         "(model: " & ThisAddIn.INI_Model & ")"
 
         If Trim(ThisAddIn.INI_MyStylePath) = "" Then
-            Me.RI_DefineMyStyle.Visible = False
-            Me.RI_ApplyMyStyle.Visible = False
+            SetRibbonControlVisibleByAvailability(Me.RI_DefineMyStyle, False)
+            SetRibbonControlVisibleByAvailability(Me.RI_ApplyMyStyle, False)
         Else
-            Me.RI_DefineMyStyle.Visible = True
-            Me.RI_ApplyMyStyle.Visible = True
+            SetRibbonControlVisibleByAvailability(Me.RI_DefineMyStyle, True)
+            SetRibbonControlVisibleByAvailability(Me.RI_ApplyMyStyle, True)
         End If
 
-        Me.RI_AutoPilot.Visible = ThisAddIn.IsAutoPilotPermitted()
+        SetRibbonControlVisibleByAvailability(Me.RI_AutoPilot, ThisAddIn.IsAutoPilotPermitted())
 
         If String.IsNullOrWhiteSpace(ThisAddIn.INI_MailMoverPath) And String.IsNullOrWhiteSpace(ThisAddIn.INI_MailMoverPathLocal) Then
-            Me.RI_MailMover.Visible = False
+            SetRibbonControlVisibleByAvailability(Me.RI_MailMover, False)
         Else
-            Me.RI_MailMover.Visible = True
+            SetRibbonControlVisibleByAvailability(Me.RI_MailMover, True)
         End If
 
         If String.IsNullOrWhiteSpace(ThisAddIn.INI_KnowledgeStorePath) And String.IsNullOrWhiteSpace(ThisAddIn.INI_KnowledgeStorePathLocal) Then
@@ -895,6 +907,7 @@ Partial Class Ribbon2
 
 
         ApplyThemeAwareMenuIcon()
+        ApplyRibbonVisibilityConfiguration()
 
     End Function
 
@@ -930,6 +943,7 @@ Partial Class Ribbon2
     Friend WithEvents RI_DefineMyStyle As RibbonButton
     Friend WithEvents SearchTools As RibbonMenu
     Friend WithEvents RI_KnowledgeStores As RibbonButton
+    Friend WithEvents RI_SchedulerDashboard As RibbonButton
     Friend WithEvents RI_PSTExport As RibbonButton
     Friend WithEvents RI_AutoPilot As RibbonButton
     Friend WithEvents RI_OpenChat As RibbonButton

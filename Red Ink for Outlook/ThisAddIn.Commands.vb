@@ -2301,6 +2301,7 @@ Partial Public Class ThisAddIn
     Public Sub ShowSettings()
 
         Dim Settings As New Dictionary(Of String, String) From {
+                        {"SimpleMenuOverride", "Simple menu"},
                         {"Temperature", "Temperature of {model}"},
                         {"Timeout", "Timeout of {model}"},
                         {"Temperature_2", "Temperature of {model2}"},
@@ -2338,6 +2339,7 @@ Partial Public Class ThisAddIn
                     }
 
         Dim SettingsTips As New Dictionary(Of String, String) From {
+                        {"SimpleMenuOverride", "Only show the simple menu features in this add-in (can be defined)"},
                         {"Temperature", "The higher, the more creative the LLM will be (0.0-2.0)"},
                         {"Timeout", "In milliseconds"},
                         {"Temperature_2", "The higher, the more creative the LLM will be (0.0-2.0)"},
@@ -2353,7 +2355,7 @@ Partial Public Class ThisAddIn
                         {"ReplaceText2", "If selected, the response of the LLM for other commands (than translate) will replace the original text"},
                         {"ReplaceText2Override", "Leave empty to not override the above value; use 0 or 'false' to disable and 1 or 'true' to enable 'Replace text' as a personal override"},
                         {"DoMarkupOutlook", "Whether a markup should be done for functions that change only parts of a text"},
-                                                {"MarkupMethodOutlook", "Markup method to use: 1 = Compare using the Word compare function, 2 = Simple Differ, 3 = Simple Diff shown in a window, 4 = Interactive review (accept/reject each change)"},
+                        {"MarkupMethodOutlook", "Markup method to use: 1 = Compare using the Word compare function, 2 = Simple Differ, 3 = Simple Diff shown in a window, 4 = Interactive review (accept/reject each change)"},
                         {"MarkupMethodOutlookOverride", "Leave empty to not override the above value; otherwise enter the personal override value for 'markup method'"},
                         {"MarkupDiffCap", "The maximum size of the text that should be processed using the Diff method (to avoid you having to wait too long)"},
                         {"PreCorrection", "Add prompting text that will be added to all basic requests (e.g., for special language tasks)"},

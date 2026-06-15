@@ -119,23 +119,46 @@ Partial Public Class ThisAddIn
         Return result
     End Function
 
-    Private Function GetToolParameterType(schemaToken As JToken) As String
+    Private Function GetToolParameterTypes(schemaToken As JToken) As List(Of String)
+        Dim result As New List(Of String)()
+
         If schemaToken Is Nothing Then
-            Return "string"
+            Return result
         End If
 
         Dim typeToken As JToken = schemaToken("type")
-        Dim typeName As String = If(typeToken, "").ToString().Trim().ToLowerInvariant()
 
-        If typeName <> "" Then
-            Return typeName
+        If TypeOf typeToken Is JArray Then
+            For Each item As JToken In DirectCast(typeToken, JArray)
+                Dim typeName As String = If(item, "").ToString().Trim().ToLowerInvariant()
+                If typeName <> "" Then
+                    result.Add(typeName)
+                End If
+            Next
+        Else
+            Dim typeName As String = If(typeToken, "").ToString().Trim().ToLowerInvariant()
+            If typeName <> "" Then
+                result.Add(typeName)
+            End If
         End If
 
-        If schemaToken("enum") IsNot Nothing Then
+        If result.Count = 0 AndAlso schemaToken("enum") IsNot Nothing Then
+            result.Add("string")
+        End If
+
+        Return result.
+            Distinct(StringComparer.OrdinalIgnoreCase).
+            ToList()
+    End Function
+
+    Private Function GetToolParameterType(schemaToken As JToken) As String
+        Dim types As List(Of String) = GetToolParameterTypes(schemaToken)
+
+        If types Is Nothing OrElse types.Count = 0 Then
             Return "string"
         End If
 
-        Return "string"
+        Return types(0)
     End Function
 
     Private Function GetToolParameterEnumValues(schemaToken As JToken) As List(Of String)
@@ -224,34 +247,38 @@ Partial Public Class ThisAddIn
             Return True
         End If
 
-        Dim parameterType As String = GetToolParameterType(schemaToken)
-        Dim typeMatches As Boolean = True
+        Dim parameterTypes As List(Of String) = GetToolParameterTypes(schemaToken)
+        Dim typeMatches As Boolean = (parameterTypes.Count = 0)
 
-        Select Case parameterType
-            Case "string"
-                typeMatches = (token.Type = JTokenType.String)
+        For Each parameterType As String In parameterTypes
+            Select Case parameterType
+                Case "string"
+                    typeMatches = (token.Type = JTokenType.String)
 
-            Case "integer"
-                typeMatches = (token.Type = JTokenType.Integer)
+                Case "integer"
+                    typeMatches = (token.Type = JTokenType.Integer)
 
-            Case "number"
-                typeMatches = (token.Type = JTokenType.Integer OrElse token.Type = JTokenType.Float)
+                Case "number"
+                    typeMatches = (token.Type = JTokenType.Integer OrElse token.Type = JTokenType.Float)
 
-            Case "boolean"
-                typeMatches = (token.Type = JTokenType.Boolean)
+                Case "boolean"
+                    typeMatches = (token.Type = JTokenType.Boolean)
 
-            Case "array"
-                typeMatches = (token.Type = JTokenType.Array)
+                Case "array"
+                    typeMatches = (token.Type = JTokenType.Array)
 
-            Case "object"
-                typeMatches = (token.Type = JTokenType.Object)
+                Case "object"
+                    typeMatches = (token.Type = JTokenType.Object)
 
-            Case Else
-                typeMatches = True
-        End Select
+                Case Else
+                    typeMatches = True
+            End Select
+
+            If typeMatches Then Exit For
+        Next
 
         If Not typeMatches Then
-            validationError = $"Parameter '{argumentName}' must be of type '{parameterType}'."
+            validationError = $"Parameter '{argumentName}' must be of type '{String.Join("' or '", parameterTypes)}'."
             Return False
         End If
 
@@ -298,6 +325,39 @@ Partial Public Class ThisAddIn
         Return True
     End Function
 
+    Private Sub NormalizeSchedulerDateArgumentForValidation(arguments As Dictionary(Of String, Object),
+                                                            argumentName As String)
+        If arguments Is Nothing OrElse String.IsNullOrWhiteSpace(argumentName) Then
+            Return
+        End If
+
+        If Not arguments.ContainsKey(argumentName) Then
+            Return
+        End If
+
+        Dim rawValue As Object = arguments(argumentName)
+        If rawValue Is Nothing Then
+            Return
+        End If
+
+        Dim parsedUtc As DateTime
+        If TryParseSchedulerUtcArgument(rawValue, parsedUtc) Then
+            arguments(argumentName) = parsedUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", Globalization.CultureInfo.InvariantCulture)
+        End If
+    End Sub
+
+    Private Sub NormalizeToolArgumentsForSchemaValidation(toolCall As ToolCall,
+                                                          arguments As Dictionary(Of String, Object))
+        If toolCall Is Nothing OrElse arguments Is Nothing Then
+            Return
+        End If
+
+        If String.Equals(toolCall.ToolName, AP_Tool_ManageScheduledTasks, StringComparison.OrdinalIgnoreCase) Then
+            NormalizeSchedulerDateArgumentForValidation(arguments, "next_due_utc")
+            NormalizeSchedulerDateArgumentForValidation(arguments, "end_date_utc")
+        End If
+    End Sub
+
     Private Function TryValidateToolCallArguments(toolCall As ToolCall,
                                                   toolConfig As ModelConfig,
                                                   ByRef validationError As String) As Boolean
@@ -320,6 +380,8 @@ Partial Public Class ThisAddIn
 
         Dim arguments As Dictionary(Of String, Object) =
             If(toolCall.Arguments, New Dictionary(Of String, Object)(StringComparer.OrdinalIgnoreCase))
+
+        NormalizeToolArgumentsForSchemaValidation(toolCall, arguments)
 
         For Each requiredParameter As String In requiredParameters
             If Not arguments.ContainsKey(requiredParameter) OrElse arguments(requiredParameter) Is Nothing Then

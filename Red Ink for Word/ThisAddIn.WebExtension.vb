@@ -35,6 +35,10 @@ Partial Public Class ThisAddIn
     Private listenerTask As System.Threading.Tasks.Task
     Private isShuttingDown As Boolean = False
 
+    Private Function IsEdgeExtensionReceiverEnabled() As System.Boolean
+        Return INI_WebServerBlock <> 1 AndAlso INI_WebServerBlock <> 3
+    End Function
+
     '───────────────────────────────────────────────────────────────────────────
     ''' <summary>
     ''' Executes an action on the UI thread and waits for completion.
@@ -90,7 +94,8 @@ Partial Public Class ThisAddIn
     ''' Starts the HTTP listener in a fire-and-forget manner.
     ''' </summary>
     '───────────────────────────────────────────────────────────────────────────
-    Private Sub StartupHttpListener()
+    Private Sub StartupHttpListener(WebServerBlock As Integer)
+        If WebServerBlock = 1 OrElse WebServerBlock = 3 Then Return
         listenerTask = StartHttpListener()
     End Sub
 
@@ -181,8 +186,25 @@ Partial Public Class ThisAddIn
         ctx As System.Net.HttpListenerContext) _
         As System.Threading.Tasks.Task
 
-        Dim req = ctx.Request
-        Dim res = ctx.Response
+        Dim req As System.Net.HttpListenerRequest = ctx.Request
+        Dim res As System.Net.HttpListenerResponse = ctx.Response
+
+        If Not IsEdgeExtensionReceiverEnabled() Then
+            Dim msgBytes() As System.Byte =
+                System.Text.Encoding.UTF8.GetBytes("The Edge extension receiver is disabled by WebServerBlock.")
+
+            res.StatusCode = 403
+            res.ContentLength64 = msgBytes.LongLength
+            res.ContentType = "text/plain; charset=utf-8"
+            res.AddHeader("Access-Control-Allow-Origin", "*")
+
+            Using os As System.IO.Stream = res.OutputStream
+                Await os.WriteAsync(msgBytes, 0, msgBytes.Length).ConfigureAwait(False)
+            End Using
+
+            res.Close()
+            Return
+        End If
 
         ' CORS pre-flight
         If req.HttpMethod = "OPTIONS" Then

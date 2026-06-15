@@ -27,6 +27,27 @@ Namespace Agents
         Private Sub New()
         End Sub
 
+        Private Shared Function ToSafeToolSuffix(value As String) As String
+            If String.IsNullOrWhiteSpace(value) Then
+                Return ""
+            End If
+
+            Dim sb As New System.Text.StringBuilder()
+            Dim lastWasUnderscore As Boolean = False
+
+            For Each ch As Char In value.Trim()
+                If Char.IsLetterOrDigit(ch) Then
+                    sb.Append(Char.ToLowerInvariant(ch))
+                    lastWasUnderscore = False
+                ElseIf Not lastWasUnderscore Then
+                    sb.Append("_"c)
+                    lastWasUnderscore = True
+                End If
+            Next
+
+            Return sb.ToString().Trim("_"c)
+        End Function
+
         ''' <summary>
         ''' Wraps an existing list of <see cref="ModelConfig"/> tools into a registry.
         ''' Entries are registered eagerly (the ModelConfig is already built and cheap to
@@ -73,7 +94,10 @@ Namespace Agents
                 If sk Is Nothing OrElse String.IsNullOrWhiteSpace(sk.Name) Then Continue For
 
                 Dim localSk = sk ' capture
-                Dim toolName As String = "skill_" & localSk.Name
+                Dim toolSuffix As String = ToSafeToolSuffix(localSk.Name)
+                If String.IsNullOrWhiteSpace(toolSuffix) Then Continue For
+
+                Dim toolName As String = "skill_" & toolSuffix
                 Dim shortDesc As String = If(localSk.Description, "")
                 Dim originLabel As String = If(localSk.IsLocal, "local", "central")
 
@@ -100,7 +124,10 @@ Namespace Agents
                 If ag Is Nothing OrElse String.IsNullOrWhiteSpace(ag.Name) Then Continue For
 
                 Dim localAg = ag ' capture
-                Dim toolName As String = "agent_" & localAg.Name
+                Dim toolSuffix As String = ToSafeToolSuffix(localAg.Name)
+                If String.IsNullOrWhiteSpace(toolSuffix) Then Continue For
+
+                Dim toolName As String = "agent_" & toolSuffix
                 Dim shortDesc As String = If(localAg.Description, "")
                 Dim originLabel As String = If(localAg.IsLocal, "local", "central")
 

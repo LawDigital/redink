@@ -680,6 +680,50 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_SimpleMenuHide As String
+        Get
+            Return _context.INI_SimpleMenuHide
+        End Get
+        Set(value As String)
+            _context.INI_SimpleMenuHide = value
+        End Set
+    End Property
+
+    Public Shared Property INI_SimpleMenuDefault As Boolean
+        Get
+            Return _context.INI_SimpleMenuDefault
+        End Get
+        Set(value As Boolean)
+            _context.INI_SimpleMenuDefault = value
+        End Set
+    End Property
+
+    Public Shared Property INI_SimpleMenuOverride As Boolean
+        Get
+            Return _context.INI_SimpleMenuOverride
+        End Get
+        Set(value As Boolean)
+            _context.INI_SimpleMenuOverride = value
+        End Set
+    End Property
+
+    Public Shared Property INI_MenuBlock As String
+        Get
+            Return _context.INI_MenuBlock
+        End Get
+        Set(value As String)
+            _context.INI_MenuBlock = value
+        End Set
+    End Property
+
+    Public Shared Property INI_WebServerBlock As Integer
+        Get
+            Return _context.INI_WebServerBlock
+        End Get
+        Set(value As Integer)
+            _context.INI_WebServerBlock = value
+        End Set
+    End Property
 
     Public Shared Property INI_DoMarkupOutlook As Boolean
         Get

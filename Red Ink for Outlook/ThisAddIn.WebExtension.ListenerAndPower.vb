@@ -285,7 +285,7 @@ Partial Public Class ThisAddIn
                         ' Restart only if user was present pre-suspend
                         If userPresent AndAlso wasListenerRunningBeforeSleep Then
                             Try
-                                StartupHttpListener()
+                                StartupHttpListener(INI_WebServerBlock)
                             Catch
                             End Try
                         End If
@@ -334,7 +334,16 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Initializes listener generation, cancellation token source, logs, and starts listener loop.
     ''' </summary>
-    Private Sub StartupHttpListener()
+    Private Sub StartupHttpListener(WebServerBlock)
+
+        ' WebServerBlock:
+        '   1 = no webserver
+        '   2 = no Local Chatbot / InkyPlay
+        '   3 = no Edge extension receiver
+        '   4 = scheduler disabled
+
+        If WebServerBlock = 1 Then Return
+
         isShuttingDown = False
 
         ResetInkyServerLogIfNeeded()
@@ -362,6 +371,10 @@ Partial Public Class ThisAddIn
 
         lastListenerProgressUtc = System.DateTime.UtcNow
         listenerTask = StartHttpListener(cts.Token, gen)
+
+        If Not _apActive Then
+            EnsureLocalSchedulerTimerStarted()
+        End If
     End Sub
 
     ''' <summary>
@@ -426,6 +439,10 @@ Partial Public Class ThisAddIn
         Finally
             cts = Nothing
         End Try
+
+        If Not _apActive Then
+            StopLocalSchedulerRuntime()
+        End If
 
         System.Diagnostics.Debug.WriteLine(
             "HttpListener STOP at " &
@@ -808,7 +825,7 @@ Partial Public Class ThisAddIn
                                 Catch
                                 End Try
                                 Try
-                                    StartupHttpListener()
+                                    StartupHttpListener(INI_WebServerBlock)
                                 Catch
                                 End Try
                             End Function)

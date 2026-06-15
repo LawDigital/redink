@@ -133,9 +133,10 @@ Public Class DiscussInky
 
     Private Const AssistantName As String = Globals.ThisAddIn.AN6
     Private Const PersistedKnowledgeFileName As String = "redink-discussknowledge.txt"
+    Private Const AutoPersistKnowledgeThresholdChars As Integer = 25000
     Private Const DialogueArchiveFolderName As String = "redink-discuss-dialogues"
     Private Const DialogueArchiveFileExtension As String = ".dialogue.xml"
-    Private Const ToolTrigger As String = "(a)"
+    Private Const ToolTrigger As String = "(ag)"
     Private Const KBTrigger As String = "(kb)"  ' Trigger to supplement with knowledge store results.
 
     ' Default fallback persona used when no persona library is configured
@@ -234,6 +235,7 @@ Public Class DiscussInky
 
     Private ReadOnly _btnClear As Button = New Button() With {.Text = "Clear", .AutoSize = True}
     Private ReadOnly _btnSendToDoc As Button = New Button() With {.Text = "Send to Doc", .AutoSize = True}
+    Private ReadOnly _btnInsertSelectionToDoc As Button = New Button() With {.Text = "Insert in Doc", .AutoSize = True}
     Private ReadOnly _btnClose As Button = New Button() With {.Text = "Close", .AutoSize = True}
     Private ReadOnly _btnSend As Button = New Button() With {.Text = $"Send", .AutoSize = True}
     Private ReadOnly _btnPersona As Button = New Button() With {.Text = "Persona", .AutoSize = True}
@@ -261,6 +263,7 @@ Public Class DiscussInky
     ' State
     Private _htmlReady As Boolean = False
     Private ReadOnly _htmlQueue As New List(Of String)()
+    Private _persistAfterHtmlFlush As Boolean = False
     Private _lastThinkingId As String = Nothing
     Private ReadOnly _history As New List(Of (Role As String, Content As String))()
     Private _knowledgeContent As String = Nothing
@@ -370,6 +373,7 @@ Public Class DiscussInky
         table.RowStyles.Add(New RowStyle(SizeType.AutoSize))
 
         _txtInput.Margin = New Padding(0, 0, 0, 0)
+        _txtInput.Font = New System.Drawing.Font(_txtInput.Font.FontFamily, 10.0F, _txtInput.Font.Style)
 
         ' Place chat and input into the SplitContainer
         _splitChat.Panel1.Controls.Add(_chat)
@@ -398,6 +402,7 @@ Public Class DiscussInky
 
         pnlButtons.Controls.Add(_btnClear)
         pnlButtons.Controls.Add(_btnSendToDoc)
+        pnlButtons.Controls.Add(_btnInsertSelectionToDoc)
         pnlButtons.Controls.Add(_btnClose)
         pnlButtons.Controls.Add(_btnAutoRespond)
         pnlButtons.Controls.Add(_btnSortOut)
@@ -415,6 +420,8 @@ Public Class DiscussInky
         table.Controls.Add(pnlButtons, 0, 1)
         Me.Controls.Add(table)
 
+        InitializeButtonToolTips()
+
         _mdPipeline = New MarkdownPipelineBuilder().
             UseAdvancedExtensions().
             UseSoftlineBreakAsHardlineBreak().
@@ -426,6 +433,7 @@ Public Class DiscussInky
         AddHandler _btnSend.Click, AddressOf OnSend
         AddHandler _btnClear.Click, AddressOf OnClear
         AddHandler _btnSendToDoc.Click, AddressOf OnSendToDoc
+        AddHandler _btnInsertSelectionToDoc.Click, AddressOf OnInsertSelectionToDoc
         AddHandler _btnClose.Click, AddressOf OnClose
         AddHandler _btnPersona.Click, AddressOf OnSelectPersona
         AddHandler _btnMission.Click, AddressOf OnSelectMission
@@ -448,6 +456,7 @@ Public Class DiscussInky
         AddHandler _chkShowToolingLog.CheckedChanged, AddressOf OnShowToolingLogChanged
         AddHandler _chkInkyMemory.CheckedChanged, AddressOf OnInkyMemoryChanged
         AddHandler _lnkEditMemory.LinkClicked, AddressOf OnEditMemoryClicked
+        AddHandler _txtInput.MouseWheel, AddressOf OnInputMouseWheel
         AddHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
 
     End Sub
@@ -489,6 +498,30 @@ Public Class DiscussInky
         End If
     End Sub
 
+    Private Sub BringDiscussFormToFront()
+        If Me.IsDisposed Then Return
+
+        Try
+            If Me.InvokeRequired Then
+                Me.BeginInvoke(New System.Windows.Forms.MethodInvoker(AddressOf BringDiscussFormToFront))
+                Return
+            End If
+
+            If Me.WindowState = System.Windows.Forms.FormWindowState.Minimized Then
+                Me.WindowState = System.Windows.Forms.FormWindowState.Normal
+            End If
+
+            SharedMethods.EnsureVisibleOnScreen(Me)
+
+            Me.Show()
+            Me.Activate()
+            Me.BringToFront()
+            _txtInput.Focus()
+
+        Catch
+        End Try
+    End Sub
+
     ''' <summary>
     ''' Builds the window caption to reflect persona, mission, knowledge file, and model state.
     ''' </summary>
@@ -522,6 +555,49 @@ Public Class DiscussInky
     Private Sub UpdateSendButtonText()
         Ui(Sub() _btnSend.Text = $"Send to {_currentPersonaName}")
     End Sub
+
+    ''' <summary>
+    ''' Initializes tooltips for the action buttons.
+    ''' </summary>
+    Private Sub InitializeButtonToolTips()
+        _toolTip.SetToolTip(_btnSend, "Send the current prompt to the selected discussion persona.")
+        _toolTip.SetToolTip(_btnPersona, "Select the persona for this discussion.")
+        _toolTip.SetToolTip(_btnMission, "Select or clear the current mission.")
+        _toolTip.SetToolTip(_btnEditPersona, "Open the local persona library for editing.")
+        _toolTip.SetToolTip(_btnKnowledge, "Load a knowledge file or a folder of knowledge files.")
+        _toolTip.SetToolTip(_btnArchive, "Store, restore, update, or delete archived discussions.")
+        _toolTip.SetToolTip(_btnAlternateModel, "Switch between the primary model and an alternate or secondary model.")
+        _toolTip.SetToolTip(_btnClear, "Clear the current discussion and start a new one.")
+        _toolTip.SetToolTip(_btnSendToDoc, "Export the full discussion to a new Word document.")
+        _toolTip.SetToolTip(_btnInsertSelectionToDoc, "Insert the selected chat text into the active Word document at the current selection or cursor.")
+        _toolTip.SetToolTip(_btnClose, "Close this discussion window.")
+        _toolTip.SetToolTip(_btnAutoRespond, "Start an automated back-and-forth discussion.")
+        _toolTip.SetToolTip(_btnSortOut, "Run a structured Advocate versus Challenger discussion.")
+        _toolTip.SetToolTip(_btnTools, $"Select the {Globals.ThisAddIn.ToolFriendlyName.ToLower} available for this discussion.")
+    End Sub
+
+    ''' <summary>
+    ''' Gets the currently selected text from the discussion thread.
+    ''' </summary>
+    Private Function GetSelectedChatText() As String
+        Try
+            If _chat.Document Is Nothing Then
+                Return ""
+            End If
+
+            Dim selectedTextObject As Object = _chat.Document.InvokeScript("getSelectedText")
+            Dim selectedText As String = If(selectedTextObject, "").ToString()
+
+            If String.IsNullOrWhiteSpace(selectedText) Then
+                Return ""
+            End If
+
+            selectedText = selectedText.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf).Replace(vbLf, vbCrLf)
+            Return selectedText.Trim()
+        Catch
+            Return ""
+        End Try
+    End Function
 
     ''' <summary>
     ''' Returns a random adverb used to vary assistant tone.
@@ -723,6 +799,59 @@ Public Class DiscussInky
     End Sub
 
     ''' <summary>
+    ''' Automatically enables temporary knowledge persistence when loaded knowledge is large enough.
+    ''' </summary>
+    ''' <param name="loadedFileCount">Number of knowledge files loaded for the current operation.</param>
+    ''' <returns>True if knowledge was persisted or persistence was already enabled; otherwise False.</returns>
+    Private Function AutoEnablePersistKnowledgeIfLarge(loadedFileCount As Integer) As Boolean
+        If String.IsNullOrWhiteSpace(_knowledgeContent) Then Return False
+
+        If _knowledgeContent.Length <= AutoPersistKnowledgeThresholdChars Then
+            Return _chkPersistKnowledge.Checked
+        End If
+
+        Try
+            Dim persistPath As String = GetPersistedKnowledgeFilePath()
+
+            System.IO.File.WriteAllText(persistPath, _knowledgeContent, System.Text.Encoding.UTF8)
+
+            _isUpdatingPersistCheckbox = True
+            _chkPersistKnowledge.Checked = True
+            _isUpdatingPersistCheckbox = False
+
+            My.Settings.DiscussPersistKnowledge = True
+            My.Settings.Save()
+
+            UpdatePersistKnowledgeTooltip()
+
+            ShowCustomMessageBox(
+            $"Knowledge is large ({_knowledgeContent.Length:N0} characters, threshold {AutoPersistKnowledgeThresholdChars:N0})." &
+            vbCrLf & vbCrLf &
+            "Temporary knowledge persistence has been turned on automatically for this session." &
+            vbCrLf & vbCrLf &
+            $"Stored in: {persistPath}")
+
+            AppendSystemMessage($"Knowledge loaded and persisted automatically ({_knowledgeContent.Length:N0} characters from {loadedFileCount} file(s)).")
+            Return True
+
+        Catch ex As System.Exception
+            _isUpdatingPersistCheckbox = True
+            _chkPersistKnowledge.Checked = False
+            _isUpdatingPersistCheckbox = False
+
+            Try
+                My.Settings.DiscussPersistKnowledge = False
+                My.Settings.Save()
+            Catch
+            End Try
+
+            UpdatePersistKnowledgeTooltip()
+            AppendSystemMessage($"Knowledge loaded ({_knowledgeContent.Length:N0} characters) but failed to auto-persist: {ex.Message}")
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>
     ''' Restores persisted settings, persona, mission, knowledge cache, transcript, and optionally triggers a welcome.
     ''' </summary>
     Private Async Sub OnLoadForm(sender As Object, e As EventArgs)
@@ -832,58 +961,42 @@ Public Class DiscussInky
 
         InitializeChatHtml()
 
-        Dim restoredFromFullSessionState As Boolean = False
+        ' Restore the running chat only from the normal last-chat storage.
+        ' Do NOT call RestoreSessionStateFromXml here: that is reserved for explicit archive/session restore.
+        Dim hasChat As Boolean = False
+        Dim restoredHtmlHadAlternateModel As Boolean = False
+
         Try
-            Dim savedSessionStateXml = My.Settings.DiscussLastSessionStateXml
-            If Not String.IsNullOrWhiteSpace(savedSessionStateXml) Then
-                restoredFromFullSessionState = RestoreSessionStateFromXml(savedSessionStateXml, "previous session", announceRestore:=False)
+            ' First, restore _history from plain transcript. This keeps the LLM context intact.
+            Dim savedTranscript As String = My.Settings.DiscussLastChat
+            If Not String.IsNullOrEmpty(savedTranscript) Then
+                RestoreHistoryFromTranscript(savedTranscript)
             End If
-        Catch
+
+            ' Then restore the visible HTML transcript.
+            Dim savedHtml As String = My.Settings.DiscussLastChatHtml
+            If Not String.IsNullOrEmpty(savedHtml) Then
+                restoredHtmlHadAlternateModel = ChatHtmlIndicatesAlternateModel(savedHtml)
+                AppendHtml(savedHtml)
+                hasChat = True
+            ElseIf Not String.IsNullOrEmpty(savedTranscript) Then
+                AppendTranscriptToHtml(savedTranscript)
+                hasChat = True
+            End If
+
+        Catch ex As System.Exception
+            AppendSystemMessage($"Failed to restore previous chat: {ex.Message}")
         End Try
 
-        ' Restore chat or load knowledge
-        Dim hasChat = False
-        Dim restoredHtmlHadAlternateModel = False
-
-        If restoredFromFullSessionState Then
-            hasChat = (_history.Count > 0)
-        Else
-            Try
-                ' First, restore _history from plain transcript (this ensures LLM sees the conversation)
-                Dim savedTranscript = My.Settings.DiscussLastChat
-                If Not String.IsNullOrEmpty(savedTranscript) Then
-                    RestoreHistoryFromTranscript(savedTranscript)
-                End If
-
-                ' Then restore the HTML display
-                Dim savedHtml = My.Settings.DiscussLastChatHtml
-                If Not String.IsNullOrEmpty(savedHtml) Then
-                    ' Check if the restored HTML contains an alternate/secondary model switch message
-                    restoredHtmlHadAlternateModel = ChatHtmlIndicatesAlternateModel(savedHtml)
-                    AppendHtml(savedHtml)
-                    hasChat = True
-                ElseIf Not String.IsNullOrEmpty(savedTranscript) Then
-                    AppendTranscriptToHtml(savedTranscript)
-                    hasChat = True
-                End If
-            Catch
-            End Try
-
-            ' If restored chat indicated an alternate model was active, notify user we're back on primary
-            If hasChat AndAlso restoredHtmlHadAlternateModel Then
-                ' Ensure alternate model state is reset (it should be by default, but be explicit)
-                _alternateModelSelected = False
-                _alternateModelConfig = Nothing
-                _alternateModelDisplayName = Nothing
-                UpdateAlternateModelButtonText()
-
-                ' Notify user in chat that we're back on primary
-                AppendSystemMessage($"Session restored. Now using primary model ({_context.INI_Model}).")
-            End If
-
-            ' Restore knowledge using the new loading flow
-            Await RestoreKnowledgeAsync()
+        If hasChat AndAlso restoredHtmlHadAlternateModel Then
+            _alternateModelSelected = False
+            _alternateModelConfig = Nothing
+            _alternateModelDisplayName = Nothing
+            UpdateAlternateModelButtonText()
+            AppendSystemMessage($"Previous chat restored. Now using primary model ({_context.INI_Model}).")
         End If
+
+        Await RestoreKnowledgeAsync()
 
         ' Only force persona selection if there are custom personas beyond the default
         ' (i.e., a persona library is configured and has entries)
@@ -930,7 +1043,7 @@ Public Class DiscussInky
                     _cachedKnowledgeFilePath = _knowledgeFilePath
 
                     UpdateWindowTitle()
-                    AppendSystemMessage($"Knowledge restored from persisted storage ({_knowledgeContent.Length:N0} characters).")
+                    AppendSystemMessage($"Knowledge restored from persisted storage ({GetKnowledgeSummaryText()}).")
                     Return
                 Catch ex As Exception
                     AppendSystemMessage($"Failed to restore persisted knowledge: {ex.Message}")
@@ -1033,6 +1146,7 @@ Public Class DiscussInky
 
                         ctx.GlobalDocumentCounter += 1
                         ctx.LoadedFiles.Add(Tuple.Create(filePath, content.Length))
+                        loadedCount += 1
 
                         If useDocumentTags Then
                             Dim docNum = ctx.GlobalDocumentCounter
@@ -1084,11 +1198,11 @@ Public Class DiscussInky
     ''' Persists the current knowledge content to the temp file.
     ''' </summary>
     Private Sub PersistKnowledgeToTempFile()
-        If String.IsNullOrWhiteSpace(_cachedKnowledgeContent) Then Return
+        If String.IsNullOrWhiteSpace(_knowledgeContent) Then Return
 
         Try
-            Dim persistPath = GetPersistedKnowledgeFilePath()
-            File.WriteAllText(persistPath, _cachedKnowledgeContent, Encoding.UTF8)
+            Dim persistPath As String = GetPersistedKnowledgeFilePath()
+            System.IO.File.WriteAllText(persistPath, _knowledgeContent, System.Text.Encoding.UTF8)
         Catch
             ' Silently fail - not critical
         End Try
@@ -1919,6 +2033,80 @@ Public Class DiscussInky
 
 #Region "Knowledge File Management"
 
+    Private Function GetKnowledgeDocumentCount(Optional content As String = Nothing) As Integer
+        Dim source As String = If(content, _knowledgeContent)
+
+        If String.IsNullOrWhiteSpace(source) Then
+            Return 0
+        End If
+
+        Dim matches As System.Text.RegularExpressions.MatchCollection =
+            System.Text.RegularExpressions.Regex.Matches(
+                source,
+                "<document\d+\b",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+
+        If matches.Count > 0 Then
+            Return matches.Count
+        End If
+
+        Return 1
+    End Function
+
+    Private Function GetNextKnowledgeDocumentNumber(existingContent As String) As Integer
+        If String.IsNullOrWhiteSpace(existingContent) Then
+            Return 1
+        End If
+
+        Dim maxNumber As Integer = 0
+
+        Dim matches As System.Text.RegularExpressions.MatchCollection =
+            System.Text.RegularExpressions.Regex.Matches(
+                existingContent,
+                "<document(?<n>\d+)\b",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+
+        For Each m As System.Text.RegularExpressions.Match In matches
+            Dim n As Integer = 0
+            If Integer.TryParse(m.Groups("n").Value, n) Then
+                If n > maxNumber Then
+                    maxNumber = n
+                End If
+            End If
+        Next
+
+        Return maxNumber + 1
+    End Function
+
+    Private Function GetKnowledgeSummaryText(Optional content As String = Nothing) As String
+        Dim source As String = If(content, _knowledgeContent)
+
+        If String.IsNullOrWhiteSpace(source) Then
+            Return "0 item(s), 0 characters"
+        End If
+
+        Return $"{GetKnowledgeDocumentCount(source):N0} item(s), {source.Length:N0} characters"
+    End Function
+
+    Private Function GetKnowledgeDisplayName() As String
+        If String.IsNullOrWhiteSpace(_knowledgeFilePath) Then
+            Return "None loaded"
+        End If
+
+        Return $"{System.IO.Path.GetFileName(_knowledgeFilePath)} ({GetKnowledgeSummaryText()})"
+    End Function
+
+    Private Function GetKnowledgePathLabelAfterLoad(selectedPath As String, isFile As Boolean, appendToExisting As Boolean) As String
+        If appendToExisting Then
+            Return "(Combined Knowledge)"
+        End If
+
+        If isFile Then
+            Return selectedPath
+        End If
+
+        Return selectedPath & " (directory)"
+    End Function
 
     Private Sub DeleteCurrentKnowledge()
         _knowledgeContent = Nothing
@@ -1949,6 +2137,7 @@ Public Class DiscussInky
     ''' </summary>
     Private Async Sub OnLoadKnowledge(sender As Object, e As EventArgs)
         Await PromptForKnowledgeAsync()
+        BringDiscussFormToFront()
     End Sub
 
     ''' <summary>
@@ -1963,7 +2152,7 @@ Public Class DiscussInky
             Dim selectedPath As String = ""
 
             Using frm As New DragDropForm(DragDropMode.FileOrDirectory)
-                If frm.ShowDialog() = DialogResult.OK Then
+                If frm.ShowDialog(Me) = System.Windows.Forms.DialogResult.OK Then
                     selectedPath = frm.SelectedFilePath
                 End If
             End Using
@@ -1992,6 +2181,24 @@ Public Class DiscussInky
             If Not isFile AndAlso Not isDirectory Then
                 AppendSystemMessage("Selected path does not exist.")
                 Return
+            End If
+
+            Dim appendToExisting As Boolean = False
+            Dim existingKnowledgeSummary As String = GetKnowledgeSummaryText()
+
+            If Not String.IsNullOrWhiteSpace(_knowledgeContent) Then
+                Dim appendAnswer = ShowCustomYesNoBox(
+                    "There is already knowledge loaded:" &
+                    vbCrLf & vbCrLf &
+                    existingKnowledgeSummary &
+                    vbCrLf & vbCrLf &
+                    "Do you want to add the selected knowledge to the existing knowledge, or replace the existing knowledge?",
+                    "Add to existing", "Replace existing")
+                If appendAnswer = 0 Then
+                    ' User cancelled
+                    Return
+                End If
+                appendToExisting = (appendAnswer = 1)
             End If
 
             ' Create loading context
@@ -2070,7 +2277,8 @@ Public Class DiscussInky
             ShowAssistantThinking()
 
             Dim resultBuilder As New StringBuilder()
-            Dim useDocumentTags = (filesToProcess.Count > 1)
+            Dim useDocumentTags As Boolean = appendToExisting OrElse filesToProcess.Count > 1
+            Dim firstDocumentNumber As Integer = If(appendToExisting, GetNextKnowledgeDocumentNumber(_knowledgeContent), 1)
 
             For Each filePath In filesToProcess
                 Try
@@ -2117,11 +2325,18 @@ Public Class DiscussInky
                     ctx.LoadedFiles.Add(Tuple.Create(filePath, content.Length))
 
                     If useDocumentTags Then
-                        Dim docNum = ctx.GlobalDocumentCounter
-                        Dim fileName = Path.GetFileName(filePath)
-                        Dim openTag = $"<document{docNum} name=""{fileName}"">"
-                        Dim closeTag = $"</document{docNum}>"
-                        resultBuilder.Append(openTag).Append(content).Append(closeTag)
+                        Dim docNum As Integer = If(appendToExisting, firstDocumentNumber + ctx.GlobalDocumentCounter - 1, ctx.GlobalDocumentCounter)
+                        Dim fileName As String = System.IO.Path.GetFileName(filePath)
+                        Dim openTag As String = $"<document{docNum} name=""{fileName}"">"
+                        Dim closeTag As String = $"</document{docNum}>"
+
+                        resultBuilder.
+                            Append(openTag).
+                            AppendLine().
+                            Append(content).
+                            AppendLine().
+                            Append(closeTag).
+                            AppendLine()
                     Else
                         resultBuilder.Append(content)
                     End If
@@ -2194,27 +2409,42 @@ Public Class DiscussInky
             End If
 
             ' Update state
-            _knowledgeContent = combinedContent
-            _knowledgeFilePath = If(isFile, selectedPath, selectedPath & " (directory)")
+            If appendToExisting Then
+                _knowledgeContent =
+                    If(_knowledgeContent, "").TrimEnd() &
+                    vbCrLf & vbCrLf &
+                    combinedContent.TrimStart()
+            Else
+                _knowledgeContent = combinedContent
+            End If
+
+            _knowledgeFilePath = GetKnowledgePathLabelAfterLoad(selectedPath, isFile, appendToExisting)
 
             ' Update runtime cache
             _cachedKnowledgeContent = _knowledgeContent
             _cachedKnowledgeFilePath = _knowledgeFilePath
 
-            ' Persist if checkbox is checked
-            If _chkPersistKnowledge.Checked Then
+            ' Auto-enable persistence for large knowledge; otherwise persist only if user already enabled it.
+            Dim autoPersisted As Boolean = AutoEnablePersistKnowledgeIfLarge(ctx.LoadedFiles.Count)
+
+            If _chkPersistKnowledge.Checked AndAlso Not autoPersisted Then
                 Try
-                    Dim persistPath = GetPersistedKnowledgeFilePath()
-                    File.WriteAllText(persistPath, _knowledgeContent, Encoding.UTF8)
-                    AppendSystemMessage($"Knowledge loaded and persisted ({_knowledgeContent.Length:N0} characters from {ctx.LoadedFiles.Count} file(s)).")
-                Catch ex As Exception
-                    AppendSystemMessage($"Knowledge loaded ({_knowledgeContent.Length:N0} characters) but failed to persist: {ex.Message}")
+                    PersistKnowledgeToTempFile()
+                    AppendSystemMessage(
+                        $"Knowledge {If(appendToExisting, "added and persisted", "loaded and persisted")} " &
+                        $"({GetKnowledgeSummaryText()}, {ctx.LoadedFiles.Count:N0} new file(s)).")
+                Catch ex As System.Exception
+                    AppendSystemMessage(
+                        $"Knowledge {If(appendToExisting, "added", "loaded")} ({GetKnowledgeSummaryText()}) but failed to persist: {ex.Message}")
                 End Try
-            Else
-                AppendSystemMessage($"Knowledge loaded: {ctx.LoadedFiles.Count} file(s), {_knowledgeContent.Length:N0} characters total.")
+            ElseIf Not _chkPersistKnowledge.Checked Then
+                AppendSystemMessage(
+                    $"Knowledge {If(appendToExisting, "added", "loaded")}: " &
+                    $"{ctx.LoadedFiles.Count:N0} new file(s), {GetKnowledgeSummaryText()} total.")
             End If
 
             UpdateWindowTitle()
+            BringDiscussFormToFront()
 
             Try
                 My.Settings.DiscussKnowledgePath = selectedPath  ' Save both files AND directories
@@ -2225,6 +2455,7 @@ Public Class DiscussInky
         Catch ex As Exception
             RemoveAssistantThinking()
             AppendSystemMessage($"Error loading knowledge: {ex.Message}")
+            BringDiscussFormToFront()
         End Try
     End Function
 
@@ -2326,7 +2557,49 @@ Public Class DiscussInky
         End Try
     End Sub
 
-    ' Replace the OnSendToDoc method to properly handle autoresponder messages:
+    ''' <summary>
+    ''' Inserts the selected chat text into the active Word document at the current selection or cursor.
+    ''' </summary>
+    Private Sub OnInsertSelectionToDoc(sender As Object, e As EventArgs)
+        Try
+            Dim selectedChatText As String = GetSelectedChatText()
+            If String.IsNullOrWhiteSpace(selectedChatText) Then
+                AppendSystemMessage("Select text in the discussion thread first.")
+                Return
+            End If
+
+            Dim app As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
+            If app Is Nothing OrElse Not Globals.ThisAddIn.IsDocumentEditable(silent:=True) Then
+                AppendSystemMessage("Open an editable Word document first.")
+                Return
+            End If
+
+            Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
+            Dim sel As Microsoft.Office.Interop.Word.Selection = Nothing
+
+            Try
+                doc = app.ActiveDocument
+                sel = app.Selection
+            Catch
+            End Try
+
+            If doc Is Nothing OrElse sel Is Nothing Then
+                AppendSystemMessage("Open an editable Word document first.")
+                Return
+            End If
+
+            If app.ActiveWindow Is Nothing OrElse
+               app.ActiveWindow.Type <> Microsoft.Office.Interop.Word.WdWindowType.wdWindowDocument Then
+                AppendSystemMessage("Open an editable Word document first.")
+                Return
+            End If
+
+            sel.TypeText(selectedChatText)
+            AppendSystemMessage("Selected chat text inserted into the active document.")
+        Catch ex As Exception
+            AppendSystemMessage($"Error inserting selected chat text into document: {ex.Message}")
+        End Try
+    End Sub
 
     ''' <summary>
     ''' Creates a new Word document with the chat transcript, excluding system messages.
@@ -2446,6 +2719,34 @@ Public Class DiscussInky
         Me.Close()
     End Sub
 
+
+    Private Sub OnInputMouseWheel(sender As Object, e As System.Windows.Forms.MouseEventArgs)
+        Try
+            If System.Windows.Forms.Control.ModifierKeys <> System.Windows.Forms.Keys.Control Then
+                Return
+            End If
+
+            Dim oldFont As System.Drawing.Font = _txtInput.Font
+            Dim newSize As Single = oldFont.Size
+
+            If e.Delta > 0 Then
+                newSize += 1.0F
+            ElseIf e.Delta < 0 Then
+                newSize -= 1.0F
+            End If
+
+            newSize = System.Math.Max(8.0F, System.Math.Min(24.0F, newSize))
+
+            If newSize <> oldFont.Size Then
+                _txtInput.Font = New System.Drawing.Font(oldFont.FontFamily, newSize, oldFont.Style, oldFont.Unit)
+                oldFont.Dispose()
+            End If
+
+        Catch ex As System.Exception
+            AppendSystemMessage($"Error changing input font size: {ex.Message}")
+        End Try
+    End Sub
+
     ''' <summary>
     ''' Handles slash-triggered prompt library insertion for the DiscussInky input box.
     ''' </summary>
@@ -2540,7 +2841,7 @@ Public Class DiscussInky
 
         ' Knowledge document info
         If Not String.IsNullOrEmpty(_knowledgeFilePath) Then
-            sb.Append($" | Knowledge: {Path.GetFileName(_knowledgeFilePath)}")
+            sb.Append($" | Knowledge: {GetKnowledgeDisplayName()}")
         Else
             sb.Append(" | Knowledge: None loaded")
         End If
@@ -2959,6 +3260,7 @@ Public Class DiscussInky
                     <meta charset=""utf-8"">
                     <style>{css}</style>
                     <script>
+                    var lastSelectedText = '';
                     function appendMessage(html) {{
                       var c=document.getElementById('chat'); if(!c) return;
                       var temp=document.createElement('div'); temp.innerHTML=html;
@@ -2968,6 +3270,30 @@ Public Class DiscussInky
                     function removeById(id) {{
                       var el=document.getElementById(id); if(!el||!el.parentNode) return;
                       el.parentNode.removeChild(el);
+                    }}
+                    function getWindowSelectionText() {{
+                      try {{
+                        if (window.getSelection) {{
+                          return window.getSelection().toString();
+                        }}
+                        if (document.selection) {{
+                          return document.selection.createRange().text;
+                        }}
+                      }} catch (e) {{
+                      }}
+                      return '';
+                    }}
+                    function captureSelection() {{
+                      var text = getWindowSelectionText();
+                      if (text && text.replace(/\s+/g, ' ').replace(/^\s+|\s+$/g, '').length > 0) {{
+                        lastSelectedText = text;
+                      }}
+                    }}
+                    document.onmouseup = captureSelection;
+                    document.onkeyup = captureSelection;
+                    function getSelectedText() {{
+                      captureSelection();
+                      return lastSelectedText || '';
                     }}
                     </script>
                     </head>
@@ -2980,18 +3306,39 @@ Public Class DiscussInky
     ''' <summary>
     ''' Flushes queued HTML fragments once the browser document is ready.
     ''' </summary>
-    Private Sub Chat_DocumentCompleted(sender As Object, e As WebBrowserDocumentCompletedEventArgs)
-        _htmlReady = True
-        If _htmlQueue.Count > 0 Then
-            Try
-                For Each frag In _htmlQueue
-                    _chat.Document.InvokeScript("appendMessage", New Object() {frag})
-                Next
-            Catch
-            Finally
-                _htmlQueue.Clear()
-            End Try
-        End If
+    Private Sub Chat_DocumentCompleted(sender As System.Object, e As System.Windows.Forms.WebBrowserDocumentCompletedEventArgs)
+        Try
+            If _chat.Document Is Nothing Then Return
+
+            Dim chatRoot As System.Windows.Forms.HtmlElement = _chat.Document.GetElementById("chat")
+            If chatRoot Is Nothing Then Return
+
+            _htmlReady = True
+
+            If _htmlQueue.Count > 0 Then
+                Dim queuedFragments As New System.Collections.Generic.List(Of String)(_htmlQueue)
+
+                Try
+                    For Each frag As String In queuedFragments
+                        _chat.Document.InvokeScript("appendMessage", New System.Object() {frag})
+                    Next
+
+                    _htmlQueue.Clear()
+
+                Catch ex As System.Exception
+                    _htmlReady = False
+                    Return
+                End Try
+            End If
+
+            If _persistAfterHtmlFlush Then
+                _persistAfterHtmlFlush = False
+                PersistCurrentSessionSettings()
+            End If
+
+        Catch ex As System.Exception
+            _htmlReady = False
+        End Try
     End Sub
 
     ''' <summary>
@@ -5086,8 +5433,9 @@ Public Class DiscussInky
     End Sub
 
     Private Function RestoreSessionStateFromXml(stateXml As String,
-                                                sourceLabel As String,
-                                                Optional announceRestore As Boolean = True) As Boolean
+                                            sourceLabel As String,
+                                            Optional announceRestore As Boolean = True,
+                                            Optional resetChatHtml As Boolean = True) As Boolean
         If String.IsNullOrWhiteSpace(stateXml) Then Return False
 
         Try
@@ -5199,7 +5547,9 @@ Public Class DiscussInky
             UpdatePersistKnowledgeTooltip()
             UpdateToolingControlsState()
 
-            InitializeChatHtml()
+            If resetChatHtml Then
+                InitializeChatHtml()
+            End If
 
             Dim transcriptHtml = If(transcriptHtmlElement IsNot Nothing, transcriptHtmlElement.Value, "")
             If Not String.IsNullOrWhiteSpace(transcriptHtml) Then
@@ -5208,7 +5558,11 @@ Public Class DiscussInky
                 RenderHistoryToCurrentChat()
             End If
 
-            PersistCurrentSessionSettings()
+            If _htmlReady AndAlso _chat.Document IsNot Nothing Then
+                PersistCurrentSessionSettings()
+            Else
+                _persistAfterHtmlFlush = True
+            End If
 
             If announceRestore AndAlso Not String.IsNullOrWhiteSpace(sourceLabel) Then
                 AppendSystemMessage($"Dialogue restored: {sourceLabel}")

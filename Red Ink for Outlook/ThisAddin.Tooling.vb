@@ -4947,14 +4947,18 @@ __AfterDispatch:
         Catch
         End Try
 
+        If INI_WebServerBlock <> 4 Then
+            tools.Add(BuildManageScheduledTasksTool())
+        End If
+
         Return DeduplicateToolsByName(tools)
     End Function
 
-
-
     Private Function GetDefaultLocalChatAdvancedToolNames(Optional includeInteractiveM365Tools As Boolean = True) As List(Of String)
         Return GetLocalChatAdvancedSelectableTools(includeInteractiveM365Tools).
-        Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
+        Where(Function(t) t IsNot Nothing AndAlso
+                          Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                          Not t.ToolName.Equals(AP_Tool_ManageScheduledTasks, StringComparison.OrdinalIgnoreCase)).
         Select(Function(t) t.ToolName.Trim()).
         Distinct(StringComparer.OrdinalIgnoreCase).
         ToList()

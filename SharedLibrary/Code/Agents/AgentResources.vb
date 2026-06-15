@@ -121,16 +121,75 @@ Namespace Agents
             End Get
         End Property
 
+        Private Shared Function NormalizeResourceLookupKey(value As String) As String
+            If String.IsNullOrWhiteSpace(value) Then Return ""
+
+            Dim sb As New StringBuilder()
+            Dim lastWasUnderscore As Boolean = False
+
+            For Each ch As Char In value.Trim()
+                If Char.IsLetterOrDigit(ch) Then
+                    sb.Append(Char.ToLowerInvariant(ch))
+                    lastWasUnderscore = False
+                ElseIf Not lastWasUnderscore Then
+                    sb.Append("_"c)
+                    lastWasUnderscore = True
+                End If
+            Next
+
+            Return sb.ToString().Trim("_"c)
+        End Function
+
         Public Shared Function FindSkill(name As String) As SkillDescriptor
             If String.IsNullOrWhiteSpace(name) Then Return Nothing
             EnsureInitialized()
-            Return _skills.FirstOrDefault(Function(s) String.Equals(s.Name, name, StringComparison.OrdinalIgnoreCase))
+
+            Dim trimmedName As String = name.Trim()
+
+            Dim exact = _skills.FirstOrDefault(
+                Function(s)
+                    Return s IsNot Nothing AndAlso
+                           String.Equals(s.Name, trimmedName, StringComparison.OrdinalIgnoreCase)
+                End Function)
+
+            If exact IsNot Nothing Then
+                Return exact
+            End If
+
+            Dim normalizedName As String = NormalizeResourceLookupKey(trimmedName)
+            If normalizedName = "" Then Return Nothing
+
+            Return _skills.FirstOrDefault(
+                Function(s)
+                    Return s IsNot Nothing AndAlso
+                           NormalizeResourceLookupKey(s.Name) = normalizedName
+                End Function)
         End Function
 
         Public Shared Function FindAgent(name As String) As AgentDescriptor
             If String.IsNullOrWhiteSpace(name) Then Return Nothing
             EnsureInitialized()
-            Return _agents.FirstOrDefault(Function(a) String.Equals(a.Name, name, StringComparison.OrdinalIgnoreCase))
+
+            Dim trimmedName As String = name.Trim()
+
+            Dim exact = _agents.FirstOrDefault(
+                Function(a)
+                    Return a IsNot Nothing AndAlso
+                           String.Equals(a.Name, trimmedName, StringComparison.OrdinalIgnoreCase)
+                End Function)
+
+            If exact IsNot Nothing Then
+                Return exact
+            End If
+
+            Dim normalizedName As String = NormalizeResourceLookupKey(trimmedName)
+            If normalizedName = "" Then Return Nothing
+
+            Return _agents.FirstOrDefault(
+                Function(a)
+                    Return a IsNot Nothing AndAlso
+                           NormalizeResourceLookupKey(a.Name) = normalizedName
+                End Function)
         End Function
 
         Private Shared Sub EnsureInitialized()
