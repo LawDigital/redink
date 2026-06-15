@@ -212,12 +212,18 @@ Namespace SharedLibrary
             "or web_content_retriever for the user's own content. " &
             "Provide query (required) and NEVER send it as an empty string. " &
             "If the user only wants date-bounded browsing or a broad listing, use query='*'. " &
-            "from_date is inclusive. to_date is inclusive for the user, but the implementation applies it as the next-day exclusive bound internally. " &
+            "Date filtering semantics: from_date and to_date are USER-LEVEL calendar dates in ISO format (YYYY-MM-DD), both inclusive. " &
+            "For a request like 'on 15 June 2026' pass from_date='2026-06-15' and to_date='2026-06-15'; do NOT pass the following day. " &
+            "The implementation converts to_date internally to the next-day exclusive bound. " &
+            "For calendar searches, verify returned event start/end fields against the requested user date range and ignore hits outside that range. " &
             "Optionally narrow with sources, max_per_source, from_index, from_date, to_date, kql_extra. " &
             "Each hit has 'n', 'id', 'source', 'title', 'summary', 'web_url' and, where available, " &
             "'date_iso_utc' and 'date_anchor_utc'. Mail hits may also include 'sentDateTime', 'receivedDateTime', " &
             "'sent_date_iso_utc', 'sent_date_anchor_utc', 'received_date_iso_utc' and 'received_date_anchor_utc'. " &
-            "Teams hits may include 'createdDateTime', 'created_date_iso_utc' and 'created_date_anchor_utc'. " &
+            "Calendar hits may include 'startDateTime', 'endDateTime', 'event_start_date_anchor_utc', " &
+            "'event_end_date_anchor_utc', 'event_start_date_anchor_user', 'event_end_date_anchor_user', " &
+            "'event_start_local_date' and 'event_end_local_date'. Teams hits may include 'createdDateTime', " &
+            "'created_date_iso_utc' and 'created_date_anchor_utc'. " &
             "If you mention a date from a hit, copy the corresponding '*_anchor_utc' value exactly. " &
             "Do not reinterpret, relocalize or reformat numeric ISO dates. " &
             "Pass ids to m365_get_mail, m365_get_mail_thread, m365_get_file, m365_get_event, " &
@@ -522,16 +528,30 @@ Namespace SharedLibrary
                 errorsJson(kv.Key.ToString()) = kv.Value
             Next
 
+            Dim requestedFromDate As String = ""
+            If opts.From.HasValue Then
+                requestedFromDate = opts.From.Value.ToString("yyyy-MM-dd", Globalization.CultureInfo.InvariantCulture)
+            End If
+
+            Dim requestedToDate As String = ""
+            If opts.To.HasValue Then
+                requestedToDate = opts.To.Value.ToString("yyyy-MM-dd", Globalization.CultureInfo.InvariantCulture)
+            End If
+
             Dim envelope As New JObject(
-                New JProperty("query", query),
-                New JProperty("requested_sources", sources.ToString()),
-                New JProperty("requested_max_per_source", opts.MaxPerSource),
-                New JProperty("requested_from_index", opts.FromIndex),
-                New JProperty("requested_kql_extra", If(opts.KqlExtra, "")),
-                New JProperty("total", result.Hits.Count),
-                New JProperty("hits", hitsJson),
-                New JProperty("errors", errorsJson)
-            )
+                        New JProperty("query", query),
+                        New JProperty("requested_sources", sources.ToString()),
+                        New JProperty("requested_max_per_source", opts.MaxPerSource),
+                        New JProperty("requested_from_index", opts.FromIndex),
+                        New JProperty("requested_from_date", requestedFromDate),
+                        New JProperty("requested_to_date", requestedToDate),
+                        New JProperty("requested_time_zone", System.TimeZoneInfo.Local.Id),
+                        New JProperty("date_filter_semantics", "from_date and to_date are inclusive user-level dates. Calendar date-bounded searches use Microsoft Graph calendarView with startDateTime = from_date 00:00 and endDateTime = day after to_date 00:00 in the user timezone."),
+                        New JProperty("requested_kql_extra", If(opts.KqlExtra, "")),
+                        New JProperty("total", result.Hits.Count),
+                        New JProperty("hits", hitsJson),
+                        New JProperty("errors", errorsJson)
+                    )
 
             r.Response = envelope.ToString(Formatting.None)
             r.Success = True
@@ -740,6 +760,23 @@ Namespace SharedLibrary
             Return value.Value.ToUniversalTime().ToString("dd MMM yyyy HH:mm 'UTC'", Globalization.CultureInfo.InvariantCulture)
         End Function
 
+        Private Function FormatDateIsoLocal(value As DateTime?) As String
+            If Not value.HasValue Then Return ""
+            Dim localValue As DateTimeOffset = New DateTimeOffset(value.Value.ToUniversalTime()).ToLocalTime()
+            Return localValue.ToString("yyyy-MM-dd'T'HH:mm:sszzz", Globalization.CultureInfo.InvariantCulture)
+        End Function
+
+        Private Function FormatDateAnchorLocal(value As DateTime?) As String
+            If Not value.HasValue Then Return ""
+            Dim localValue As DateTimeOffset = New DateTimeOffset(value.Value.ToUniversalTime()).ToLocalTime()
+            Return localValue.ToString("dd MMM yyyy HH:mm 'UTC'zzz", Globalization.CultureInfo.InvariantCulture)
+        End Function
+
+        Private Function FormatDateLocalDate(value As DateTime?) As String
+            If Not value.HasValue Then Return ""
+            Return value.Value.ToUniversalTime().ToLocalTime().ToString("yyyy-MM-dd", Globalization.CultureInfo.InvariantCulture)
+        End Function
+
         Private Function TryParseUtcDate(value As String) As DateTime?
             If String.IsNullOrWhiteSpace(value) Then Return Nothing
 
@@ -887,6 +924,57 @@ Namespace SharedLibrary
                             Dim chanId = If(chanIdent("channelId")?.ToString(), "")
                             If Not String.IsNullOrEmpty(teamId) Then o("team_id") = teamId
                             If Not String.IsNullOrEmpty(chanId) Then o("channel_id") = chanId
+                        End If
+                    End If
+
+                Case M365SearchSources.Calendar
+                    If resource IsNot Nothing Then
+                        Dim organizer = TryCast(TryCast(resource("organizer"), JObject)?("emailAddress"), JObject)
+                        Dim location = TryCast(resource("location"), JObject)
+
+                        Dim organizerName As String = GetJsonString(organizer, "name").Trim()
+                        Dim organizerAddress As String = GetJsonString(organizer, "address").Trim()
+                        If Not String.IsNullOrWhiteSpace(organizerName) Then
+                            o("organizer") = organizerName
+                        ElseIf Not String.IsNullOrWhiteSpace(organizerAddress) Then
+                            o("organizer") = organizerAddress
+                        End If
+
+                        Dim locationName As String = GetJsonString(location, "displayName").Trim()
+                        If Not String.IsNullOrWhiteSpace(locationName) Then o("location") = locationName
+
+                        Dim isAllDayTok = resource("isAllDay")
+                        If isAllDayTok IsNot Nothing AndAlso isAllDayTok.Type <> JTokenType.Null Then
+                            o("is_all_day") = isAllDayTok.Value(Of Boolean)()
+                        End If
+
+                        Dim attendees = GetRecipientsDisplay(resource, "attendees")
+                        If Not String.IsNullOrWhiteSpace(attendees) Then o("attendees") = attendees
+
+                        Dim startObj = TryCast(resource("start"), JObject)
+                        Dim startUtc As DateTime? = TryParseUtcDate(GetJsonString(startObj, "dateTime"))
+                        If startUtc.HasValue Then
+                            o("startDateTime") = FormatDateAnchorUtc(startUtc)
+                            o("event_start_date_iso_utc") = FormatDateIsoUtc(startUtc)
+                            o("event_start_date_anchor_utc") = FormatDateAnchorUtc(startUtc)
+                            o("event_start_date_iso_user") = FormatDateIsoLocal(startUtc)
+                            o("event_start_date_anchor_user") = FormatDateAnchorLocal(startUtc)
+                            o("event_start_local_date") = FormatDateLocalDate(startUtc)
+                        ElseIf startObj IsNot Nothing Then
+                            o("startDateTime") = GetJsonString(startObj, "dateTime")
+                        End If
+
+                        Dim endObj = TryCast(resource("end"), JObject)
+                        Dim endUtc As DateTime? = TryParseUtcDate(GetJsonString(endObj, "dateTime"))
+                        If endUtc.HasValue Then
+                            o("endDateTime") = FormatDateAnchorUtc(endUtc)
+                            o("event_end_date_iso_utc") = FormatDateIsoUtc(endUtc)
+                            o("event_end_date_anchor_utc") = FormatDateAnchorUtc(endUtc)
+                            o("event_end_date_iso_user") = FormatDateIsoLocal(endUtc)
+                            o("event_end_date_anchor_user") = FormatDateAnchorLocal(endUtc)
+                            o("event_end_local_date") = FormatDateLocalDate(endUtc)
+                        ElseIf endObj IsNot Nothing Then
+                            o("endDateTime") = GetJsonString(endObj, "dateTime")
                         End If
                     End If
             End Select
