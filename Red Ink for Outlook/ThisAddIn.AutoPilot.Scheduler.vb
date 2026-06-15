@@ -521,7 +521,10 @@ Partial Public Class ThisAddIn
 
     ''' <summary>Starts the local scheduler runtime when Local Agent scheduling is enabled and the listener is live.</summary>
     Friend Sub EnsureLocalSchedulerTimerStarted()
-        If Not IsLocalSchedulerEnabled() Then Return
+        If Not IsLocalSchedulerEnabled() Then
+            StopLocalSchedulerRuntime()
+            Return
+        End If
 
         If _apLocalSchedulerCts Is Nothing OrElse _apLocalSchedulerCts.IsCancellationRequested Then
             Try : _apLocalSchedulerCts?.Dispose() : Catch : End Try
@@ -549,7 +552,7 @@ Partial Public Class ThisAddIn
     End Sub
 
     Private Function IsLocalSchedulerEnabled() As Boolean
-        If INI_WebServerBlock = 4 Then Return False
+        If INI_WebServerBlock = 2 OrElse INI_WebServerBlock = 4 Then Return False
         If _apActive Then Return False
 
         Try
@@ -567,7 +570,12 @@ Partial Public Class ThisAddIn
 
     ''' <summary>Timer callback that checks for and executes due tasks.</summary>
     Private Async Sub SchedulerTimerCallback(state As Object)
-        If Not IsSchedulerRuntimeAvailable() Then Return
+        If Not IsSchedulerRuntimeAvailable() Then
+            If Not _apActive Then
+                StopLocalSchedulerRuntime()
+            End If
+            Return
+        End If
         If Interlocked.CompareExchange(_apSchedulerCheckRunning, 1, 0) <> 0 Then Return
 
         Try
