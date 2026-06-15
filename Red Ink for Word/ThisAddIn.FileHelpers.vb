@@ -48,7 +48,8 @@ Partial Public Class ThisAddIn
                                            Optional DoOCR As Boolean = False,
                                            Optional AskUser As Boolean = True,
                                            Optional AskWorksheetSelection As Boolean = False,
-                                           Optional OcrAdditionalInstruction As String = Nothing) As Task(Of FileReadResult)
+                                           Optional OcrAdditionalInstruction As String = Nothing,
+                                           Optional ShowOCRProgress As Boolean = False) As Task(Of FileReadResult)
 
         Dim result As New FileReadResult()
         Dim filePath As String = ""
@@ -111,7 +112,7 @@ Partial Public Class ThisAddIn
                             DoOCR,
                             AskUser,
                             _context,
-                            OcrAdditionalInstruction)
+                            OcrAdditionalInstruction, ShowOCRProgress)
                         FromFile = pdfResult.Content
                         result.PdfMayBeIncomplete = pdfResult.OcrWasSkippedDueToHeuristics
                     Case ".eml"
@@ -166,8 +167,10 @@ Partial Public Class ThisAddIn
                                          Optional DoOCR As Boolean = False,
                                          Optional AskUser As Boolean = True,
                                          Optional AskWorksheetSelection As Boolean = False,
-                                         Optional OcrAdditionalInstruction As String = Nothing) As Task(Of String)
-        Dim result = Await GetFileContentEx(optionalFilePath, Silent, DoOCR, AskUser, AskWorksheetSelection, OcrAdditionalInstruction)
+                                         Optional OcrAdditionalInstruction As String = Nothing,
+                                         Optional ShowOCRProgress As Boolean = False) As Task(Of String)
+
+        Dim result = Await GetFileContentEx(optionalFilePath, Silent, DoOCR, AskUser, AskWorksheetSelection, OcrAdditionalInstruction, ShowOCRProgress)
         Return result.Content
     End Function
 

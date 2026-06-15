@@ -1,6 +1,7 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
+Imports System.Diagnostics
 Imports Microsoft.Office.Tools.Ribbon
 Imports Microsoft.Win32
 Imports SharedLibrary
@@ -393,6 +394,271 @@ Public Class Ribbon1
             SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Voice command failed: " & ex.Message)
         End Try
     End Sub
+
+    Private ReadOnly RibbonControlsHiddenByAvailability As New System.Collections.Generic.HashSet(Of String)(
+        System.StringComparer.OrdinalIgnoreCase
+    )
+
+    Private ReadOnly RibbonControlsHiddenByConfiguration As New System.Collections.Generic.HashSet(Of String)(
+        System.StringComparer.OrdinalIgnoreCase
+    )
+
+    Private Function GetRibbonControlLabel(ByVal ribbonControl As Microsoft.Office.Tools.Ribbon.RibbonControl) As String
+        If ribbonControl Is Nothing Then
+            Return ""
+        End If
+
+        Try
+            Dim propertyInfo As System.Reflection.PropertyInfo =
+                ribbonControl.GetType().GetProperty(
+                    "Label",
+                    System.Reflection.BindingFlags.Instance Or
+                    System.Reflection.BindingFlags.Public Or
+                    System.Reflection.BindingFlags.IgnoreCase
+                )
+
+            If propertyInfo Is Nothing Then
+                Return ""
+            End If
+
+            Dim value As Object = propertyInfo.GetValue(ribbonControl, Nothing)
+            Return If(TryCast(value, String), "")
+        Catch
+            Return ""
+        End Try
+    End Function
+
+    Private Function SplitRibbonControlNames(ByVal controlNames As String) As String()
+        If System.String.IsNullOrWhiteSpace(controlNames) Then
+            Return New String() {}
+        End If
+
+        Dim separators As Char() = {","c, ";"c}
+
+        Return controlNames.Split(
+            separators,
+            System.StringSplitOptions.RemoveEmptyEntries
+        )
+    End Function
+
+    Private Function IsRibbonControlHiddenByConfiguration(
+        ByVal ribbonControl As Microsoft.Office.Tools.Ribbon.RibbonControl
+    ) As Boolean
+        If ribbonControl Is Nothing Then
+            Return False
+        End If
+
+        If System.String.IsNullOrWhiteSpace(ribbonControl.Name) Then
+            Return False
+        End If
+
+        Return RibbonControlsHiddenByConfiguration.Contains(ribbonControl.Name)
+    End Function
+
+
+    Private Function GetRibbonControlByName(ByVal controlName As String) As Microsoft.Office.Tools.Ribbon.RibbonControl
+        If System.String.IsNullOrWhiteSpace(controlName) Then
+            Return Nothing
+        End If
+
+        Dim normalizedControlName As String = controlName.Trim()
+        Dim flags As System.Reflection.BindingFlags =
+            System.Reflection.BindingFlags.Instance Or
+            System.Reflection.BindingFlags.NonPublic Or
+            System.Reflection.BindingFlags.Public Or
+            System.Reflection.BindingFlags.IgnoreCase
+
+        Dim directField As System.Reflection.FieldInfo =
+            Me.GetType().GetField(normalizedControlName, flags)
+
+        If directField IsNot Nothing Then
+            Dim directControl As Microsoft.Office.Tools.Ribbon.RibbonControl =
+                TryCast(directField.GetValue(Me), Microsoft.Office.Tools.Ribbon.RibbonControl)
+
+            If directControl IsNot Nothing Then
+                Return directControl
+            End If
+        End If
+
+        For Each fieldInfo As System.Reflection.FieldInfo In Me.GetType().GetFields(flags)
+            Dim ribbonControl As Microsoft.Office.Tools.Ribbon.RibbonControl =
+                TryCast(fieldInfo.GetValue(Me), Microsoft.Office.Tools.Ribbon.RibbonControl)
+
+            If ribbonControl Is Nothing Then
+                Continue For
+            End If
+
+            If normalizedControlName.Equals(fieldInfo.Name, System.StringComparison.OrdinalIgnoreCase) OrElse
+               normalizedControlName.Equals(If(ribbonControl.Name, ""), System.StringComparison.OrdinalIgnoreCase) OrElse
+               normalizedControlName.Equals(GetRibbonControlLabel(ribbonControl), System.StringComparison.OrdinalIgnoreCase) Then
+                Return ribbonControl
+            End If
+        Next
+
+        Return Nothing
+    End Function
+
+    Private Sub SetRibbonControlVisibleByAvailability(
+        ByVal ribbonControl As Microsoft.Office.Tools.Ribbon.RibbonControl,
+        ByVal visible As Boolean
+    )
+        If ribbonControl Is Nothing Then
+            System.Diagnostics.Debug.WriteLine("SetRibbonControlVisibleByAvailability: ribbonControl ist Nothing.")
+            Return
+        End If
+
+        If System.String.IsNullOrWhiteSpace(ribbonControl.Name) Then
+            System.Diagnostics.Debug.WriteLine("SetRibbonControlVisibleByAvailability: Ribbon-Control ohne Name.")
+            ribbonControl.Visible = visible
+            Return
+        End If
+
+        If visible Then
+            RibbonControlsHiddenByAvailability.Remove(ribbonControl.Name)
+        Else
+            RibbonControlsHiddenByAvailability.Add(ribbonControl.Name)
+        End If
+
+        If visible AndAlso IsRibbonControlHiddenByConfiguration(ribbonControl) Then
+            ribbonControl.Visible = False
+            Return
+        End If
+
+        ribbonControl.Visible = visible
+    End Sub
+
+    Private Sub SetRibbonControlVisibleByConfiguration(
+        ByVal ribbonControl As Microsoft.Office.Tools.Ribbon.RibbonControl,
+        ByVal visible As Boolean
+    )
+        If ribbonControl Is Nothing Then
+            System.Diagnostics.Debug.WriteLine("SetRibbonControlVisibleByConfiguration: ribbonControl is Nothing.")
+            Return
+        End If
+
+        If System.String.IsNullOrWhiteSpace(ribbonControl.Name) Then
+            System.Diagnostics.Debug.WriteLine("SetRibbonControlVisibleByConfiguration: Ribbon control without name.")
+            ribbonControl.Visible = visible
+            Return
+        End If
+
+        If visible Then
+            RibbonControlsHiddenByConfiguration.Remove(ribbonControl.Name)
+
+            If Not RibbonControlsHiddenByAvailability.Contains(ribbonControl.Name) Then
+                ribbonControl.Visible = True
+            End If
+        Else
+            RibbonControlsHiddenByConfiguration.Add(ribbonControl.Name)
+            ribbonControl.Visible = False
+        End If
+    End Sub
+
+    Public Sub ApplySimpleModeToRibbonControls(
+        ByVal controlNames As String,
+        ByVal blockedControlNames As String,
+        ByVal simpleMode As Boolean
+    )
+
+        Dim names As String() = SplitRibbonControlNames(controlNames)
+        Dim blockedNames As String() = SplitRibbonControlNames(blockedControlNames)
+
+        If names.Length = 0 AndAlso blockedNames.Length = 0 Then
+            System.Diagnostics.Debug.WriteLine("ApplySimpleModeToRibbonControls: No control names provided.")
+            Return
+        End If
+
+        RibbonControlsHiddenByConfiguration.Clear()
+
+        For Each rawName As String In names
+            Dim controlName As String = rawName.Trim()
+
+            If System.String.IsNullOrWhiteSpace(controlName) Then
+                Continue For
+            End If
+
+            Try
+                Dim ribbonControl As Microsoft.Office.Tools.Ribbon.RibbonControl =
+                    GetRibbonControlByName(controlName)
+
+                If ribbonControl Is Nothing Then
+                    System.Diagnostics.Debug.WriteLine("ApplySimpleModeToRibbonControls: Ribbon control not found: " & controlName)
+                    Continue For
+                End If
+
+                If simpleMode Then
+                    ribbonControl.Visible = False
+                Else
+                    If RibbonControlsHiddenByAvailability.Contains(ribbonControl.Name) Then
+                        System.Diagnostics.Debug.WriteLine(
+                            "ApplySimpleModeToRibbonControls: Control remains hidden due to availability: " & ribbonControl.Name
+                        )
+                    Else
+                        ribbonControl.Visible = True
+                    End If
+                End If
+
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine("ApplySimpleModeToRibbonControls: Error in '" & controlName & "': " & ex.Message)
+            End Try
+        Next
+
+        For Each rawName As String In blockedNames
+            Dim controlName As String = rawName.Trim()
+
+            If System.String.IsNullOrWhiteSpace(controlName) Then
+                Continue For
+            End If
+
+            Try
+                Dim ribbonControl As Microsoft.Office.Tools.Ribbon.RibbonControl =
+                    GetRibbonControlByName(controlName)
+
+                If ribbonControl Is Nothing Then
+                    System.Diagnostics.Debug.WriteLine("ApplySimpleModeToRibbonControls: Ribbon control to block not found: " & controlName)
+                    Continue For
+                End If
+
+                SetRibbonControlVisibleByConfiguration(ribbonControl, False)
+
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine("ApplySimpleModeToRibbonControls: Error blocking '" & controlName & "': " & ex.Message)
+            End Try
+        Next
+    End Sub
+
+    Public Function GetRibbonControlNamesAsString() As String
+        Dim result As New System.Text.StringBuilder()
+        Dim flags As System.Reflection.BindingFlags =
+            System.Reflection.BindingFlags.Instance Or
+            System.Reflection.BindingFlags.NonPublic Or
+            System.Reflection.BindingFlags.Public
+
+        Try
+            For Each fieldInfo As System.Reflection.FieldInfo In Me.GetType().GetFields(flags)
+                Dim ribbonControl As Microsoft.Office.Tools.Ribbon.RibbonControl =
+                    TryCast(fieldInfo.GetValue(Me), Microsoft.Office.Tools.Ribbon.RibbonControl)
+
+                If ribbonControl Is Nothing Then
+                    Continue For
+                End If
+
+                result.AppendLine(
+                    fieldInfo.Name &
+                    " | " &
+                    fieldInfo.FieldType.Name &
+                    " | Name=" & If(ribbonControl.Name, "") &
+                    " | Label=" & GetRibbonControlLabel(ribbonControl)
+                )
+            Next
+
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine("GetRibbonControlNamesAsString: Error: " & ex.Message)
+        End Try
+
+        Return result.ToString()
+    End Function
+
 
     Private Sub SelectModelCommand(modelNumber As Integer)
         ThisAddIn.SelectModel(modelNumber)

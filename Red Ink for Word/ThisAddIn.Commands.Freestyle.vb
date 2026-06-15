@@ -1353,6 +1353,8 @@ Partial Public Class ThisAddIn
                 AddItem("reload", "Reload the configuration from disk and rebuild menus.")
                 AddItem("reset", "Reset local configuration to defaults and rebuild menus.")
                 AddItem("cleanmenu", "Remove old context menus and rebuild them.")
+                AddItem("simplemen", "Toggle simple menu mode.")
+                AddItem("menunames", "Provide a list of menu names available for 'SimpleMeduHide' parameter.")
 
                 ' INI UPDATE / SIGNING
                 AddItem("iniupdate", "Check for and apply configuration updates.")
@@ -2385,6 +2387,20 @@ Partial Public Class ThisAddIn
                 RemoveVeryOldContextMenu()
                 MenusAdded = False
                 AddContextMenu()
+                Return
+            End If
+
+            ' Toggle simplemenu
+            If OtherPrompt.StartsWith("simplemenu", StringComparison.OrdinalIgnoreCase) Then
+                INI_SimpleMenuOverride = Not INI_SimpleMenuOverride
+                AddContextMenu()
+                Return
+            End If
+
+            ' Menu names
+            If OtherPrompt.StartsWith("menunames", StringComparison.OrdinalIgnoreCase) Then
+                selection.Range.Collapse(Direction:=Word.WdCollapseDirection.wdCollapseEnd)
+                selection.TypeText(vbCrLf & "Menu Names:" & vbCrLf & Globals.Ribbons.Ribbon1.GetRibbonControlNamesAsString() & vbCrLf)
                 Return
             End If
 

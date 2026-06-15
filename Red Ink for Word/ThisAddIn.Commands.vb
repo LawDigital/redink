@@ -1106,6 +1106,7 @@ Partial Public Class ThisAddIn
         If INILoadFail() Then Return
 
         Dim Settings As New Dictionary(Of String, String) From {
+                {"SimpleMenuOverride", "Simple menu"},
                 {"Temperature", "Temperature of {model}"},
                 {"Timeout", "Timeout of {model}"},
                 {"Temperature_2", "Temperature of {model2}"},
@@ -1139,6 +1140,7 @@ Partial Public Class ThisAddIn
                 {"PromptLibPath_Transcript", "Transcript prompt library file"},
                 {"ShortcutsWordExcel", "Key shortcuts (for direct access)"},
                 {"ChatCap", "Chat conversation memory (chars)"},
+                {"ChunkOCR", "Chunk size for OCR processing (pages; 0 = no chunking)"},
                 {"MyStylePath", "Path to the MyStyle prompt file"},
                 {"DefaultPrefix", "Default prefix to use in 'Freestyle'"},
                 {"Location", "Location information to use, e.g., in 'Freestyle'"},
@@ -1153,6 +1155,7 @@ Partial Public Class ThisAddIn
                 {"KnowledgeStoreBackgroundIndexingWindow", "Knowledge store: Background processing window"}
             }
         Dim SettingsTips As New Dictionary(Of String, String) From {
+                {"SimpleMenuOverride", "Only show the simple menu features in this add-in (can be defined)"},
                 {"Temperature", "The higher, the more creative the LLM will be (0.0-2.0)"},
                 {"Timeout", "In milliseconds"},
                 {"Temperature_2", "The higher, the more creative the LLM will be (0.0-2.0)"},
@@ -1186,6 +1189,7 @@ Partial Public Class ThisAddIn
                 {"PromptLibPath_Transcript", "The filename (including path, support environmental variables) for your transcript prompt library (if any)"},
                 {"ShortcutsWordExcel", "You can add key shortcuts by giving the name of the context menu, e.g., 'Correct=Ctrl-Shift-C', separated by ';' (only works if context menus are enabled and the Word helper is installed)"},
                 {"ChatCap", "Use this to limit how many characters of your past chat discussion the chatbot will memorize (for saving costs and time)"},
+                {"ChunkOCR", "If OCR is done through a model you have configured, you can have Red Ink send the PDF to the model only in chunks of the number of pages stated"},
                 {"MyStylePath", "This is the path where the prompts are stored that convey your writing style (if defined, see 'Analyze')."},
                 {"DefaultPrefix", "You can define here the default prefix to use within 'Freestyle' if no other prefix is used (will be added automatically)."},
                 {"Location", "Provide location information (e.g., 'We are in Zurich, Switzerland') to be used in 'Freestyle', chatbot and some other prompts that contain {Location} to get more location specific results."},

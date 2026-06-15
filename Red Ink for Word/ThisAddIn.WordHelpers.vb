@@ -2218,7 +2218,7 @@ Partial Public Class ThisAddIn
                             Silent:=True,
                             DoOCR:=useOcrForThisFile,
                             AskUser:=False,
-                            OcrAdditionalInstruction:=If(useMarkdownForThisFile, ocrMarkdownInstruction, ""))
+                            OcrAdditionalInstruction:=If(useMarkdownForThisFile, ocrMarkdownInstruction, ""), ShowOCRProgress:=True)
 
                         If String.IsNullOrWhiteSpace(content) Then
                             emptyContentFiles.Add($"{fileName} ({IO.Path.GetExtension(filePath).ToLowerInvariant()})")
@@ -3101,7 +3101,8 @@ Partial Public Class ThisAddIn
                     True,
                     False,
                     False,
-                    OcrAdditionalInstruction:=Add_OcrMarkdownInstruction)
+                    OcrAdditionalInstruction:=Add_OcrMarkdownInstruction,
+                    ShowOCRProgress:=True)
 
                 If String.IsNullOrWhiteSpace(docText) Then
                     Exit Sub

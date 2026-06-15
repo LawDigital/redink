@@ -66,6 +66,32 @@ Partial Public Class ThisAddIn
 
     Private Const LegacyWebExtensionRoute As String = "/redink"
 
+    Private Function IsLocalChatAndInkyPlayEnabled() As System.Boolean
+        Return INI_WebServerBlock <> 2
+    End Function
+
+    Private Function IsLegacyEdgeExtensionReceiverEnabled() As System.Boolean
+        Return INI_WebServerBlock <> 3
+    End Function
+
+    Private Sub SendFeatureBlockedResponse(
+        ByVal res As System.Net.HttpListenerResponse,
+        ByVal requestId As System.String,
+        ByVal message As System.String,
+        Optional ByVal addCors As System.Boolean = False
+    )
+        Dim payload() As System.Byte = System.Text.Encoding.UTF8.GetBytes(message)
+
+        SendBufferedHttpResponse(
+            res,
+            403,
+            "text/plain; charset=utf-8",
+            payload,
+            requestId,
+            "feature-blocked",
+            addCors:=addCors)
+    End Sub
+
     Private Const AllToolUse As String = "Advanced tools"
     Private Const AllToolUseDescription As String =
         "Turns selected advanced tools on or off. Configure which advanced tools are callable through the Agents button."
@@ -108,6 +134,7 @@ Partial Public Class ThisAddIn
         Public Property UseSecond As Boolean
         Public Property FileObject As String
         Public Property ChatId As Integer = 1
+        Public Property ScheduledTaskId As String = ""
 
         Public Sub Dispose() Implements IDisposable.Dispose
             Try
@@ -119,9 +146,56 @@ Partial Public Class ThisAddIn
         End Sub
     End Class
 
+    Private Class PendingScheduledBrowserTask
+        Public Property TaskId As String = ""
+        Public Property Prompt As String = ""
+        Public Property ChatId As Integer = 2
+        Public Property CreatedUtc As DateTime = DateTime.UtcNow
+    End Class
+
     Private ReadOnly jobMap As New System.Collections.Concurrent.ConcurrentDictionary(Of String, LlmJob)()
     Private activeJobs As Integer = 0
     Private Const JobTtlMinutes As Integer = 45
+    Private ReadOnly _pendingScheduledBrowserTaskGate As New Object()
+    Private _pendingScheduledBrowserTask As PendingScheduledBrowserTask = Nothing
+
+    Friend Sub QueuePendingScheduledBrowserTask(taskId As String, prompt As String, Optional chatId As Integer = 2)
+        If String.IsNullOrWhiteSpace(taskId) OrElse String.IsNullOrWhiteSpace(prompt) Then Return
+
+        SyncLock _pendingScheduledBrowserTaskGate
+            _pendingScheduledBrowserTask = New PendingScheduledBrowserTask() With {
+                .TaskId = taskId,
+                .Prompt = prompt,
+                .ChatId = chatId,
+                .CreatedUtc = DateTime.UtcNow
+            }
+        End SyncLock
+    End Sub
+
+    Friend Function HasPendingScheduledBrowserTask() As Boolean
+        SyncLock _pendingScheduledBrowserTaskGate
+            Return _pendingScheduledBrowserTask IsNot Nothing
+        End SyncLock
+    End Function
+
+    Friend Sub ClearPendingScheduledBrowserTask(Optional taskId As String = Nothing)
+        SyncLock _pendingScheduledBrowserTaskGate
+            If _pendingScheduledBrowserTask Is Nothing Then Return
+
+            If String.IsNullOrWhiteSpace(taskId) OrElse
+               _pendingScheduledBrowserTask.TaskId.Equals(taskId, StringComparison.OrdinalIgnoreCase) Then
+                _pendingScheduledBrowserTask = Nothing
+            End If
+        End SyncLock
+    End Sub
+
+    Private Function ClaimPendingScheduledBrowserTask() As PendingScheduledBrowserTask
+        SyncLock _pendingScheduledBrowserTaskGate
+            Dim claimed = _pendingScheduledBrowserTask
+            _pendingScheduledBrowserTask = Nothing
+            Return claimed
+        End SyncLock
+    End Function
 
     ''' <summary>
     ''' Handles a single HTTP request (routing: favicon, UI HTML, API POST, CORS preflight).
@@ -142,11 +216,43 @@ Partial Public Class ThisAddIn
         Dim requestMethod As System.String = If(req.HttpMethod, System.String.Empty)
         Dim debugEnabled As System.Boolean = INI_APIDebug
 
+        Dim isLegacyWebExtensionRequest As System.Boolean =
+            System.String.Equals(requestPath, LegacyWebExtensionRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
+            System.String.Equals(requestPath, LegacyWebExtensionRoute & "/", System.StringComparison.OrdinalIgnoreCase)
+
+        Dim isLocalChatRequest As System.Boolean =
+            System.String.Equals(requestPath, "/", System.StringComparison.OrdinalIgnoreCase) OrElse
+            System.String.Equals(requestPath, "/inky/ping", System.StringComparison.OrdinalIgnoreCase) OrElse
+            System.String.Equals(requestPath, InkyUiRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
+            System.String.Equals(requestPath, InkyUiRoute & "/", System.StringComparison.OrdinalIgnoreCase) OrElse
+            System.String.Equals(requestPath, InkyPlayRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
+            System.String.Equals(requestPath, InkyPlayRoute & "/", System.StringComparison.OrdinalIgnoreCase) OrElse
+            System.String.Equals(requestPath, InkyApiRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
+            System.String.Equals(requestPath, InkyApiRoute & "/", System.StringComparison.OrdinalIgnoreCase)
+
         System.Threading.Interlocked.Increment(activeRequests)
 
         Dim hb As System.Threading.Timer = Nothing
 
         Try
+            If isLocalChatRequest AndAlso Not IsLocalChatAndInkyPlayEnabled() Then
+                SendFeatureBlockedResponse(
+                    res,
+                    requestId,
+                    "Local chat and InkyPlay are disabled by WebServerBlock.",
+                    addCors:=True)
+                Return
+            End If
+
+            If isLegacyWebExtensionRequest AndAlso Not IsLegacyEdgeExtensionReceiverEnabled() Then
+                SendFeatureBlockedResponse(
+                    res,
+                    requestId,
+                    "The Edge extension receiver is disabled by WebServerBlock.",
+                    addCors:=True)
+                Return
+            End If
+
             If debugEnabled Then
                 Dim rawUrl As System.String = ""
                 Dim hostHeader As System.String = ""
@@ -1800,6 +1906,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("let __jobStartTs=0;")
         html.AppendLine("let __elapsedTimer=null;")
         html.AppendLine("let __lastPrompt=" & Newtonsoft.Json.JsonConvert.SerializeObject(My.Settings.Inky_LastPrompt) & ";")
+        html.AppendLine("let __pendingScheduledTaskId='';")
 
         ' Press feedback
         html.AppendLine("(function(){const pressOn=e=>{const b=e.target.closest('button');if(!b||b.disabled)return;b.classList.add('is-pressed');};const pressOff=()=>{document.querySelectorAll('button.is-pressed').forEach(b=>b.classList.remove('is-pressed'));};['mousedown','touchstart'].forEach(ev=>document.addEventListener(ev,pressOn,{passive:true}));['mouseup','mouseleave','blur'].forEach(ev=>document.addEventListener(ev,pressOff));document.addEventListener('keydown',e=>{if((e.key===' '||e.key==='Enter')){const b=e.target.closest('button');if(b&&!b.disabled)b.classList.add('is-pressed');}});document.addEventListener('keyup',e=>{if(e.key===' '||e.key==='Enter')pressOff();});})();")
@@ -1874,7 +1981,8 @@ Partial Public Class ThisAddIn
         html.AppendLine("function removeTypingBubble(){if(__typingBubbleId){removeTempBubble(__typingBubbleId);__typingBubbleId=null;}stopElapsedTimer();}")
 
         ' Boot        
-        html.AppendLine("async function boot(){const st=await api('inky_getstate');if(!st.ok){alert(st.error||'Init failed');return;}__supportsFiles=(st.supportsFiles===true);setTheme(st.darkMode!==false);render(st.history||[]);modelSel.innerHTML='';for(const m of (st.models||[])){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}updateModelTooltip();if(st.greeting&&(!Array.isArray(st.history)||st.history.length===0)){msgEl.placeholder=st.greeting;}setActiveChatBtn(st.activeChat||1);__modelSupportsTooling=(st.supportsTooling===true);__toolingEnabled=(st.toolingEnabled===true);toolingChk.checked=__toolingEnabled;__toolLogEnabled=(st.toolingLogEnabled!==false);toolLogBtn.classList.toggle('active',__toolLogEnabled);__memoryEnabled=(st.inkyMemoryEnabled===true);memoryChk.checked=__memoryEnabled;memoryEditLnk.style.display=__memoryEnabled?'inline':'none';syncAdvancedToolsUi({advancedToolsEnabled:st.advancedToolsEnabled===true,agentWorkspace:st.agentWorkspace,agentFiles:st.agentFiles||[],agentModelAvailable:st.agentModelAvailable===true,agentModelActive:st.agentModelActive===true});adjustModelSel();}")
+        html.AppendLine("async function claimScheduledTask(){const r=await api('inky_claimscheduledtask');if(!r||!r.ok)return null;return r.task||null;}")
+        html.AppendLine("async function boot(){const st=await api('inky_getstate');if(!st.ok){alert(st.error||'Init failed');return;}__supportsFiles=(st.supportsFiles===true);setTheme(st.darkMode!==false);render(st.history||[]);modelSel.innerHTML='';for(const m of (st.models||[])){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}updateModelTooltip();if(st.greeting&&(!Array.isArray(st.history)||st.history.length===0)){msgEl.placeholder=st.greeting;}setActiveChatBtn(st.activeChat||1);__modelSupportsTooling=(st.supportsTooling===true);__toolingEnabled=(st.toolingEnabled===true);toolingChk.checked=__toolingEnabled;__toolLogEnabled=(st.toolingLogEnabled!==false);toolLogBtn.classList.toggle('active',__toolLogEnabled);__memoryEnabled=(st.inkyMemoryEnabled===true);memoryChk.checked=__memoryEnabled;memoryEditLnk.style.display=__memoryEnabled?'inline':'none';syncAdvancedToolsUi({advancedToolsEnabled:st.advancedToolsEnabled===true,agentWorkspace:st.agentWorkspace,agentFiles:st.agentFiles||[],agentModelAvailable:st.agentModelAvailable===true,agentModelActive:st.agentModelActive===true});adjustModelSel();const scheduledTask=await claimScheduledTask();if(scheduledTask&&scheduledTask.prompt&&!__currentJobId){__pendingScheduledTaskId=scheduledTask.taskId||'';msgEl.value=scheduledTask.prompt;await send();}}")
 
         ' Poll job
         html.AppendLine("function buildAssistantTurnFromJobResult(r){const md=String((r&&r.result)||'').trim();if(!md)return null;const html=String((r&&r.resultHtml)||'').trim()||md.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>');return {role:'assistant',markdown:md,html:html,utc:new Date().toISOString()};}")
@@ -1882,7 +1990,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("async function pollJob(jobId){if(!jobId)return;__currentJobId=jobId;__jobCanceled=false;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);try{for(;;){await new Promise(r=>setTimeout(r,2000));if(__jobCanceled)break;const s=await api('inky_jobstatus',{Job:jobId});if(!s.ok){console.warn('job status error',s.error);break;}if(s.status==='running'){continue;}if(s.status==='done'){if(Array.isArray(s.history)){render(s.history);}else{const st=await api('inky_getstate');if(st.ok){const hist=ensureJobResultVisible(st,s);render(hist);}else{render(ensureJobResultVisible({history:[]},s));console.warn('state sync error',st&&st.error);}}const stSync=await api('inky_getstate');if(stSync&&stSync.ok){if(stSync.agentFiles)updateAgentFilesDisplay(stSync.agentFiles);syncAdvancedToolsUi({advancedToolsEnabled:stSync.advancedToolsEnabled===true,agentWorkspace:stSync.agentWorkspace,agentFiles:stSync.agentFiles||[],agentModelAvailable:stSync.agentModelAvailable===true,agentModelActive:stSync.agentModelActive===true});}break;}if(s.status==='canceled'){const st=await api('inky_getstate');if(st.ok){render(st.history||[]);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);}break;}if(s.status==='error'){console.warn('job failed',s.error);break;}const st=await api('inky_getstate');if(st.ok){const hist=ensureJobResultVisible(st,s);render(hist);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);}break;}}finally{cancelBtn.style.display='none';removeTypingBubble();sendBtn.disabled=false;pureBtn.disabled=false;disableChatSwitch(false);__currentJobId=null;adjustModelSel();}}")
 
         ' Send (normal)
-        html.AppendLine("async function send(){if(__currentJobId){return;}const t=msgEl.value.trim();if(!t)return;__lastPrompt=t;msgEl.value='';sendBtn.disabled=true;pureBtn.disabled=true;chatEl.insertAdjacentHTML('beforeend',`<div class=""row user""><div class=""bubble""><div class=""role"">You</div><div>${t.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>')}</div></div></div>`);let typingId=addTempAssistantBubble('<span class=""typing-dots""><span></span><span></span><span></span></span>');const payload={Text:t};if(__pendingFilePath)payload.FileObject=__pendingFilePath;let r;try{r=await api('inky_send',payload);}catch(e){r={ok:false,error:e.message||'Network error'};}if(!r||!r.ok){removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;alert(r&&r.error||'Error');__pendingFilePath='';adjustModelSel();return;}__pendingFilePath='';if(r.job){if(r.history){render(r.history||[]);}removeTempBubble(typingId);__typingBubbleId=null;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);pollJob(r.job);}else{removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;if(r.history){render(r.history||[]);}adjustModelSel();}}")
+        html.AppendLine("async function send(){if(__currentJobId){return;}const t=msgEl.value.trim();if(!t)return;const scheduledTaskId=__pendingScheduledTaskId||'';__pendingScheduledTaskId='';__lastPrompt=t;msgEl.value='';sendBtn.disabled=true;pureBtn.disabled=true;chatEl.insertAdjacentHTML('beforeend',`<div class=""row user""><div class=""bubble""><div class=""role"">You</div><div>${t.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>')}</div></div></div>`);let typingId=addTempAssistantBubble('<span class=""typing-dots""><span></span><span></span><span></span></span>');const payload={Text:t};if(scheduledTaskId)payload.ScheduledTaskId=scheduledTaskId;if(__pendingFilePath)payload.FileObject=__pendingFilePath;let r;try{r=await api('inky_send',payload);}catch(e){r={ok:false,error:e.message||'Network error'};}if(!r||!r.ok){removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;alert(r&&r.error||'Error');__pendingFilePath='';adjustModelSel();return;}__pendingFilePath='';if(r.job){if(r.history){render(r.history||[]);}removeTempBubble(typingId);__typingBubbleId=null;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);pollJob(r.job);}else{removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;if(r.history){render(r.history||[]);}adjustModelSel();}}")
 
         ' PureSend
         html.AppendLine("async function pureSend(){if(__currentJobId){return;}const t=msgEl.value.trim();if(!t)return;__lastPrompt=t;msgEl.value='';sendBtn.disabled=true;pureBtn.disabled=true;chatEl.insertAdjacentHTML('beforeend',`<div class=""row user""><div class=""bubble""><div class=""role"">You</div><div>${('Pure: '+t).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>')}</div></div></div>`);let typingId=addTempAssistantBubble('<span class=""typing-dots""><span></span><span></span><span></span></span>');const payload={Text:t};if(__pendingFilePath)payload.FileObject=__pendingFilePath;let r;try{r=await api('inky_pure',payload);}catch(e){r={ok:false,error:e.message||'Network error'};}if(!r||!r.ok){removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;alert(r&&r.error||'Error');__pendingFilePath='';adjustModelSel();return;}__pendingFilePath='';if(r.job){if(r.history){render(r.history||[]);}removeTempBubble(typingId);__typingBubbleId=null;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);pollJob(r.job);}else{removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;if(r.history){render(r.history||[]);}adjustModelSel();}}")
@@ -2719,8 +2827,31 @@ Partial Public Class ThisAddIn
                             Throw
                         End Try
 
-                    ' Remaining cases kept intact (command-specific logic)
+                     ' Remaining cases kept intact (command-specific logic)
                     ' ------------------------------------------------------------------
+                    Case "inky_claimscheduledtask"
+                        Dim claimed = ClaimPendingScheduledBrowserTask()
+
+                        If claimed IsNot Nothing Then
+                            activeChatId = claimed.ChatId
+                            Try
+                                My.Settings.Inky_LastChat = activeChatId
+                                My.Settings.Save()
+                            Catch
+                            End Try
+                        End If
+
+                        Return JsonOk(New With {
+                                .ok = True,
+                                .task = If(claimed Is Nothing,
+                                           Nothing,
+                                           New With {
+                                               .taskId = claimed.TaskId,
+                                               .prompt = claimed.Prompt,
+                                               .chatId = claimed.ChatId
+                                           })
+                            })
+
                     Case "inky_switch"
                         Dim which As String = j("Chat")?.ToString()
                         activeChatId = If(which = "2", 2, 1)
@@ -2887,6 +3018,7 @@ Partial Public Class ThisAddIn
                         Dim fileObject As System.String = j("FileObject")?.ToString()
                         Dim uploadedTempPath As System.String = fileObject
                         Dim textBody As System.String = j("Text")?.ToString()
+                        Dim scheduledTaskId As System.String = j("ScheduledTaskId")?.ToString()
                         If System.String.IsNullOrWhiteSpace(textBody) Then
                             Return JsonErr("Please enter a message.")
                         End If
@@ -3149,7 +3281,8 @@ Partial Public Class ThisAddIn
                                         .Cts = jobCts,
                                         .UseSecond = useSecondApiLocal,
                                         .FileObject = finalFileObject,
-                                        .ChatId = originatingChatId
+                                        .ChatId = originatingChatId,
+                                        .ScheduledTaskId = If(scheduledTaskId, "")
                                     }
                         If Not jobMap.TryAdd(jobId, job) Then
                             jobCts.Dispose()
@@ -3165,6 +3298,11 @@ Partial Public Class ThisAddIn
                         Catch
                         End Try
                         llmOperationCts = jobCts
+
+                        If Not String.IsNullOrWhiteSpace(scheduledTaskId) Then
+                            SchedulerMarkLocalTaskRunning(scheduledTaskId)
+                        End If
+
                         ' Replace the original System.Threading.Tasks.Task.Run(Sub() ... End Sub) block with this:
                         System.Threading.Tasks.Task.Run(
                             Sub()
@@ -3175,6 +3313,7 @@ Partial Public Class ThisAddIn
                                 Dim agentAbortDetected As Boolean = False
                                 Dim agentToolCallLogSnapshot As List(Of AutoPilotToolCallEntry) = Nothing
                                 Dim agentOutputFiles As List(Of String) = Nothing
+                                Dim scheduledTaskFinalized As Boolean = False
                                 Try
                                     ' (1) Alternate model application (safer pattern)
                                     If useSecondApiLocal AndAlso Not String.IsNullOrWhiteSpace(selectedModelKeyLocal) Then
@@ -3310,6 +3449,12 @@ Partial Public Class ThisAddIn
 
                                             agentOutputFiles = ChatAgentCollectAndCopyOutputs(citedExternalFiles)
 
+                                            If Not String.IsNullOrWhiteSpace(job.ScheduledTaskId) AndAlso
+                                               agentOutputFiles IsNot Nothing AndAlso
+                                               agentOutputFiles.Count > 0 Then
+                                                SchedulerPersistLocalBrowserOutputs(job.ScheduledTaskId, agentOutputFiles)
+                                            End If
+
                                             If agentAbortDetected Then
                                                 localOutput = BuildChatAgentAbortReport(
                                                     agentToolCallLogSnapshot,
@@ -3395,16 +3540,35 @@ Partial Public Class ThisAddIn
                                     $"[Inky] Assistant result was returned but could not be persisted for job={job.Id}; chat={job.ChatId}")
                                     End If
 
+                                    If Not String.IsNullOrWhiteSpace(job.ScheduledTaskId) AndAlso Not scheduledTaskFinalized Then
+                                        SchedulerCompleteLocalBrowserTask(job.ScheduledTaskId, assistantText)
+                                        scheduledTaskFinalized = True
+                                    End If
+
                                     If wasCanceled AndAlso localOutput.Length = 0 Then
                                         tcs.TrySetCanceled()
                                     Else
                                         tcs.TrySetResult(assistantText)
                                     End If
                                 Catch exOp As OperationCanceledException
+                                    If Not String.IsNullOrWhiteSpace(job.ScheduledTaskId) AndAlso Not scheduledTaskFinalized Then
+                                        SchedulerFailLocalBrowserTask(job.ScheduledTaskId, "Aborted by user.")
+                                        scheduledTaskFinalized = True
+                                    End If
                                     tcs.TrySetCanceled()
                                 Catch ex As System.Exception
+                                    If Not String.IsNullOrWhiteSpace(job.ScheduledTaskId) AndAlso Not scheduledTaskFinalized Then
+                                        SchedulerFailLocalBrowserTask(job.ScheduledTaskId, ex.Message)
+                                        scheduledTaskFinalized = True
+                                    End If
                                     tcs.TrySetException(ex)
                                 Finally
+                                    If Not String.IsNullOrWhiteSpace(job.ScheduledTaskId) AndAlso
+                                       Not scheduledTaskFinalized AndAlso
+                                       jobCts.IsCancellationRequested Then
+                                        SchedulerFailLocalBrowserTask(job.ScheduledTaskId, "Aborted by user.")
+                                    End If
+
                                     ' (4) Cleanup temp upload
                                     Try
                                         If Not String.IsNullOrWhiteSpace(tempUploadPathCopy) AndAlso IO.File.Exists(tempUploadPathCopy) Then

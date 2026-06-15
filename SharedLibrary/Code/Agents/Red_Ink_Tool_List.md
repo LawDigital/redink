@@ -54,7 +54,10 @@ This file lists the built-in internal tools registered in `SharedLibrary\Code\Ag
 | `compare_word_documents` | Compares two Word documents and reports differences. | Outlook |
 | `read_word_document_details` | Returns metadata or structural details about a Word document. | Outlook |
 | `create_pdf_from_text` | Generates a PDF from supplied text content. | Outlook |
-| `extract_excel_data` | Extracts readable or structured data from an Excel file. | Outlook |
+| `extract_excel_data` | Extracts readable or structured data from an Excel file using the normal reader path. For live form-filling scenarios with formulas, dropdowns, recalculation, or protected sheets, prefer the live Excel Interop tools below. | Outlook |
+| `excel_list_live_worksheets` | Lists worksheet names and basic live worksheet metadata from an existing Excel file through Excel Interop. | Outlook |
+| `excel_read_live_range` | Reads a worksheet or range from an existing Excel file through live Excel Interop, including current values and workbook-state-dependent details. | Outlook |
+| `excel_complete_live_workbook` | Updates an existing Excel workbook through live Excel Interop and saves a new `_completed.xlsx` copy, including LiftLock handling where present. | Outlook |
 | `split_pdf` | Splits a PDF into multiple output files. | Outlook |
 | `add_pdf_watermark` | Applies a watermark to a PDF. | Outlook |
 | `word_to_pdf` | Converts a Word document to PDF. | Outlook |

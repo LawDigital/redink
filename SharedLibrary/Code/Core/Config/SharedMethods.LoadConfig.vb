@@ -247,8 +247,6 @@ Namespace SharedLibrary
                 context.SP_Assemble_Execute = If(configDict.ContainsKey("SP_Assemble_Execute"), configDict("SP_Assemble_Execute"), Default_SP_Assemble_Execute)
                 context.SP_Assemble_Summarize = If(configDict.ContainsKey("SP_Assemble_Summarize"), configDict("SP_Assemble_Summarize"), Default_SP_Assemble_Summarize)               ' Legacy; was required For Excel Helper.
 
-                ' context.INI_OpenSSLPath = If(configDict.ContainsKey("OpenSSLPath"), configDict("OpenSSLPath"), "%APPDATA%\Microsoft\OpenSSL_Runtime\openssl.exe")
-
                 ' Optional values.
                 context.INI_PreCorrection = If(configDict.ContainsKey("PreCorrection"), configDict("PreCorrection"), "")
                 context.INI_PostCorrection = If(configDict.ContainsKey("PostCorrection"), configDict("PostCorrection"), "")
@@ -265,6 +263,9 @@ Namespace SharedLibrary
                 context.INI_MarkupRegexCap = If(configDict.ContainsKey("MarkupRegexCap"), CInt(configDict("MarkupRegexCap")), DEFAULT_MARKUP_REGEX_CAP)
                 context.INI_ChatCap = If(configDict.ContainsKey("ChatCap"), CInt(configDict("ChatCap")), DEFAULT_CHAT_CAP)
                 context.INI_InkyMemoryCap = If(configDict.ContainsKey("InkyMemoryCap"), CInt(configDict("InkyMemoryCap")), DEFAULT_INKY_MEMORY_CAP)
+                context.INI_SimpleMenuHide = If(configDict.ContainsKey("SimpleMenuHide"), configDict("SimpleMenuHide"), DEFAULT_SIMPLEMENUHIDE)
+                context.INI_MenuBlock = If(configDict.ContainsKey("MenuBlock"), configDict("MenuBlock"), "")
+                context.INI_WebServerBlock = If(configDict.ContainsKey("WebServerBlock"), CInt(configDict("WebServerBlock")), 0)
 
                 ' Load per-user overrides from My.Settings.
                 context.INI_DefaultPrefix = My.Settings.DefaultPrefix
@@ -272,6 +273,7 @@ Namespace SharedLibrary
                 context.INI_MarkupMethodWordOverride = My.Settings.MarkupMethodWordOverride
                 context.INI_MarkupMethodOutlookOverride = My.Settings.MarkupMethodOutlookOverride
                 context.INI_MarkupAuthor = My.Settings.MarkupAuthor
+                context.INI_SimpleMenuOverride = My.Settings.SimpleMenuOverride
 
                 ' Boolean parameters.
                 context.INI_DoubleS = ParseBoolean(configDict, "DoubleS")
@@ -288,6 +290,7 @@ Namespace SharedLibrary
                 context.INI_DoMarkupOutlook = ParseBoolean(configDict, "DoMarkupOutlook", DEFAULT_BOOL_DOMARKUPOUTLOOK)
                 context.INI_DoMarkupWord = ParseBoolean(configDict, "DoMarkupWord", DEFAULT_BOOL_DOMARKUPWORD)
                 context.INI_RoastMe = ParseBoolean(configDict, "RoastMe", False)
+                context.INI_SimpleMenuDefault = ParseBoolean(configDict, "SimpleMenuDefault", DEFAULT_SIMPLEMENUDEFAULT)
                 context.INI_APIDebug = ParseBoolean(configDict, "APIDebug")
                 context.INI_AutoPilotAutoStart = ParseBoolean(configDict, "AutoPilotAutoStart")
                 context.INI_AutoPilotSchedulerLocalChat = ParseBoolean(configDict, "AutoPilotSchedulerLocalChat")
@@ -379,6 +382,7 @@ Namespace SharedLibrary
                 context.INI_AgentResourcesPathLocal = If(configDict.ContainsKey("AgentResourcesPathLocal"), configDict("AgentResourcesPathLocal"), "")
                 Agents.AgentResources.SetPaths(context.INI_AgentResourcesPath, context.INI_AgentResourcesPathLocal)
 
+                context.INI_ChunkOCR = If(configDict.ContainsKey("ChunkOCR"), CInt(configDict("ChunkOCR")), DEFAULT_CHUNK_OCR_PAGES)
 
                 ' Logo paths
                 context.INI_LogoPath = If(configDict.ContainsKey("LogoPath"), configDict("LogoPath"), "")

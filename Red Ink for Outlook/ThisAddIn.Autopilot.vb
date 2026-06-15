@@ -326,6 +326,11 @@ Partial Public Class ThisAddIn
         _apCurrentProcessingEntryId = Nothing
         _apActiveJobLastNotifiedUtc = DateTime.MinValue
         _apVoicemailCallerIdMap = Nothing
+
+        If INI_WebServerBlock <> 4 Then
+            EnsureLocalSchedulerTimerStarted()
+        End If
+
         WebGrounding = ""
         ApDashboardLog("AutoPilot stopped.", "info")
         ApDashboardMarkComplete()
@@ -394,6 +399,7 @@ Partial Public Class ThisAddIn
     ''' <summary>Starts AutoPilot with an explicit configuration instance.</summary>
     Private Sub StartAutoPilotWithConfig(config As AutoPilotConfig)
         _apConfig = config
+        StopLocalSchedulerRuntime()
         _apActive = True
         _apCts = New CancellationTokenSource()
         _apSessionReplyCount = 0
@@ -564,8 +570,12 @@ Partial Public Class ThisAddIn
 
         ' Start scheduler if enabled
         If config.EnableScheduler Then
-            SchedulerCatchUp()
-            StartSchedulerTimer()
+            If INI_WebServerBlock = 4 Then
+                ApDashboardLog("📅 Scheduler disabled because WebServerBlock = 4.", "warn")
+            Else
+                SchedulerCatchUp()
+                StartSchedulerTimer()
+            End If
         End If
 
         If config.AutoDeleteAfterHours > 0 Then

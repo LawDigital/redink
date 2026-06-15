@@ -1046,23 +1046,21 @@ Partial Public Class ThisAddIn
         If Not IsChatAgentWorkspaceConnected() Then Return tools
 
         tools.Add(New ModelConfig() With {
-            .ToolOnly = True, .Tool = True, .ToolName = CA_Tool_WorkspaceWrite,
-            .ModelDescription = "Agent Workspace: Write File",
-            .ToolPriority = 123,
+            .ToolOnly = True, .Tool = True, .ToolName = CA_Tool_WorkspaceRead,
+            .ModelDescription = "Agent Workspace: Read File",
+            .ToolPriority = 122,
             .ToolErrorHandling = "skip",
             .ToolInstructionsPrompt =
-                CA_Tool_WorkspaceWrite & ": Creates a plain text/code file inside the workspace. " &
-                "When updating or replacing an existing workspace file, set overwrite=true. " &
-                "NEVER use this tool to create or overwrite PDF, Word, Excel, PowerPoint, image, archive, audio, video, or any other binary/document format. " &
-                "Use agent_workspace_save_session_file only after another tool has produced a real file.",
+                CA_Tool_WorkspaceRead & ": Read or extract text from one workspace file. " &
+                "For one local workspace PDF or Office document, prefer this tool over direct path-based extraction, because it stages the file into the current session and uses the existing attachment extraction stack. " &
+                "When the returned payload contains session_file_name, use that exact name with attachment-based tools such as read_attachment, process_word_document, complete_word_tables, excel_list_live_worksheets, excel_read_live_range, and excel_complete_live_workbook.",
             .ToolDefinition =
-                "{""name"":""" & CA_Tool_WorkspaceWrite & """," &
-                """description"":""Creates a UTF-8 text file inside the workspace. To replace an existing file, set overwrite=true. Never use this tool for binary/document formats such as PDF, DOCX, XLSX, PPTX, ZIP, images, audio, or video.""," &
+                "{""name"":""" & CA_Tool_WorkspaceRead & """," &
+                """description"":""Reads or extracts text from one workspace file and stages it into the current session when possible. When session_file_name is returned, use that exact name with attachment-based tools such as read_attachment, process_word_document, complete_word_tables, excel_list_live_worksheets, excel_read_live_range, and excel_complete_live_workbook.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
-                """path"":{""type"":""string"",""description"":""Relative target file path inside the workspace.""}," &
-                """content"":{""type"":""string"",""description"":""File content to write.""}," &
-                """overwrite"":{""type"":""boolean"",""description"":""Set to true only when the user wants to replace an existing file. Default false.""}" &
-                "},""required"":[""path"",""content""]}}"
+                """path"":{""type"":""string"",""description"":""Relative workspace file path.""}," &
+                """max_chars"":{""type"":""integer"",""description"":""Maximum characters to return. Default 12000, capped.""}" &
+                "},""required"":[""path""]}}"
         })
 
 
@@ -1454,7 +1452,16 @@ Partial Public Class ThisAddIn
             Return "Error: Workspace file not found."
         End If
 
-        Dim fullText As String = Await ChatAgentExtractFileText(fullPath).ConfigureAwait(False)
+        Dim stagedAttachment As AutoPilotAttachmentInfo = StageWorkspaceFile(rel)
+
+        Dim readPath As String = fullPath
+        If stagedAttachment IsNot Nothing AndAlso
+           Not String.IsNullOrWhiteSpace(stagedAttachment.TempFilePath) AndAlso
+           File.Exists(stagedAttachment.TempFilePath) Then
+            readPath = stagedAttachment.TempFilePath
+        End If
+
+        Dim fullText As String = Await ChatAgentExtractFileText(readPath).ConfigureAwait(False)
         fullText = If(fullText, "")
 
         Dim totalChars As Integer = fullText.Length
@@ -1474,6 +1481,13 @@ Partial Public Class ThisAddIn
         New JProperty("returned_chars", takeChars),
         New JProperty("truncated", truncated),
         New JProperty("continuation", "If more content is needed, call the same tool again with start_char=next_offset and a suitable max_chars value."))
+
+        If stagedAttachment IsNot Nothing Then
+            payload("staged") = True
+            payload("session_file_name") = If(stagedAttachment.OriginalFileName, "")
+        Else
+            payload("staged") = False
+        End If
 
         If truncated Then
             payload("next_offset") = nextOffset
