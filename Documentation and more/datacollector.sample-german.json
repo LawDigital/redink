@@ -1,0 +1,239 @@
+{
+  "schemaVersion": "1.0",
+  "configVersion": "2026-06-16.2",
+  "enabled": true,
+  "allowedBaseDirectory": "C:\\DataCollector",
+  "defaults": {
+    "culture": "invariant",
+    "timezone": "Europe/Zurich",
+    "encoding": "utf-8",
+    "createDirectories": true,
+    "atomicWrites": true,
+    "backupBeforeStructuredUpdate": true,
+    "maxOriginalRequestLength": 50000
+  },
+  "log": {
+    "enabled": true,
+    "directory": "Logs",
+    "fileNameTemplate": "collector_log_{yyyy}-{MM}.jsonl",
+    "format": "jsonl",
+    "logDryRuns": false
+  },
+  "useCases": [
+    {
+      "id": "person_address_collection",
+      "enabled": true,
+      "name": "Person Address Collection",
+      "description": "Erfasst die Postadresse einer natürlichen Person aus einer E-Mail-Anfrage.",
+      "applicability": {
+        "modelInstructions": "Verwende diesen Fall, wenn in der E-Mail nach der Adresse einer bestimmten Person gefragt wird oder eine Adresse dieser Person für die weitere Bearbeitung benötigt wird.",
+        "subjectHints": ["adresse", "anschrift", "wohnort", "kontakt"],
+        "bodyHints": ["bitte sende die adresse", "anschrift von", "wohnhaft", "postadresse"]
+      },
+      "extraction": {
+        "modelInstructions": "Extrahiere die Adresse der genannten Person aus der E-Mail. Falls die E-Mail nur eine unvollständige Adresse enthält und im Arbeitsablauf zulässig eine Internetrecherche durchgeführt wurde, verwende die durch AutoPilot final ermittelte strukturierte Adresse. Erfinde keine Werte. Wenn einzelne Teile unsicher bleiben, lasse sie leer und liefere nur belastbare Angaben.",
+        "includeOriginalRequest": true,
+        "originalRequestFieldName": "originalRequest"
+      },
+      "target": {
+        "directory": "PersonAddresses",
+        "fileNameTemplate": "person_addresses_{yyyy}-{MM}.jsonl",
+        "format": "jsonl",
+        "mode": "appendOrCreate",
+        "encoding": "utf-8"
+      },
+      "duplicateControl": {
+        "enabled": true,
+        "policy": "appendWithWarning",
+        "recordKey": ["personName", "street", "postalCode", "city"],
+        "caseSensitive": false,
+        "trimWhitespace": true,
+        "normalizeBeforeCompare": true
+      },
+      "fields": [
+        {
+          "name": "personName",
+          "displayName": "Name der Person",
+          "description": "Vollständiger Name der Person, deren Adresse gesucht oder mitgeteilt wird.",
+          "type": "string",
+          "required": true,
+          "modelExtractionInstructions": "Extrahiere den vollständigen Namen der Person, nicht den Namen des Absenders, falls diese voneinander abweichen.",
+          "normalization": {
+            "trim": true,
+            "collapseWhitespace": true
+          },
+          "validation": {
+            "minLength": 3,
+            "maxLength": 200
+          }
+        },
+        {
+          "name": "street",
+          "displayName": "Strasse und Hausnummer",
+          "description": "Strasse und Hausnummer der Person.",
+          "type": "string",
+          "required": true,
+          "modelExtractionInstructions": "Extrahiere Strasse und Hausnummer als zusammengehörigen Wert.",
+          "normalization": {
+            "trim": true,
+            "collapseWhitespace": true
+          },
+          "validation": {
+            "minLength": 3,
+            "maxLength": 200
+          }
+        },
+        {
+          "name": "postalCode",
+          "displayName": "Postleitzahl",
+          "description": "Postleitzahl der Adresse.",
+          "type": "string",
+          "required": true,
+          "modelExtractionInstructions": "Extrahiere die Postleitzahl genau so, wie sie zur Adresse gehört.",
+          "normalization": {
+            "trim": true
+          },
+          "validation": {
+            "minLength": 3,
+            "maxLength": 20
+          }
+        },
+        {
+          "name": "city",
+          "displayName": "Ort",
+          "description": "Ort der Adresse.",
+          "type": "string",
+          "required": true,
+          "modelExtractionInstructions": "Extrahiere den Ortsnamen der Adresse.",
+          "normalization": {
+            "trim": true,
+            "collapseWhitespace": true
+          },
+          "validation": {
+            "minLength": 2,
+            "maxLength": 100
+          }
+        },
+        {
+          "name": "country",
+          "displayName": "Land",
+          "description": "Land der Adresse.",
+          "type": "string",
+          "required": false,
+          "nullable": true,
+          "modelExtractionInstructions": "Extrahiere das Land nur, wenn es ausdrücklich genannt oder eindeutig aus der finalen recherchierten Adresse ableitbar ist.",
+          "normalization": {
+            "trim": true,
+            "collapseWhitespace": true
+          },
+          "validation": {
+            "maxLength": 100
+          }
+        },
+        {
+          "name": "addressSource",
+          "displayName": "Adressquelle",
+          "description": "Herkunft der finalen Adresse.",
+          "type": "enum",
+          "required": true,
+          "modelExtractionInstructions": "Setze 'email', wenn die Adresse vollständig aus der E-Mail stammt, 'internet', wenn sie aus einer vorgängigen Internetrecherche stammt, oder 'combined', wenn E-Mail und Recherche kombiniert wurden.",
+          "normalization": {
+            "trim": true,
+            "uppercase": true
+          },
+          "validation": {
+            "allowedValues": ["EMAIL", "INTERNET", "COMBINED"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "conflict_check_intake",
+      "enabled": true,
+      "name": "Conflict Check Intake",
+      "description": "Erfasst Kerndaten für eine Kollisions- oder Konfliktprüfung aus einer E-Mail.",
+      "applicability": {
+        "modelInstructions": "Verwende diesen Fall, wenn die E-Mail einen neuen Auftrag, eine neue Mandatsanfrage oder eine Konfliktprüfung betrifft.",
+        "subjectHints": ["conflict", "kollision", "mandat", "new matter", "neues mandat"],
+        "bodyHints": ["gegenpartei", "mandant", "auftrag", "sachverhalt", "conflict check"]
+      },
+      "extraction": {
+        "modelInstructions": "Extrahiere den Namen des Mandanten, den Namen der Gegenpartei und eine kurze Beschreibung des Mandats oder Auftrags. Erfinde keine Parteiennamen. Wenn mehrere Parteien genannt werden, verwende die für die Konfliktprüfung primär relevante Gegenpartei.",
+        "includeOriginalRequest": true,
+        "originalRequestFieldName": "originalRequest"
+      },
+      "target": {
+        "directory": "ConflictChecks",
+        "fileNameTemplate": "conflict_checks_{yyyy}-{MM}.csv",
+        "format": "csv",
+        "mode": "appendOrCreate",
+        "encoding": "utf-8"
+      },
+      "csv": {
+        "delimiter": ";",
+        "includeHeader": true,
+        "quoteMode": "whenNeeded",
+        "newline": "CRLF",
+        "protectAgainstFormulaInjection": true
+      },
+      "duplicateControl": {
+        "enabled": true,
+        "policy": "appendWithWarning",
+        "recordKey": ["clientName", "counterpartyName", "mandateSummary"],
+        "caseSensitive": false,
+        "trimWhitespace": true,
+        "normalizeBeforeCompare": true
+      },
+      "fields": [
+        {
+          "name": "clientName",
+          "displayName": "Mandant",
+          "description": "Name des Mandanten oder der Mandantin.",
+          "type": "string",
+          "required": true,
+          "modelExtractionInstructions": "Extrahiere den Namen des Mandanten, nicht den Namen der Gegenpartei und nicht interne Bearbeiternamen.",
+          "normalization": {
+            "trim": true,
+            "collapseWhitespace": true
+          },
+          "validation": {
+            "minLength": 2,
+            "maxLength": 200
+          }
+        },
+        {
+          "name": "counterpartyName",
+          "displayName": "Gegenpartei",
+          "description": "Name der relevanten Gegenpartei.",
+          "type": "string",
+          "required": true,
+          "modelExtractionInstructions": "Extrahiere die für die Konfliktprüfung relevante Gegenpartei. Bei mehreren genannten Gegenparteien verwende die primär betroffene Partei oder die ausdrücklich bezeichnete Hauptgegenpartei.",
+          "normalization": {
+            "trim": true,
+            "collapseWhitespace": true
+          },
+          "validation": {
+            "minLength": 2,
+            "maxLength": 200
+          }
+        },
+        {
+          "name": "mandateSummary",
+          "displayName": "Mandat / Auftrag",
+          "description": "Kurzbeschreibung des Mandats oder des Auftrags.",
+          "type": "string",
+          "required": true,
+          "modelExtractionInstructions": "Extrahiere eine knappe, sachliche Zusammenfassung des Mandats oder Auftragsgegenstands aus der E-Mail.",
+          "normalization": {
+            "trim": true,
+            "collapseWhitespace": true
+          },
+          "validation": {
+            "minLength": 5,
+            "maxLength": 1000
+          }
+        }
+      ]
+    }
+  ]
+}

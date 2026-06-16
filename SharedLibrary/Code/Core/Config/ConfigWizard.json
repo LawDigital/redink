@@ -1225,78 +1225,85 @@
       "id": "automation_resources",
       "title": "Automation & Library Files",
       "description": "Files and directories used by agent resources, extraction, file renaming, snapshot tracking and MailMover. Keep shared resources on a central path if the same rules should be available to all users.",
-      "fields": [
-        {
-          "key": "AgentResourcesPath",
-          "label": "Agent Resources Directory",
-          "type": "path",
-          "default": "%APPDATA%\\microsoft\\word",
-          "description": "Path to the shared directory that contains agent resources such as inky.md, skills and agents. Use a central network location if the same resources should be shared across users. Example: N:\\AI\\Library. [AgentResourcesPath]"
-        },
-        {
-          "key": "AgentResourcesPathLocal",
-          "label": "Agent Resources Directory (Local)",
-          "type": "path",
-          "default": "",
-          "description": "Path to the user's local version of the same resource directory so personal files can be kept separate from the shared central directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [AgentResourcesPathLocal]"
-        },
-        {
-          "key": "ExtractorPath",
-          "label": "Extractor Library",
-          "type": "path",
-          "default": "%APPDATA%\\microsoft\\word\\extractorlib.txt",
-          "description": "Path to the shared instruction file for Data Extractor. Use a central network location if the same resources should be shared across users; the file stores reusable extraction rules. Example: N:\\AI\\extractorlib.txt. [ExtractorPath]"
-        },
-        {
-          "key": "ExtractorPathLocal",
-          "label": "Extractor Library (Local)",
-          "type": "path",
-          "default": "",
-          "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\extractorliblocal.txt. [ExtractorPathLocal]"
-        },
-        {
-          "key": "RenameLibPath",
-          "label": "Rename Library",
-          "type": "path",
-          "default": "%APPDATA%\\microsoft\\word\\renamelib.txt",
-          "description": "Path to the shared instruction file for File Renamer. Use a central network location if the same resources should be shared across users; the file stores reusable renaming rules. Example: N:\\AI\\renamelib.txt. [RenameLibPath]"
-        },
-        {
-          "key": "RenameLibPathLocal",
-          "label": "Rename Library (Local)",
-          "type": "path",
-          "default": "",
-          "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\renameliblocal.txt. [RenameLibPathLocal]"
-        },
-        {
-          "key": "SnapshotLibPath",
-          "label": "Snapshot Library",
-          "type": "path",
-          "default": "%APPDATA%\\microsoft\\word\\snapshotlib.txt",
-          "description": "Path to the shared snapshot metadata file for Snapshot & Compare. Use a central network location if the same resources should be shared across users; the file stores monitored websites and files. Example: N:\\AI\\Library\\snapshotlib.txt. [SnapshotLibPath]"
-        },
-        {
-          "key": "SnapshotLibPathLocal",
-          "label": "Snapshot Library (Local)",
-          "type": "path",
-          "default": "",
-          "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\snapshotliblocal.txt. [SnapshotLibPathLocal]"
-        },
-        {
-          "key": "MailMoverPath",
-          "label": "Mail Mover",
-          "type": "path",
-          "default": "%APPDATA%\\Microsoft\\Word\\mailmover.txt",
-          "description": "Path to the shared rules file for MailMover. Use a central network location if the same resources should be shared across users; the file stores reusable mail-moving rules. Example: N:\\AI\\Library\\mailmover.txt. [MailMoverPath]"
-        },
-        {
-          "key": "MailMoverPathLocal",
-          "label": "Mail Mover (Local)",
-          "type": "path",
-          "default": "",
-          "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\mailmoverlocal.txt. [MailMoverPathLocal]"
-        }
-      ]
+        "fields": [
+            {
+                "key": "AgentResourcesPath",
+                "label": "Agent Resources Directory",
+                "type": "path",
+                "default": "%APPDATA%\\microsoft\\word",
+                "description": "Path to the shared directory that contains agent resources such as inky.md, skills and agents. Use a central network location if the same resources should be shared across users. Example: N:\\AI\\Library. [AgentResourcesPath]"
+            },
+            {
+                "key": "AgentResourcesPathLocal",
+                "label": "Agent Resources Directory (Local)",
+                "type": "path",
+                "default": "",
+                "description": "Path to the user's local version of the same resource directory so personal files can be kept separate from the shared central directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [AgentResourcesPathLocal]"
+            },
+            {
+                "key": "ExtractorPath",
+                "label": "Extractor Library",
+                "type": "path",
+                "default": "%APPDATA%\\microsoft\\word\\extractorlib.txt",
+                "description": "Path to the shared instruction file for Data Extractor. Use a central network location if the same resources should be shared across users; the file stores reusable extraction rules. Example: N:\\AI\\extractorlib.txt. [ExtractorPath]"
+            },
+            {
+                "key": "ExtractorPathLocal",
+                "label": "Extractor Library (Local)",
+                "type": "path",
+                "default": "",
+                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\extractorliblocal.txt. [ExtractorPathLocal]"
+            },
+            {
+                "key": "RenameLibPath",
+                "label": "Rename Library",
+                "type": "path",
+                "default": "%APPDATA%\\microsoft\\word\\renamelib.txt",
+                "description": "Path to the shared instruction file for File Renamer. Use a central network location if the same resources should be shared across users; the file stores reusable renaming rules. Example: N:\\AI\\renamelib.txt. [RenameLibPath]"
+            },
+            {
+                "key": "RenameLibPathLocal",
+                "label": "Rename Library (Local)",
+                "type": "path",
+                "default": "",
+                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\renameliblocal.txt. [RenameLibPathLocal]"
+            },
+            {
+                "key": "SnapshotLibPath",
+                "label": "Snapshot Library",
+                "type": "path",
+                "default": "%APPDATA%\\microsoft\\word\\snapshotlib.txt",
+                "description": "Path to the shared snapshot metadata file for Snapshot & Compare. Use a central network location if the same resources should be shared across users; the file stores monitored websites and files. Example: N:\\AI\\Library\\snapshotlib.txt. [SnapshotLibPath]"
+            },
+            {
+                "key": "SnapshotLibPathLocal",
+                "label": "Snapshot Library (Local)",
+                "type": "path",
+                "default": "",
+                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\snapshotliblocal.txt. [SnapshotLibPathLocal]"
+            },
+            {
+                "key": "MailMoverPath",
+                "label": "Mail Mover",
+                "type": "path",
+                "default": "%APPDATA%\\Microsoft\\Word\\mailmover.txt",
+                "description": "Path to the shared rules file for MailMover. Use a central network location if the same resources should be shared across users; the file stores reusable mail-moving rules. Example: N:\\AI\\Library\\mailmover.txt. [MailMoverPath]"
+            },
+            {
+                "key": "MailMoverPathLocal",
+                "label": "Mail Mover (Local)",
+                "type": "path",
+                "default": "",
+                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\mailmoverlocal.txt. [MailMoverPathLocal]"
+            },
+            {
+                "key": "DataCollectorPath",
+                "label": "Data Collector (AutoPilot)",
+                "type": "path",
+                "default": "",
+                "description": "Path to the schema file for the AutoPilot Data Collector. The path should contain the filename of the JSON file that contains the tasks that the Data Collector shall undertake. Example: N:\\AI\\Library\\datacollector.json. [DataCollectorPath]"
+            }
+        ]
     },
     {
       "id": "document_assembly",

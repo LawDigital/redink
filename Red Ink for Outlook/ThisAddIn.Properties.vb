@@ -2065,6 +2065,16 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_DataCollectorPath As String
+        Get
+            Return _context.INI_DataCollectorPath
+        End Get
+        Set(value As String)
+            _context.INI_DataCollectorPath = value
+        End Set
+    End Property
+
+
     Public Shared Property INI_MailMoverPathLocal As String
         Get
             Return _context.INI_MailMoverPathLocal

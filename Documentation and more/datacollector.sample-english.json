@@ -1,0 +1,275 @@
+{
+  "schemaVersion": "1.0",
+  "configVersion": "2026-06-16.2",
+  "enabled": true,
+  "allowedBaseDirectory": "C:\\DataCollector",
+  "defaults": {
+    "culture": "invariant",
+    "timezone": "Europe/Zurich",
+    "encoding": "utf-8",
+    "createDirectories": true,
+    "atomicWrites": true,
+    "backupBeforeStructuredUpdate": true,
+    "maxOriginalRequestLength": 50000
+  },
+  "log": {
+    "enabled": true,
+    "directory": "Logs",
+    "fileNameTemplate": "collector_log_{yyyy}-{MM}.jsonl",
+    "format": "jsonl",
+    "logDryRuns": false
+  },
+  "useCases": [
+    {
+      "id": "person_address_collection",
+      "enabled": true,
+      "name": "Person Address Collection",
+      "description": "Collect the postal address of a person from an email request.",
+      "applicability": {
+        "modelInstructions": "Use this case when the email asks for the address of a specific person or when the person's postal address must be captured from the request.",
+        "subjectHints": [
+          "address",
+          "postal address",
+          "contact details",
+          "residence"
+        ],
+        "bodyHints": [
+          "please send the address",
+          "address of",
+          "lives at",
+          "postal address"
+        ]
+      },
+      "extraction": {
+        "modelInstructions": "Extract the address of the person named in the email. If the email contains only a partial address and AutoPilot has already retrieved reliable supplementary address data from the internet, provide the final structured address values. Do not invent missing values. If a component remains uncertain, leave it empty.",
+        "includeOriginalRequest": true,
+        "originalRequestFieldName": "originalRequest"
+      },
+      "target": {
+        "directory": "PersonAddresses",
+        "fileNameTemplate": "person_addresses_{yyyy}-{MM}.jsonl",
+        "format": "jsonl",
+        "mode": "appendOrCreate",
+        "encoding": "utf-8"
+      },
+      "duplicateControl": {
+        "enabled": true,
+        "policy": "appendWithWarning",
+        "recordKey": [
+          "personName",
+          "street",
+          "postalCode",
+          "city"
+        ],
+        "caseSensitive": false,
+        "trimWhitespace": true,
+        "normalizeBeforeCompare": true
+      },
+      "fields": [
+        {
+          "name": "personName",
+          "displayName": "Person name",
+          "description": "Full name of the person whose address is requested or stated.",
+          "type": "string",
+          "required": true,
+          "modelExtractionInstructions": "Extract the full name of the relevant person, not automatically the sender name unless the sender is clearly the same person.",
+          "normalization": {
+            "trim": true,
+            "collapseWhitespace": true
+          },
+          "validation": {
+            "minLength": 3,
+            "maxLength": 200
+          }
+        },
+        {
+          "name": "street",
+          "displayName": "Street and house number",
+          "description": "Street and house number of the address.",
+          "type": "string",
+          "required": true,
+          "modelExtractionInstructions": "Extract street and house number as one combined value unless the source clearly separates them and a different field structure is configured.",
+          "normalization": {
+            "trim": true,
+            "collapseWhitespace": true
+          },
+          "validation": {
+            "minLength": 3,
+            "maxLength": 200
+          }
+        },
+        {
+          "name": "postalCode",
+          "displayName": "Postal code",
+          "description": "Postal code of the address.",
+          "type": "string",
+          "required": true,
+          "modelExtractionInstructions": "Extract the postal code belonging to the final address.",
+          "normalization": {
+            "trim": true
+          },
+          "validation": {
+            "minLength": 3,
+            "maxLength": 20
+          }
+        },
+        {
+          "name": "city",
+          "displayName": "City",
+          "description": "City of the address.",
+          "type": "string",
+          "required": true,
+          "modelExtractionInstructions": "Extract the city belonging to the final address.",
+          "normalization": {
+            "trim": true,
+            "collapseWhitespace": true
+          },
+          "validation": {
+            "minLength": 2,
+            "maxLength": 100
+          }
+        },
+        {
+          "name": "country",
+          "displayName": "Country",
+          "description": "Country of the address.",
+          "type": "string",
+          "required": false,
+          "nullable": true,
+          "modelExtractionInstructions": "Extract the country only if it is explicitly stated or reliably known from the final structured address.",
+          "normalization": {
+            "trim": true,
+            "collapseWhitespace": true
+          },
+          "validation": {
+            "maxLength": 100
+          }
+        },
+        {
+          "name": "addressSource",
+          "displayName": "Address source",
+          "description": "Source of the final address.",
+          "type": "enum",
+          "required": true,
+          "modelExtractionInstructions": "Use EMAIL if the address came only from the email, INTERNET if it came only from prior web retrieval, or COMBINED if both were used.",
+          "normalization": {
+            "trim": true,
+            "uppercase": true
+          },
+          "validation": {
+            "allowedValues": [
+              "EMAIL",
+              "INTERNET",
+              "COMBINED"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "conflict_check_intake",
+      "enabled": true,
+      "name": "Conflict Check Intake",
+      "description": "Collect core data for a conflict check from an email.",
+      "applicability": {
+        "modelInstructions": "Use this case when the email concerns a new matter, new mandate, engagement request, or an explicit conflict check.",
+        "subjectHints": [
+          "conflict check",
+          "new matter",
+          "new mandate",
+          "engagement",
+          "intake"
+        ],
+        "bodyHints": [
+          "client",
+          "counterparty",
+          "opposing party",
+          "matter",
+          "mandate",
+          "engagement"
+        ]
+      },
+      "extraction": {
+        "modelInstructions": "Extract the client name, the counterparty name, and a concise mandate or matter description. Do not invent party names. If several counterparties are mentioned, use the primary relevant counterparty for the conflict check or return the most relevant one according to the email wording.",
+        "includeOriginalRequest": true,
+        "originalRequestFieldName": "originalRequest"
+      },
+      "target": {
+        "directory": "ConflictChecks",
+        "fileNameTemplate": "conflict_checks_{yyyy}-{MM}.csv",
+        "format": "csv",
+        "mode": "appendOrCreate",
+        "encoding": "utf-8"
+      },
+      "csv": {
+        "delimiter": ";",
+        "includeHeader": true,
+        "quoteMode": "whenNeeded",
+        "newline": "CRLF",
+        "protectAgainstFormulaInjection": true
+      },
+      "duplicateControl": {
+        "enabled": true,
+        "policy": "appendWithWarning",
+        "recordKey": [
+          "clientName",
+          "counterpartyName",
+          "mandateSummary"
+        ],
+        "caseSensitive": false,
+        "trimWhitespace": true,
+        "normalizeBeforeCompare": true
+      },
+      "fields": [
+        {
+          "name": "clientName",
+          "displayName": "Client name",
+          "description": "Name of the client.",
+          "type": "string",
+          "required": true,
+          "modelExtractionInstructions": "Extract the client name, not the sender name unless the sender is clearly the client, and not the counterparty name.",
+          "normalization": {
+            "trim": true,
+            "collapseWhitespace": true
+          },
+          "validation": {
+            "minLength": 2,
+            "maxLength": 200
+          }
+        },
+        {
+          "name": "counterpartyName",
+          "displayName": "Counterparty name",
+          "description": "Name of the relevant counterparty.",
+          "type": "string",
+          "required": true,
+          "modelExtractionInstructions": "Extract the primary relevant counterparty for the matter. Do not use internal team names, law firm names, or the client name unless the email explicitly identifies them as the opposing party.",
+          "normalization": {
+            "trim": true,
+            "collapseWhitespace": true
+          },
+          "validation": {
+            "minLength": 2,
+            "maxLength": 200
+          }
+        },
+        {
+          "name": "mandateSummary",
+          "displayName": "Mandate summary",
+          "description": "Short description of the matter or mandate.",
+          "type": "string",
+          "required": true,
+          "modelExtractionInstructions": "Extract a concise and factual summary of the matter, mandate, or engagement from the email. Do not include unnecessary boilerplate.",
+          "normalization": {
+            "trim": true,
+            "collapseWhitespace": true
+          },
+          "validation": {
+            "minLength": 5,
+            "maxLength": 1000
+          }
+        }
+      ]
+    }
+  ]
+}

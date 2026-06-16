@@ -143,6 +143,9 @@ Partial Public Class ThisAddIn
     Private Const AP_Tool_ManageScheduledTasks As String = "manage_scheduled_tasks"
     Private Const AP_Tool_ManageUserMemory As String = "manage_user_memory"
     Private Const AP_Tool_ManageUserFiles As String = "manage_user_files"
+    Private Const AP_Tool_ListCollectionUseCases As String = "list_collection_use_cases"
+    Private Const AP_Tool_CollectData As String = "collect_data"
+    Private Const AP_Tool_PreviewCollection As String = "preview_collection"
     Private Const AP_Tool_ReportInability As String = "report_inability"
     Private Const AP_Tool_CompleteWordTables As String = "complete_word_tables"
 
@@ -1276,6 +1279,13 @@ Partial Public Class ThisAddIn
         End If
 
 
+        ' ── data collector ──
+        If IsDataCollectorToolAvailable() Then
+            tools.Add(BuildListCollectionUseCasesTool())
+            tools.Add(BuildCollectDataTool())
+            tools.Add(BuildPreviewCollectionTool())
+        End If
+
         ' ── report_inability ──
 
         tools.Add(New ModelConfig() With {
@@ -1400,6 +1410,12 @@ Partial Public Class ThisAddIn
                 response = Await ExecuteManageUserMemoryTool(toolCall, context, cancellationToken)
             Case AP_Tool_ManageUserFiles
                 response = Await ExecuteManageUserFilesTool(toolCall, context, cancellationToken)
+            Case AP_Tool_ListCollectionUseCases
+                response = Await ExecuteListCollectionUseCasesTool(toolCall, context, cancellationToken)
+            Case AP_Tool_CollectData
+                response = Await ExecuteCollectDataTool(toolCall, context, cancellationToken)
+            Case AP_Tool_PreviewCollection
+                response = Await ExecutePreviewCollectionTool(toolCall, context, cancellationToken)
             Case AP_Tool_CompleteWordTables
                 response = Await ExecuteCompleteWordTablesTool(toolCall, context, cancellationToken)
             Case AP_Tool_ReportInability
@@ -1966,6 +1982,9 @@ Partial Public Class ThisAddIn
      AP_Tool_ManageScheduledTasks,
      AP_Tool_ManageUserMemory,
      AP_Tool_ManageUserFiles,
+     AP_Tool_ListCollectionUseCases,
+     AP_Tool_CollectData,
+     AP_Tool_PreviewCollection,
      AP_Tool_CompleteWordTables,
      AP_Tool_ReportInability
                 Return True
