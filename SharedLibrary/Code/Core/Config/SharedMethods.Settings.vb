@@ -1143,6 +1143,8 @@ Namespace SharedLibrary
                     Return context.INI_MailMoverPath
                 Case "MailMoverPathLocal"
                     Return context.INI_MailMoverPathLocal
+                Case "DataCollectorPath"
+                    Return context.INI_DataCollectorPath
                 Case "TTSEndpoint"
                     Return context.INI_TTSEndpoint
                 Case "OAuth2"
@@ -1525,6 +1527,8 @@ Namespace SharedLibrary
                     context.INI_MailMoverPath = value
                 Case "MailMoverPathLocal"
                     context.INI_MailMoverPathLocal = value
+                Case "DataCollectorPath"
+                    context.INI_DataCollectorPath = value
                 Case "NoHelperDownload"
                     context.INI_NoHelperDownload = Boolean.Parse(value)
                 Case "AutoPilot"
@@ -1880,6 +1884,7 @@ Namespace SharedLibrary
                     {"RenameLibPathLocal", context.INI_RenameLibPathLocal},
                     {"MailMoverPath", context.INI_MailMoverPath},
                     {"MailMoverPathLocal", context.INI_MailMoverPathLocal},
+                    {"DataCollectorPath", context.INI_DataCollectorPath},
                     {"SpeechModelPath", context.INI_SpeechModelPath},
                     {"LocalModelPath", context.INI_LocalModelPath},
                     {"DictionaryPath", context.INI_DictionaryPath},
@@ -2537,6 +2542,7 @@ Namespace SharedLibrary
                     {"RenameLibPathLocal", context.INI_RenameLibPathLocal},
                     {"MailMoverPath", context.INI_MailMoverPath},
                     {"MailMoverPathLocal", context.INI_MailMoverPathLocal},
+                    {"DataCollectorPath", context.INI_DataCollectorPath},
                     {"HelpMeInkyPath", context.INI_HelpMeInkyPath},
                     {"DiscussInkyPath", context.INI_DiscussInkyPath},
                     {"DiscussInkyPathLocal", context.INI_DiscussInkyPathLocal},
@@ -3076,7 +3082,8 @@ Namespace SharedLibrary
                                     Tuple.Create("DocStyle", context.INI_DocStylePath, False, AN2 & "-ds-", ".json"),
                                     Tuple.Create("DocStyle (Local)", context.INI_DocStylePathLocal, False, AN2 & "-ds-", ".json"),
                                     Tuple.Create("WebAgent", context.INI_WebAgentPath, False, AN2 & "-ag-", ".json"),
-                                    Tuple.Create("WebAgent (Local)", context.INI_WebAgentPathLocal, False, AN2 & "-ag-", ".json")
+                                    Tuple.Create("WebAgent (Local)", context.INI_WebAgentPathLocal, False, AN2 & "-ag-", ".json"),
+                                    Tuple.Create("Data Collector (Autopilot)", context.INI_DataCollectorPath, True, "", "")
                                 }
 
                                 Dim fileMap As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
@@ -3350,6 +3357,7 @@ Namespace SharedLibrary
             variableValues.Add("RenameLibPathLocal", context.INI_RenameLibPathLocal)
             variableValues.Add("MailMoverPath", context.INI_MailMoverPath)
             variableValues.Add("MailMoverPathLocal", context.INI_MailMoverPathLocal)
+            variableValues.Add("DataCollectorPath", context.INI_DataCollectorPath)
             variableValues.Add("SpeechModelPath", context.INI_SpeechModelPath)
             variableValues.Add("LocalModelPath", context.INI_LocalModelPath)
             variableValues.Add("DictionaryPath", context.INI_DictionaryPath)
@@ -3739,6 +3747,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("RenameLibPathLocal") Then context.INI_RenameLibPathLocal = CStr(updatedValues("RenameLibPathLocal"))
                 If updatedValues.ContainsKey("MailMoverPath") Then context.INI_MailMoverPath = CStr(updatedValues("MailMoverPath"))
                 If updatedValues.ContainsKey("MailMoverPathLocal") Then context.INI_MailMoverPathLocal = CStr(updatedValues("MailMoverPathLocal"))
+                If updatedValues.ContainsKey("DataCollectorPath") Then context.INI_DataCollectorPath = CStr(updatedValues("DataCollectorPath"))
                 If updatedValues.ContainsKey("SpeechModelPath") Then context.INI_SpeechModelPath = CStr(updatedValues("SpeechModelPath"))
                 If updatedValues.ContainsKey("LocalModelPath") Then context.INI_LocalModelPath = CStr(updatedValues("LocalModelPath"))
                 If updatedValues.ContainsKey("DictionaryPath") Then context.INI_DictionaryPath = CStr(updatedValues("DictionaryPath"))

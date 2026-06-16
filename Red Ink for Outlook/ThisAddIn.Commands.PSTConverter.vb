@@ -741,6 +741,100 @@ Partial Public Class ThisAddIn
     End Function
 
 
+    Private Function ReadMsgAttachmentText(filePath As String) As String
+        Return SharedMethods.ReadMsgSandboxed(
+            filePath,
+            Function(msgPath As String, tempDir As String, ByRef nestedFiles As List(Of String)) As String
+                nestedFiles = New List(Of String)()
+
+                Dim sharedItem As Object = Nothing
+                Dim attachments As Attachments = Nothing
+
+                Try
+                    Dim session As Microsoft.Office.Interop.Outlook.NameSpace =
+                        Globals.ThisAddIn.Application.GetNamespace("MAPI")
+
+                    sharedItem = session.OpenSharedItem(msgPath)
+                    If sharedItem Is Nothing Then Return Nothing
+
+                    Dim sb As New StringBuilder()
+
+                    AppendOutlookItemHeader(
+                        sb,
+                        sharedItem,
+                        Nothing,
+                        Path.GetFileNameWithoutExtension(msgPath))
+
+                    Dim bodyText As String = GetOutlookItemTextBody(sharedItem)
+                    sb.AppendLine("=== BODY / PRIMARY TEXT ===")
+                    sb.AppendLine(bodyText)
+
+                    Dim detailsText As String = BuildItemSpecificDetailsText(sharedItem)
+                    If Not String.IsNullOrWhiteSpace(detailsText) Then
+                        sb.AppendLine()
+                        sb.AppendLine("=== STRUCTURED DETAILS ===")
+                        sb.AppendLine(detailsText.Trim())
+                    End If
+
+                    attachments = TryGetAttachments(sharedItem)
+                    Dim attachmentCount As Integer = If(attachments Is Nothing, 0, attachments.Count)
+
+                    sb.AppendLine()
+                    sb.AppendLine("=== ATTACHMENTS ===")
+                    sb.AppendLine($"Count: {attachmentCount}")
+
+                    If attachmentCount > 0 Then
+                        For i As Integer = 1 To attachmentCount
+                            Dim nestedAttachment As Attachment = Nothing
+
+                            Try
+                                nestedAttachment = attachments(i)
+
+                                Dim nestedName As String = TryGetAttachmentFileName(nestedAttachment)
+                                If String.IsNullOrWhiteSpace(nestedName) Then
+                                    nestedName = $"attachment_{i:000}"
+                                End If
+
+                                If nestedAttachment.Type = OlAttachmentType.olEmbeddeditem AndAlso
+                                   Not nestedName.EndsWith(".msg", StringComparison.OrdinalIgnoreCase) AndAlso
+                                   Not nestedName.EndsWith(".eml", StringComparison.OrdinalIgnoreCase) Then
+                                    nestedName = Path.GetFileNameWithoutExtension(nestedName) & ".msg"
+                                End If
+
+                                Dim nestedPath As String = Path.Combine(tempDir, nestedName)
+                                Dim counter As Integer = 1
+
+                                While File.Exists(nestedPath)
+                                    nestedPath = Path.Combine(
+                                        tempDir,
+                                        Path.GetFileNameWithoutExtension(nestedName) &
+                                        $"_{counter}" &
+                                        Path.GetExtension(nestedName))
+                                    counter += 1
+                                End While
+
+                                nestedAttachment.SaveAsFile(nestedPath)
+                                nestedFiles.Add(nestedPath)
+
+                                sb.AppendLine($"  - {nestedName}")
+                            Catch ex As System.Exception
+                                sb.AppendLine($"  - [attachment {i:000} could not be extracted: {ex.Message}]")
+                            Finally
+                                ReleaseComObjectIfNeeded(nestedAttachment)
+                            End Try
+                        Next
+                    End If
+
+                    Return sb.ToString().TrimEnd()
+                Catch
+                    Return Nothing
+                Finally
+                    ReleaseComObjectIfNeeded(attachments)
+                    ReleaseComObjectIfNeeded(sharedItem)
+                End Try
+            End Function)
+    End Function
+
     Private Async Function ExtractTextFromSavedAttachmentAsync(
     filePath As String,
     options As PstExportOptions) As Task(Of String)
@@ -753,6 +847,50 @@ Partial Public Class ThisAddIn
         Dim label As String = Nothing
         Dim ext As String = Path.GetExtension(filePath).ToLowerInvariant()
 
+        Select Case ext
+            Case ".msg"
+                Dim msgText As String = ReadMsgAttachmentText(filePath)
+                If Not String.IsNullOrWhiteSpace(msgText) AndAlso
+                   Not msgText.StartsWith("Error:", StringComparison.OrdinalIgnoreCase) Then
+                    Return msgText
+                End If
+
+            Case ".eml"
+                Dim emlText As String = SharedMethods.ReadEmlSandboxed(filePath)
+                If Not String.IsNullOrWhiteSpace(emlText) AndAlso
+                   Not emlText.StartsWith("Error:", StringComparison.OrdinalIgnoreCase) Then
+                    Return emlText
+                End If
+
+            Case ".rtf"
+                Dim rtfText As String = SharedMethods.ReadRtfAsText(filePath, ReturnErrorInsteadOfEmpty:=True)
+                If Not String.IsNullOrWhiteSpace(rtfText) AndAlso
+                   Not rtfText.StartsWith("Error:", StringComparison.OrdinalIgnoreCase) Then
+                    Return rtfText
+                End If
+
+            Case ".docx", ".docm"
+                Dim docText As String = SharedMethods.ReadDocxSandboxed(filePath)
+                If Not String.IsNullOrWhiteSpace(docText) AndAlso
+                   Not docText.StartsWith("Error:", StringComparison.OrdinalIgnoreCase) Then
+                    Return docText
+                End If
+
+            Case ".xlsx", ".xlsm"
+                Dim xlsxText As String = SharedMethods.ReadXlsxSandboxed(filePath, silent:=True, askWorksheetSelection:=False)
+                If Not String.IsNullOrWhiteSpace(xlsxText) AndAlso
+                   Not xlsxText.StartsWith("Error:", StringComparison.OrdinalIgnoreCase) Then
+                    Return xlsxText
+                End If
+
+            Case ".pptx", ".pptm"
+                Dim pptText As String = SharedMethods.ReadPptxSandboxed(filePath)
+                If Not String.IsNullOrWhiteSpace(pptText) AndAlso
+                   Not pptText.StartsWith("Error:", StringComparison.OrdinalIgnoreCase) Then
+                    Return pptText
+                End If
+        End Select
+
         Try
             If TryExtractOfficeText(filePath, extracted, label) Then
                 If Not String.IsNullOrWhiteSpace(extracted) Then
@@ -761,7 +899,7 @@ Partial Public Class ThisAddIn
 
                 Return $"Error: safe Office extraction returned empty content for '{ext}'."
             End If
-        Catch ex As system.Exception
+        Catch ex As System.Exception
             Return $"Error: Office extraction failed for '{ext}': {ex.Message}"
         End Try
 
