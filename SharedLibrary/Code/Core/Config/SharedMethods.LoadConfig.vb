@@ -344,6 +344,7 @@ Namespace SharedLibrary
                 context.INI_RenameLibPathLocal = If(configDict.ContainsKey("RenameLibPathLocal"), configDict("RenameLibPathLocal"), "")
                 context.INI_MailMoverPath = If(configDict.ContainsKey("MailMoverPath"), configDict("MailMoverPath"), "")
                 context.INI_MailMoverPathLocal = If(configDict.ContainsKey("MailMoverPathLocal"), configDict("MailMoverPathLocal"), "")
+                context.INI_DataCollectorPath = If(configDict.ContainsKey("DataCollectorPath"), configDict("DataCollectorPath"), "")
 
                 context.INI_Location = If(configDict.ContainsKey("Location"), configDict("Location"), "")
 

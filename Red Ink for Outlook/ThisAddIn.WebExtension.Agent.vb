@@ -1391,10 +1391,9 @@ Partial Public Class ThisAddIn
         Try
             Select Case ext
                 Case ".txt", ".ini", ".csv", ".tsv", ".log", ".json", ".xml", ".html", ".htm",
-                     ".md", ".yaml", ".yml",
+                     ".md", ".yaml", ".yml", ".ics", ".vcf",
                      ".vb", ".cs", ".js", ".ts", ".py", ".java", ".cpp", ".c", ".h", ".sql"
                     Return SharedMethods.ReadTextFile(filePath, ReturnErrorInsteadOfEmpty:=False)
-
                 Case ".rtf"
                     Return SharedMethods.ReadRtfAsText(filePath, ReturnErrorInsteadOfEmpty:=False)
 
@@ -1402,16 +1401,16 @@ Partial Public Class ThisAddIn
                     If INI_AllowLegacyDocFiles Then Return SharedMethods.ReadWordDocument(filePath, ReturnErrorInsteadOfEmpty:=False)
                     Return ""
 
-                Case ".docx"
+                Case ".docx", ".docm"
                     Return SharedMethods.ReadDocxSandboxed(filePath)
-                Case ".xlsx"
+                Case ".xlsx", ".xlsm"
                     Return SharedMethods.ReadXlsxSandboxed(filePath, silent:=True, askWorksheetSelection:=False)
-                Case ".pptx"
+                Case ".pptx", ".pptm"
                     Return SharedMethods.ReadPptxSandboxed(filePath)
                 Case ".eml"
                     Return SharedMethods.ReadEmlSandboxed(filePath)
                 Case ".msg"
-                    Return SharedMethods.ReadMsgSandboxed(filePath)
+                    Return ReadMsgAttachmentText(filePath)
 
                 Case ".pdf"
                     Dim r = Await SharedMethods.ReadPdfAsTextEx(filePath, True, DoOCR:=True, AskUser:=False, context:=_context).ConfigureAwait(False)

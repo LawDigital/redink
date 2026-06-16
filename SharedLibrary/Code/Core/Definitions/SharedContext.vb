@@ -147,6 +147,8 @@ Namespace SharedLibrary
             Property INI_ExtractorPathLocal As String
             Property INI_RenameLibPath As String
             Property INI_RenameLibPathLocal As String
+
+            Property INI_DataCollectorPath As String
             Property INI_MailMoverPath As String
             Property INI_MailMoverPathLocal As String
 
@@ -504,6 +506,7 @@ Namespace SharedLibrary
         Public Property INI_ExtractorPathLocal As String Implements ISharedContext.INI_ExtractorPathLocal
         Public Property INI_RenameLibPath As String Implements ISharedContext.INI_RenameLibPath
         Public Property INI_RenameLibPathLocal As String Implements ISharedContext.INI_RenameLibPathLocal
+        Public Property INI_DataCollectorPath As String Implements ISharedContext.INI_DataCollectorPath
         Public Property INI_MailMoverPath As String Implements ISharedContext.INI_MailMoverPath
         Public Property INI_MailMoverPathLocal As String Implements ISharedContext.INI_MailMoverPathLocal
         Public Property INI_RedactionInstructionsPath As String Implements ISharedContext.INI_RedactionInstructionsPath
