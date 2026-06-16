@@ -9,38 +9,59 @@
 '   created, queried, updated, and deleted via natural language commands
 '   processed by the LLM through the manage_scheduled_tasks internal tool.
 '
-' Architecture:
-'  - Storage:
-'      * Tasks are persisted in autopilot_schedule.json in the same directory
-'        as the main redink.ini file.
-'      * The file is re-read on every access and re-written on every mutation,
-'        so manual edits take immediate effect.
-'      * Per-task file attachments are stored in a subdirectory under
-'        schedule_tasks\{taskId}\ relative to the JSON file.
-'  - Scheduling:
-'      * Each task has a nextDueUtc field. A periodic timer checks for due tasks.
-'      * Recurrence is expressed as an iCalendar-style RRULE string, resolved by
-'        a lightweight evaluator that covers weekly, monthly, daily, and
-'        count-limited patterns.
-'      * The LLM translates natural language schedule descriptions into the
-'        structured schedule fields when creating or updating a task.
-'  - Execution:
-'      * Due tasks are processed through the same LLM + tooling pipeline as
-'        regular AutoPilot mails. The instruction text is sent as user prompt,
-'        any stored attachments are loaded, and the result (text + generated
-'        files) is delivered by e-mail to the task's deliverTo addresses.
-'  - Catch-up:
-'      * On AutoPilot start, any task with nextDueUtc in the past and
-'        lastExecutedUtc < nextDueUtc is executed immediately.
-'  - Security:
-'      * Task management is restricted to senders who pass AutoPilot filter rules
-'        (whitelisted or approval-required senders).
-'      * Local Chat access requires INI_AutoPilotSchedulerLocalChat = True.
+' Key Features:
+'  - Persistent Storage:
+'      * Tasks persisted in autopilot_schedule.json in the same directory as redink.ini
+'      * Re-read and re-written on every access to support live manual edits
+'      * Per-task file attachments stored in schedule_tasks\{taskId}\
+'      * Workspace files (persisted across executions) in schedule_tasks\{taskId}\workspace\
+'      * Automatic quota enforcement (100 MB per task workspace) with oldest-file pruning
 '
-' Threading:
-'  - File I/O is synchronous (single-process, no locking needed).
-'  - Timer callback uses SemaphoreSlim to prevent overlapping executions.
-'  - Outlook COM access is marshaled to UI thread via SwitchToUi.
+'  - Scheduling & Recurrence:
+'      * Each task has a nextDueUtc field monitored by a periodic timer (30-second intervals)
+'      * Recurrence expressed as iCalendar-style RRULE strings (FREQ=DAILY, WEEKLY, MONTHLY)
+'      * Lightweight evaluator supports daily, weekly, monthly patterns with intervals,
+'        weekday selection, nth-weekday-in-month, and count-limited occurrences
+'      * LLM translates natural language schedules to structured RRULE + timeOfDayLocal fields
+'      * One-shot (no RRULE) and recurring tasks both supported
+'
+'  - Task Execution Modes:
+'      * Email mode: results delivered as e-mail to deliverTo addresses
+'      * Browser prompt mode: Local Agent opens browser for interactive approval + execution
+'      * Local Agent tasks may be queued, run, snoozed, or skipped by user
+'      * Task instructions filtered to exclude manage_scheduled_tasks tool (no recursive task creation)
+'
+'  - Execution Pipeline:
+'      * Due tasks processed through LLM + tooling with instruction as user prompt
+'      * Input attachments and prior workspace files loaded into temp directory
+'      * Recurring tasks receive special prompts emphasizing timestamped snapshots & change tracking
+'      * Generated outputs automatically persisted to workspace for next execution
+'      * Result e-mail sent to authorized recipients with HTML formatting and sources
+'
+'  - Catch-up & Reliability:
+'      * On AutoPilot start, overdue tasks executed immediately
+'      * Orphaned task directories cleaned up automatically
+'      * Failed task execution does NOT advance schedule (will retry on next cycle)
+'      * Snoozed Local Agent tasks can be resumed or skipped interactively
+'
+'  - Security & Control:
+'      * Task management restricted to whitelisted/approval-required senders (AutoPilot filter rules)
+'      * Local Chat access controlled via INI_AutoPilotSchedulerLocalChat setting
+'      * Task recipients validated against creator to prevent unauthorized delivery
+'      * Dashboard UI provides pause/resume, delete, and JSON editing
+'
+'  - Threading & Marshaling:
+'      * File I/O synchronous (single-process, no multi-instance locking)
+'      * Timer callback protected by Interlocked flag to prevent overlapping checks
+'      * Outlook COM access marshaled to UI thread via SwitchToUi
+'      * Separate CancellationTokenSource for Local Agent scheduler runtime
+'
+'  - Dashboard & Monitoring:
+'      * DataGridView form shows all tasks with status, schedule, execution mode, snooz state, next due time
+'      * Color-coded task status (active=green, paused=orange, completed=gray, failed=red)
+'      * In-place JSON editor for manual task creation/modification
+'      * Pause/resume and delete operations refresh display immediately
+'
 ' =============================================================================
 
 Option Explicit On
@@ -688,6 +709,12 @@ Partial Public Class ThisAddIn
     Private Async Function ExecuteScheduledTask(task As ScheduledTask, ct As CancellationToken) As Task
         Dim tempDir As String = Nothing
         Dim previousMaxToolIterations = MaxToolIterations
+        Dim executionState As InkyState = Nothing
+        Dim executionModelConfig As ModelConfig = Nothing
+        Dim executionSelectedTools As List(Of ModelConfig) = Nothing
+        Dim executionUseSecondApi As Boolean = _apUseSecondApi
+        Dim restoreExecutionConfig As Boolean = False
+        Dim originalExecutionConfig As ModelConfig = Nothing
 
         Try
             ' Create isolated temp directory
@@ -816,30 +843,51 @@ Partial Public Class ThisAddIn
 
             Dim systemPrompt = InterpolateAtRuntime(SP_AutoPilot)
 
-            ' Re-apply base model config
-            If _apBaseModelConfig IsNot Nothing Then ApplyModelConfig(_context, _apBaseModelConfig)
+            ResolveScheduledTaskExecutionContext(
+                executionState,
+                executionModelConfig,
+                executionSelectedTools,
+                executionUseSecondApi,
+                restoreExecutionConfig,
+                originalExecutionConfig)
+
+            If _apActive AndAlso executionModelConfig IsNot Nothing Then
+                ApplyModelConfig(_context, executionModelConfig)
+            End If
 
             ' Execute with tooling
             Dim response As String
-            Dim modelCanCallTools As Boolean = _apBaseModelConfig IsNot Nothing AndAlso ModelSupportsTooling(_apBaseModelConfig)
+            Dim modelCanCallTools As Boolean =
+                ScheduledTaskExecutionSupportsTooling(
+                    executionState,
+                    executionModelConfig,
+                    executionUseSecondApi)
 
-            If modelCanCallTools AndAlso _apSelectedTools IsNot Nothing AndAlso _apSelectedTools.Count > 0 Then
+            If modelCanCallTools AndAlso executionSelectedTools IsNot Nothing AndAlso executionSelectedTools.Count > 0 Then
                 ' Filter out manage_scheduled_tasks — the LLM must not create/modify
                 ' tasks while executing inside a scheduled task
-                Dim schedulerTools = _apSelectedTools.Where(
+                Dim schedulerTools = executionSelectedTools.Where(
                     Function(t) t IsNot Nothing AndAlso
                                 Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
                                 Not t.ToolName.Equals(AP_Tool_ManageScheduledTasks, StringComparison.OrdinalIgnoreCase)).ToList()
 
-                response = Await ExecuteToolingLoop(
-                    systemPrompt, userPrompt.ToString(),
-                    schedulerTools, _apUseSecondApi,
-                    hideSplash:=True, hideLogWindow:=True,
-                    cancellationToken:=ct, binaryOutputDirectory:=tempDir)
+                If schedulerTools.Count > 0 Then
+                    response = Await ExecuteToolingLoop(
+                        systemPrompt, userPrompt.ToString(),
+                        schedulerTools, executionUseSecondApi,
+                        hideSplash:=True, hideLogWindow:=True,
+                        cancellationToken:=ct, binaryOutputDirectory:=tempDir)
+                Else
+                    response = Await LLM(systemPrompt, userPrompt.ToString(),
+                                         UseSecondAPI:=executionUseSecondApi,
+                                         HideSplash:=True, EnsureUI:=False,
+                                         cancellationToken:=ct,
+                                         binaryOutputDirectory:=tempDir)
+                End If
             Else
                 Dim effectiveSystemPrompt = If(modelCanCallTools, systemPrompt, InterpolateAtRuntime(SP_AutoPilot_NoTools))
                 response = Await LLM(effectiveSystemPrompt, userPrompt.ToString(),
-                                     UseSecondAPI:=_apUseSecondApi,
+                                     UseSecondAPI:=executionUseSecondApi,
                                      HideSplash:=True, EnsureUI:=False,
                                      cancellationToken:=ct,
                                      binaryOutputDirectory:=tempDir)
@@ -871,6 +919,14 @@ Partial Public Class ThisAddIn
             _apCurrentAttachments = Nothing
             _apCurrentMailInfo = Nothing
             _apCurrentToolCallLog = Nothing
+
+            Try
+                If restoreExecutionConfig AndAlso originalExecutionConfig IsNot Nothing Then
+                    RestoreDefaults(_context, originalExecutionConfig)
+                End If
+            Catch
+            End Try
+
             MaxToolIterations = previousMaxToolIterations
             ClearAttachmentCaches()
 
@@ -881,6 +937,160 @@ Partial Public Class ThisAddIn
             Catch
             End Try
         End Try
+    End Function
+
+    Private Sub EnsureScheduledTaskLocalChatToolSelection(st As InkyState)
+        If st Is Nothing Then Return
+
+        MigrateLocalChatToolSelections(st, includeInteractiveM365Tools:=True)
+        st.ToolingEnabled = True
+        st.AgentModeEnabled = True
+        st.SelectedAdvancedToolNames =
+            ResolveLocalChatAdvancedToolNamesForEnabledState(
+                st.SelectedAdvancedToolNames,
+                includeInteractiveM365Tools:=True)
+
+        Dim effectiveTools = GetLocalChatEffectiveSelection(st, includeInteractiveM365Tools:=True)
+
+        If (effectiveTools Is Nothing OrElse effectiveTools.Count = 0) AndAlso
+           Not IsChatAgentWorkspaceConnected() Then
+
+            st.SelectedMainToolNames =
+                GetLocalChatMainSelectableTools(includeInteractiveM365Tools:=True).
+                    Where(Function(t) t IsNot Nothing AndAlso
+                                      Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                                      Not t.ToolName.Equals(AP_Tool_ManageScheduledTasks, StringComparison.OrdinalIgnoreCase)).
+                    Select(Function(t) t.ToolName.Trim()).
+                    Distinct(StringComparer.OrdinalIgnoreCase).
+                    ToList()
+
+            st.SelectedAdvancedToolNames =
+                GetLocalChatAdvancedSelectableTools(includeInteractiveM365Tools:=True).
+                    Where(Function(t) t IsNot Nothing AndAlso
+                                      Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                                      Not t.ToolName.Equals(AP_Tool_ManageScheduledTasks, StringComparison.OrdinalIgnoreCase)).
+                    Select(Function(t) t.ToolName.Trim()).
+                    Distinct(StringComparer.OrdinalIgnoreCase).
+                    ToList()
+
+            effectiveTools = GetLocalChatEffectiveSelection(st, includeInteractiveM365Tools:=True)
+        End If
+
+        st.SelectedToolNames =
+            If(effectiveTools, New List(Of ModelConfig)()).
+                Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
+                Select(Function(t) t.ToolName).
+                Distinct(StringComparer.OrdinalIgnoreCase).
+                ToList()
+    End Sub
+
+    Private Function GetScheduledTaskExecutionState() As InkyState
+        If _apActive Then Return Nothing
+
+        Dim sourceChatId As Integer = 1
+        If activeChatId > 0 AndAlso activeChatId <> AP_SchedulerLocalChatId Then
+            sourceChatId = activeChatId
+        End If
+
+        Dim st As InkyState = Nothing
+
+        Try
+            st = LoadInkyState(sourceChatId)
+        Catch
+        End Try
+
+        If st Is Nothing Then
+            Try
+                st = LoadInkyState()
+            Catch
+                Return Nothing
+            End Try
+        End If
+
+        If st Is Nothing Then Return Nothing
+
+        EnsureScheduledTaskLocalChatToolSelection(st)
+
+        Return st
+    End Function
+
+    Private Sub ResolveScheduledTaskExecutionContext(ByRef executionState As InkyState,
+                                                     ByRef executionModelConfig As ModelConfig,
+                                                     ByRef executionSelectedTools As List(Of ModelConfig),
+                                                     ByRef executionUseSecondApi As Boolean,
+                                                     ByRef restoreExecutionConfig As Boolean,
+                                                     ByRef originalExecutionConfig As ModelConfig)
+        executionState = Nothing
+        executionModelConfig = _apBaseModelConfig
+        executionSelectedTools =
+            If(_apSelectedTools IsNot Nothing,
+               New List(Of ModelConfig)(_apSelectedTools),
+               New List(Of ModelConfig)())
+        executionUseSecondApi = _apUseSecondApi
+        restoreExecutionConfig = False
+        originalExecutionConfig = Nothing
+
+        If _apActive Then Return
+
+        executionState = GetScheduledTaskExecutionState()
+        If executionState Is Nothing Then Return
+
+        executionUseSecondApi = executionState.UseSecondApi
+        executionSelectedTools = GetLocalChatEffectiveSelection(executionState, includeInteractiveM365Tools:=True)
+
+        If executionSelectedTools Is Nothing Then
+            executionSelectedTools = New List(Of ModelConfig)()
+        End If
+
+        If Not executionUseSecondApi Then Return
+
+        originalExecutionConfig = GetCurrentConfig(_context)
+
+        Dim selectedModelKey = executionState.SelectedModelKey
+
+        If String.IsNullOrWhiteSpace(selectedModelKey) Then
+            executionModelConfig = originalExecutionConfig
+        Else
+            Try
+                Dim alts = LoadAlternativeModels(INI_AlternateModelPath, _context)
+                Dim selectedModel = alts?.FirstOrDefault(
+                    Function(m)
+                        If m Is Nothing Then Return False
+                        If Not String.IsNullOrWhiteSpace(m.ModelDescription) AndAlso
+                           String.Equals(m.ModelDescription, selectedModelKey, StringComparison.OrdinalIgnoreCase) Then Return True
+                        If Not String.IsNullOrWhiteSpace(m.Model) AndAlso
+                           String.Equals(m.Model, selectedModelKey, StringComparison.OrdinalIgnoreCase) Then Return True
+                        Return False
+                    End Function)
+
+                executionModelConfig = If(selectedModel, originalExecutionConfig)
+            Catch
+                executionModelConfig = originalExecutionConfig
+            End Try
+        End If
+
+        If executionModelConfig IsNot Nothing Then
+            ApplyModelConfig(_context, executionModelConfig)
+            restoreExecutionConfig = True
+        End If
+    End Sub
+
+    Private Function ScheduledTaskExecutionSupportsTooling(executionState As InkyState,
+                                                           executionModelConfig As ModelConfig,
+                                                           executionUseSecondApi As Boolean) As Boolean
+        If _apActive Then
+            Return executionModelConfig IsNot Nothing AndAlso ModelSupportsTooling(executionModelConfig)
+        End If
+
+        If executionState IsNot Nothing Then
+            Return CurrentModelSupportsTooling(executionState)
+        End If
+
+        If executionUseSecondApi Then
+            Return executionModelConfig IsNot Nothing AndAlso ModelSupportsTooling(executionModelConfig)
+        End If
+
+        Return False
     End Function
 
     ''' <summary>
@@ -1217,11 +1427,7 @@ Partial Public Class ThisAddIn
         targetState.SelectedMainToolNames = New List(Of String)(If(sourceState.SelectedMainToolNames, New List(Of String)()))
         targetState.SelectedAdvancedToolNames = New List(Of String)(If(sourceState.SelectedAdvancedToolNames, New List(Of String)()))
 
-        MigrateLocalChatToolSelections(targetState, includeInteractiveM365Tools:=True)
-        targetState.SelectedAdvancedToolNames =
-            ResolveLocalChatAdvancedToolNamesForEnabledState(
-                targetState.SelectedAdvancedToolNames,
-                includeInteractiveM365Tools:=True)
+        EnsureScheduledTaskLocalChatToolSelection(targetState)
 
         Try
             targetState.SupportsFileUploads = ComputeSupportsFiles(targetState.UseSecondApi, targetState.SelectedModelKey)

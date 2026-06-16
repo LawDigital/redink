@@ -1571,7 +1571,7 @@ Partial Public Class ThisAddIn
                     If Not TryNormalizeSchedulerDeliverToForCaller(
                         rawDeliverTo,
                         schedulerOwnerAddress,
-                        allowEmpty:=isLocalChatOrigin,
+                                                allowEmpty:=isLocalChatOrigin AndAlso Not INI_AutoPilotSchedulerLocalChat,
                         normalizedDeliverTo:=task.DeliverTo,
                         errorMessage:=deliverToError) Then
 
@@ -1752,7 +1752,7 @@ Partial Public Class ThisAddIn
                     If Not TryNormalizeSchedulerDeliverToForCaller(
                         rawDeliverTo,
                         schedulerOwnerAddress,
-                        allowEmpty:=isLocalChatOrigin,
+                                                allowEmpty:=isLocalChatOrigin AndAlso Not INI_AutoPilotSchedulerLocalChat,
                         normalizedDeliverTo:=task.DeliverTo,
                         errorMessage:=deliverToError) Then
 

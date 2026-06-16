@@ -370,11 +370,11 @@ Public Class ReviewChangesDialog
 
         Dim builder As New InlineDiffBuilder(New Differ())
 
-        Dim a As String = NormalizeForDiff(originalText)
-        Dim b As String = NormalizeForDiff(suggestedText)
+        Dim aTokens As List(Of String) = TokenizePreservingWhitespace(originalText)
+        Dim bTokens As List(Of String) = TokenizePreservingWhitespace(suggestedText)
 
-        Dim aWords As String = String.Join(Environment.NewLine, a.Split(" "c))
-        Dim bWords As String = String.Join(Environment.NewLine, b.Split(" "c))
+        Dim aWords As String = String.Join(Environment.NewLine, aTokens)
+        Dim bWords As String = String.Join(Environment.NewLine, bTokens)
 
         Dim model As DiffPaneModel = builder.BuildDiffModel(aWords, bWords)
 
@@ -392,7 +392,6 @@ Public Class ReviewChangesDialog
             If restored.Length = 0 Then Continue For
 
             Dim displayText As String = restored
-            If Not displayText.EndsWith(vbCrLf) Then displayText &= " "
 
             Dim kind As SegmentKind
             Select Case line.Type
@@ -414,18 +413,46 @@ Public Class ReviewChangesDialog
         ConsolidateEquivalentLineBreakChanges()
     End Sub
 
-    Private Shared Function NormalizeForDiff(s As String) As String
-        If s Is Nothing Then Return ""
+    Private Shared Function TokenizePreservingWhitespace(s As String) As List(Of String)
+        Dim tokens As New List(Of String)()
+        If s Is Nothing Then Return tokens
 
-        s = s.Replace(vbCrLf, " {br} ") _
-         .Replace(vbCr, " {br} ") _
-         .Replace(vbLf, " {br} ")
+        s = s.Replace(vbCrLf, vbLf) _
+         .Replace(vbCr, vbLf)
 
-        Do While s.Contains("  ")
-            s = s.Replace("  ", " ")
-        Loop
+        Dim i As Integer = 0
 
-        Return s.Trim()
+        While i < s.Length
+            Dim ch As Char = s(i)
+
+            If ch = ControlChars.Lf Then
+                tokens.Add("{br}")
+                i += 1
+
+            ElseIf ch = ControlChars.Tab Then
+                tokens.Add(ControlChars.Tab)
+                i += 1
+
+            ElseIf ch = " "c Then
+                Dim start As Integer = i
+                While i < s.Length AndAlso s(i) = " "c
+                    i += 1
+                End While
+                tokens.Add(s.Substring(start, i - start))
+
+            Else
+                Dim start As Integer = i
+                While i < s.Length AndAlso
+                      s(i) <> " "c AndAlso
+                      s(i) <> ControlChars.Tab AndAlso
+                      s(i) <> ControlChars.Lf
+                    i += 1
+                End While
+                tokens.Add(s.Substring(start, i - start))
+            End If
+        End While
+
+        Return tokens
     End Function
 
     Private Sub ConsolidateEquivalentLineBreakChanges()

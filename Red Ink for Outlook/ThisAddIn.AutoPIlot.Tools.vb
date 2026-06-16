@@ -155,7 +155,7 @@ Partial Public Class ThisAddIn
         Return New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ManageScheduledTasks,
             .ModelDescription = "Manage Scheduled Tasks (built-in)",
-            .ToolInstructionsPrompt =
+                       .ToolInstructionsPrompt =
                 AP_Tool_ManageScheduledTasks & ": Manages the AutoPilot task scheduler. " &
                 "Users can schedule tasks to be executed automatically at specific times (one-time or recurring) " &
                 "with results delivered by e-mail or, in Local Chat mode, through the Local Agent browser workflow after user confirmation. " &
@@ -171,6 +171,8 @@ Partial Public Class ThisAddIn
                 "- next_due_utc: the ISO 8601 UTC timestamp of the FIRST execution " &
                 "- end_date_utc: the ISO 8601 UTC end date if specified (otherwise omit) " &
                 "- remaining_occurrences: number of times to execute if count-limited (e.g. 'three times' → 3), otherwise 0 for unlimited " &
+                "Interpret all schedule phrases relative to the CURRENT LOCAL time on this machine, not UTC. " &
+                "Use UTC only for the internal next_due_utc and end_date_utc fields; keep all user-facing wording and reasoning in local time only. " &
                 "When the user says 'every Monday at 8am' and today is Wednesday, the next_due_utc should be next Monday at 08:00 local time converted to UTC. " &
                 "The machine timezone offset is used for UTC conversion (current local time: " & DateTime.Now.ToString("yyyy-MM-dd HH:mm") & ", " &
                 "UTC offset: " & DateTimeOffset.Now.Offset.ToString() & "). " &
@@ -178,7 +180,10 @@ Partial Public Class ThisAddIn
                 "For 'delete' or 'update', match by task ID prefix or instruction text. " &
                 "The deliver_to field is the e-mail address(es) for result delivery. " &
                 "When invoked from an e-mail, use the sender's address as deliver_to unless the user specifies otherwise. " &
-                "When invoked from Local Chat, deliver_to may be omitted — the task will run in the Local Agent browser workflow after user confirmation rather than by sending the result by e-mail. " &
+                "When invoked from Local Chat, " &
+                If(INI_AutoPilotSchedulerLocalChat,
+                   "deliver_to may be omitted — default it to the current mailbox address and use e-mail delivery rather than the Local Agent browser prompt workflow. ",
+                   "deliver_to may be omitted — the task will run in the Local Agent browser workflow after user confirmation rather than by sending the result by e-mail. ") &
                 "Tasks can reference attached files — use store_attachment_names to copy the current e-mail's attachments " &
                 "into the task's permanent storage for use during execution.",
             .ToolDefinition =
@@ -1763,56 +1768,7 @@ Partial Public Class ThisAddIn
                     text = SharedMethods.ReadEmlSandboxed(att.TempFilePath)
                     extracted = Not String.IsNullOrWhiteSpace(text) AndAlso Not text.StartsWith("Error")
                 Case ".msg"
-                    text = SharedMethods.ReadMsgSandboxed(att.TempFilePath,
-                        Function(msgPath As String, tmpDir As String, ByRef nested As List(Of String)) As String
-                            nested = New List(Of String)()
-                            Try
-                                Dim ns = Application.GetNamespace("MAPI")
-                                Dim sharedItem = ns.OpenSharedItem(msgPath)
-                                Dim mi = TryCast(sharedItem, Microsoft.Office.Interop.Outlook.MailItem)
-                                If mi IsNot Nothing Then
-                                    Dim bodyResult = BuildEmbeddedMailText(mi)
-                                    ' Save nested attachments for recursive reading
-                                    Try
-                                        For j As Integer = 1 To mi.Attachments.Count
-                                            Dim nestedAtt = mi.Attachments(j)
-                                            Try
-                                                If nestedAtt.Type = Microsoft.Office.Interop.Outlook.OlAttachmentType.olEmbeddeditem Then
-                                                    Dim nestedName = If(nestedAtt.FileName, $"embedded_{j}.msg")
-                                                    If Not nestedName.EndsWith(".msg", StringComparison.OrdinalIgnoreCase) Then
-                                                        nestedName = Path.GetFileNameWithoutExtension(nestedName) & ".msg"
-                                                    End If
-                                                    Dim nestedPath = Path.Combine(tmpDir, nestedName)
-                                                    nestedAtt.SaveAsFile(nestedPath)
-                                                    nested.Add(nestedPath)
-                                                Else
-                                                    Dim nestedFileName = nestedAtt.FileName
-                                                    If Not String.IsNullOrWhiteSpace(nestedFileName) Then
-                                                        Dim nestedPath = Path.Combine(tmpDir, nestedFileName)
-                                                        Dim nc = 1
-                                                        While File.Exists(nestedPath)
-                                                            nestedPath = Path.Combine(tmpDir,
-                                                                Path.GetFileNameWithoutExtension(nestedFileName) & $"_{nc}" &
-                                                                Path.GetExtension(nestedFileName))
-                                                            nc += 1
-                                                        End While
-                                                        nestedAtt.SaveAsFile(nestedPath)
-                                                        nested.Add(nestedPath)
-                                                    End If
-                                                End If
-                                            Catch
-                                            End Try
-                                        Next
-                                    Catch
-                                    End Try
-                                    Try : System.Runtime.InteropServices.Marshal.ReleaseComObject(mi) : Catch : End Try
-                                    Return bodyResult
-                                End If
-                                If sharedItem IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.ReleaseComObject(sharedItem) : Catch : End Try
-                            Catch
-                            End Try
-                            Return Nothing
-                        End Function)
+                    text = ReadMsgAttachmentText(att.TempFilePath)
                     extracted = Not String.IsNullOrWhiteSpace(text) AndAlso Not text.StartsWith("Error")
                 Case ".doc"
                     If Not INI_AllowLegacyDocFiles Then
