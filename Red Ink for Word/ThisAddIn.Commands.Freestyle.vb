@@ -1181,7 +1181,7 @@ Partial Public Class ThisAddIn
             Dim SlidesInstruct As String = $"with '{SlidesPrefix}' for adding to a Powerpoint file"
             Dim ChartInstruct As String = $"with '{ChartPrefix}'/'{ChartPrefix}' for creating a chart (normal or for webapps)"
             Dim ClipboardInstruct As String = $"with '{ClipboardPrefix}', '{NewdocPrefix}' or '{PanePrefix}' for separate output"
-            Dim PromptLibInstruct As String = If(INI_PromptLib, " or press 'OK' for the prompt library", "")
+            Dim PromptLibInstruct As String = If(INI_PromptLib, " or press 'OK' or '/' for the prompt library", "")
             Dim ExtInstruct As String = $"; include '{ExtTrigger}' or '{ExtTriggerFixed}' (multiple times) for including the text of (a) file(s) (txt, docx, pdf), {ExtDirTrigger} for a directory of text files, {ExtUrlTrigger} for URL content, or '{AddDocTrigger}' for an open Word doc"
             Dim TPMarkupInstruct As String = $"; add '{TPMarkupTriggerInstruct}' if revisions [of user] should be pointed out to the LLM"
             Dim NoFormatInstruct As String = $"; add '{NoFormatTrigger2}'/'{KFTrigger2}'/'{KPFTrigger2}/{SameAsReplaceTrigger}' for overriding formatting defaults"

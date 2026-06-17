@@ -581,7 +581,7 @@ Partial Public Class ThisAddIn
         If config.AutoDeleteAfterHours > 0 Then
             ApDashboardLog($"🗑 Auto-delete enabled after {config.AutoDeleteAfterHours}h (includes Deleted Items).", "info")
             StartAutoDeleteTimer()
-            RunAutoDeleteCleanupAsync(_apCts.Token)
+            RunAutoDeleteCleanupAsync(_apCts.Token, "startup")
         Else
             ApDashboardLog("🗑 Auto-delete disabled.", "info")
         End If
