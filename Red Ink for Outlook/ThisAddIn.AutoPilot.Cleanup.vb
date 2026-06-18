@@ -49,7 +49,11 @@ Partial Public Class ThisAddIn
     Private Const AP_CleanupDeleteAfterUtcProperty As String =
         "http://schemas.microsoft.com/mapi/string/{00020386-0000-0000-C000-000000000046}/X-RedInk-AutoDeleteAfterUtc"
 
-    Private Const AP_AutoDeleteTimerIntervalSeconds As Integer = 15 * 60
+    Private Const AP_AutoDeleteTimerIntervalSeconds As Integer = 6 * 60 * 60
+    Private Const AP_AutoDeleteUiYieldItemInterval As Integer = 100
+    Private Const AP_AutoDeleteUiYieldFolderInterval As Integer = 10
+    Private Const AP_AutoDeleteProgressItemInterval As Integer = 500
+    Private Const AP_AutoDeleteProgressFolderInterval As Integer = 25
 
     Private _apAutoDeleteTimer As System.Threading.Timer = Nothing
     Private _apAutoDeleteCheckRunning As Integer = 0
@@ -58,6 +62,9 @@ Partial Public Class ThisAddIn
         Public ScannedCount As Integer
         Public DeletedCount As Integer
         Public ErrorCount As Integer
+        Public FolderCount As Integer
+        Public LastProgressLogScannedCount As Integer
+        Public LastProgressLogFolderCount As Integer
     End Structure
 
     Friend Sub StartAutoDeleteTimer()
@@ -68,7 +75,7 @@ Partial Public Class ThisAddIn
         _apAutoDeleteTimer = New System.Threading.Timer(
             AddressOf AutoDeleteTimerCallback,
             Nothing,
-            dueTime:=TimeSpan.FromSeconds(30),
+            dueTime:=TimeSpan.FromSeconds(AP_AutoDeleteTimerIntervalSeconds),
             period:=TimeSpan.FromSeconds(AP_AutoDeleteTimerIntervalSeconds))
 
         ApDashboardLog($"🗑 Auto-delete timer started ({_apConfig.AutoDeleteAfterHours}h retention, including Deleted Items).", "info")
@@ -81,46 +88,127 @@ Partial Public Class ThisAddIn
 
     Private Async Sub AutoDeleteTimerCallback(state As Object)
         If Not _apActive Then Return
-        If Interlocked.CompareExchange(_apAutoDeleteCheckRunning, 1, 0) <> 0 Then Return
 
         Try
             Dim ct = _apCts?.Token
             If ct Is Nothing OrElse ct.Value.IsCancellationRequested Then Return
-            Await RunAutoDeleteCleanupAsync(ct.Value)
+            Await RunAutoDeleteCleanupAsync(ct.Value, "timer")
         Catch ex As OperationCanceledException
             ' Expected during shutdown
         Catch ex As System.Exception
             ApDashboardLog($"🗑 Auto-delete timer error: {ex.Message}", "warn")
-        Finally
-            Interlocked.Exchange(_apAutoDeleteCheckRunning, 0)
         End Try
     End Sub
 
-    Friend Async Function RunAutoDeleteCleanupAsync(ct As CancellationToken) As Task
+    Friend Async Function RunAutoDeleteCleanupAsync(ct As CancellationToken,
+                                                    Optional trigger As String = "manual") As Task
         If _apConfig Is Nothing OrElse _apConfig.AutoDeleteAfterHours <= 0 Then Return
 
+        If Interlocked.CompareExchange(_apAutoDeleteCheckRunning, 1, 0) <> 0 Then
+            ApDashboardLog($"🗑 Auto-delete cleanup already running — skipped duplicate {trigger} request.", "step")
+            Return
+        End If
+
+        Dim nowUtc = DateTime.UtcNow
         Dim pass1 As AutoDeleteCleanupStats
         Dim pass2 As AutoDeleteCleanupStats
+        Dim sw = Stopwatch.StartNew()
 
-        Await SwitchToUi(
-            Sub()
-                pass1 = DeleteExpiredAutoPilotItemsOutsideDeletedItems()
-            End Sub)
+        Try
+            ApDashboardLog($"🗑 Auto-delete cleanup started ({trigger}).", "info")
 
-        Await SwitchToUi(
-            Sub()
-                pass2 = DeleteExpiredAutoPilotItemsInsideDeletedItems()
-            End Sub)
+            ThrowIfAutoDeleteCancelled(ct)
+            Await SwitchToUi(
+                Sub()
+                    pass1 = DeleteExpiredAutoPilotItemsOutsideDeletedItems(ct, nowUtc)
+                End Sub)
 
-        Dim totalDeleted = pass1.DeletedCount + pass2.DeletedCount
-        Dim totalErrors = pass1.ErrorCount + pass2.ErrorCount
-
-        If totalDeleted > 0 OrElse totalErrors > 0 Then
             ApDashboardLog(
-                $"🗑 Auto-delete cleanup: {totalDeleted} item(s) removed, {totalErrors} error(s), {pass1.ScannedCount + pass2.ScannedCount} item(s) scanned.",
+                $"🗑 Auto-delete mailbox folders pass: {pass1.DeletedCount} item(s) removed, {pass1.ErrorCount} error(s), {pass1.ScannedCount} candidate item(s) matched across {pass1.FolderCount} folder(s).",
+                If(pass1.ErrorCount > 0, "warn", "step"))
+
+            ThrowIfAutoDeleteCancelled(ct)
+            Await SwitchToUi(
+                Sub()
+                    pass2 = DeleteExpiredAutoPilotItemsInsideDeletedItems(ct, nowUtc)
+                End Sub)
+
+            ApDashboardLog(
+                $"🗑 Auto-delete Deleted Items pass: {pass2.DeletedCount} item(s) removed, {pass2.ErrorCount} error(s), {pass2.ScannedCount} candidate item(s) matched across {pass2.FolderCount} folder(s).",
+                If(pass2.ErrorCount > 0, "warn", "step"))
+
+            Dim totalDeleted = pass1.DeletedCount + pass2.DeletedCount
+            Dim totalErrors = pass1.ErrorCount + pass2.ErrorCount
+            Dim totalScanned = pass1.ScannedCount + pass2.ScannedCount
+            Dim totalFolders = pass1.FolderCount + pass2.FolderCount
+
+            If totalScanned = 0 Then
+                ApDashboardLog(
+                    "🗑 Auto-delete found no eligible mails with cleanup metadata. Existing mails in Inbox, Sent Items, or Deleted Items are ignored unless they were previously stamped for auto-delete.",
+                    "step")
+            End If
+
+            ApDashboardLog(
+                $"🗑 Auto-delete cleanup finished in {sw.Elapsed.TotalSeconds:F1}s: {totalDeleted} item(s) removed, {totalErrors} error(s), {totalScanned} candidate item(s) matched across {totalFolders} folder(s).",
                 If(totalErrors > 0, "warn", "info"))
-        End If
+        Catch ex As OperationCanceledException
+            ApDashboardLog("🗑 Auto-delete cleanup cancelled.", "step")
+        Catch ex As System.Exception
+            ApDashboardLog($"🗑 Auto-delete cleanup error: {ex.Message}", "warn")
+        Finally
+            sw.Stop()
+            Interlocked.Exchange(_apAutoDeleteCheckRunning, 0)
+        End Try
     End Function
+
+    Private Sub ThrowIfAutoDeleteCancelled(ct As CancellationToken)
+        If ct.IsCancellationRequested Then
+            Throw New OperationCanceledException(ct)
+        End If
+    End Sub
+
+    Private Sub PumpAutoDeleteUi(ByRef stats As AutoDeleteCleanupStats,
+                                 ct As CancellationToken,
+                                 currentScope As String,
+                                 Optional force As Boolean = False)
+
+        ThrowIfAutoDeleteCancelled(ct)
+
+        Dim shouldLog As Boolean = force
+
+        If Not shouldLog Then
+            If stats.ScannedCount > 0 AndAlso
+               stats.ScannedCount - stats.LastProgressLogScannedCount >= AP_AutoDeleteProgressItemInterval Then
+                shouldLog = True
+            ElseIf stats.FolderCount > 0 AndAlso
+                   stats.FolderCount Mod AP_AutoDeleteProgressFolderInterval = 0 AndAlso
+                   stats.FolderCount <> stats.LastProgressLogFolderCount Then
+                shouldLog = True
+            End If
+        End If
+
+        If shouldLog Then
+            stats.LastProgressLogScannedCount = stats.ScannedCount
+            stats.LastProgressLogFolderCount = stats.FolderCount
+
+            Dim scopeLabel = If(String.IsNullOrWhiteSpace(currentScope), "(unknown folder)", currentScope)
+
+            ApDashboardLog(
+                $"🗑 Auto-delete progress: {stats.DeletedCount} item(s) removed, {stats.ErrorCount} error(s), {stats.ScannedCount} item(s) scanned across {stats.FolderCount} folder(s). Current: {scopeLabel}",
+                "step")
+        End If
+
+        If force OrElse
+           (stats.ScannedCount > 0 AndAlso stats.ScannedCount Mod AP_AutoDeleteUiYieldItemInterval = 0) OrElse
+           (stats.FolderCount > 0 AndAlso stats.FolderCount Mod AP_AutoDeleteUiYieldFolderInterval = 0) Then
+            Try
+                System.Windows.Forms.Application.DoEvents()
+            Catch
+            End Try
+
+            ThrowIfAutoDeleteCancelled(ct)
+        End If
+    End Sub
 
     Private Function GetAutoDeleteCutoffUtc() As DateTime?
         If _apConfig Is Nothing OrElse _apConfig.AutoDeleteAfterHours <= 0 Then Return Nothing
@@ -187,6 +275,13 @@ Partial Public Class ThisAddIn
             Debug.WriteLine($"[AutoPilot] StampCleanupMetadata error: {ex.Message}")
         End Try
     End Sub
+
+    Private Function BuildCleanupGroupRestriction(groupId As String) As String
+        Dim groupProperty = ChrW(34) & AP_CleanupGroupIdProperty & ChrW(34)
+        Dim groupIdEscaped = If(groupId, "").Replace("'", "''")
+
+        Return "@SQL=" & groupProperty & " = '" & groupIdEscaped & "'"
+    End Function
 
     Friend Sub MarkMailGroupAsAnsweredAndEligible(originalMail As MailItem)
         If originalMail Is Nothing Then Return
@@ -255,42 +350,44 @@ Partial Public Class ThisAddIn
         If folder Is Nothing Then Return
 
         Dim items As Items = Nothing
+        Dim restrictedItems As Items = Nothing
         Dim subFolders As Folders = Nothing
 
         Try
-            items = folder.Items
-            For i As Integer = items.Count To 1 Step -1
-                Dim obj As Object = Nothing
-                Dim mi As MailItem = Nothing
+            Try
+                If folder.DefaultItemType = OlItemType.olMailItem Then
+                    items = folder.Items
+                    restrictedItems = items.Restrict(BuildCleanupGroupRestriction(groupId))
 
-                Try
-                    obj = items(i)
-                    mi = TryCast(obj, MailItem)
-                    If mi Is Nothing Then Continue For
+                    For i As Integer = restrictedItems.Count To 1 Step -1
+                        Dim obj As Object = Nothing
+                        Dim mi As MailItem = Nothing
 
-                    Dim itemGroupId = GetCleanupGroupId(mi)
-                    If itemGroupId Is Nothing OrElse
-                       Not itemGroupId.Equals(groupId, StringComparison.OrdinalIgnoreCase) Then
-                        Continue For
-                    End If
+                        Try
+                            obj = restrictedItems(i)
+                            mi = TryCast(obj, MailItem)
+                            If mi Is Nothing Then Continue For
 
-                    StampCleanupMetadata(
-                        mi,
-                        groupId,
-                        isEligible:=True,
-                        answeredUtc:=answeredUtc,
-                        deleteAfterUtc:=deleteAfterUtc,
-                        saveItem:=True)
+                            StampCleanupMetadata(
+                                mi,
+                                groupId,
+                                isEligible:=True,
+                                answeredUtc:=answeredUtc,
+                                deleteAfterUtc:=deleteAfterUtc,
+                                saveItem:=True)
 
-                    stampedCount += 1
-                Catch
-                Finally
-                    If mi IsNot Nothing Then Try : Marshal.ReleaseComObject(mi) : Catch : End Try
-                    If obj IsNot Nothing AndAlso Not ReferenceEquals(obj, mi) Then
-                        Try : Marshal.ReleaseComObject(obj) : Catch : End Try
-                    End If
-                End Try
-            Next
+                            stampedCount += 1
+                        Catch
+                        Finally
+                            If mi IsNot Nothing Then Try : Marshal.ReleaseComObject(mi) : Catch : End Try
+                            If obj IsNot Nothing AndAlso Not ReferenceEquals(obj, mi) Then
+                                Try : Marshal.ReleaseComObject(obj) : Catch : End Try
+                            End If
+                        End Try
+                    Next
+                End If
+            Catch
+            End Try
 
             subFolders = folder.Folders
             For i As Integer = 1 To subFolders.Count
@@ -306,11 +403,13 @@ Partial Public Class ThisAddIn
         Catch
         Finally
             If subFolders IsNot Nothing Then Try : Marshal.ReleaseComObject(subFolders) : Catch : End Try
+            If restrictedItems IsNot Nothing Then Try : Marshal.ReleaseComObject(restrictedItems) : Catch : End Try
             If items IsNot Nothing Then Try : Marshal.ReleaseComObject(items) : Catch : End Try
         End Try
     End Sub
 
-    Private Function DeleteExpiredAutoPilotItemsOutsideDeletedItems() As AutoDeleteCleanupStats
+    Private Function DeleteExpiredAutoPilotItemsOutsideDeletedItems(ct As CancellationToken,
+                                                                    nowUtc As DateTime) As AutoDeleteCleanupStats
         Dim stats As New AutoDeleteCleanupStats()
         Dim session As Microsoft.Office.Interop.Outlook.NameSpace = Nothing
 
@@ -318,12 +417,20 @@ Partial Public Class ThisAddIn
             session = Application.GetNamespace("MAPI")
 
             For i As Integer = 1 To session.Stores.Count
+                ThrowIfAutoDeleteCancelled(ct)
+
                 Dim store As Store = Nothing
                 Dim root As MAPIFolder = Nothing
                 Dim deletedItems As MAPIFolder = Nothing
+                Dim storeLabel As String = $"Store {i}"
 
                 Try
                     store = session.Stores(i)
+                    Try
+                        storeLabel = If(store.DisplayName, storeLabel)
+                    Catch
+                    End Try
+
                     root = store.GetRootFolder()
                     Try
                         deletedItems = store.GetDefaultFolder(OlDefaultFolders.olFolderDeletedItems)
@@ -331,11 +438,16 @@ Partial Public Class ThisAddIn
                         deletedItems = Nothing
                     End Try
 
+                    ApDashboardLog($"🗑 Auto-delete scanning mailbox folders in {storeLabel}...", "step")
+
                     DeleteExpiredItemsOutsideDeletedItemsTree(
                         root,
                         If(deletedItems IsNot Nothing, deletedItems.EntryID, ""),
-                        DateTime.UtcNow,
-                        stats)
+                        nowUtc,
+                        stats,
+                        ct)
+                Catch ex As OperationCanceledException
+                    Throw
                 Catch
                 Finally
                     If deletedItems IsNot Nothing Then Try : Marshal.ReleaseComObject(deletedItems) : Catch : End Try
@@ -343,6 +455,8 @@ Partial Public Class ThisAddIn
                     If store IsNot Nothing Then Try : Marshal.ReleaseComObject(store) : Catch : End Try
                 End Try
             Next
+        Catch ex As OperationCanceledException
+            Throw
         Catch ex As System.Exception
             Debug.WriteLine($"[AutoPilot] DeleteExpiredAutoPilotItemsOutsideDeletedItems error: {ex.Message}")
         Finally
@@ -352,7 +466,8 @@ Partial Public Class ThisAddIn
         Return stats
     End Function
 
-    Private Function DeleteExpiredAutoPilotItemsInsideDeletedItems() As AutoDeleteCleanupStats
+    Private Function DeleteExpiredAutoPilotItemsInsideDeletedItems(ct As CancellationToken,
+                                                                   nowUtc As DateTime) As AutoDeleteCleanupStats
         Dim stats As New AutoDeleteCleanupStats()
         Dim session As Microsoft.Office.Interop.Outlook.NameSpace = Nothing
 
@@ -360,19 +475,32 @@ Partial Public Class ThisAddIn
             session = Application.GetNamespace("MAPI")
 
             For i As Integer = 1 To session.Stores.Count
+                ThrowIfAutoDeleteCancelled(ct)
+
                 Dim store As Store = Nothing
                 Dim deletedItems As MAPIFolder = Nothing
+                Dim storeLabel As String = $"Store {i}"
 
                 Try
                     store = session.Stores(i)
+                    Try
+                        storeLabel = If(store.DisplayName, storeLabel)
+                    Catch
+                    End Try
+
                     deletedItems = store.GetDefaultFolder(OlDefaultFolders.olFolderDeletedItems)
-                    DeleteExpiredItemsInFolderTree(deletedItems, DateTime.UtcNow, stats)
+                    ApDashboardLog($"🗑 Auto-delete scanning Deleted Items in {storeLabel}...", "step")
+                    DeleteExpiredItemsInFolderTree(deletedItems, nowUtc, stats, ct)
+                Catch ex As OperationCanceledException
+                    Throw
                 Catch
                 Finally
                     If deletedItems IsNot Nothing Then Try : Marshal.ReleaseComObject(deletedItems) : Catch : End Try
                     If store IsNot Nothing Then Try : Marshal.ReleaseComObject(store) : Catch : End Try
                 End Try
             Next
+        Catch ex As OperationCanceledException
+            Throw
         Catch ex As System.Exception
             Debug.WriteLine($"[AutoPilot] DeleteExpiredAutoPilotItemsInsideDeletedItems error: {ex.Message}")
         Finally
@@ -385,9 +513,21 @@ Partial Public Class ThisAddIn
     Private Sub DeleteExpiredItemsOutsideDeletedItemsTree(folder As MAPIFolder,
                                                           deletedItemsEntryId As String,
                                                           nowUtc As DateTime,
-                                                          ByRef stats As AutoDeleteCleanupStats)
+                                                          ByRef stats As AutoDeleteCleanupStats,
+                                                          ct As CancellationToken)
 
         If folder Is Nothing Then Return
+
+        ThrowIfAutoDeleteCancelled(ct)
+
+        Dim folderPath As String = "(unknown folder)"
+        Try
+            folderPath = folder.FolderPath
+        Catch
+        End Try
+
+        stats.FolderCount += 1
+        PumpAutoDeleteUi(stats, ct, folderPath)
 
         Try
             If Not String.IsNullOrWhiteSpace(deletedItemsEntryId) AndAlso
@@ -397,7 +537,7 @@ Partial Public Class ThisAddIn
         Catch
         End Try
 
-        DeleteExpiredItemsInCurrentFolder(folder, nowUtc, stats)
+        DeleteExpiredItemsInCurrentFolder(folder, nowUtc, stats, ct)
 
         Dim subFolders As Folders = Nothing
         Try
@@ -406,12 +546,16 @@ Partial Public Class ThisAddIn
                 Dim child As MAPIFolder = Nothing
                 Try
                     child = subFolders(i)
-                    DeleteExpiredItemsOutsideDeletedItemsTree(child, deletedItemsEntryId, nowUtc, stats)
+                    DeleteExpiredItemsOutsideDeletedItemsTree(child, deletedItemsEntryId, nowUtc, stats, ct)
+                Catch ex As OperationCanceledException
+                    Throw
                 Catch
                 Finally
                     If child IsNot Nothing Then Try : Marshal.ReleaseComObject(child) : Catch : End Try
                 End Try
             Next
+        Catch ex As OperationCanceledException
+            Throw
         Catch
         Finally
             If subFolders IsNot Nothing Then Try : Marshal.ReleaseComObject(subFolders) : Catch : End Try
@@ -420,11 +564,23 @@ Partial Public Class ThisAddIn
 
     Private Sub DeleteExpiredItemsInFolderTree(folder As MAPIFolder,
                                                nowUtc As DateTime,
-                                               ByRef stats As AutoDeleteCleanupStats)
+                                               ByRef stats As AutoDeleteCleanupStats,
+                                               ct As CancellationToken)
 
         If folder Is Nothing Then Return
 
-        DeleteExpiredItemsInCurrentFolder(folder, nowUtc, stats)
+        ThrowIfAutoDeleteCancelled(ct)
+
+        Dim folderPath As String = "(unknown folder)"
+        Try
+            folderPath = folder.FolderPath
+        Catch
+        End Try
+
+        stats.FolderCount += 1
+        PumpAutoDeleteUi(stats, ct, folderPath)
+
+        DeleteExpiredItemsInCurrentFolder(folder, nowUtc, stats, ct)
 
         Dim subFolders As Folders = Nothing
         Try
@@ -433,12 +589,16 @@ Partial Public Class ThisAddIn
                 Dim child As MAPIFolder = Nothing
                 Try
                     child = subFolders(i)
-                    DeleteExpiredItemsInFolderTree(child, nowUtc, stats)
+                    DeleteExpiredItemsInFolderTree(child, nowUtc, stats, ct)
+                Catch ex As OperationCanceledException
+                    Throw
                 Catch
                 Finally
                     If child IsNot Nothing Then Try : Marshal.ReleaseComObject(child) : Catch : End Try
                 End Try
             Next
+        Catch ex As OperationCanceledException
+            Throw
         Catch
         Finally
             If subFolders IsNot Nothing Then Try : Marshal.ReleaseComObject(subFolders) : Catch : End Try
@@ -447,28 +607,51 @@ Partial Public Class ThisAddIn
 
     Private Sub DeleteExpiredItemsInCurrentFolder(folder As MAPIFolder,
                                                   nowUtc As DateTime,
-                                                  ByRef stats As AutoDeleteCleanupStats)
+                                                  ByRef stats As AutoDeleteCleanupStats,
+                                                  ct As CancellationToken)
 
         Dim items As Items = Nothing
+        Dim restrictedItems As Items = Nothing
+        Dim folderPath As String = "(unknown folder)"
+        Dim restriction As String = ""
+        Dim processedInFolder As Integer = 0
 
         Try
-            items = folder.Items
+            Try
+                folderPath = folder.FolderPath
+            Catch
+            End Try
 
-            For i As Integer = items.Count To 1 Step -1
+            Try
+                If folder.DefaultItemType <> OlItemType.olMailItem Then Return
+            Catch
+            End Try
+
+            items = folder.Items
+            restriction = BuildAutoDeleteRestriction(nowUtc)
+            restrictedItems = items.Restrict(restriction)
+
+            For i As Integer = restrictedItems.Count To 1 Step -1
                 Dim obj As Object = Nothing
                 Dim mi As MailItem = Nothing
 
                 Try
-                    obj = items(i)
+                    processedInFolder += 1
+                    If processedInFolder Mod AP_AutoDeleteUiYieldItemInterval = 0 Then
+                        PumpAutoDeleteUi(stats, ct, folderPath)
+                    End If
+
+                    obj = restrictedItems(i)
                     mi = TryCast(obj, MailItem)
                     If mi Is Nothing Then Continue For
 
                     stats.ScannedCount += 1
-
-                    If Not ShouldAutoDeleteMail(mi, nowUtc) Then Continue For
+                    PumpAutoDeleteUi(stats, ct, folderPath)
 
                     mi.Delete()
                     stats.DeletedCount += 1
+                Catch ex As OperationCanceledException
+                    Throw
                 Catch
                     stats.ErrorCount += 1
                 Finally
@@ -478,12 +661,26 @@ Partial Public Class ThisAddIn
                     End If
                 End Try
             Next
-        Catch
+        Catch ex As OperationCanceledException
+            Throw
+        Catch ex As System.Exception
             stats.ErrorCount += 1
+            ApDashboardLog($"🗑 Auto-delete folder scan error: {folderPath} — {ex.Message}", "warn")
         Finally
+            If restrictedItems IsNot Nothing Then Try : Marshal.ReleaseComObject(restrictedItems) : Catch : End Try
             If items IsNot Nothing Then Try : Marshal.ReleaseComObject(items) : Catch : End Try
         End Try
     End Sub
+
+    Private Function BuildAutoDeleteRestriction(nowUtc As DateTime) As String
+        Dim eligibleProperty = ChrW(34) & AP_CleanupEligibleProperty & ChrW(34)
+        Dim deleteAfterProperty = ChrW(34) & AP_CleanupDeleteAfterUtcProperty & ChrW(34)
+        Dim nowUtcText = nowUtc.ToString("o", CultureInfo.InvariantCulture).Replace("'", "''")
+
+        Return "@SQL=" &
+            eligibleProperty & " = 'true' AND " &
+            deleteAfterProperty & " <= '" & nowUtcText & "'"
+    End Function
 
     Private Function ShouldAutoDeleteMail(mi As MailItem, nowUtc As DateTime) As Boolean
         If mi Is Nothing Then Return False

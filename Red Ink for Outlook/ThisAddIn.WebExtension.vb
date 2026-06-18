@@ -1615,8 +1615,17 @@ Partial Public Class ThisAddIn
 
         _selectedToolsForChat = GetLocalChatEffectiveSelection(st, includeInteractiveM365Tools:=True)
 
+        If activeChatId = AP_SchedulerLocalChatId AndAlso HasActiveScheduledTaskWorkspace() Then
+            _selectedToolsForChat =
+                MergeScheduledTaskExecutionTools(
+                    _selectedToolsForChat,
+                    includeAllAdvancedTools:=True,
+                    executionMode:=AP_TaskExecutionModeBrowserPrompt)
+        End If
+
         If (_selectedToolsForChat Is Nothing OrElse _selectedToolsForChat.Count = 0) AndAlso
-           Not IsChatAgentWorkspaceConnected() Then
+           Not IsChatAgentWorkspaceConnected() AndAlso
+           Not HasActiveScheduledTaskWorkspace() Then
             Return False
         End If
 
@@ -1629,8 +1638,18 @@ Partial Public Class ThisAddIn
     Private Function EnsureToolsSelected(st As InkyState,
                                          Optional includeInteractiveM365Tools As Boolean = False) As Boolean
         _selectedToolsForChat = GetLocalChatEffectiveSelection(st, includeInteractiveM365Tools)
+
+        If activeChatId = AP_SchedulerLocalChatId AndAlso HasActiveScheduledTaskWorkspace() Then
+            _selectedToolsForChat =
+                MergeScheduledTaskExecutionTools(
+                    _selectedToolsForChat,
+                    includeAllAdvancedTools:=True,
+                    executionMode:=AP_TaskExecutionModeBrowserPrompt)
+        End If
+
         Return (_selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0) OrElse
-               IsChatAgentWorkspaceConnected()
+               IsChatAgentWorkspaceConnected() OrElse
+               HasActiveScheduledTaskWorkspace()
     End Function
 
     ''' <summary>

@@ -587,7 +587,8 @@ Namespace SharedLibrary
                                 promptLibraryPath,
                                 promptLibraryPathLocal,
                                 promptLibraryContext,
-                                CtrlP
+                                CtrlP,
+                                True   ' NoWarning
                             )
 
                         If slashAction <> SharedMethods.PromptLibrarySlashAction.NotTriggered Then
