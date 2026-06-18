@@ -4299,14 +4299,17 @@ Partial Public Class ThisAddIn
             Dim hasReadableWorkspace As Boolean = IsChatAgentWorkspaceConnected()
             Dim hasTransientSessionWorkspace As Boolean =
                 _chatAgentActive AndAlso Not _apActive AndAlso HasChatAgentSessionWorkspace()
+            Dim hasScheduledTaskWorkspace As Boolean = HasActiveScheduledTaskWorkspace()
 
-            If Not hasReadableWorkspace AndAlso Not hasTransientSessionWorkspace Then
+            If Not hasReadableWorkspace AndAlso Not hasTransientSessionWorkspace AndAlso Not hasScheduledTaskWorkspace Then
                 wsResp.Success = False
                 wsResp.ErrorMessage = "No readable workspace is connected."
                 Return wsResp
             End If
 
-            If hasTransientSessionWorkspace Then
+            If hasScheduledTaskWorkspace Then
+                ActivateScheduledTaskWorkspace(_apScheduledWorkspaceTaskId)
+            ElseIf hasTransientSessionWorkspace Then
                 SyncWorkspaceToPathPolicy(includeSessionTempFallback:=True)
             End If
 

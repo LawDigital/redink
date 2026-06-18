@@ -30,6 +30,7 @@
 
 Option Strict On
 Option Explicit On
+Imports System.Runtime.InteropServices
 Imports SharedLibrary.SharedLibrary.SharedContext
 
 Namespace SharedLibrary
@@ -1449,7 +1450,8 @@ Namespace SharedLibrary
                                                    Context As ISharedContext,
                                                    Optional initialFilter As String = Nothing,
                                                    Optional lastPromptForCtrlP As String = Nothing,
-                                                   Optional ownerHandle As IntPtr = Nothing) As String
+                                                   Optional ownerHandle As IntPtr = Nothing,
+                                                   Optional NoWarning As Boolean = False) As String
 
             Dim centralPath As String = ExpandEnvironmentVariables(filePath)
             Dim localPath As String = ExpandEnvironmentVariables(filepathlocal)
@@ -1973,7 +1975,7 @@ Namespace SharedLibrary
                 Dim selectedIndex As Integer = titleListBox.SelectedIndex
                 If selectedIndex >= 0 AndAlso selectedIndex < visibleEntries.Count Then
                     Dim selectedPrompt As String = visibleEntries(selectedIndex).Prompt
-                    WarnIfPromptContainsUnsupportedChatPlaceholders(selectedPrompt)
+                    If Not NoWarning Then WarnIfPromptContainsUnsupportedChatPlaceholders(selectedPrompt)
                     Return selectedPrompt
                 End If
             End If
@@ -1989,7 +1991,8 @@ Namespace SharedLibrary
                                                         filePath As String,
                                                         filepathlocal As String,
                                                         Context As ISharedContext,
-                                                        Optional lastPromptForCtrlP As String = Nothing) As PromptLibrarySlashAction
+                                                        Optional lastPromptForCtrlP As String = Nothing,
+                                                        Optional NoWarning As Boolean = False) As PromptLibrarySlashAction
 
             If targetTextBox Is Nothing Then
                 Return PromptLibrarySlashAction.NotTriggered
@@ -2000,7 +2003,7 @@ Namespace SharedLibrary
             End If
 
             Dim selectedPrompt As String =
-                ShowPromptInsertionSelector(filePath, filepathlocal, Context, Nothing, lastPromptForCtrlP)
+                ShowPromptInsertionSelector(filePath, filepathlocal, Context, Nothing, lastPromptForCtrlP, NoWarning:=NoWarning)
 
             If String.IsNullOrEmpty(selectedPrompt) Then
                 Return PromptLibrarySlashAction.Canceled
