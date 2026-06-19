@@ -763,103 +763,95 @@ Namespace SharedLibrary
             ' Remote URL
             If s.StartsWith("http://", StringComparison.OrdinalIgnoreCase) OrElse s.StartsWith("https://", StringComparison.OrdinalIgnoreCase) Then
                 Try
-                    Dim handler As New HttpClientHandler()
-                    handler.AllowAutoRedirect = True
-                    handler.AutomaticDecompression = DecompressionMethods.GZip Or DecompressionMethods.Deflate
+                    Dim response = Await SharedMethods.SendHttpRequestAsync(
+                        New SharedMethods.SharedHttpRequest() With {
+                            .Url = s,
+                            .Method = "GET",
+                            .TimeoutMs = 30000,
+                            .UserAgent = "RedInk/1.0 (+https://redink.ai)",
+                            .Accept = "application/pdf, text/*, */*",
+                            .StackPreference = SharedMethods.HttpStackPreference.PreferConfiguredDefault
+                        }).ConfigureAwait(False)
 
-                    Using client As New HttpClient(handler)
-                        client.Timeout = TimeSpan.FromSeconds(30)
-                        ' Some servers reject requests without UA
-                        Try
-                            client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "RedInk/1.0 (+https://redink.ai)")
-                            client.DefaultRequestHeaders.TryAddWithoutValidation("Accept", "application/pdf, text/*, */*")
-                        Catch
-                        End Try
+                    If response Is Nothing OrElse response.StatusCode < 200 OrElse response.StatusCode >= 300 Then
+                        Return ""
+                    End If
 
-                        Using resp As HttpResponseMessage = Await client.GetAsync(s, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(False)
-                            If Not resp.IsSuccessStatusCode Then Return ""
+                    Debug.WriteLine("Manual HTTP stack: " & response.UsedStack)
 
-                            Dim data As Byte() = Await resp.Content.ReadAsByteArrayAsync().ConfigureAwait(False)
+                    Dim data As Byte() = If(response.BodyBytes, New Byte() {})
 
-                            ' Extract media type if provided
-                            Dim mediaType As String = ""
-                            If resp.Content IsNot Nothing AndAlso resp.Content.Headers IsNot Nothing AndAlso resp.Content.Headers.ContentType IsNot Nothing Then
-                                If Not String.IsNullOrEmpty(resp.Content.Headers.ContentType.MediaType) Then
-                                    mediaType = resp.Content.Headers.ContentType.MediaType.ToLowerInvariant()
-                                End If
-                            End If
+                    ' Extract media type if provided
+                    Dim mediaType As String = ""
+                    If Not String.IsNullOrEmpty(response.ContentType) Then
+                        mediaType = response.ContentType.ToLowerInvariant()
+                    End If
 
-                            ' PDF detection
-                            Dim isPdf As Boolean = False
+                    ' PDF detection
+                    Dim isPdf As Boolean = False
 
-                            ' 1) Declared content-type
-                            If Not String.IsNullOrEmpty(mediaType) AndAlso mediaType.IndexOf("pdf", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    ' 1) Declared content-type
+                    If Not String.IsNullOrEmpty(mediaType) AndAlso mediaType.IndexOf("pdf", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                        isPdf = True
+                    End If
+
+                    ' 2) URL contains ".pdf" anywhere (also handles querystring)
+                    If Not isPdf Then
+                        If s.IndexOf(".pdf", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                            isPdf = True
+                        End If
+                    End If
+
+                    ' 3) Magic header scan for "%PDF" within first KB (after possible BOM or garbage)
+                    If Not isPdf AndAlso data.Length >= 4 Then
+                        Dim scanMax As Integer = Math.Min(data.Length - 4, 1024)
+                        Dim i As Integer = 0
+                        While i <= scanMax
+                            If data(i) = AscW("%"c) AndAlso data(i + 1) = AscW("P"c) AndAlso data(i + 2) = AscW("D"c) AndAlso data(i + 3) = AscW("F"c) Then
                                 isPdf = True
+                                Exit While
                             End If
+                            i += 1
+                        End While
+                    End If
 
-                            ' 2) URL contains ".pdf" anywhere (also handles querystring)
-                            If Not isPdf Then
-                                If s.IndexOf(".pdf", StringComparison.OrdinalIgnoreCase) >= 0 Then
-                                    isPdf = True
-                                End If
-                            End If
+                    If isPdf Then
+                        Try
+                            Dim tmpPath As String = Path.Combine(Path.GetTempPath(), "manual_" & Guid.NewGuid().ToString("N") & ".pdf")
+                            File.WriteAllBytes(tmpPath, data)
+                            Return Await SharedMethods.ReadPdfAsText(tmpPath, True, False, False, context).ConfigureAwait(False)
+                        Catch
+                            Return ""
+                        End Try
+                    End If
 
-                            ' 3) Magic header scan for "%PDF" within first KB (after possible BOM or garbage)
-                            If Not isPdf AndAlso data IsNot Nothing AndAlso data.Length >= 4 Then
-                                Dim scanMax As Integer = Math.Min(data.Length - 4, 1024)
-                                Dim i As Integer = 0
-                                While i <= scanMax
-                                    If data(i) = AscW("%"c) AndAlso data(i + 1) = AscW("P"c) AndAlso data(i + 2) = AscW("D"c) AndAlso data(i + 3) = AscW("F"c) Then
-                                        isPdf = True
-                                        Exit While
-                                    End If
-                                    i += 1
-                                End While
-                            End If
+                    ' Fallback: decode as text
+                    Dim enc As Encoding = Encoding.UTF8
+                    If Not String.IsNullOrEmpty(response.CharSet) Then
+                        Try
+                            enc = Encoding.GetEncoding(response.CharSet)
+                        Catch
+                            enc = Encoding.UTF8
+                        End Try
+                    End If
 
-                            If isPdf Then
-                                Try
-                                    Dim tmpPath As String = Path.Combine(Path.GetTempPath(), "manual_" & Guid.NewGuid().ToString("N") & ".pdf")
-                                    File.WriteAllBytes(tmpPath, data)
-                                    Return Await SharedMethods.ReadPdfAsText(tmpPath, True, False, False, context).ConfigureAwait(False)
-                                Catch
-                                    Return ""
-                                End Try
-                            End If
+                    Dim text As String = enc.GetString(data)
 
-                            ' Fallback: decode as text
-                            Dim enc As Encoding = Encoding.UTF8
-                            Dim charset As String = ""
-                            If resp.Content IsNot Nothing AndAlso resp.Content.Headers IsNot Nothing AndAlso resp.Content.Headers.ContentType IsNot Nothing Then
-                                charset = resp.Content.Headers.ContentType.CharSet
-                            End If
-                            If Not String.IsNullOrEmpty(charset) Then
-                                Try
-                                    enc = Encoding.GetEncoding(charset)
-                                Catch
-                                    enc = Encoding.UTF8
-                                End Try
-                            End If
-
-                            Dim text As String = enc.GetString(data)
-
-                            ' HTML -> plain
-                            If Not String.IsNullOrEmpty(mediaType) AndAlso mediaType.IndexOf("html", StringComparison.OrdinalIgnoreCase) >= 0 Then
-                                If LooksLikeHtml(text) Then
-                                    Return HtmlToPlain(text)
-                                Else
-                                    Return text
-                                End If
-                            End If
-
-                            ' Generic octet-stream sometimes still is HTML
-                            If LooksLikeHtml(text) Then
-                                Return HtmlToPlain(text)
-                            End If
-
+                    ' HTML -> plain
+                    If Not String.IsNullOrEmpty(mediaType) AndAlso mediaType.IndexOf("html", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                        If LooksLikeHtml(text) Then
+                            Return HtmlToPlain(text)
+                        Else
                             Return text
-                        End Using
-                    End Using
+                        End If
+                    End If
+
+                    ' Generic octet-stream sometimes still is HTML
+                    If LooksLikeHtml(text) Then
+                        Return HtmlToPlain(text)
+                    End If
+
+                    Return text
                 Catch
                     Return ""
                 End Try

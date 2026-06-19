@@ -1037,6 +1037,8 @@ Namespace SharedLibrary
                     Return context.INI_STT_Azure_SpeechKey
                 Case "BrandingName"
                     Return context.INI_BrandingName
+                Case "HttpStack"
+                    Return context.INI_HttpStack
                 Case "LogoPath"
                     Return context.INI_LogoPath
                 Case "LogoPathMedium"
@@ -1425,6 +1427,8 @@ Namespace SharedLibrary
                     context.INI_STT_Azure_SpeechKey = value
                 Case "BrandingName"
                     context.INI_BrandingName = value
+                Case "HttpStack"
+                    context.INI_HttpStack = value
                 Case "LogoPath"
                     context.INI_LogoPath = value
                 Case "LogoPathMedium"
@@ -1913,6 +1917,7 @@ Namespace SharedLibrary
                     {"DocCheckPathLocal", context.INI_DocCheckPathLocal},
                     {"DocStylePath", context.INI_DocStylePath},
                     {"DocStylePathLocal", context.INI_DocStylePathLocal},
+                    {"HttpStack", context.INI_HttpStack},
                     {"BrandingName", context.INI_BrandingName},
                     {"LogoPath", context.INI_LogoPath},
                     {"LogoPathMedium", context.INI_LogoPathMedium},
@@ -2556,6 +2561,7 @@ Namespace SharedLibrary
                     {"AssembleMaxContextSummaryChars", context.INI_AssembleMaxContextSummaryChars.ToString()},
                     {"UpdateCheckInterval", context.INI_UpdateCheckInterval.ToString()},
                     {"UpdatePath", context.INI_UpdatePath},
+                    {"HttpStack", context.INI_HttpStack},
                     {"BrandingName", context.INI_BrandingName},
                     {"LogoPath", context.INI_LogoPath},
                     {"LogoPathMedium", context.INI_LogoPathMedium},
@@ -3368,6 +3374,7 @@ Namespace SharedLibrary
             variableValues.Add("STT_Azure", context.INI_STT_Azure)
             variableValues.Add("STT_Azure_SpeechKey", context.INI_STT_Azure_SpeechKey)
             variableValues.Add("TTSEndpoint", context.INI_TTSEndpoint)
+            variableValues.Add("HttpStack", context.INI_HttpStack)
             variableValues.Add("BrandingName", context.INI_BrandingName)
             variableValues.Add("LogoPath", context.INI_LogoPath)
             variableValues.Add("LogoPathMedium", context.INI_LogoPathMedium)
@@ -3776,6 +3783,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("DocStylePath") Then context.INI_DocStylePath = CStr(updatedValues("DocStylePath"))
                 If updatedValues.ContainsKey("DocStylePathLocal") Then context.INI_DocStylePathLocal = CStr(updatedValues("DocStylePathLocal"))
                 If updatedValues.ContainsKey("PromptLib_Transcript") Then context.INI_PromptLibPath_Transcript = CStr(updatedValues("PromptLib_Transcript"))
+                If updatedValues.ContainsKey("HttpStack") Then context.INI_HttpStack = CStr(updatedValues("HttpStack"))
                 If updatedValues.ContainsKey("BrandingName") Then context.INI_BrandingName = CStr(updatedValues("BrandingName"))
                 If updatedValues.ContainsKey("LogoPath") Then context.INI_LogoPath = CStr(updatedValues("LogoPath"))
                 If updatedValues.ContainsKey("LogoPathMedium") Then context.INI_LogoPathMedium = CStr(updatedValues("LogoPathMedium"))

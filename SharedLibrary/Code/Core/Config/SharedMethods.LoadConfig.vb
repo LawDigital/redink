@@ -397,6 +397,10 @@ Namespace SharedLibrary
                 SharedMethods.INI_LogoPathLarge_Cached = context.INI_LogoPathLarge
                 SharedMethods.INI_AllowLegacyDocFiles_Cached = context.INI_AllowLegacyDocFiles
 
+                context.INI_HttpStack = If(configDict.ContainsKey("HttpStack"), configDict("HttpStack"), "")
+
+                SharedMethods.INI_HttpStack_Cached = context.INI_HttpStack
+
                 ' Apply administrator-configured registry fixes (e.g., resiliency hardening).
                 ApplyRegistryFixes(configDict, context)
 

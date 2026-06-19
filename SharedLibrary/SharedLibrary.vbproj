@@ -580,6 +580,7 @@
     <Compile Include="Code\Core\LLM\ModelSelection\SharedMethods.AlternateModels.vb" />
     <Compile Include="Code\Core\LLM\ModelSelection\SharedMethods.PrimaryModelManager.vb" />
     <Compile Include="Code\Core\LLM\SharedMethods.GoogleOAuthHelper.vb" />
+    <Compile Include="Code\Core\LLM\SharedMethods.Http.vb" />
     <Compile Include="Code\Core\LLM\SharedMethods.MainLLM.vb" />
     <Compile Include="Code\Core\LLM\SharedMethods.MCP.vb" />
     <Compile Include="Code\Core\LLM\SharedMethods.MCPOAuth.vb" />

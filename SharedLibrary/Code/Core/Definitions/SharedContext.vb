@@ -376,6 +376,8 @@ Namespace SharedLibrary
             Property INI_LogoPath As String
             Property INI_BrandingName As String
 
+            Property INI_HttpStack As String
+
             ' InkyMemory settings
             Property INI_InkyMemoryCap As Integer
             Property SP_Add_InkyMemory As String
@@ -723,6 +725,8 @@ Namespace SharedLibrary
         Public Property INI_LogoPathMedium As String Implements ISharedContext.INI_LogoPathMedium
         Public Property INI_LogoPath As String Implements ISharedContext.INI_LogoPath
         Public Property INI_BrandingName As String Implements ISharedContext.INI_BrandingName
+
+        Public Property INI_HttpStack As String Implements ISharedContext.INI_HttpStack
 
         Public Property INI_InkyMemoryCap As Integer Implements ISharedContext.INI_InkyMemoryCap
         Public Property SP_Add_InkyMemory As String Implements ISharedContext.SP_Add_InkyMemory

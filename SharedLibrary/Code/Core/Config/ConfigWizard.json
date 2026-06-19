@@ -1073,6 +1073,13 @@
                 "description": "Define keyboard shortcuts in the format Menu item=Key combination, separated by semicolons. The menu text must match the visible command name exactly. This only works if the Word and/or Excel helper is installed. Example: To English=Ctrl-Shift-E;Freestyle=Ctrl-Shift-P. [ShortcutsWordExcel]"
             },
             {
+                "key": "HttpStack",
+                "label": "Http Stack To Use",
+                "type": "string",
+                "default": "",
+                "description": "Define the http stack to be used for license server requests, 'Help me, Inky' and other cases (LLM/MCP calls are not affected). Can be httpclient, winhttp, prefer-winhttp, prefer-httpclient (which is the default). [HttpStack]"
+            },
+            {
                 "key": "APIDebug",
                 "label": "API Debug Mode",
                 "type": "boolean",
