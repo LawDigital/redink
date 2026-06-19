@@ -758,6 +758,7 @@ Partial Public Class ThisAddIn
 
                 ' Mark as executed and advance schedule
                 task.LastExecutedUtc = DateTime.UtcNow
+                task.FailureRetryCount = 0
                 task.LastResult = "Completed successfully at " & DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss UTC")
 
                 AdvanceTaskSchedule(task)
@@ -796,6 +797,7 @@ Partial Public Class ThisAddIn
             $"— retry limit reached after {AP_SchedulerEmailFailureRetryLimit} retr{If(AP_SchedulerEmailFailureRetryLimit = 1, "y", "ies")}"
 
         AdvanceTaskSchedule(task)
+        task.FailureRetryCount = 0
         SchedulerUpdateTask(task)
 
         ApDashboardLog(
@@ -952,13 +954,16 @@ Partial Public Class ThisAddIn
             End If
 
             Dim taskStatus = SharedLibrary.Agents.TaskStatusFooterParser.Parse(response)
+            Dim isPartialResult As Boolean = False
+            Dim partialFailureMessage As String = ""
 
             If taskStatus IsNot Nothing Then
                 Select Case taskStatus.Kind
                     Case SharedLibrary.Agents.TaskStatusKind.Blocked
-                        Throw New InvalidOperationException(
+                        isPartialResult = True
+                        partialFailureMessage =
                             "Scheduled task execution was blocked" &
-                            If(String.IsNullOrWhiteSpace(taskStatus.Reason), ".", ": " & taskStatus.Reason))
+                            If(String.IsNullOrWhiteSpace(taskStatus.Reason), ".", ": " & taskStatus.Reason)
 
                     Case SharedLibrary.Agents.TaskStatusKind.Invalid
                         Throw New InvalidOperationException(
@@ -968,6 +973,17 @@ Partial Public Class ThisAddIn
             End If
 
             response = SharedLibrary.Agents.TaskStatusFooterParser.Strip(response)
+
+            If isPartialResult Then
+                Dim partialNotice As String =
+                    "Important: These are partial results only. Not everything completed successfully, so the output may be incomplete."
+
+                If String.IsNullOrWhiteSpace(response) Then
+                    response = partialNotice & Environment.NewLine & Environment.NewLine & partialFailureMessage
+                Else
+                    response = partialNotice & Environment.NewLine & Environment.NewLine & response
+                End If
+            End If
 
             ' Collect result attachments
             Dim resultAttachments = CollectResultAttachments(tempDir, attachments)
@@ -985,6 +1001,10 @@ Partial Public Class ThisAddIn
 
             Interlocked.Increment(_apSessionReplyCount)
             RecordLastProcessedTime()
+
+            If isPartialResult Then
+                Throw New InvalidOperationException(partialFailureMessage)
+            End If
 
         Finally
             _apCurrentTempDir = Nothing
@@ -1257,6 +1277,40 @@ Partial Public Class ThisAddIn
         Return FilterScheduledTaskExecutableTools(merged, executionMode)
     End Function
 
+    Private Function TryResolveScheduledTaskPreferredToolingModel(ByRef modelConfig As ModelConfig,
+                                                                  ByRef displayKey As String) As Boolean
+        modelConfig = Nothing
+        displayKey = Nothing
+
+        If String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then Return False
+
+        If TryGetSpecialTaskModelConfig(_context, INI_AlternateModelPath, "AgentDefaultModel", modelConfig) AndAlso
+           modelConfig IsNot Nothing AndAlso
+           ModelSupportsTooling(modelConfig) Then
+
+            displayKey = If(Not String.IsNullOrWhiteSpace(modelConfig.ModelDescription),
+                            modelConfig.ModelDescription,
+                            modelConfig.Model)
+            Return True
+        End If
+
+        modelConfig = Nothing
+
+        If TryGetSpecialTaskModelConfig(_context, INI_AlternateModelPath, "ToolDefaultModel", modelConfig) AndAlso
+           modelConfig IsNot Nothing AndAlso
+           ModelSupportsTooling(modelConfig) Then
+
+            displayKey = If(Not String.IsNullOrWhiteSpace(modelConfig.ModelDescription),
+                            modelConfig.ModelDescription,
+                            modelConfig.Model)
+            Return True
+        End If
+
+        modelConfig = Nothing
+        displayKey = Nothing
+        Return False
+    End Function
+
     Private Sub ResolveScheduledTaskExecutionContext(task As ScheduledTask,
                                                      ByRef executionState As InkyState,
                                                      ByRef executionModelConfig As ModelConfig,
@@ -1305,31 +1359,41 @@ Partial Public Class ThisAddIn
             executionSelectedTools = New List(Of ModelConfig)()
         End If
 
-        If Not executionUseSecondApi Then Return
+        Dim scheduledTaskToolingModel As ModelConfig = Nothing
+        Dim scheduledTaskToolingModelKey As String = Nothing
+
+        If TryResolveScheduledTaskPreferredToolingModel(scheduledTaskToolingModel, scheduledTaskToolingModelKey) Then
+            executionUseSecondApi = True
+            executionModelConfig = scheduledTaskToolingModel
+        ElseIf Not executionUseSecondApi Then
+            Return
+        End If
 
         originalExecutionConfig = GetCurrentConfig(_context)
 
-        Dim selectedModelKey = executionState.SelectedModelKey
+        If executionModelConfig Is Nothing Then
+            Dim selectedModelKey = executionState.SelectedModelKey
 
-        If String.IsNullOrWhiteSpace(selectedModelKey) Then
-            executionModelConfig = originalExecutionConfig
-        Else
-            Try
-                Dim alts = LoadAlternativeModels(INI_AlternateModelPath, _context)
-                Dim selectedModel = alts?.FirstOrDefault(
-                    Function(m)
-                        If m Is Nothing Then Return False
-                        If Not String.IsNullOrWhiteSpace(m.ModelDescription) AndAlso
-                           String.Equals(m.ModelDescription, selectedModelKey, StringComparison.OrdinalIgnoreCase) Then Return True
-                        If Not String.IsNullOrWhiteSpace(m.Model) AndAlso
-                           String.Equals(m.Model, selectedModelKey, StringComparison.OrdinalIgnoreCase) Then Return True
-                        Return False
-                    End Function)
-
-                executionModelConfig = If(selectedModel, originalExecutionConfig)
-            Catch
+            If String.IsNullOrWhiteSpace(selectedModelKey) Then
                 executionModelConfig = originalExecutionConfig
-            End Try
+            Else
+                Try
+                    Dim alts = LoadAlternativeModels(INI_AlternateModelPath, _context)
+                    Dim selectedModel = alts?.FirstOrDefault(
+                        Function(m)
+                            If m Is Nothing Then Return False
+                            If Not String.IsNullOrWhiteSpace(m.ModelDescription) AndAlso
+                               String.Equals(m.ModelDescription, selectedModelKey, StringComparison.OrdinalIgnoreCase) Then Return True
+                            If Not String.IsNullOrWhiteSpace(m.Model) AndAlso
+                               String.Equals(m.Model, selectedModelKey, StringComparison.OrdinalIgnoreCase) Then Return True
+                            Return False
+                        End Function)
+
+                    executionModelConfig = If(selectedModel, originalExecutionConfig)
+                Catch
+                    executionModelConfig = originalExecutionConfig
+                End Try
+            End If
         End If
 
         If executionModelConfig IsNot Nothing Then
@@ -1346,6 +1410,10 @@ Partial Public Class ThisAddIn
         End If
 
         If executionState IsNot Nothing Then
+            If executionModelConfig IsNot Nothing Then
+                Return ModelSupportsTooling(executionModelConfig)
+            End If
+
             Return CurrentModelSupportsTooling(executionState)
         End If
 
@@ -1742,12 +1810,23 @@ Partial Public Class ThisAddIn
         Dim sourceChatId = If(activeChatId = chatId, 1, activeChatId)
         Dim sourceState = LoadInkyState(sourceChatId)
         Dim targetState = LoadInkyState(chatId)
+        Dim scheduledTaskModelConfig As ModelConfig = Nothing
+        Dim scheduledTaskModelKey As String = Nothing
 
         targetState.History = New List(Of ChatTurn)()
         targetState.LastAssistantText = ""
         targetState.DarkMode = True
-        targetState.UseSecondApi = sourceState.UseSecondApi
-        targetState.SelectedModelKey = sourceState.SelectedModelKey
+
+        If TryResolveScheduledTaskPreferredToolingModel(scheduledTaskModelConfig, scheduledTaskModelKey) AndAlso
+           Not String.IsNullOrWhiteSpace(scheduledTaskModelKey) Then
+
+            targetState.UseSecondApi = True
+            targetState.SelectedModelKey = scheduledTaskModelKey
+        Else
+            targetState.UseSecondApi = sourceState.UseSecondApi
+            targetState.SelectedModelKey = sourceState.SelectedModelKey
+        End If
+
         targetState.ToolingEnabled = True
         targetState.AgentModeEnabled = True
         targetState.AgentModelActive = sourceState.AgentModelActive
