@@ -29,6 +29,7 @@ Imports System.Threading.Tasks
 Imports System.Windows.Forms
 Imports Newtonsoft.Json
 
+
 Namespace SharedLibrary
     Public Class TalkToMeWidget
         Inherits Form
@@ -37,13 +38,13 @@ Namespace SharedLibrary
             Public Property X As Integer = Integer.MinValue
             Public Property Y As Integer = Integer.MinValue
             Public Property Width As Integer = 420
-            Public Property Height As Integer = 44
+            Public Property Height As Integer = 72
             Public Property IncludeFullDocument As Boolean = False
         End Class
 
         Private Const DefaultPromptText As String = "Ready. Click ▶ to start."
         Private Const ListeningPromptText As String = "Listening…"
-        Private Const DispatchPauseMilliseconds As Integer = 900
+        Private Const DispatchPauseMilliseconds As Integer = 250
 
         Private ReadOnly _speechAdapter As ITalkToMeSpeechAdapter
         Private ReadOnly _coordinator As TalkToMeCoordinator
@@ -53,9 +54,13 @@ Namespace SharedLibrary
         Private _isClosing As Boolean = False
         Private _dispatchCts As CancellationTokenSource = Nothing
         Private _isBusy As Boolean = False
+        Private _returnFocusAfterStart As Action = Nothing
+        Private _speechOutputRefreshTimer As System.Windows.Forms.Timer
 
+        Private _rootLayout As TableLayoutPanel
         Private WithEvents btnStartStop As Button
         Private WithEvents btnConfigure As Button
+        Private WithEvents btnSpeechOutput As Button
         Private lblTranscript As Label
 
         Public Sub New(speechAdapter As ITalkToMeSpeechAdapter,
@@ -67,6 +72,12 @@ Namespace SharedLibrary
             LoadSettings()
             RestoreBoundsSafe()
 
+            _speechOutputRefreshTimer = New System.Windows.Forms.Timer() With {
+                .Interval = 250,
+                .Enabled = True
+            }
+            AddHandler _speechOutputRefreshTimer.Tick, Sub(sender As Object, e As EventArgs) UpdateSpeechOutputUi()
+
             AddHandler _speechAdapter.PartialTranscriptReceived, AddressOf OnPartialTranscriptReceived
             AddHandler _speechAdapter.FinalTranscriptReceived, AddressOf OnFinalTranscriptReceived
         End Sub
@@ -75,14 +86,20 @@ Namespace SharedLibrary
             Return _settings IsNot Nothing AndAlso _settings.IncludeFullDocument
         End Function
 
+        Public Sub SetReturnFocusAfterStart(action As Action)
+            _returnFocusAfterStart = action
+        End Sub
+
         Private Sub InitializeComponent()
             Me.Text = SharedMethods.AN & " - Talk to me!"
+            Me.AutoScaleDimensions = New SizeF(96.0F, 96.0F)
+            Me.AutoScaleMode = AutoScaleMode.Dpi
             Me.FormBorderStyle = FormBorderStyle.Sizable
             Me.TopMost = True
             Me.ShowInTaskbar = False
             Me.StartPosition = FormStartPosition.Manual
-            Me.MinimumSize = New Size(320, 44)
-            Me.Size = New Size(420, 44)
+            Me.MinimumSize = New Size(360, 72)
+            Me.Size = New Size(520, 72)
             Me.Font = New Font("Segoe UI", 9.0F, FontStyle.Regular, GraphicsUnit.Point)
             Me.Padding = New Padding(0)
 
@@ -92,17 +109,18 @@ Namespace SharedLibrary
             Catch
             End Try
 
-            Dim root As New TableLayoutPanel() With {
+            _rootLayout = New TableLayoutPanel() With {
                 .Dock = DockStyle.Fill,
-                .ColumnCount = 3,
+                .ColumnCount = 4,
                 .RowCount = 1,
-                .Padding = New Padding(8, 2, 8, 2),
+                .Padding = New Padding(8, 4, 8, 4),
                 .Margin = New Padding(0)
             }
-            root.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
-            root.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
-            root.ColumnStyles.Add(New ColumnStyle(SizeType.Percent, 100.0F))
-            root.RowStyles.Add(New RowStyle(SizeType.Percent, 100.0F))
+            _rootLayout.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
+            _rootLayout.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
+            _rootLayout.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
+            _rootLayout.ColumnStyles.Add(New ColumnStyle(SizeType.Percent, 100.0F))
+            _rootLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))
 
             btnStartStop = New Button() With {
                 .Text = ChrW(&H25B6),
@@ -113,6 +131,19 @@ Namespace SharedLibrary
                 .Margin = New Padding(0, 0, 4, 0),
                 .Padding = New Padding(0),
                 .UseVisualStyleBackColor = True
+            }
+
+            btnSpeechOutput = New Button() With {
+                .Text = Char.ConvertFromUtf32(&H1F50A),
+                .Font = New Font("Segoe UI Emoji", 9.0F, FontStyle.Regular, GraphicsUnit.Point),
+                .Size = New Size(22, 22),
+                .MinimumSize = New Size(22, 22),
+                .MaximumSize = New Size(22, 22),
+                .Margin = New Padding(0, 0, 4, 0),
+                .Padding = New Padding(0),
+                .UseVisualStyleBackColor = True,
+                .Visible = False,
+                .TabStop = False
             }
 
             btnConfigure = New Button() With {
@@ -130,17 +161,19 @@ Namespace SharedLibrary
                 .Dock = DockStyle.Fill,
                 .Text = DefaultPromptText,
                 .AutoSize = False,
-                .AutoEllipsis = False,
+                .AutoEllipsis = True,
                 .TextAlign = ContentAlignment.MiddleLeft,
                 .Margin = New Padding(0)
             }
 
-            root.Controls.Add(btnStartStop, 0, 0)
-            root.Controls.Add(btnConfigure, 1, 0)
-            root.Controls.Add(lblTranscript, 2, 0)
+            _rootLayout.Controls.Add(btnStartStop, 0, 0)
+            _rootLayout.Controls.Add(btnSpeechOutput, 1, 0)
+            _rootLayout.Controls.Add(btnConfigure, 2, 0)
+            _rootLayout.Controls.Add(lblTranscript, 3, 0)
 
-            Me.Controls.Add(root)
+            Me.Controls.Add(_rootLayout)
 
+            ApplyCalculatedMinimumSize()
             UpdateUiState()
         End Sub
 
@@ -192,6 +225,15 @@ Namespace SharedLibrary
             Catch
             End Try
 
+            Try
+                If _speechOutputRefreshTimer IsNot Nothing Then
+                    _speechOutputRefreshTimer.Stop()
+                    _speechOutputRefreshTimer.Dispose()
+                    _speechOutputRefreshTimer = Nothing
+                End If
+            Catch
+            End Try
+
             RemoveHandler _speechAdapter.PartialTranscriptReceived, AddressOf OnPartialTranscriptReceived
             RemoveHandler _speechAdapter.FinalTranscriptReceived, AddressOf OnFinalTranscriptReceived
 
@@ -221,6 +263,7 @@ Namespace SharedLibrary
         End Sub
 
         Public Sub ShowWidget()
+            ApplyCalculatedMinimumSize()
             EnsureWidgetVisible()
 
             If Me.Visible Then
@@ -230,6 +273,23 @@ Namespace SharedLibrary
                 Me.Show()
             End If
         End Sub
+
+        Public Async Function SubmitExternalSpeechAsync(speakerName As String,
+                                                        text As String) As Task(Of Boolean)
+            If _isClosing OrElse Me.IsDisposed Then
+                Return False
+            End If
+
+            If Not _speechAdapter.CanAcceptExternalSpeech Then
+                UpdateSpeechOutputUi()
+                Return False
+            End If
+
+            Return Await _speechAdapter.SubmitExternalSpeechAsync(
+                speakerName,
+                text,
+                CancellationToken.None).ConfigureAwait(False)
+        End Function
 
         Private Async Sub btnStartStop_Click(sender As Object, e As EventArgs) Handles btnStartStop.Click
             If _isBusy Then
@@ -245,6 +305,15 @@ Namespace SharedLibrary
 
         Private Sub btnConfigure_Click(sender As Object, e As EventArgs) Handles btnConfigure.Click
             ConfigureSpeech()
+        End Sub
+
+        Private Sub btnSpeechOutput_Click(sender As Object, e As EventArgs) Handles btnSpeechOutput.Click
+            If _isBusy Then
+                Return
+            End If
+
+            ConfigureSpeech()
+            UpdateSpeechOutputUi()
         End Sub
 
         Private Sub ConfigureSpeech()
@@ -267,6 +336,7 @@ Namespace SharedLibrary
             End If
 
             UpdateUiState()
+            UpdateSpeechOutputUi()
         End Sub
 
         Private Async Function StartListeningAsync() As Task
@@ -287,6 +357,17 @@ Namespace SharedLibrary
             Try
                 Await _speechAdapter.StartListeningAsync(CancellationToken.None).ConfigureAwait(True)
                 SetDisplayText(ListeningPromptText)
+
+                If _returnFocusAfterStart IsNot Nothing Then
+                    BeginInvoke(
+                        New MethodInvoker(
+                            Sub()
+                                Try
+                                    _returnFocusAfterStart.Invoke()
+                                Catch
+                                End Try
+                            End Sub))
+                End If
             Catch ex As System.Exception
                 SetDisplayText("Start failed: " & ex.Message)
             Finally
@@ -316,6 +397,10 @@ Namespace SharedLibrary
                 Return
             End If
 
+            If _speechAdapter.IsSpeechOutputActive Then
+                Return
+            End If
+
             If Me.InvokeRequired Then
                 Me.BeginInvoke(New Action(Of Object, TalkToMeTranscriptEventArgs)(AddressOf OnPartialTranscriptReceived), sender, e)
                 Return
@@ -326,6 +411,10 @@ Namespace SharedLibrary
 
         Private Async Sub OnFinalTranscriptReceived(sender As Object, e As TalkToMeTranscriptEventArgs)
             If _isClosing OrElse Me.IsDisposed Then
+                Return
+            End If
+
+            If _speechAdapter.IsSpeechOutputActive Then
                 Return
             End If
 
@@ -408,7 +497,18 @@ Namespace SharedLibrary
                 Return
             End If
 
-            Dim value As String = FitTranscript(If(text, "").Trim())
+            Dim canShowMultipleLines As Boolean = CanShowMultipleTranscriptLines()
+            Dim value As String
+
+            If canShowMultipleLines Then
+                value = FitTranscriptMultiline(If(text, "").Trim())
+                lblTranscript.AutoEllipsis = False
+                lblTranscript.TextAlign = ContentAlignment.TopLeft
+            Else
+                value = FitTranscript(If(text, "").Trim())
+                lblTranscript.AutoEllipsis = True
+                lblTranscript.TextAlign = ContentAlignment.MiddleLeft
+            End If
 
             If String.IsNullOrWhiteSpace(value) Then
                 value = DefaultPromptText
@@ -440,11 +540,73 @@ Namespace SharedLibrary
             Else
                 btnStartStop.BackColor = SystemColors.Control
             End If
+
+            UpdateSpeechOutputUi()
         End Sub
 
         Private Shared Function FitTranscript(text As String) As String
             Return System.Text.RegularExpressions.Regex.Replace(If(text, ""), "\s+", " ").Trim()
         End Function
+
+        Private Shared Function FitTranscriptMultiline(text As String) As String
+            Dim normalized As String = If(text, "").Replace(vbCrLf, vbLf).Replace(vbCr, vbLf)
+            Dim lines As String() =
+                normalized.Split(New String() {vbLf}, StringSplitOptions.None).
+                    Select(Function(line) System.Text.RegularExpressions.Regex.Replace(line, "\s+", " ").Trim()).
+                    ToArray()
+
+            Return String.Join(Environment.NewLine, lines).Trim()
+        End Function
+
+        Private Function CanShowMultipleTranscriptLines() As Boolean
+            If lblTranscript Is Nothing Then
+                Return False
+            End If
+
+            Dim lineHeight As Integer = CInt(Math.Ceiling(lblTranscript.Font.GetHeight()))
+            Return lblTranscript.Height >= (lineHeight * 2) + 4
+        End Function
+
+        Private Sub UpdateSpeechOutputUi()
+            If Me.IsDisposed OrElse btnSpeechOutput Is Nothing Then
+                Return
+            End If
+
+            If Me.InvokeRequired Then
+                Try
+                    Me.BeginInvoke(New MethodInvoker(AddressOf UpdateSpeechOutputUi))
+                Catch
+                End Try
+                Return
+            End If
+
+            btnSpeechOutput.Visible = _speechAdapter.IsSpeechOutputActive
+            btnSpeechOutput.Enabled = False
+            btnSpeechOutput.BackColor = Color.FromArgb(220, 240, 220)
+        End Sub
+
+        Private Sub ApplyCalculatedMinimumSize()
+            If Me.IsDisposed OrElse _rootLayout Is Nothing Then
+                Return
+            End If
+
+            _rootLayout.PerformLayout()
+
+            Dim preferredClientSize As Size =
+                _rootLayout.GetPreferredSize(New Size(Integer.MaxValue, Integer.MaxValue))
+
+            Dim nonClientWidth As Integer = Me.Width - Me.ClientSize.Width
+            Dim nonClientHeight As Integer = Me.Height - Me.ClientSize.Height
+
+            Dim minWidth As Integer = Math.Max(360, preferredClientSize.Width + nonClientWidth + 8)
+            Dim minHeight As Integer = Math.Max(72, preferredClientSize.Height + nonClientHeight + 8)
+
+            Me.MinimumSize = New Size(minWidth, minHeight)
+
+            If Me.Width < minWidth OrElse Me.Height < minHeight Then
+                Me.Size = New Size(Math.Max(Me.Width, minWidth), Math.Max(Me.Height, minHeight))
+            End If
+        End Sub
 
         Private Sub LoadSettings()
             _settings = New WidgetSettings()
@@ -453,7 +615,7 @@ Namespace SharedLibrary
                 _settings.X = My.Settings.TalkToMeWidgetX
                 _settings.Y = My.Settings.TalkToMeWidgetY
                 _settings.Width = If(My.Settings.TalkToMeWidgetWidth > 0, My.Settings.TalkToMeWidgetWidth, 420)
-                _settings.Height = Math.Max(44, If(My.Settings.TalkToMeWidgetHeight > 0, My.Settings.TalkToMeWidgetHeight, 44))
+                _settings.Height = Math.Max(Me.MinimumSize.Height, If(My.Settings.TalkToMeWidgetHeight > 0, My.Settings.TalkToMeWidgetHeight, Me.MinimumSize.Height))
                 _settings.IncludeFullDocument = My.Settings.TalkToMeIncludeFullDocument
             Catch
                 _settings = New WidgetSettings()
@@ -469,7 +631,7 @@ Namespace SharedLibrary
                 _settings.X = Me.Left
                 _settings.Y = Me.Top
                 _settings.Width = Me.Width
-                _settings.Height = Math.Max(44, Me.Height)
+                _settings.Height = Math.Max(Me.MinimumSize.Height, Me.Height)
 
                 My.Settings.TalkToMeWidgetX = _settings.X
                 My.Settings.TalkToMeWidgetY = _settings.Y
@@ -491,8 +653,9 @@ Namespace SharedLibrary
             If _settings.Width > 0 AndAlso _settings.Height > 0 AndAlso
                _settings.X <> Integer.MinValue AndAlso _settings.Y <> Integer.MinValue Then
 
-                Dim safeHeight As Integer = Math.Max(44, _settings.Height)
-                Me.SetBounds(_settings.X, _settings.Y, _settings.Width, safeHeight)
+                Dim safeWidth As Integer = Math.Max(Me.MinimumSize.Width, _settings.Width)
+                Dim safeHeight As Integer = Math.Max(Me.MinimumSize.Height, _settings.Height)
+                Me.SetBounds(_settings.X, _settings.Y, safeWidth, safeHeight)
             Else
                 PositionOnScreen()
             End If
@@ -517,8 +680,14 @@ Namespace SharedLibrary
 
             Try
                 If Me.InvokeRequired Then
-                    Me.BeginInvoke(New MethodInvoker(AddressOf EnsureWidgetVisible))
+                    Me.BeginInvoke(
+                        New MethodInvoker(
+                            Sub()
+                                ApplyCalculatedMinimumSize()
+                                EnsureWidgetVisible()
+                            End Sub))
                 Else
+                    ApplyCalculatedMinimumSize()
                     EnsureWidgetVisible()
                 End If
             Catch

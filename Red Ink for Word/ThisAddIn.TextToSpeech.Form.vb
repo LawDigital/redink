@@ -178,14 +178,24 @@ Partial Public Class ThisAddIn
 
             AddHandlers()
 
+            RemoveHandler cmbEngine.SelectedIndexChanged, AddressOf EngineChanged
+
             Dim saved = My.Settings.TTSProvider
             If saved = "OpenAI" AndAlso TTS_openAIAvailable Then
                 cmbEngine.SelectedItem = "OpenAI"
             ElseIf saved = "Google" AndAlso TTS_googleAvailable Then
                 cmbEngine.SelectedItem = "Google"
-            Else
-                ' fall back to whichever is first in the list
+            ElseIf cmbEngine.Items.Count > 0 Then
                 cmbEngine.SelectedIndex = 0
+            End If
+
+            AddHandler cmbEngine.SelectedIndexChanged, AddressOf EngineChanged
+
+            If cmbEngine.SelectedItem IsNot Nothing AndAlso
+               cmbEngine.SelectedItem.ToString() = "OpenAI" Then
+                TTS_SelectedEngine = TTSEngine.OpenAI
+            Else
+                TTS_SelectedEngine = TTSEngine.Google
             End If
 
             PopulateLanguageComboBoxes()
@@ -589,36 +599,79 @@ Partial Public Class ThisAddIn
             RemoveHandler cmbLanguage1.SelectedIndexChanged, AddressOf cmbLanguage1_SelectedIndexChanged
             RemoveHandler cmbLanguage2.SelectedIndexChanged, AddressOf cmbLanguage2_SelectedIndexChanged
 
-            ' restore last‐used languages
-            cmbLanguage1.SelectedItem = My.Settings.TTS1languagecode
-            cmbLanguage2.SelectedItem = My.Settings.TTS2languagecode
+            Dim selectedLanguage1 As String = SelectExistingComboItem(cmbLanguage1, My.Settings.TTS1languagecode)
+            Dim selectedLanguage2 As String = SelectExistingComboItem(cmbLanguage2, My.Settings.TTS2languagecode)
 
             Dim tasks As New List(Of System.Threading.Tasks.Task)
 
             If TTS_SelectedEngine = TTSEngine.OpenAI Then
-                ' immediate, sync fill of voices
-                PopulateOpenAIVoices(cmbLanguage1.Text, cmbVoice1A, cmbVoice1B)
-                PopulateOpenAIVoices(cmbLanguage2.Text, cmbVoice2A, cmbVoice2B)
+                PopulateOpenAIVoices(selectedLanguage1, cmbVoice1A, cmbVoice1B)
+                PopulateOpenAIVoices(selectedLanguage2, cmbVoice2A, cmbVoice2B)
             Else
-                ' Google: async fetch
-                If Not String.IsNullOrEmpty(cmbLanguage1.Text) Then
-                    tasks.Add(LoadVoicesIntoComboBoxesAsync(cmbLanguage1.Text, cmbVoice1A, cmbVoice1B))
+                If Not String.IsNullOrEmpty(selectedLanguage1) Then
+                    tasks.Add(LoadVoicesIntoComboBoxesAsync(selectedLanguage1, cmbVoice1A, cmbVoice1B))
                 End If
-                If Not String.IsNullOrEmpty(cmbLanguage2.Text) Then
-                    tasks.Add(LoadVoicesIntoComboBoxesAsync(cmbLanguage2.Text, cmbVoice2A, cmbVoice2B))
+                If Not String.IsNullOrEmpty(selectedLanguage2) Then
+                    tasks.Add(LoadVoicesIntoComboBoxesAsync(selectedLanguage2, cmbVoice2A, cmbVoice2B))
                 End If
             End If
 
             If tasks.Count > 0 Then Await System.Threading.Tasks.Task.WhenAll(tasks)
 
-            ' restore last‐used voice selections
-            cmbVoice1A.SelectedItem = My.Settings.TTS1voiceA
-            cmbVoice1B.SelectedItem = My.Settings.TTS1voiceB
-            cmbVoice2A.SelectedItem = My.Settings.TTS2voiceA
-            cmbVoice2B.SelectedItem = My.Settings.TTS2voiceB
+            RestoreExistingComboItem(cmbVoice1A, My.Settings.TTS1voiceA)
+            RestoreExistingComboItem(cmbVoice1B, My.Settings.TTS1voiceB)
+            RestoreExistingComboItem(cmbVoice2A, My.Settings.TTS2voiceA)
+            RestoreExistingComboItem(cmbVoice2B, My.Settings.TTS2voiceB)
 
             AddHandler cmbLanguage1.SelectedIndexChanged, AddressOf cmbLanguage1_SelectedIndexChanged
             AddHandler cmbLanguage2.SelectedIndexChanged, AddressOf cmbLanguage2_SelectedIndexChanged
+        End Sub
+
+        Private Function SelectExistingComboItem(combo As Forms.ComboBox, preferredValue As String) As String
+            Dim normalizedPreferredValue As String = If(preferredValue, "").Trim()
+
+            If combo Is Nothing Then
+                Return ""
+            End If
+
+            If Not String.IsNullOrWhiteSpace(normalizedPreferredValue) Then
+                For Each item As Object In combo.Items
+                    Dim itemText As String = If(item, "").ToString()
+                    If itemText.Equals(normalizedPreferredValue, StringComparison.OrdinalIgnoreCase) Then
+                        combo.SelectedItem = item
+                        Return itemText
+                    End If
+                Next
+            End If
+
+            If combo.Items.Count > 0 Then
+                combo.SelectedIndex = 0
+                Return If(combo.SelectedItem, "").ToString()
+            End If
+
+            Return ""
+        End Function
+
+        Private Sub RestoreExistingComboItem(combo As Forms.ComboBox, preferredValue As String)
+            Dim normalizedPreferredValue As String = If(preferredValue, "").Trim()
+
+            If combo Is Nothing OrElse combo.Items.Count = 0 Then
+                Return
+            End If
+
+            If Not String.IsNullOrWhiteSpace(normalizedPreferredValue) Then
+                For Each item As Object In combo.Items
+                    Dim itemText As String = If(item, "").ToString()
+                    If itemText.Equals(normalizedPreferredValue, StringComparison.OrdinalIgnoreCase) Then
+                        combo.SelectedItem = item
+                        Return
+                    End If
+                Next
+            End If
+
+            If combo.SelectedIndex < 0 Then
+                combo.SelectedIndex = 0
+            End If
         End Sub
 
 

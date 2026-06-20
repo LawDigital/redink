@@ -109,12 +109,22 @@ Namespace SharedLibrary
 
         ReadOnly Property IsListening As Boolean
         ReadOnly Property IsConfigured As Boolean
+        ReadOnly Property IsSpeechOutputAvailable As Boolean
+        ReadOnly Property IsSpeechOutputEnabled As Boolean
+        ReadOnly Property IsSpeechOutputActive As Boolean
+        ReadOnly Property CanAcceptExternalSpeech As Boolean
 
         Function Configure(owner As System.Windows.Forms.IWin32Window,
                            currentIncludeFullDocument As Boolean) As TalkToMeSpeechConfigurationResult
         Function StartListeningAsync(cancellationToken As CancellationToken) As Task
         Function StopListeningAsync() As Task
         Function GetConfigurationSummary() As String
+        Function GetSpeechOutputSummary() As String
+        Function ConfigureSpeechOutput(owner As System.Windows.Forms.IWin32Window) As String
+        Function ToggleSpeechOutputEnabled() As Boolean
+        Function SubmitExternalSpeechAsync(speakerName As String,
+                                           text As String,
+                                           cancellationToken As CancellationToken) As Task(Of Boolean)
     End Interface
 
     Public Class TalkToMeCoordinator

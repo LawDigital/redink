@@ -1672,6 +1672,30 @@ Namespace My
                 Me("DiscussLastSessionStateXml") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property TalkToMeSpeechOutputEnabled() As Boolean
+            Get
+                Return CType(Me("TalkToMeSpeechOutputEnabled"),Boolean)
+            End Get
+            Set
+                Me("TalkToMeSpeechOutputEnabled") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property TalkToMeSpeechOutputMode() As String
+            Get
+                Return CType(Me("TalkToMeSpeechOutputMode"),String)
+            End Get
+            Set
+                Me("TalkToMeSpeechOutputMode") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

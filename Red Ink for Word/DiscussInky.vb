@@ -249,6 +249,7 @@ Public Class DiscussInky
     Private ReadOnly _btnAutoRespond As Button = New Button() With {.Text = "Autorespond", .AutoSize = True}
     Private ReadOnly _btnSortOut As Button = New Button() With {.Text = "Sort It Out", .AutoSize = True}
     Private ReadOnly _btnTools As Button = New Button() With {.Text = Globals.ThisAddIn.ToolFriendlyName, .AutoSize = True}
+    Private ReadOnly _btnTalkToMe As Button = New Button() With {.Text = "", .AutoSize = True}
     Private ReadOnly _chkEnableTooling As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = $"Enable {Globals.ThisAddIn.ToolFriendlyName.ToLower}", .AutoSize = True}
     Private ReadOnly _chkAdvancedTools As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = "Advanced tools", .AutoSize = True}
     Private ReadOnly _chkShowToolingLog As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = "Tooling log", .AutoSize = True, .Checked = True}
@@ -273,6 +274,7 @@ Public Class DiscussInky
     Private _isUpdatingPersistCheckbox As Boolean = False ' Prevents recursive event handling    
     Private _toolingControlsInitialized As Boolean = False
     Private _noPersonaLibraryConfigured As Boolean = False ' True when no persona path is defined
+    Private _suppressTalkToMeForwarding As Boolean = False
     Private _activeDialogueArchiveName As String = ""
     Private _activeDialogueArchiveFilePath As String = ""
     Private _activeDialogueArchiveBaselineHash As String = ""
@@ -348,10 +350,19 @@ Public Class DiscussInky
         _context = context
 
         Me.Text = $"Discuss this, {AssistantName}"
+        Me.AutoScaleDimensions = New System.Drawing.SizeF(96.0F, 96.0F)
+        Me.AutoScaleMode = AutoScaleMode.Dpi
         Me.FormBorderStyle = FormBorderStyle.Sizable
         Me.StartPosition = FormStartPosition.Manual
         Me.MinimumSize = New System.Drawing.Size(780, 480)
         Me.Font = New System.Drawing.Font("Segoe UI", 9.0F)
+        _btnTalkToMe.Text = Char.ConvertFromUtf32(&H1F5E3) & ChrW(&HFE0F)
+        _btnTalkToMe.Font = New System.Drawing.Font("Segoe UI Emoji", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
+        _btnTalkToMe.AutoSize = False
+        _btnTalkToMe.Padding = New Padding(5, 0, 5, 0)
+        _btnTalkToMe.Margin = _btnTools.Margin
+        _btnTalkToMe.Visible = Globals.ThisAddIn.IsTalkToMeAvailable()
+        _btnTalkToMe.Enabled = _btnTalkToMe.Visible
         ' Do NOT set Me.TopMost = True.
         ' Child dialogs are parented via SharedMethods.PushDialogOwner(Me) and the
         ' shared Show* helpers already re-assert TopMost themselves on Shown,
@@ -407,6 +418,7 @@ Public Class DiscussInky
         pnlButtons.Controls.Add(_btnAutoRespond)
         pnlButtons.Controls.Add(_btnSortOut)
         pnlButtons.Controls.Add(_btnTools)
+        pnlButtons.Controls.Add(_btnTalkToMe)
         pnlButtons.Controls.Add(_chkEnableTooling)
         pnlButtons.Controls.Add(_chkAdvancedTools)
         pnlButtons.Controls.Add(_chkIncludeActiveDoc)
@@ -419,6 +431,16 @@ Public Class DiscussInky
         table.Controls.Add(_splitChat, 0, 0)
         table.Controls.Add(pnlButtons, 0, 1)
         Me.Controls.Add(table)
+
+        pnlButtons.PerformLayout()
+        Dim talkToMeButtonWidth As Integer =
+            TextRenderer.MeasureText(_btnTalkToMe.Text, _btnTalkToMe.Font).Width +
+            _btnTalkToMe.Padding.Left +
+            _btnTalkToMe.Padding.Right +
+            2
+        _btnTalkToMe.Size = New System.Drawing.Size(talkToMeButtonWidth, _btnTools.Height)
+        _btnTalkToMe.MinimumSize = _btnTalkToMe.Size
+        _btnTalkToMe.MaximumSize = _btnTalkToMe.Size
 
         InitializeButtonToolTips()
 
@@ -451,6 +473,7 @@ Public Class DiscussInky
         AddHandler _btnAutoRespond.Click, AddressOf OnAutoRespondClick
         AddHandler _btnSortOut.Click, AddressOf OnSortOutClick
         AddHandler _btnTools.Click, AddressOf OnToolsClick
+        AddHandler _btnTalkToMe.Click, AddressOf OnTalkToMeClick
         AddHandler _chkEnableTooling.CheckedChanged, AddressOf OnEnableToolingChanged
         AddHandler _chkAdvancedTools.CheckedChanged, AddressOf OnAdvancedToolsChanged
         AddHandler _chkShowToolingLog.CheckedChanged, AddressOf OnShowToolingLogChanged
@@ -522,6 +545,47 @@ Public Class DiscussInky
         End Try
     End Sub
 
+    Private Sub OnTalkToMeClick(sender As Object, e As EventArgs)
+        Try
+            Globals.ThisAddIn.ShowTalkToMeWidget(AddressOf RestoreFocusAfterTalkToMeStart)
+        Catch ex As Exception
+            AppendSystemMessage($"Could not open TalkToMe: {ex.Message}")
+        End Try
+    End Sub
+
+    Private Sub RestoreFocusAfterTalkToMeStart()
+        If Me.IsDisposed Then
+            Return
+        End If
+
+        Ui(
+            Sub()
+                Try
+                    If Me.WindowState = FormWindowState.Minimized Then
+                        Me.WindowState = FormWindowState.Normal
+                    End If
+
+                    SharedMethods.EnsureVisibleOnScreen(Me)
+                    Me.Show()
+                    Me.Activate()
+                    Me.BringToFront()
+                    _txtInput.Focus()
+                Catch
+                End Try
+            End Sub)
+    End Sub
+
+    Private Sub ForwardOutputToTalkToMe(speakerName As String, outputText As String)
+        If _suppressTalkToMeForwarding Then
+            Return
+        End If
+
+        Try
+            Globals.ThisAddIn.SubmitTalkToMeExternalSpeech("", outputText)
+        Catch
+        End Try
+    End Sub
+
     ''' <summary>
     ''' Builds the window caption to reflect persona, mission, knowledge file, and model state.
     ''' </summary>
@@ -574,6 +638,7 @@ Public Class DiscussInky
         _toolTip.SetToolTip(_btnAutoRespond, "Start an automated back-and-forth discussion.")
         _toolTip.SetToolTip(_btnSortOut, "Run a structured Advocate versus Challenger discussion.")
         _toolTip.SetToolTip(_btnTools, $"Select the {Globals.ThisAddIn.ToolFriendlyName.ToLower} available for this discussion.")
+        _toolTip.SetToolTip(_btnTalkToMe, "Show TalkToMe and return focus here after listening starts.")
     End Sub
 
     ''' <summary>
@@ -3464,6 +3529,8 @@ Public Class DiscussInky
                 AppendHtml($"<div class='msg assistant'><span class='who'>{whoHtml}:</span><div class='content'>{t}</div></div>")
             End If
         End If
+
+        ForwardOutputToTalkToMe(displayName, md)
     End Sub
 
 #End Region
@@ -3538,39 +3605,47 @@ Public Class DiscussInky
     ''' </summary>
     Private Sub AppendTranscriptToHtml(transcript As String)
         If String.IsNullOrEmpty(transcript) Then Return
-        Dim lines = transcript.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf).Split({vbLf}, StringSplitOptions.None)
-        Dim currentRole As String = Nothing
-        Dim content As New StringBuilder()
 
-        Dim flush =
-            Sub()
-                If content.Length = 0 OrElse String.IsNullOrEmpty(currentRole) Then
-                    content.Clear() : currentRole = Nothing : Return
-                End If
-                If currentRole = "user" Then
-                    Dim enc = WebUtility.HtmlEncode(content.ToString()).Replace(vbLf, "<br>")
-                    AppendHtml($"<div class='msg user'><span class='who'>You:</span><span class='content'>{enc}</span></div>")
+        _suppressTalkToMeForwarding = True
+
+        Try
+            Dim lines = transcript.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf).Split({vbLf}, StringSplitOptions.None)
+            Dim currentRole As String = Nothing
+            Dim content As New StringBuilder()
+
+            Dim flush =
+                Sub()
+                    If content.Length = 0 OrElse String.IsNullOrEmpty(currentRole) Then
+                        content.Clear() : currentRole = Nothing : Return
+                    End If
+                    If currentRole = "user" Then
+                        Dim enc = WebUtility.HtmlEncode(content.ToString()).Replace(vbLf, "<br>")
+                        AppendHtml($"<div class='msg user'><span class='who'>You:</span><span class='content'>{enc}</span></div>")
+                    Else
+                        AppendAssistantMarkdown(content.ToString())
+                    End If
+                    content.Clear()
+                    currentRole = Nothing
+                End Sub
+
+            For Each ln In lines
+                If ln.StartsWith("You:", StringComparison.OrdinalIgnoreCase) Then
+                    flush() : currentRole = "user" : content.Append(ln.Substring(4).TrimStart())
+                ElseIf ln.StartsWith(_currentPersonaName & ":", StringComparison.OrdinalIgnoreCase) Then
+                    flush() : currentRole = "assistant" : content.Append(ln.Substring((_currentPersonaName & ":").Length).TrimStart())
+                ElseIf ln.StartsWith(AssistantName & ":", StringComparison.OrdinalIgnoreCase) Then
+                    flush() : currentRole = "assistant" : content.Append(ln.Substring((AssistantName & ":").Length).TrimStart())
                 Else
-                    AppendAssistantMarkdown(content.ToString())
+                    If content.Length > 0 Then content.AppendLine()
+                    content.Append(ln)
                 End If
-                content.Clear()
-                currentRole = Nothing
-            End Sub
+            Next
 
-        For Each ln In lines
-            If ln.StartsWith("You:", StringComparison.OrdinalIgnoreCase) Then
-                flush() : currentRole = "user" : content.Append(ln.Substring(4).TrimStart())
-            ElseIf ln.StartsWith(_currentPersonaName & ":", StringComparison.OrdinalIgnoreCase) Then
-                flush() : currentRole = "assistant" : content.Append(ln.Substring((_currentPersonaName & ":").Length).TrimStart())
-            ElseIf ln.StartsWith(AssistantName & ":", StringComparison.OrdinalIgnoreCase) Then
-                flush() : currentRole = "assistant" : content.Append(ln.Substring((AssistantName & ":").Length).TrimStart())
-            Else
-                If content.Length > 0 Then content.AppendLine()
-                content.Append(ln)
-            End If
-        Next
-        flush()
-        PersistChatHtml()
+            flush()
+            PersistChatHtml()
+        Finally
+            _suppressTalkToMeForwarding = False
+        End Try
     End Sub
 
     ''' <summary>
@@ -4120,6 +4195,8 @@ Public Class DiscussInky
                 AppendHtml($"<div class='msg autoresponder'><span class='who'>{whoHtml}:</span><div class='content'>{t}</div></div>")
             End If
         End If
+
+        ForwardOutputToTalkToMe(responderName, text)
     End Sub
 
 #End Region
