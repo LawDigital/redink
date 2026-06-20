@@ -257,6 +257,50 @@ Partial Public Class ThisAddIn
         Return DateTime.UtcNow.AddHours(_apConfig.AutoDeleteAfterHours)
     End Function
 
+    Private Function TryGetAutoDeleteTargetStoreId(session As Microsoft.Office.Interop.Outlook.NameSpace,
+                                                   ByRef storeId As String) As Boolean
+        storeId = ""
+
+        If session Is Nothing Then Return False
+        If _apConfig Is Nothing OrElse String.IsNullOrWhiteSpace(_apConfig.MonitoredMailbox) Then Return True
+
+        For i As Integer = 1 To session.Accounts.Count
+            Dim acct As Account = Nothing
+            Dim deliveryStore As Store = Nothing
+
+            Try
+                acct = session.Accounts(i)
+                If acct Is Nothing Then Continue For
+                If String.IsNullOrWhiteSpace(acct.SmtpAddress) Then Continue For
+                If Not acct.SmtpAddress.Equals(_apConfig.MonitoredMailbox, StringComparison.OrdinalIgnoreCase) Then Continue For
+
+                deliveryStore = acct.DeliveryStore
+                If deliveryStore Is Nothing Then Return False
+
+                storeId = If(deliveryStore.StoreID, "")
+                Return Not String.IsNullOrWhiteSpace(storeId)
+            Catch
+            Finally
+                If deliveryStore IsNot Nothing Then Try : Marshal.ReleaseComObject(deliveryStore) : Catch : End Try
+                If acct IsNot Nothing Then Try : Marshal.ReleaseComObject(acct) : Catch : End Try
+            End Try
+        Next
+
+        Return False
+    End Function
+
+    Private Function ShouldProcessAutoDeleteStore(store As Store,
+                                                  targetStoreId As String) As Boolean
+        If store Is Nothing Then Return False
+        If String.IsNullOrWhiteSpace(targetStoreId) Then Return True
+
+        Try
+            Return store.StoreID.Equals(targetStoreId, StringComparison.OrdinalIgnoreCase)
+        Catch
+            Return False
+        End Try
+    End Function
+
     Private Function GetCleanupGroupId(mi As MailItem) As String
         If mi Is Nothing Then Return Nothing
 
@@ -318,12 +362,6 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
-    Private Function BuildCleanupGroupRestriction(groupId As String) As String
-        Dim groupProperty = ChrW(34) & AP_CleanupGroupIdProperty & ChrW(34)
-        Dim groupIdEscaped = If(groupId, "").Replace("'", "''")
-
-        Return "@SQL=" & groupProperty & " = '" & groupIdEscaped & "'"
-    End Function
 
     Friend Sub MarkMailGroupAsAnsweredAndEligible(originalMail As MailItem)
         If originalMail Is Nothing Then Return
@@ -362,17 +400,39 @@ Partial Public Class ThisAddIn
         Try
             session = Application.GetNamespace("MAPI")
 
+            Dim targetStoreId As String = ""
+            If Not TryGetAutoDeleteTargetStoreId(session, targetStoreId) Then Return
+
             For i As Integer = 1 To session.Stores.Count
                 Dim store As Store = Nothing
-                Dim root As MAPIFolder = Nothing
+                Dim sentItems As MAPIFolder = Nothing
+                Dim deletedItems As MAPIFolder = Nothing
 
                 Try
                     store = session.Stores(i)
-                    root = store.GetRootFolder()
-                    ApplyEligibilityToGroupInFolderTree(root, groupId, answeredUtc, deleteAfterUtc, stampedCount)
+                    If Not ShouldProcessAutoDeleteStore(store, targetStoreId) Then Continue For
+
+                    Try
+                        sentItems = store.GetDefaultFolder(OlDefaultFolders.olFolderSentMail)
+                        ApplyEligibilityToGroupInFolderTree(sentItems, groupId, answeredUtc, deleteAfterUtc, stampedCount)
+                    Catch
+                    Finally
+                        If sentItems IsNot Nothing Then Try : Marshal.ReleaseComObject(sentItems) : Catch : End Try
+                        sentItems = Nothing
+                    End Try
+
+                    Try
+                        deletedItems = store.GetDefaultFolder(OlDefaultFolders.olFolderDeletedItems)
+                        ApplyEligibilityToGroupInFolderTree(deletedItems, groupId, answeredUtc, deleteAfterUtc, stampedCount)
+                    Catch
+                    Finally
+                        If deletedItems IsNot Nothing Then Try : Marshal.ReleaseComObject(deletedItems) : Catch : End Try
+                        deletedItems = Nothing
+                    End Try
+
+                    Exit For
                 Catch
                 Finally
-                    If root IsNot Nothing Then Try : Marshal.ReleaseComObject(root) : Catch : End Try
                     If store IsNot Nothing Then Try : Marshal.ReleaseComObject(store) : Catch : End Try
                 End Try
             Next
@@ -473,6 +533,9 @@ Partial Public Class ThisAddIn
         Try
             session = Application.GetNamespace("MAPI")
 
+            Dim targetStoreId As String = ""
+            If Not TryGetAutoDeleteTargetStoreId(session, targetStoreId) Then Return stats
+
             For i As Integer = 1 To session.Stores.Count
                 ThrowIfAutoDeleteCancelled(ct)
 
@@ -483,6 +546,8 @@ Partial Public Class ThisAddIn
 
                 Try
                     store = session.Stores(i)
+                    If Not ShouldProcessAutoDeleteStore(store, targetStoreId) Then Continue For
+
                     Try
                         storeLabel = If(store.DisplayName, storeLabel)
                     Catch
@@ -531,6 +596,9 @@ Partial Public Class ThisAddIn
         Try
             session = Application.GetNamespace("MAPI")
 
+            Dim targetStoreId As String = ""
+            If Not TryGetAutoDeleteTargetStoreId(session, targetStoreId) Then Return stats
+
             For i As Integer = 1 To session.Stores.Count
                 ThrowIfAutoDeleteCancelled(ct)
 
@@ -540,6 +608,8 @@ Partial Public Class ThisAddIn
 
                 Try
                     store = session.Stores(i)
+                    If Not ShouldProcessAutoDeleteStore(store, targetStoreId) Then Continue For
+
                     Try
                         storeLabel = If(store.DisplayName, storeLabel)
                     Catch
