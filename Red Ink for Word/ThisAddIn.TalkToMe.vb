@@ -1789,6 +1789,8 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
         Public Property MicrophoneDeviceIndex As Integer = 0
         Public Property SpeechOutputEnabled As Boolean = False
         Public Property SpeechOutputMode As String = "Queue (progressive)"
+        Public Property UseSpeakerSpecificVoices As Boolean = False
+        Public Property SpeechOutputSpeed As Double = 1.0R
     End Class
 
     Private NotInheritable Class LiveEngineDescriptor
@@ -1816,6 +1818,8 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
     Private _speechOutputPlaybackCts As CancellationTokenSource = Nothing
     Private _speechOutputGeneration As Integer = 0
     Private _speechOutputBusy As Integer = 0
+    Private _lastSpeechOutputSpeakerKey As String = ""
+    Private _lastSpeechOutputVoiceSlot As Integer = 0
 
     Private _g1Token As String = ""
     Private _g2Token As String = ""
@@ -1898,7 +1902,9 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
             currentIncludeFullDocument,
             savedLanguages,
             _settings.SpeechOutputEnabled,
-            NormalizeSpeechOutputMode(_settings.SpeechOutputMode))
+            NormalizeSpeechOutputMode(_settings.SpeechOutputMode),
+            _settings.UseSpeakerSpecificVoices,
+            _settings.SpeechOutputSpeed)
 
             If dlg.ShowDialog(ownerWindow) <> DialogResult.OK Then
                 Return New SharedLibrary.SharedLibrary.TalkToMeSpeechConfigurationResult With {
@@ -1914,8 +1920,10 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
             _settings.EngineDisplayName = _selectedDescriptor.DisplayName
             _settings.LanguageCode = dlg.SelectedLanguage
             _settings.MicrophoneDeviceIndex = dlg.SelectedMicrophoneDeviceIndex
-            _settings.SpeechOutputEnabled = dlg.SelectedSpeechOutputEnabled AndAlso IsSpeechOutputAvailable AndAlso HasConfiguredSpeechOutputSelection()
             _settings.SpeechOutputMode = NormalizeSpeechOutputMode(dlg.SelectedSpeechOutputMode)
+            _settings.UseSpeakerSpecificVoices = dlg.SelectedUseSpeakerSpecificVoices
+            _settings.SpeechOutputSpeed = NormalizeSpeechOutputSpeed(dlg.SelectedSpeechOutputSpeed)
+            _settings.SpeechOutputEnabled = dlg.SelectedSpeechOutputEnabled AndAlso IsSpeechOutputAvailable AndAlso HasConfiguredSpeechOutputSelection()
 
             If _opts Is Nothing Then
                 _opts = New TranscriptionOptions()
@@ -1939,6 +1947,8 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
             }
         End Using
     End Function
+
+
 
     Public Async Function StartListeningAsync(cancellationToken As CancellationToken) As Task Implements SharedLibrary.SharedLibrary.ITalkToMeSpeechAdapter.StartListeningAsync
         If _isListeningValue Then
@@ -2108,10 +2118,28 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
             Return "Voice unset"
         End If
 
-        Return If(IsSpeechOutputEnabled, "Speech on", "Speech off")
+        Dim summary As String = If(IsSpeechOutputEnabled, "Speech on", "Speech off")
+
+        If _settings IsNot Nothing AndAlso _settings.UseSpeakerSpecificVoices Then
+            summary &= " / Two voices"
+        End If
+
+        Dim speed As Double = GetSafeSpeechOutputSpeed()
+        If speed > 1.0R Then
+            summary &= " / " & FormatSpeechOutputSpeed(speed)
+        End If
+
+        Return summary
     End Function
 
-    Public Function ConfigureSpeechOutput(owner As IWin32Window) As String Implements SharedLibrary.SharedLibrary.ITalkToMeSpeechAdapter.ConfigureSpeechOutput
+    Public Overloads Function ConfigureSpeechOutput(owner As IWin32Window) As String Implements SharedLibrary.SharedLibrary.ITalkToMeSpeechAdapter.ConfigureSpeechOutput
+        Return ConfigureSpeechOutput(
+            owner,
+            _settings IsNot Nothing AndAlso _settings.UseSpeakerSpecificVoices)
+    End Function
+
+    Public Overloads Function ConfigureSpeechOutput(owner As IWin32Window,
+                                                    useSpeakerSpecificVoices As Boolean) As String
         _owner.DetectTTSEngines()
 
         If Not IsSpeechOutputAvailable Then
@@ -2121,7 +2149,7 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
         Using dlg As New ThisAddIn.TTSSelectionForm(
             "Select the speech provider and voice for Talk to me! output.",
             $"{SharedMethods.AN} - Talk to me! Speech Output",
-            False,
+            useSpeakerSpecificVoices,
             True)
 
             If dlg.ShowDialog(owner) = DialogResult.OK Then
@@ -2153,6 +2181,10 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
         Return _settings.SpeechOutputEnabled
     End Function
 
+    Public Sub StopSpeechOutput() Implements SharedLibrary.SharedLibrary.ITalkToMeSpeechAdapter.StopSpeechOutput
+        CancelCurrentSpeechOutput(clearQueue:=True)
+    End Sub
+
     Public Function SubmitExternalSpeechAsync(speakerName As String,
                                               text As String,
                                               cancellationToken As CancellationToken) As Task(Of Boolean) Implements SharedLibrary.SharedLibrary.ITalkToMeSpeechAdapter.SubmitExternalSpeechAsync
@@ -2171,7 +2203,7 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
                 Dim immediateTask As Task =
                     Task.Run(
                         Async Function()
-                            Await PlaySpeechOutputAsync(speechText, cancellationToken).ConfigureAwait(False)
+                            Await PlaySpeechOutputAsync(speakerName, speechText, cancellationToken).ConfigureAwait(False)
                         End Function)
 
                 SyncLock _speechOutputSyncRoot
@@ -2186,7 +2218,7 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
                 Dim skipTask As Task =
                     Task.Run(
                         Async Function()
-                            Await PlaySpeechOutputAsync(speechText, cancellationToken).ConfigureAwait(False)
+                            Await PlaySpeechOutputAsync(speakerName, speechText, cancellationToken).ConfigureAwait(False)
                         End Function)
 
                 SyncLock _speechOutputSyncRoot
@@ -2201,7 +2233,14 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
                 SyncLock _speechOutputSyncRoot
                     progressiveGeneration = _speechOutputGeneration
                     progressivePreviousTask = _speechOutputQueueTail
-                    progressiveQueuedTask = QueueSpeechOutputAsync(progressivePreviousTask, progressiveGeneration, speechText, cancellationToken, True)
+                    progressiveQueuedTask =
+                        QueueSpeechOutputAsync(
+                            progressivePreviousTask,
+                            progressiveGeneration,
+                            speakerName,
+                            speechText,
+                            cancellationToken,
+                            True)
                     _speechOutputQueueTail = progressiveQueuedTask
                 End SyncLock
 
@@ -2213,7 +2252,14 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
                 SyncLock _speechOutputSyncRoot
                     generation = _speechOutputGeneration
                     previousTask = _speechOutputQueueTail
-                    queuedTask = QueueSpeechOutputAsync(previousTask, generation, speechText, cancellationToken, False)
+                    queuedTask =
+                        QueueSpeechOutputAsync(
+                            previousTask,
+                            generation,
+                            speakerName,
+                            speechText,
+                            cancellationToken,
+                            False)
                     _speechOutputQueueTail = queuedTask
                 End SyncLock
         End Select
@@ -2223,6 +2269,7 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
 
     Private Function QueueSpeechOutputAsync(previousTask As Task,
                                             generation As Integer,
+                                            speakerName As String,
                                             speechText As String,
                                             cancellationToken As CancellationToken,
                                             useProgressivePlayback As Boolean) As Task
@@ -2249,9 +2296,9 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
                     End If
 
                     If useProgressivePlayback Then
-                        Await PlaySpeechOutputProgressivelyAsync(speechText, cancellationToken).ConfigureAwait(False)
+                        Await PlaySpeechOutputProgressivelyAsync(speakerName, speechText, cancellationToken).ConfigureAwait(False)
                     Else
-                        Await PlaySpeechOutputAsync(speechText, cancellationToken).ConfigureAwait(False)
+                        Await PlaySpeechOutputAsync(speakerName, speechText, cancellationToken).ConfigureAwait(False)
                     End If
                 Catch
                 End Try
@@ -2259,7 +2306,8 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
     End Function
 
     Private Async Function GenerateSpeechOutputAudioBytesAsync(speechText As String,
-                                                               selection As Tuple(Of String, String, String)) As Task(Of Byte())
+                                                               selection As Tuple(Of String, String, String),
+                                                               Optional speakingRate As Double = 1.0R) As Task(Of Byte())
         ThisAddIn.TTS_SelectedEngine =
             If(String.Equals(selection.Item1, "OpenAI", StringComparison.OrdinalIgnoreCase),
                ThisAddIn.TTSEngine.OpenAI,
@@ -2268,16 +2316,19 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
         Return Await ThisAddIn.GenerateAudioFromText(
             speechText,
             selection.Item2,
-            selection.Item3).ConfigureAwait(False)
+            selection.Item3,
+            SpeakingRate:=NormalizeSpeechOutputSpeed(speakingRate)).ConfigureAwait(False)
     End Function
 
-    Private Async Function PlaySpeechOutputAsync(speechText As String,
+    Private Async Function PlaySpeechOutputAsync(speakerName As String,
+                                                 speechText As String,
                                                  cancellationToken As CancellationToken) As Task
         If String.IsNullOrWhiteSpace(speechText) Then
             Return
         End If
 
-        Dim selection As Tuple(Of String, String, String) = GetConfiguredSpeechOutputSelection()
+        Dim selection As Tuple(Of String, String, String) = GetConfiguredSpeechOutputSelection(speakerName)
+        Dim playbackRate As Double = GetSafeSpeechOutputSpeed()
         Dim tempFilePath As String = ""
         Dim playbackCts As CancellationTokenSource = Nothing
 
@@ -2302,7 +2353,12 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
             tempFilePath = System.IO.Path.ChangeExtension(System.IO.Path.GetTempFileName(), ".mp3")
             ThisAddIn.SaveAudioToFile(audioBytes, tempFilePath)
 
-            Await PlayAudioFileAsync(tempFilePath, playbackCts.Token, True, 1200).ConfigureAwait(False)
+            Await PlayAudioFileAsync(
+                tempFilePath,
+                playbackCts.Token,
+                playbackRate,
+                True,
+                1200).ConfigureAwait(False)
 
         Catch ex As OperationCanceledException
         Catch
@@ -2333,16 +2389,18 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
         End Try
     End Function
 
-    Private Async Function PlaySpeechOutputProgressivelyAsync(speechText As String,
+    Private Async Function PlaySpeechOutputProgressivelyAsync(speakerName As String,
+                                                              speechText As String,
                                                               cancellationToken As CancellationToken) As Task
         Dim chunks As List(Of String) = SplitSpeechOutputIntoChunks(speechText, 2)
 
         If chunks.Count <= 1 Then
-            Await PlaySpeechOutputAsync(speechText, cancellationToken).ConfigureAwait(False)
+            Await PlaySpeechOutputAsync(speakerName, speechText, cancellationToken).ConfigureAwait(False)
             Return
         End If
 
-        Dim selection As Tuple(Of String, String, String) = GetConfiguredSpeechOutputSelection()
+        Dim selection As Tuple(Of String, String, String) = GetConfiguredSpeechOutputSelection(speakerName)
+        Dim playbackRate As Double = GetSafeSpeechOutputSpeed()
         Dim playbackCts As CancellationTokenSource = Nothing
         Dim tempFiles As New List(Of String)
 
@@ -2378,6 +2436,7 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
                 Await PlayAudioFileAsync(
                     tempFilePath,
                     playbackCts.Token,
+                    playbackRate,
                     chunkIndex = 0,
                     1200).ConfigureAwait(False)
             Next
@@ -2446,14 +2505,361 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
         Return result
     End Function
 
+    Private NotInheritable Class LeadingSilenceSampleProvider
+        Implements NAudio.Wave.ISampleProvider
+
+        Private ReadOnly _waveFormat As NAudio.Wave.WaveFormat
+        Private _remainingSamples As Integer
+
+        Public Sub New(waveFormat As NAudio.Wave.WaveFormat, duration As TimeSpan)
+            _waveFormat = waveFormat
+
+            Dim totalSamples As Double =
+                duration.TotalSeconds *
+                CDbl(waveFormat.SampleRate) *
+                CDbl(waveFormat.Channels)
+
+            _remainingSamples = Math.Max(0, CInt(Math.Ceiling(totalSamples)))
+        End Sub
+
+        Public ReadOnly Property WaveFormat As NAudio.Wave.WaveFormat Implements NAudio.Wave.ISampleProvider.WaveFormat
+            Get
+                Return _waveFormat
+            End Get
+        End Property
+
+        Public Function Read(buffer As Single(), offset As Integer, count As Integer) As Integer Implements NAudio.Wave.ISampleProvider.Read
+            If _remainingSamples <= 0 Then
+                Return 0
+            End If
+
+            Dim samplesToWrite As Integer = Math.Min(count, _remainingSamples)
+            Array.Clear(buffer, offset, samplesToWrite)
+            _remainingSamples -= samplesToWrite
+            Return samplesToWrite
+        End Function
+    End Class
+
+    Private NotInheritable Class PlaybackSpeedSampleProvider
+        Implements NAudio.Wave.ISampleProvider
+
+        Private ReadOnly _pipeline As NAudio.Wave.ISampleProvider
+
+        Public Sub New(source As NAudio.Wave.ISampleProvider, speed As Double)
+            If source Is Nothing Then
+                Throw New System.ArgumentNullException(NameOf(source))
+            End If
+
+            If speed <= 0.0R Then
+                Throw New System.ArgumentOutOfRangeException(NameOf(speed), "Speed must be greater than zero.")
+            End If
+
+            If source.WaveFormat.Channels <> 1 Then
+                Throw New System.Exception("This WSOLA implementation is mono-only. Convert to mono before using it.")
+            End If
+
+            If System.Math.Abs(speed - 1.0R) <= 0.01R Then
+                _pipeline = source
+            Else
+                _pipeline = New MonoWsolaSpeedSampleProvider(source, speed)
+            End If
+        End Sub
+
+        Public ReadOnly Property WaveFormat As NAudio.Wave.WaveFormat Implements NAudio.Wave.ISampleProvider.WaveFormat
+            Get
+                Return _pipeline.WaveFormat
+            End Get
+        End Property
+
+        Public Function Read(buffer As Single(), offset As Integer, count As Integer) As Integer Implements NAudio.Wave.ISampleProvider.Read
+            Return _pipeline.Read(buffer, offset, count)
+        End Function
+
+    End Class
+
+    Private NotInheritable Class MonoWsolaSpeedSampleProvider
+        Implements NAudio.Wave.ISampleProvider
+
+        Private ReadOnly _waveFormat As NAudio.Wave.WaveFormat
+        Private ReadOnly _samples As Single()
+        Private _position As Integer
+
+        Public Sub New(source As NAudio.Wave.ISampleProvider, speed As Double)
+            If source Is Nothing Then
+                Throw New System.ArgumentNullException(NameOf(source))
+            End If
+
+            If source.WaveFormat.Channels <> 1 Then
+                Throw New System.Exception("MonoWsolaSpeedSampleProvider requires mono audio.")
+            End If
+
+            If speed <= 0.0R Then
+                Throw New System.ArgumentOutOfRangeException(NameOf(speed), "Speed must be greater than zero.")
+            End If
+
+            _waveFormat = source.WaveFormat
+
+            Dim inputSamples As Single() = ReadAllSamples(source)
+
+            If inputSamples.Length = 0 Then
+                _samples = New Single() {}
+                Return
+            End If
+
+            If System.Math.Abs(speed - 1.0R) <= 0.01R Then
+                _samples = inputSamples
+            Else
+                _samples = TimeStretchMonoWsola(inputSamples, _waveFormat.SampleRate, speed)
+            End If
+        End Sub
+
+        Public ReadOnly Property WaveFormat As NAudio.Wave.WaveFormat Implements NAudio.Wave.ISampleProvider.WaveFormat
+            Get
+                Return _waveFormat
+            End Get
+        End Property
+
+        Public Function Read(buffer As Single(), offset As Integer, count As Integer) As Integer Implements NAudio.Wave.ISampleProvider.Read
+            If buffer Is Nothing Then
+                Throw New System.ArgumentNullException(NameOf(buffer))
+            End If
+
+            If count <= 0 Then
+                Return 0
+            End If
+
+            Dim available As Integer = _samples.Length - _position
+
+            If available <= 0 Then
+                Return 0
+            End If
+
+            Dim samplesToCopy As Integer = System.Math.Min(count, available)
+
+            For i As Integer = 0 To samplesToCopy - 1
+                buffer(offset + i) = _samples(_position + i)
+            Next
+
+            _position += samplesToCopy
+
+            Return samplesToCopy
+        End Function
+
+        Private Shared Function ReadAllSamples(source As NAudio.Wave.ISampleProvider) As Single()
+            Dim result As New System.Collections.Generic.List(Of Single)()
+            Dim temp(32767) As Single
+
+            Do
+                Dim read As Integer = source.Read(temp, 0, temp.Length)
+
+                If read <= 0 Then
+                    Exit Do
+                End If
+
+                For i As Integer = 0 To read - 1
+                    result.Add(temp(i))
+                Next
+            Loop
+
+            Return result.ToArray()
+        End Function
+
+        Private Shared Function TimeStretchMonoWsola(input As Single(), sampleRate As Integer, speed As Double) As Single()
+            Dim overlapLength As Integer = System.Math.Max(64, CInt(System.Math.Round(sampleRate * 0.01R)))
+            Dim frameLength As Integer = System.Math.Max(overlapLength * 4, CInt(System.Math.Round(sampleRate * 0.04R)))
+            Dim seekWindowLength As Integer = System.Math.Max(overlapLength, CInt(System.Math.Round(sampleRate * 0.02R)))
+
+            If input.Length <= frameLength + seekWindowLength + overlapLength Then
+                Return SimpleLinearResample(input, speed)
+            End If
+
+            Dim synthesisHop As Integer = frameLength - overlapLength
+            Dim analysisHop As Double = CDbl(synthesisHop) * speed
+            Dim targetLength As Integer = System.Math.Max(1, CInt(System.Math.Round(CDbl(input.Length) / speed)))
+
+            Dim output As New System.Collections.Generic.List(Of Single)(targetLength + frameLength)
+
+            For i As Integer = 0 To frameLength - 1
+                output.Add(input(i))
+            Next
+
+            Dim inputPosition As Double = analysisHop
+
+            Do While output.Count < targetLength
+                Dim predictedPosition As Integer = CInt(System.Math.Round(inputPosition))
+
+                If predictedPosition + frameLength >= input.Length Then
+                    Exit Do
+                End If
+
+                Dim bestPosition As Integer =
+                FindBestOverlapPosition(
+                    input,
+                    predictedPosition,
+                    seekWindowLength,
+                    overlapLength,
+                    output)
+
+                CrossfadeAppend(input, bestPosition, frameLength, overlapLength, output)
+
+                inputPosition += analysisHop
+            Loop
+
+            If output.Count > targetLength Then
+                output.RemoveRange(targetLength, output.Count - targetLength)
+            End If
+
+            Return output.ToArray()
+        End Function
+
+        Private Shared Function FindBestOverlapPosition(input As Single(),
+                                                    predictedPosition As Integer,
+                                                    seekWindowLength As Integer,
+                                                    overlapLength As Integer,
+                                                    output As System.Collections.Generic.List(Of Single)) As Integer
+
+            Dim searchStart As Integer = System.Math.Max(0, predictedPosition - seekWindowLength)
+            Dim searchEnd As Integer = System.Math.Min(input.Length - overlapLength - 1, predictedPosition + seekWindowLength)
+
+            Dim outputOverlapStart As Integer = output.Count - overlapLength
+
+            Dim bestPosition As Integer = predictedPosition
+            Dim bestScore As Double = Double.NegativeInfinity
+
+            For candidate As Integer = searchStart To searchEnd
+                Dim score As Double = NormalizedCorrelation(input, candidate, output, outputOverlapStart, overlapLength)
+
+                If score > bestScore Then
+                    bestScore = score
+                    bestPosition = candidate
+                End If
+            Next
+
+            Return bestPosition
+        End Function
+
+        Private Shared Function NormalizedCorrelation(input As Single(),
+                                                  inputStart As Integer,
+                                                  output As System.Collections.Generic.List(Of Single),
+                                                  outputStart As Integer,
+                                                  length As Integer) As Double
+
+            Dim sum As Double = 0.0R
+            Dim inputEnergy As Double = 0.0R
+            Dim outputEnergy As Double = 0.0R
+
+            For i As Integer = 0 To length - 1
+                Dim a As Double = CDbl(output(outputStart + i))
+                Dim b As Double = CDbl(input(inputStart + i))
+
+                sum += a * b
+                outputEnergy += a * a
+                inputEnergy += b * b
+            Next
+
+            If inputEnergy <= 0.000000000001R OrElse outputEnergy <= 0.000000000001R Then
+                Return Double.NegativeInfinity
+            End If
+
+            Return sum / System.Math.Sqrt(inputEnergy * outputEnergy)
+        End Function
+
+        Private Shared Sub CrossfadeAppend(input As Single(),
+                                       inputStart As Integer,
+                                       frameLength As Integer,
+                                       overlapLength As Integer,
+                                       output As System.Collections.Generic.List(Of Single))
+
+            Dim outputOverlapStart As Integer = output.Count - overlapLength
+
+            For i As Integer = 0 To overlapLength - 1
+                Dim fadeIn As Double = CDbl(i) / CDbl(overlapLength)
+                Dim fadeOut As Double = 1.0R - fadeIn
+
+                Dim oldSample As Double = CDbl(output(outputOverlapStart + i))
+                Dim newSample As Double = CDbl(input(inputStart + i))
+
+                output(outputOverlapStart + i) = CSng((oldSample * fadeOut) + (newSample * fadeIn))
+            Next
+
+            Dim appendStart As Integer = inputStart + overlapLength
+            Dim appendEnd As Integer = System.Math.Min(input.Length, inputStart + frameLength)
+
+            For i As Integer = appendStart To appendEnd - 1
+                output.Add(input(i))
+            Next
+        End Sub
+
+        Private Shared Function SimpleLinearResample(input As Single(), speed As Double) As Single()
+            Dim targetLength As Integer = System.Math.Max(1, CInt(System.Math.Round(CDbl(input.Length) / speed)))
+            Dim output(targetLength - 1) As Single
+
+            For i As Integer = 0 To targetLength - 1
+                Dim sourcePosition As Double = CDbl(i) * speed
+                Dim index0 As Integer = CInt(System.Math.Floor(sourcePosition))
+                Dim index1 As Integer = System.Math.Min(index0 + 1, input.Length - 1)
+                Dim fraction As Double = sourcePosition - CDbl(index0)
+
+                If index0 >= input.Length Then
+                    output(i) = input(input.Length - 1)
+                Else
+                    output(i) = CSng((CDbl(input(index0)) * (1.0R - fraction)) + (CDbl(input(index1)) * fraction))
+                End If
+            Next
+
+            Return output
+        End Function
+
+    End Class
+
+    Private Shared Function CreateSpeechOutputWaveProvider(audioReader As AudioFileReader,
+                                                           playbackRate As Double,
+                                                           Optional includeLeadingSilence As Boolean = True,
+                                                           Optional leadingSilenceMilliseconds As Integer = 1200) As IWaveProvider
+        Dim originalSource As NAudio.Wave.ISampleProvider = audioReader
+        Dim sampleProvider As NAudio.Wave.ISampleProvider = originalSource
+        Dim normalizedRate As Double = NormalizeSpeechOutputSpeed(playbackRate)
+
+        If normalizedRate > 1.0R Then
+            Dim mono As NAudio.Wave.ISampleProvider = originalSource
+
+            If originalSource.WaveFormat.Channels = 2 Then
+                mono =
+                    New NAudio.Wave.SampleProviders.StereoToMonoSampleProvider(originalSource) With {
+                        .LeftVolume = 0.5F,
+                        .RightVolume = 0.5F
+                    }
+            End If
+
+            sampleProvider = New PlaybackSpeedSampleProvider(mono, normalizedRate)
+        End If
+
+        If includeLeadingSilence AndAlso leadingSilenceMilliseconds > 0 Then
+            Dim leadingSilence As NAudio.Wave.ISampleProvider =
+                New LeadingSilenceSampleProvider(
+                    sampleProvider.WaveFormat,
+                    TimeSpan.FromMilliseconds(leadingSilenceMilliseconds))
+
+            sampleProvider =
+                New NAudio.Wave.SampleProviders.ConcatenatingSampleProvider(
+                    New List(Of NAudio.Wave.ISampleProvider) From {
+                        leadingSilence,
+                        sampleProvider
+                    })
+        End If
+
+        Return New NAudio.Wave.SampleProviders.SampleToWaveProvider(sampleProvider)
+    End Function
+
     Private Shared Async Function PlayAudioFileAsync(filePath As String,
                                                      cancellationToken As CancellationToken,
+                                                     Optional playbackRate As Double = 1.0R,
                                                      Optional includeLeadingSilence As Boolean = True,
                                                      Optional leadingSilenceMilliseconds As Integer = 1200) As Task
         Using reader As New AudioFileReader(filePath)
             Using waveOut As New WaveOutEvent()
                 ThisAddIn.ConfigurePlaybackOutput(waveOut)
-                waveOut.Init(ThisAddIn.CreatePlaybackWaveProvider(reader, includeLeadingSilence, leadingSilenceMilliseconds))
+                waveOut.Init(CreateSpeechOutputWaveProvider(reader, playbackRate, includeLeadingSilence, leadingSilenceMilliseconds))
                 waveOut.Play()
 
                 Try
@@ -2480,6 +2886,8 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
 
             If clearQueue Then
                 _speechOutputQueueTail = Task.CompletedTask
+                _lastSpeechOutputSpeakerKey = ""
+                _lastSpeechOutputVoiceSlot = 0
             End If
         End SyncLock
 
@@ -2492,14 +2900,53 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
     End Sub
 
     Private Function HasConfiguredSpeechOutputSelection() As Boolean
-        Dim selection As Tuple(Of String, String, String) = GetConfiguredSpeechOutputSelection()
+        If _settings IsNot Nothing AndAlso _settings.UseSpeakerSpecificVoices Then
+            Dim firstSelection As Tuple(Of String, String, String) = Nothing
+            Dim secondSelection As Tuple(Of String, String, String) = Nothing
 
-        Return Not String.IsNullOrWhiteSpace(selection.Item1) AndAlso
+            Return TryGetConfiguredDualSpeechOutputSelections(firstSelection, secondSelection)
+        End If
+
+        Return IsValidSpeechOutputSelection(GetConfiguredPrimarySpeechOutputSelection())
+    End Function
+
+    Private Shared Function IsValidSpeechOutputSelection(selection As Tuple(Of String, String, String)) As Boolean
+        Return selection IsNot Nothing AndAlso
+               Not String.IsNullOrWhiteSpace(selection.Item1) AndAlso
                Not String.IsNullOrWhiteSpace(selection.Item2) AndAlso
                Not String.IsNullOrWhiteSpace(selection.Item3)
     End Function
 
-    Private Function GetConfiguredSpeechOutputSelection() As Tuple(Of String, String, String)
+    Private Function GetConfiguredSpeechOutputSelection(Optional speakerName As String = "") As Tuple(Of String, String, String)
+        If _settings IsNot Nothing AndAlso _settings.UseSpeakerSpecificVoices Then
+            Dim firstSelection As Tuple(Of String, String, String) = Nothing
+            Dim secondSelection As Tuple(Of String, String, String) = Nothing
+
+            If TryGetConfiguredDualSpeechOutputSelections(firstSelection, secondSelection) Then
+                Dim normalizedSpeakerName As String = NormalizeSpeakerNameForVoiceSelection(speakerName)
+
+                If String.IsNullOrWhiteSpace(normalizedSpeakerName) Then
+                    Return firstSelection
+                End If
+
+                SyncLock _speechOutputSyncRoot
+                    If String.IsNullOrWhiteSpace(_lastSpeechOutputSpeakerKey) Then
+                        _lastSpeechOutputSpeakerKey = normalizedSpeakerName
+                        _lastSpeechOutputVoiceSlot = 0
+                    ElseIf Not String.Equals(_lastSpeechOutputSpeakerKey, normalizedSpeakerName, StringComparison.OrdinalIgnoreCase) Then
+                        _lastSpeechOutputSpeakerKey = normalizedSpeakerName
+                        _lastSpeechOutputVoiceSlot = If(_lastSpeechOutputVoiceSlot = 0, 1, 0)
+                    End If
+
+                    Return If(_lastSpeechOutputVoiceSlot = 0, firstSelection, secondSelection)
+                End SyncLock
+            End If
+        End If
+
+        Return GetConfiguredPrimarySpeechOutputSelection()
+    End Function
+
+    Private Function GetConfiguredPrimarySpeechOutputSelection() As Tuple(Of String, String, String)
         Dim provider As String = If(My.Settings.TTSProvider, "").Trim()
         Dim languageCode As String = If(My.Settings.TTS1languagecode, "").Trim()
         Dim voiceName As String = NormalizeSpeechOutputVoice(If(My.Settings.TTS1voiceA, ""))
@@ -2518,6 +2965,35 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
         End Select
 
         Return Tuple.Create(provider, languageCode, voiceName)
+    End Function
+
+    Private Function TryGetConfiguredDualSpeechOutputSelections(ByRef firstSelection As Tuple(Of String, String, String),
+                                                                ByRef secondSelection As Tuple(Of String, String, String)) As Boolean
+        Dim provider As String = If(My.Settings.TTSProvider, "").Trim()
+        Dim setName As String = If(My.Settings.TTSLastRdoTwoVoices, "").Trim()
+        Dim useSecondSet As Boolean = String.Equals(setName, "Voice2", StringComparison.OrdinalIgnoreCase)
+        Dim languageCode As String =
+            If(useSecondSet,
+               If(My.Settings.TTS2languagecode, "").Trim(),
+               If(My.Settings.TTS1languagecode, "").Trim())
+
+        Dim firstVoiceName As String =
+            NormalizeSpeechOutputVoice(
+                If(useSecondSet, My.Settings.TTS2voiceA, My.Settings.TTS1voiceA))
+
+        Dim secondVoiceName As String =
+            NormalizeSpeechOutputVoice(
+                If(useSecondSet, My.Settings.TTS2voiceB, My.Settings.TTS1voiceB))
+
+        firstSelection = Tuple.Create(provider, languageCode, firstVoiceName)
+        secondSelection = Tuple.Create(provider, languageCode, secondVoiceName)
+
+        Return IsValidSpeechOutputSelection(firstSelection) AndAlso
+               IsValidSpeechOutputSelection(secondSelection)
+    End Function
+
+    Private Shared Function NormalizeSpeakerNameForVoiceSelection(value As String) As String
+        Return Regex.Replace(If(value, "").Trim(), "\s+", " ")
     End Function
 
     Private Shared Function NormalizeSpeechOutputVoice(value As String) As String
@@ -2559,6 +3035,49 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
         End Select
     End Function
 
+    Private Shared Function NormalizeSpeechOutputSpeed(value As Double) As Double
+        If Double.IsNaN(value) OrElse Double.IsInfinity(value) Then
+            Return 1.0R
+        End If
+
+        Return Math.Max(1.0R, Math.Min(2.0R, Math.Round(value, 2, MidpointRounding.AwayFromZero)))
+    End Function
+
+    Private Shared Function ParseSpeechOutputSpeed(value As String) As Double
+        Dim normalized As String = If(value, "").Trim()
+        normalized = normalized.Replace("(Normal)", "").Replace("(normal)", "")
+        normalized = normalized.Replace("x", "").Replace("X", "").Trim()
+
+        Dim parsed As Double
+
+        If Double.TryParse(
+            normalized,
+            Globalization.NumberStyles.Float,
+            Globalization.CultureInfo.InvariantCulture,
+            parsed) Then
+
+            Return NormalizeSpeechOutputSpeed(parsed)
+        End If
+
+        If Double.TryParse(normalized, parsed) Then
+            Return NormalizeSpeechOutputSpeed(parsed)
+        End If
+
+        Return 1.0R
+    End Function
+
+    Private Shared Function FormatSpeechOutputSpeed(value As Double) As String
+        Return NormalizeSpeechOutputSpeed(value).ToString("0.00", Globalization.CultureInfo.InvariantCulture) & "x"
+    End Function
+
+    Private Function GetSafeSpeechOutputSpeed() As Double
+        If _settings Is Nothing Then
+            Return 1.0R
+        End If
+
+        Return NormalizeSpeechOutputSpeed(_settings.SpeechOutputSpeed)
+    End Function
+
     Private Shared Function PrepareSpeechOutputText(speakerName As String,
                                                     text As String) As String
         Dim normalized As String = If(text, "")
@@ -2575,15 +3094,18 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
         normalized = Regex.Replace(normalized, "[ \t]{2,}", " ")
         normalized = normalized.Trim()
 
+        If Not String.IsNullOrWhiteSpace(speakerName) Then
+            Dim prefix As String = speakerName.Trim() & ":"
+            If normalized.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) Then
+                normalized = normalized.Substring(prefix.Length).Trim()
+            End If
+        End If
+
         If String.IsNullOrWhiteSpace(normalized) Then
             Return ""
         End If
 
-        If String.IsNullOrWhiteSpace(speakerName) Then
-            Return normalized
-        End If
-
-        Return speakerName.Trim() & ": " & normalized
+        Return normalized
     End Function
 
     Private Shared Function EngineNeedsLocalAudioCapture(kind As EngineKind) As Boolean
@@ -2631,6 +3153,9 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
             If Not String.IsNullOrWhiteSpace(My.Settings.TalkToMeSpeechOutputMode) Then
                 _settings.SpeechOutputMode = NormalizeSpeechOutputMode(My.Settings.TalkToMeSpeechOutputMode)
             End If
+
+            _settings.UseSpeakerSpecificVoices = My.Settings.TalkToMeSpeechOutputUseSpeakerSpecificVoices
+            _settings.SpeechOutputSpeed = NormalizeSpeechOutputSpeed(My.Settings.TalkToMeSpeechOutputSpeed)
         Catch
             _opts = New TranscriptionOptions()
         End Try
@@ -2642,6 +3167,7 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
         End If
 
         _settings.SpeechOutputMode = NormalizeSpeechOutputMode(_settings.SpeechOutputMode)
+        _settings.SpeechOutputSpeed = NormalizeSpeechOutputSpeed(_settings.SpeechOutputSpeed)
         _opts.LanguageCode = _settings.LanguageCode
     End Sub
 
@@ -2652,6 +3178,8 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
             My.Settings.TalkToMeSpeechLanguageCode = _settings.LanguageCode
             My.Settings.TalkToMeSpeechOutputEnabled = _settings.SpeechOutputEnabled
             My.Settings.TalkToMeSpeechOutputMode = NormalizeSpeechOutputMode(_settings.SpeechOutputMode)
+            My.Settings.TalkToMeSpeechOutputUseSpeakerSpecificVoices = _settings.UseSpeakerSpecificVoices
+            My.Settings.TalkToMeSpeechOutputSpeed = NormalizeSpeechOutputSpeed(_settings.SpeechOutputSpeed)
             My.Settings.Save()
         Catch
         End Try
@@ -3497,6 +4025,8 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
         Private chkIncludeDocument As CheckBox
         Private chkSpeechOutputEnabled As CheckBox
         Private cboSpeechOutputMode As ComboBox
+        Private chkUseSpeakerSpecificVoices As CheckBox
+        Private cboSpeechOutputSpeed As ComboBox
         Private btnConfigureSpeechOutput As Button
         Private lblSpeechOutputSummary As Label
         Private btnOk As Button
@@ -3508,6 +4038,8 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
         Public Property IncludeFullDocument As Boolean
         Public Property SelectedSpeechOutputEnabled As Boolean
         Public Property SelectedSpeechOutputMode As String = "Queue (progressive)"
+        Public Property SelectedUseSpeakerSpecificVoices As Boolean
+        Public Property SelectedSpeechOutputSpeed As Double = 1.0R
 
         Public Sub New(ownerAdapter As WordTalkToMeSpeechAdapter,
                        descriptors As List(Of LiveEngineDescriptor),
@@ -3517,7 +4049,9 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
                        currentIncludeFullDocument As Boolean,
                        savedLanguageByEngine As Dictionary(Of String, String),
                        currentSpeechOutputEnabled As Boolean,
-                       currentSpeechOutputMode As String)
+                       currentSpeechOutputMode As String,
+                       currentUseSpeakerSpecificVoices As Boolean,
+                       currentSpeechOutputSpeed As Double)
             _ownerAdapter = ownerAdapter
             _descriptors = descriptors
             _savedLanguageByEngine = If(savedLanguageByEngine, New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase))
@@ -3525,6 +4059,8 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
             SelectedLanguage = currentLanguage
             SelectedSpeechOutputEnabled = currentSpeechOutputEnabled
             SelectedSpeechOutputMode = NormalizeSpeechOutputMode(currentSpeechOutputMode)
+            SelectedUseSpeakerSpecificVoices = currentUseSpeakerSpecificVoices
+            SelectedSpeechOutputSpeed = NormalizeSpeechOutputSpeed(currentSpeechOutputSpeed)
 
             Me.Text = SharedMethods.AN & " - Talk to me!"
             Me.AutoScaleDimensions = New System.Drawing.SizeF(96.0F, 96.0F)
@@ -3535,13 +4071,13 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
             Me.MaximizeBox = False
             Me.ShowInTaskbar = False
             Me.AutoScroll = True
-            Me.ClientSize = New System.Drawing.Size(640, 315)
+            Me.ClientSize = New System.Drawing.Size(640, 360)
             Me.Font = New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
 
             Dim root As New TableLayoutPanel() With {
                 .Dock = DockStyle.Fill,
                 .ColumnCount = 2,
-                .RowCount = 8,
+                .RowCount = 10,
                 .Padding = New Padding(10)
             }
 
@@ -3586,6 +4122,24 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
             cboSpeechOutputMode.Items.Add("Queue (progressive)")
             cboSpeechOutputMode.Items.Add("Interrupt current speech")
             cboSpeechOutputMode.Items.Add("Skip new output while speaking")
+
+            chkUseSpeakerSpecificVoices = New CheckBox() With {
+                .Text = "Use alternating voices when different bots speak",
+                .Checked = currentUseSpeakerSpecificVoices,
+                .AutoSize = True,
+                .Margin = New Padding(0, 5, 0, 0)
+            }
+
+            cboSpeechOutputSpeed = New ComboBox() With {
+                .Dock = DockStyle.Fill,
+                .DropDownStyle = ComboBoxStyle.DropDownList
+            }
+            cboSpeechOutputSpeed.Items.Add("1.00x (Normal)")
+            cboSpeechOutputSpeed.Items.Add("1.10x")
+            cboSpeechOutputSpeed.Items.Add("1.25x")
+            cboSpeechOutputSpeed.Items.Add("1.50x")
+            cboSpeechOutputSpeed.Items.Add("1.75x")
+            cboSpeechOutputSpeed.Items.Add("2.00x")
 
             btnConfigureSpeechOutput = New Button() With {
                 .Text = "Configure Speech Output...",
@@ -3647,10 +4201,16 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
             root.Controls.Add(New Label() With {.Text = "Speech mode:", .AutoSize = True, .Anchor = AnchorStyles.Left}, 0, 5)
             root.Controls.Add(cboSpeechOutputMode, 1, 5)
 
-            root.Controls.Add(New Label() With {.Text = "Voice:", .AutoSize = True, .Anchor = AnchorStyles.Left}, 0, 6)
-            root.Controls.Add(speechOutputPanel, 1, 6)
+            root.Controls.Add(New Label() With {.Text = "Assistant voices:", .AutoSize = True, .Anchor = AnchorStyles.Left}, 0, 6)
+            root.Controls.Add(chkUseSpeakerSpecificVoices, 1, 6)
 
-            root.Controls.Add(buttons, 1, 7)
+            root.Controls.Add(New Label() With {.Text = "Speech speed:", .AutoSize = True, .Anchor = AnchorStyles.Left}, 0, 7)
+            root.Controls.Add(cboSpeechOutputSpeed, 1, 7)
+
+            root.Controls.Add(New Label() With {.Text = "Voice:", .AutoSize = True, .Anchor = AnchorStyles.Left}, 0, 8)
+            root.Controls.Add(speechOutputPanel, 1, 8)
+
+            root.Controls.Add(buttons, 1, 9)
 
             Me.Controls.Add(root)
             Me.AcceptButton = btnOk
@@ -3679,6 +4239,7 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
 
             AddHandler cboEngine.SelectedIndexChanged, AddressOf OnEngineChanged
             AddHandler btnConfigureSpeechOutput.Click, AddressOf OnConfigureSpeechOutputClick
+            AddHandler chkUseSpeakerSpecificVoices.CheckedChanged, Sub(sender As Object, e As EventArgs) RefreshSpeechOutputUi()
             AddHandler btnOk.Click, AddressOf OnOkClick
 
             Dim selectedIndex As Integer =
@@ -3700,6 +4261,14 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
             Dim modeIndex As Integer = cboSpeechOutputMode.FindStringExact(SelectedSpeechOutputMode)
             cboSpeechOutputMode.SelectedIndex = If(modeIndex >= 0, modeIndex, 0)
 
+            Dim speedLabel As String =
+                If(SelectedSpeechOutputSpeed <= 1.0R,
+                   "1.00x (Normal)",
+                   FormatSpeechOutputSpeed(SelectedSpeechOutputSpeed))
+
+            Dim speedIndex As Integer = cboSpeechOutputSpeed.FindStringExact(speedLabel)
+            cboSpeechOutputSpeed.SelectedIndex = If(speedIndex >= 0, speedIndex, 0)
+
             RefreshSpeechOutputUi()
             ApplyCalculatedMinimumSize(root)
         End Sub
@@ -3718,7 +4287,7 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
             Dim nonClientHeight As Integer = Me.Height - Me.ClientSize.Height
 
             Dim minWidth As Integer = Math.Max(640, preferredClientSize.Width + nonClientWidth + 10)
-            Dim minHeight As Integer = Math.Max(315, preferredClientSize.Height + nonClientHeight + 10)
+            Dim minHeight As Integer = Math.Max(360, preferredClientSize.Height + nonClientHeight + 10)
 
             Me.MinimumSize = New System.Drawing.Size(minWidth, minHeight)
 
@@ -3732,6 +4301,8 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
 
             chkSpeechOutputEnabled.Enabled = available
             cboSpeechOutputMode.Enabled = available
+            chkUseSpeakerSpecificVoices.Enabled = available
+            cboSpeechOutputSpeed.Enabled = available
             btnConfigureSpeechOutput.Enabled = available
 
             If Not available Then
@@ -3794,7 +4365,7 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
                 Return
             End If
 
-            _ownerAdapter.ConfigureSpeechOutput(Me)
+            _ownerAdapter.ConfigureSpeechOutput(Me, chkUseSpeakerSpecificVoices.Checked)
             RefreshSpeechOutputUi()
         End Sub
 
@@ -3810,6 +4381,12 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
             IncludeFullDocument = chkIncludeDocument.Checked
             SelectedSpeechOutputEnabled = chkSpeechOutputEnabled.Checked
             SelectedSpeechOutputMode = If(cboSpeechOutputMode.SelectedItem IsNot Nothing, cboSpeechOutputMode.SelectedItem.ToString(), "Queue")
+            SelectedUseSpeakerSpecificVoices = chkUseSpeakerSpecificVoices.Checked
+            SelectedSpeechOutputSpeed =
+                ParseSpeechOutputSpeed(
+                    If(cboSpeechOutputSpeed.SelectedItem IsNot Nothing,
+                       cboSpeechOutputSpeed.SelectedItem.ToString(),
+                       "1.00x (Normal)"))
         End Sub
     End Class
 End Class

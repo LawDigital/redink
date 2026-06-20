@@ -1942,6 +1942,7 @@ Namespace SharedLibrary
                     {"SP_Friendly", context.SP_Friendly},
                     {"SP_Convincing", context.SP_Convincing},
                     {"SP_NoFillers", context.SP_NoFillers},
+                    {"SP_Compact", context.SP_Compact},
                     {"SP_Podcast", context.SP_Podcast},
                     {"SP_MyStyle_Word", context.SP_MyStyle_Word},
                     {"SP_MyStyle_Outlook", context.SP_MyStyle_Outlook},
@@ -2218,6 +2219,7 @@ Namespace SharedLibrary
                 {"SP_Friendly", Default_SP_Friendly},
                 {"SP_Convincing", Default_SP_Convincing},
                 {"SP_NoFillers", Default_SP_NoFillers},
+                {"SP_Compact", Default_SP_Compact},
                 {"SP_Podcast", Default_SP_Podcast},
                 {"SP_MyStyle_Word", Default_SP_MyStyle_Word},
                 {"SP_MyStyle_Outlook", Default_SP_MyStyle_Outlook},
@@ -3426,6 +3428,7 @@ Namespace SharedLibrary
             variableValues.Add("SP_Friendly", context.SP_Friendly)
             variableValues.Add("SP_Convincing", context.SP_Convincing)
             variableValues.Add("SP_NoFillers", context.SP_NoFillers)
+            variableValues.Add("SP_Compact", context.SP_Compact)
             variableValues.Add("SP_Podcast", context.SP_Podcast)
             variableValues.Add("SP_MyStyle_Word", context.SP_MyStyle_Word)
             variableValues.Add("SP_MyStyle_Outlook", context.SP_MyStyle_Outlook)
@@ -3624,6 +3627,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_Friendly") Then context.SP_Friendly = CStr(updatedValues("SP_Friendly"))
                 If updatedValues.ContainsKey("SP_Convincing") Then context.SP_Convincing = CStr(updatedValues("SP_Convincing"))
                 If updatedValues.ContainsKey("SP_NoFillers") Then context.SP_NoFillers = CStr(updatedValues("SP_NoFillers"))
+                If updatedValues.ContainsKey("SP_Compact") Then context.SP_Compact = CStr(updatedValues("SP_Compact"))
                 If updatedValues.ContainsKey("SP_Podcast") Then context.SP_Podcast = CStr(updatedValues("SP_Podcast"))
                 If updatedValues.ContainsKey("SP_MyStyle_Word") Then context.SP_MyStyle_Word = CStr(updatedValues("SP_MyStyle_Word"))
                 If updatedValues.ContainsKey("SP_MyStyle_Outlook") Then context.SP_MyStyle_Outlook = CStr(updatedValues("SP_MyStyle_Outlook"))

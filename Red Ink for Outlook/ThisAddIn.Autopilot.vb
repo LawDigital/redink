@@ -3376,18 +3376,24 @@ Partial Public Class ThisAddIn
             End If
             Try : reply.Categories = AP_CategoryName : Catch : End Try
 
+            Dim cleanupGroupId As String = Nothing
+            Dim cleanupIsEligible As Boolean = False
+            Dim cleanupAnsweredUtc As DateTime? = Nothing
+            Dim cleanupDeleteAfterUtc As DateTime? = Nothing
+
             Try
-                Dim cleanupGroupId = GetOrCreateCleanupGroupId(originalMail)
+                cleanupGroupId = GetOrCreateCleanupGroupId(originalMail)
                 If Not String.IsNullOrWhiteSpace(cleanupGroupId) Then
-                    Dim deleteAfterUtc = If(isHoldingOnly, CType(Nothing, DateTime?), GetAutoDeleteCutoffUtc())
-                    Dim answeredUtc = If(isHoldingOnly, CType(Nothing, DateTime?), DateTime.UtcNow)
+                    cleanupDeleteAfterUtc = If(isHoldingOnly, CType(Nothing, DateTime?), GetAutoDeleteCutoffUtc())
+                    cleanupAnsweredUtc = If(isHoldingOnly, CType(Nothing, DateTime?), DateTime.UtcNow)
+                    cleanupIsEligible = Not isHoldingOnly AndAlso cleanupDeleteAfterUtc.HasValue
 
                     StampCleanupMetadata(
                         reply,
                         cleanupGroupId,
-                        isEligible:=Not isHoldingOnly AndAlso deleteAfterUtc.HasValue,
-                        answeredUtc:=answeredUtc,
-                        deleteAfterUtc:=deleteAfterUtc,
+                        isEligible:=cleanupIsEligible,
+                        answeredUtc:=cleanupAnsweredUtc,
+                        deleteAfterUtc:=cleanupDeleteAfterUtc,
                         saveItem:=False)
                 End If
             Catch ex As System.Exception
@@ -3395,7 +3401,8 @@ Partial Public Class ThisAddIn
             End Try
 
             reply.Send()
-            Try : MoveLastSentToInkyReplies() : Catch : End Try
+            Try : MoveLastSentToInkyReplies(cleanupGroupId, cleanupIsEligible, cleanupAnsweredUtc, cleanupDeleteAfterUtc) : Catch : End Try
+
         Catch ex As System.Exception
             ApDashboardLog($"ERROR sending reply: {ex.Message}", "error")
         Finally
@@ -3442,22 +3449,67 @@ Partial Public Class ThisAddIn
     End Function
 
     ''' <summary>Moves the most recent AutoPilot reply into the Inky Replies folder.</summary>
-    Private Sub MoveLastSentToInkyReplies()
+    Private Sub MoveLastSentToInkyReplies(Optional groupId As String = Nothing,
+                                          Optional isEligible As Boolean = False,
+                                          Optional answeredUtc As DateTime? = Nothing,
+                                          Optional deleteAfterUtc As DateTime? = Nothing)
         Try
             Dim ns = Application.GetNamespace("MAPI")
             Dim sentFolder = ns.GetDefaultFolder(OlDefaultFolders.olFolderSentMail)
             Dim inkyFolder As MAPIFolder = Nothing
-            Try : inkyFolder = sentFolder.Folders(AP_SentSubfolder) : Catch : inkyFolder = sentFolder.Folders.Add(AP_SentSubfolder, OlDefaultFolders.olFolderSentMail) : End Try
-            Dim items = sentFolder.Items
-            items.Sort("[ReceivedTime]", True)
-            For Each item In items
-                If TypeOf item Is MailItem Then
-                    Dim mi2 = DirectCast(item, MailItem)
-                    If mi2.Categories IsNot Nothing AndAlso mi2.Categories.Contains(AP_CategoryName) Then
-                        mi2.Move(inkyFolder) : Exit For
-                    End If
-                End If
-            Next
+            Dim items As Items = Nothing
+
+            Try
+                Try
+                    inkyFolder = sentFolder.Folders(AP_SentSubfolder)
+                Catch
+                    inkyFolder = sentFolder.Folders.Add(AP_SentSubfolder, OlDefaultFolders.olFolderSentMail)
+                End Try
+
+                items = sentFolder.Items
+                items.Sort("[ReceivedTime]", True)
+
+                For Each item As Object In items
+                    Dim mi2 As MailItem = Nothing
+                    Dim movedObj As Object = Nothing
+                    Dim movedMail As MailItem = Nothing
+
+                    Try
+                        mi2 = TryCast(item, MailItem)
+                        If mi2 Is Nothing Then Continue For
+                        If mi2.Categories Is Nothing OrElse Not mi2.Categories.Contains(AP_CategoryName) Then Continue For
+
+                        movedObj = mi2.Move(inkyFolder)
+                        movedMail = TryCast(movedObj, MailItem)
+
+                        If movedMail IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(groupId) Then
+                            StampCleanupMetadata(
+                                movedMail,
+                                groupId,
+                                isEligible:=isEligible,
+                                answeredUtc:=answeredUtc,
+                                deleteAfterUtc:=deleteAfterUtc,
+                                saveItem:=True)
+                        End If
+
+                        Exit For
+                    Finally
+                        If movedMail IsNot Nothing Then Try : Marshal.ReleaseComObject(movedMail) : Catch : End Try
+                        If movedObj IsNot Nothing AndAlso Not ReferenceEquals(movedObj, movedMail) Then
+                            Try : Marshal.ReleaseComObject(movedObj) : Catch : End Try
+                        End If
+                        If mi2 IsNot Nothing Then Try : Marshal.ReleaseComObject(mi2) : Catch : End Try
+                        If item IsNot Nothing AndAlso Not ReferenceEquals(item, mi2) Then
+                            Try : Marshal.ReleaseComObject(item) : Catch : End Try
+                        End If
+                    End Try
+                Next
+            Finally
+                If items IsNot Nothing Then Try : Marshal.ReleaseComObject(items) : Catch : End Try
+                If inkyFolder IsNot Nothing Then Try : Marshal.ReleaseComObject(inkyFolder) : Catch : End Try
+                If sentFolder IsNot Nothing Then Try : Marshal.ReleaseComObject(sentFolder) : Catch : End Try
+                If ns IsNot Nothing Then Try : Marshal.ReleaseComObject(ns) : Catch : End Try
+            End Try
         Catch ex As System.Exception
             Debug.WriteLine($"MoveLastSentToInkyReplies error: {ex.Message}")
         End Try
@@ -4780,17 +4832,24 @@ Partial Public Class ThisAddIn
                 End Try
             End If
 
+            Dim cleanupGroupId As String = Nothing
+            Dim cleanupIsEligible As Boolean = False
+            Dim cleanupAnsweredUtc As DateTime? = Nothing
+            Dim cleanupDeleteAfterUtc As DateTime? = Nothing
+
             Try
-                Dim cleanupGroupId = GetOrCreateCleanupGroupId(originalMail)
+                cleanupGroupId = GetOrCreateCleanupGroupId(originalMail)
                 If Not String.IsNullOrWhiteSpace(cleanupGroupId) Then
-                    Dim deleteAfterUtc = GetAutoDeleteCutoffUtc()
+                    cleanupDeleteAfterUtc = GetAutoDeleteCutoffUtc()
+                    cleanupIsEligible = cleanupDeleteAfterUtc.HasValue
+                    cleanupAnsweredUtc = If(cleanupDeleteAfterUtc.HasValue, CType(DateTime.UtcNow, DateTime?), CType(Nothing, DateTime?))
 
                     StampCleanupMetadata(
                         newMail,
                         cleanupGroupId,
-                        isEligible:=deleteAfterUtc.HasValue,
-                        answeredUtc:=If(deleteAfterUtc.HasValue, CType(DateTime.UtcNow, DateTime?), CType(Nothing, DateTime?)),
-                        deleteAfterUtc:=deleteAfterUtc,
+                        isEligible:=cleanupIsEligible,
+                        answeredUtc:=cleanupAnsweredUtc,
+                        deleteAfterUtc:=cleanupDeleteAfterUtc,
                         saveItem:=False)
                 End If
             Catch ex As System.Exception
@@ -4798,7 +4857,7 @@ Partial Public Class ThisAddIn
             End Try
 
             newMail.Send()
-            Try : MoveLastSentToInkyReplies() : Catch : End Try
+            Try : MoveLastSentToInkyReplies(cleanupGroupId, cleanupIsEligible, cleanupAnsweredUtc, cleanupDeleteAfterUtc) : Catch : End Try
 
         Catch ex As System.Exception
             ApDashboardLog($"ERROR sending voicemail reply: {ex.Message}", "error")

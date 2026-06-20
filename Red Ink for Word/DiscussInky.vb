@@ -138,6 +138,7 @@ Public Class DiscussInky
     Private Const DialogueArchiveFileExtension As String = ".dialogue.xml"
     Private Const ToolTrigger As String = "(ag)"
     Private Const KBTrigger As String = "(kb)"  ' Trigger to supplement with knowledge store results.
+    Private Const DiscussLastCompactPromptSettingName As String = "DiscussLastCompactPrompt"
 
     ' Default fallback persona used when no persona library is configured
     Private Const DefaultPersonaName As String = "Discussion Partner"
@@ -242,6 +243,7 @@ Public Class DiscussInky
     Private ReadOnly _btnMission As Button = New Button() With {.Text = "Mission", .AutoSize = True}
     Private ReadOnly _btnEditPersona As Button = New Button() With {.Text = "Edit Local Persona Lib", .AutoSize = True}
     Private ReadOnly _btnKnowledge As Button = New Button() With {.Text = "Load Knowledge (Docs)", .AutoSize = True}
+    Private ReadOnly _btnManageDocs As Button = New Button() With {.Text = "Manage Docs", .AutoSize = True, .Enabled = False}
     Private ReadOnly _btnArchive As Button = New Button() With {.Text = "Archive", .AutoSize = True}
     Private ReadOnly _btnAlternateModel As Button = New Button() With {.Text = "Alternate Model", .AutoSize = True}
     Private ReadOnly _chkIncludeActiveDoc As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = "Include active document", .AutoSize = True}
@@ -278,6 +280,7 @@ Public Class DiscussInky
     Private _activeDialogueArchiveName As String = ""
     Private _activeDialogueArchiveFilePath As String = ""
     Private _activeDialogueArchiveBaselineHash As String = ""
+    Private _persistedKnowledgeCloseWarningAcknowledged As Boolean = False
 
     ' Autorespond state
     Private _autoRespondInProgress As Boolean = False
@@ -315,6 +318,49 @@ Public Class DiscussInky
         Public DisplayName As String
     End Structure
     Private _missions As New List(Of MissionEntry)()
+
+    Private Enum KnowledgeDocumentManagerAction
+        None = 0
+        CompactSelected = 1
+        DeleteSelected = 2
+        EditSelected = 3
+    End Enum
+
+    Private Structure KnowledgeDocumentEntry
+        Public Number As Integer
+        Public Name As String
+        Public Content As String
+        Public StartIndex As Integer
+        Public Length As Integer
+        Public IsTagged As Boolean
+
+        Public ReadOnly Property DisplayText As String
+            Get
+                Dim displayName As String = If(String.IsNullOrWhiteSpace(Name), "Knowledge", Name)
+                Dim prefix As String = If(IsTagged, $"document{Number}", "knowledge")
+                Return $"{prefix} - {displayName} ({If(Content, "").Length:N0} chars)"
+            End Get
+        End Property
+    End Structure
+
+    Private Structure KnowledgeDocumentSelectionItem
+        Public Number As Integer
+        Public DisplayText As String
+
+        Public Sub New(number As Integer, displayText As String)
+            Me.Number = number
+            Me.DisplayText = displayText
+        End Sub
+
+        Public Overrides Function ToString() As String
+            Return DisplayText
+        End Function
+    End Structure
+
+    Private Structure KnowledgeDocumentManagerResult
+        Public Action As KnowledgeDocumentManagerAction
+        Public SelectedDocumentNumbers As List(Of Integer)
+    End Structure
 
     ''' <summary>
     ''' Helper class to track file loading results for knowledge loading.
@@ -403,6 +449,7 @@ Public Class DiscussInky
         pnlButtons.Controls.Add(_btnMission)
         pnlButtons.Controls.Add(_btnEditPersona)
         pnlButtons.Controls.Add(_btnKnowledge)
+        pnlButtons.Controls.Add(_btnManageDocs)
         pnlButtons.Controls.Add(_btnArchive)
 
         ' Show alternate model button if either second API is configured or an alternate INI exists
@@ -461,6 +508,7 @@ Public Class DiscussInky
         AddHandler _btnMission.Click, AddressOf OnSelectMission
         AddHandler _btnEditPersona.Click, AddressOf OnEditLocalPersona
         AddHandler _btnKnowledge.Click, AddressOf OnLoadKnowledge
+        AddHandler _btnManageDocs.Click, AddressOf OnManageKnowledgeDocumentsClick
         AddHandler _btnArchive.Click, AddressOf OnArchiveClick
         AddHandler _btnAlternateModel.Click, AddressOf OnAlternateModelClick
         AddHandler _txtInput.KeyDown, AddressOf OnInputKeyDown
@@ -581,7 +629,7 @@ Public Class DiscussInky
         End If
 
         Try
-            Globals.ThisAddIn.SubmitTalkToMeExternalSpeech("", outputText)
+            Globals.ThisAddIn.SubmitTalkToMeExternalSpeech(speakerName, outputText)
         Catch
         End Try
     End Sub
@@ -610,7 +658,11 @@ Public Class DiscussInky
             title &= $" (using {_alternateModelDisplayName})"
         End If
 
-        Ui(Sub() Me.Text = title)
+        Ui(
+            Sub()
+                Me.Text = title
+                _btnManageDocs.Enabled = Not String.IsNullOrWhiteSpace(_knowledgeContent)
+            End Sub)
     End Sub
 
     ''' <summary>
@@ -629,6 +681,7 @@ Public Class DiscussInky
         _toolTip.SetToolTip(_btnMission, "Select or clear the current mission.")
         _toolTip.SetToolTip(_btnEditPersona, "Open the local persona library for editing.")
         _toolTip.SetToolTip(_btnKnowledge, "Load a knowledge file or a folder of knowledge files.")
+        _toolTip.SetToolTip(_btnManageDocs, "Compact, delete, or edit knowledge documents already loaded into the current discussion.")
         _toolTip.SetToolTip(_btnArchive, "Store, restore, update, or delete archived discussions.")
         _toolTip.SetToolTip(_btnAlternateModel, "Switch between the primary model and an alternate or secondary model.")
         _toolTip.SetToolTip(_btnClear, "Clear the current discussion and start a new one.")
@@ -701,6 +754,76 @@ Public Class DiscussInky
     ''' <returns>Full path to the persisted knowledge file.</returns>
     Private Function GetPersistedKnowledgeFilePath() As String
         Return Path.Combine(Path.GetTempPath(), PersistedKnowledgeFileName)
+    End Function
+
+    Private Function HasPersistedKnowledgeForCloseWarning() As Boolean
+        Try
+            If Not _chkPersistKnowledge.Checked Then
+                Return False
+            End If
+
+            Dim persistPath As String = GetPersistedKnowledgeFilePath()
+
+            Return File.Exists(persistPath) AndAlso
+                   (Not String.IsNullOrWhiteSpace(_knowledgeContent) OrElse
+                    Not String.IsNullOrWhiteSpace(_cachedKnowledgeContent))
+        Catch
+            Return False
+        End Try
+    End Function
+
+    Private Function ConfirmCloseWhenKnowledgePersisted() As Boolean
+        If _persistedKnowledgeCloseWarningAcknowledged Then
+            Return True
+        End If
+
+        ' Check if there's knowledge loaded
+        If String.IsNullOrWhiteSpace(_knowledgeContent) AndAlso String.IsNullOrWhiteSpace(_cachedKnowledgeContent) Then
+            Return True
+        End If
+
+        ' Determine if knowledge is persisted
+        Dim persistPath As String = GetPersistedKnowledgeFilePath()
+        Dim isPersistedToFile As Boolean = _chkPersistKnowledge.Checked AndAlso File.Exists(persistPath)
+
+        Dim message As String
+        Dim closeButtonText As String = "Close"
+        Dim keepOpenButtonText As String = "Keep open"
+
+        If isPersistedToFile Then
+            ' Knowledge IS persisted - safe to close
+            message = "DiscussInky is about to close." &
+                      vbCrLf &
+                      vbCrLf &
+                      "✓ Knowledge has been persisted." &
+                      vbCrLf &
+                      "✓ The current chat will be stored." &
+                      vbCrLf &
+                      vbCrLf &
+                      "You can safely close now. Both will be available when you return. However, for longer term storage of your chat, use 'Archive'. "
+        Else
+            ' Knowledge is NOT persisted - warn user
+            message = "DiscussInky is about to close." &
+                      vbCrLf &
+                      vbCrLf &
+                      "⚠ The loaded knowledge is NOT persisted and will not be available when you return, " &
+                      "unless the original source documents still exist in their original location." &
+                      vbCrLf &
+                      vbCrLf &
+                      "The current chat will be stored." &
+                      vbCrLf &
+                      vbCrLf &
+                      "You can activate persistence with the applicable checkbox or use 'Archive' to store the chat. Do you want to close now? "
+        End If
+
+        Dim answer As Integer = ShowCustomYesNoBox(message, closeButtonText, keepOpenButtonText)
+
+        If answer = 1 Then
+            _persistedKnowledgeCloseWarningAcknowledged = True
+            Return True
+        End If
+
+        Return False
     End Function
 
     ''' <summary>
@@ -1297,6 +1420,12 @@ Public Class DiscussInky
     ''' </summary>
     Private Sub OnFormClosing(sender As Object, e As FormClosingEventArgs)
         Try
+            If e.CloseReason = CloseReason.UserClosing AndAlso
+               Not ConfirmCloseWhenKnowledgePersisted() Then
+                e.Cancel = True
+                Return
+            End If
+
             Dim scope = _ownerScope
             _ownerScope = Nothing
             If scope IsNot Nothing Then
@@ -2173,6 +2302,7 @@ Public Class DiscussInky
         Return selectedPath & " (directory)"
     End Function
 
+
     Private Sub DeleteCurrentKnowledge()
         _knowledgeContent = Nothing
         _knowledgeFilePath = Nothing
@@ -2194,6 +2324,7 @@ Public Class DiscussInky
         End Try
 
         UpdateWindowTitle()
+        PersistCurrentSessionSettings()
         AppendSystemMessage("Knowledge deleted.")
     End Sub
 
@@ -2342,8 +2473,14 @@ Public Class DiscussInky
             ShowAssistantThinking()
 
             Dim resultBuilder As New StringBuilder()
+            Dim normalizedExistingKnowledgeContent As String = _knowledgeContent
+
+            If appendToExisting Then
+                normalizedExistingKnowledgeContent = PrepareKnowledgeContentForAppending(normalizedExistingKnowledgeContent)
+            End If
+
             Dim useDocumentTags As Boolean = appendToExisting OrElse filesToProcess.Count > 1
-            Dim firstDocumentNumber As Integer = If(appendToExisting, GetNextKnowledgeDocumentNumber(_knowledgeContent), 1)
+            Dim firstDocumentNumber As Integer = If(appendToExisting, GetNextKnowledgeDocumentNumber(normalizedExistingKnowledgeContent), 1)
 
             For Each filePath In filesToProcess
                 Try
@@ -2476,7 +2613,7 @@ Public Class DiscussInky
             ' Update state
             If appendToExisting Then
                 _knowledgeContent =
-                    If(_knowledgeContent, "").TrimEnd() &
+                    If(normalizedExistingKnowledgeContent, "").TrimEnd() &
                     vbCrLf & vbCrLf &
                     combinedContent.TrimStart()
             Else
@@ -2564,7 +2701,959 @@ Public Class DiscussInky
         End Try
     End Function
 
+    Private Async Sub OnManageKnowledgeDocumentsClick(sender As Object, e As EventArgs)
+        If String.IsNullOrWhiteSpace(_knowledgeContent) Then
+            AppendSystemMessage("No knowledge is currently loaded.")
+            Return
+        End If
+
+        Await ManageKnowledgeDocumentsAsync(
+            "Select one or more knowledge documents, then choose Compact Selected, Delete Selected, or Edit Selected.")
+
+        BringDiscussFormToFront()
+    End Sub
+
+    Private Shared Function TrimSingleBoundaryLineBreak(value As String) As String
+        Dim result As String = If(value, "")
+
+        If result.StartsWith(vbCrLf, StringComparison.Ordinal) Then
+            result = result.Substring(2)
+        ElseIf result.StartsWith(vbLf, StringComparison.Ordinal) OrElse result.StartsWith(vbCr, StringComparison.Ordinal) Then
+            result = result.Substring(1)
+        End If
+
+        If result.EndsWith(vbCrLf, StringComparison.Ordinal) Then
+            result = result.Substring(0, result.Length - 2)
+        ElseIf result.EndsWith(vbLf, StringComparison.Ordinal) OrElse result.EndsWith(vbCr, StringComparison.Ordinal) Then
+            result = result.Substring(0, result.Length - 1)
+        End If
+
+        Return result
+    End Function
+
+    Private Function GetSyntheticKnowledgeDocumentName(fragmentIndex As Integer) As String
+        If fragmentIndex = 1 AndAlso Not String.IsNullOrWhiteSpace(_knowledgeFilePath) Then
+            Try
+                Dim fileName As String = Path.GetFileName(_knowledgeFilePath)
+
+                If Not String.IsNullOrWhiteSpace(fileName) Then
+                    Return fileName
+                End If
+            Catch
+            End Try
+
+            Return _knowledgeFilePath
+        End If
+
+        If fragmentIndex <= 1 Then
+            Return "Knowledge"
+        End If
+
+        Return $"Knowledge fragment {fragmentIndex}"
+    End Function
+
+    Private Function ParseKnowledgeDocuments(Optional content As String = Nothing) As List(Of KnowledgeDocumentEntry)
+        Dim source As String = If(content, _knowledgeContent)
+        Dim result As New List(Of KnowledgeDocumentEntry)()
+
+        If String.IsNullOrWhiteSpace(source) Then
+            Return result
+        End If
+
+        Dim pattern As String = "<document(?<n>\d+)(?:\s+name=""(?<name>[^""]*)"")?\s*>(?<body>[\s\S]*?)</document\k<n>\s*>"
+        Dim matches As MatchCollection = Regex.Matches(source, pattern, RegexOptions.IgnoreCase)
+
+        If matches.Count = 0 Then
+            result.Add(
+                New KnowledgeDocumentEntry With {
+                    .Number = 1,
+                    .Name = GetSyntheticKnowledgeDocumentName(1),
+                    .Content = source,
+                    .StartIndex = 0,
+                    .Length = source.Length,
+                    .IsTagged = False
+                })
+
+            Return result
+        End If
+
+        Dim position As Integer = 0
+        Dim fragmentIndex As Integer = 0
+
+        For Each match As Match In matches
+            If match.Index > position Then
+                Dim rawSegment As String = source.Substring(position, match.Index - position)
+
+                If Not String.IsNullOrWhiteSpace(rawSegment) Then
+                    fragmentIndex += 1
+
+                    result.Add(
+                        New KnowledgeDocumentEntry With {
+                            .Number = -fragmentIndex,
+                            .Name = GetSyntheticKnowledgeDocumentName(fragmentIndex),
+                            .Content = TrimSingleBoundaryLineBreak(rawSegment),
+                            .StartIndex = position,
+                            .Length = match.Index - position,
+                            .IsTagged = False
+                        })
+                End If
+            End If
+
+            Dim number As Integer = 0
+            Integer.TryParse(match.Groups("n").Value, number)
+
+            result.Add(
+                New KnowledgeDocumentEntry With {
+                    .Number = number,
+                    .Name = match.Groups("name").Value,
+                    .Content = TrimSingleBoundaryLineBreak(match.Groups("body").Value),
+                    .StartIndex = match.Index,
+                    .Length = match.Length,
+                    .IsTagged = True
+                })
+
+            position = match.Index + match.Length
+        Next
+
+        If position < source.Length Then
+            Dim rawTail As String = source.Substring(position)
+
+            If Not String.IsNullOrWhiteSpace(rawTail) Then
+                fragmentIndex += 1
+
+                result.Add(
+                    New KnowledgeDocumentEntry With {
+                        .Number = -fragmentIndex,
+                        .Name = GetSyntheticKnowledgeDocumentName(fragmentIndex),
+                        .Content = TrimSingleBoundaryLineBreak(rawTail),
+                        .StartIndex = position,
+                        .Length = source.Length - position,
+                        .IsTagged = False
+                    })
+            End If
+        End If
+
+        Return result.OrderBy(Function(x) x.StartIndex).ThenBy(Function(x) x.Number).ToList()
+    End Function
+
+    Private Function RequiresKnowledgeDocumentNormalization(source As String,
+                                                           Optional forceTagSingleUntaggedDocument As Boolean = False) As Boolean
+        If String.IsNullOrWhiteSpace(source) Then
+            Return False
+        End If
+
+        Dim entries As List(Of KnowledgeDocumentEntry) = ParseKnowledgeDocuments(source)
+
+        If entries.Count = 0 Then
+            Return False
+        End If
+
+        If forceTagSingleUntaggedDocument AndAlso
+           entries.Count = 1 AndAlso
+           Not entries(0).IsTagged Then
+            Return True
+        End If
+
+        If entries.Any(Function(x) Not x.IsTagged) Then
+            Return True
+        End If
+
+        Dim seenNumbers As New HashSet(Of Integer)()
+
+        For Each entry In entries
+            If Not entry.IsTagged Then
+                Continue For
+            End If
+
+            If entry.Number <= 0 Then
+                Return True
+            End If
+
+            If Not seenNumbers.Add(entry.Number) Then
+                Return True
+            End If
+        Next
+
+        Return False
+    End Function
+
+    Private Function NormalizeKnowledgeDocumentsToTaggedContent(source As String) As String
+        If String.IsNullOrWhiteSpace(source) Then
+            Return source
+        End If
+
+        Dim entries As List(Of KnowledgeDocumentEntry) = ParseKnowledgeDocuments(source)
+
+        If entries.Count = 0 Then
+            Return source
+        End If
+
+        Dim normalizedEntries As New List(Of KnowledgeDocumentEntry)()
+
+        For i As Integer = 0 To entries.Count - 1
+            Dim entry As KnowledgeDocumentEntry = entries(i)
+
+            entry.Number = i + 1
+            entry.IsTagged = True
+
+            If String.IsNullOrWhiteSpace(entry.Name) Then
+                entry.Name = GetSyntheticKnowledgeDocumentName(i + 1)
+            End If
+
+            normalizedEntries.Add(entry)
+        Next
+
+        Return BuildKnowledgeContentFromEntries(normalizedEntries)
+    End Function
+
+    Private Function PrepareKnowledgeContentForAppending(existingContent As String) As String
+        If String.IsNullOrWhiteSpace(existingContent) Then
+            Return existingContent
+        End If
+
+        If Not RequiresKnowledgeDocumentNormalization(existingContent, forceTagSingleUntaggedDocument:=True) Then
+            Return existingContent
+        End If
+
+        Return NormalizeKnowledgeDocumentsToTaggedContent(existingContent)
+    End Function
+
+    Private Sub NormalizeKnowledgeDocumentsForManagementIfNeeded()
+        If String.IsNullOrWhiteSpace(_knowledgeContent) Then
+            Return
+        End If
+
+        If Not RequiresKnowledgeDocumentNormalization(_knowledgeContent) Then
+            Return
+        End If
+
+        Dim splash As New SharedMethods.SplashScreen("Please wait ...   ")
+
+        Try
+            splash.Show()
+            System.Windows.Forms.Application.DoEvents()
+
+            Dim normalizedContent As String = NormalizeKnowledgeDocumentsToTaggedContent(_knowledgeContent)
+
+            If Not String.Equals(normalizedContent, _knowledgeContent, StringComparison.Ordinal) Then
+                ApplyKnowledgeContentMutation(normalizedContent)
+                AppendSystemMessage("Knowledge documents were normalized for management.")
+            End If
+        Finally
+            Try
+                splash.Close()
+            Catch
+            End Try
+
+            Try
+                splash.Dispose()
+            Catch
+            End Try
+        End Try
+    End Sub
+
+    Private Function BuildKnowledgeContentFromEntries(entries As IEnumerable(Of KnowledgeDocumentEntry)) As String
+        If entries Is Nothing Then
+            Return Nothing
+        End If
+
+        Dim orderedEntries As List(Of KnowledgeDocumentEntry) =
+            entries.
+                OrderBy(Function(x) x.StartIndex).
+                ThenBy(Function(x) x.Number).
+                ToList()
+
+        If orderedEntries.Count = 0 Then
+            Return Nothing
+        End If
+
+        If orderedEntries.Count = 1 AndAlso Not orderedEntries(0).IsTagged Then
+            Return orderedEntries(0).Content
+        End If
+
+        Dim sb As New StringBuilder()
+
+        For Each entry In orderedEntries
+            If entry.IsTagged Then
+                Dim safeName As String = If(entry.Name, "").Replace("""", "'")
+
+                sb.Append($"<document{entry.Number}")
+
+                If safeName.Length > 0 Then
+                    sb.Append($" name=""{safeName}""")
+                End If
+
+                sb.Append(">").AppendLine()
+
+                Dim documentContent As String = If(entry.Content, "")
+                sb.Append(documentContent)
+
+                If documentContent.Length > 0 AndAlso
+                   Not documentContent.EndsWith(vbCrLf, StringComparison.Ordinal) AndAlso
+                   Not documentContent.EndsWith(vbLf, StringComparison.Ordinal) AndAlso
+                   Not documentContent.EndsWith(vbCr, StringComparison.Ordinal) Then
+                    sb.AppendLine()
+                End If
+
+                sb.Append($"</document{entry.Number}>").AppendLine()
+            Else
+                sb.Append(If(entry.Content, ""))
+            End If
+        Next
+
+        Return sb.ToString().TrimEnd()
+    End Function
+
+    Private Sub ApplyKnowledgeContentMutation(newKnowledgeContent As String)
+        If String.IsNullOrWhiteSpace(newKnowledgeContent) Then
+            DeleteCurrentKnowledge()
+            Return
+        End If
+
+        _knowledgeContent = newKnowledgeContent
+        _cachedKnowledgeContent = _knowledgeContent
+        _cachedKnowledgeFilePath = _knowledgeFilePath
+
+        If _chkPersistKnowledge.Checked Then
+            PersistKnowledgeToTempFile()
+        End If
+
+        UpdateWindowTitle()
+        PersistCurrentSessionSettings()
+    End Sub
+
+    Private Function IsKnowledgeRateLimitResponse(response As String) As Boolean
+        If String.IsNullOrWhiteSpace(response) Then
+            Return False
+        End If
+
+        Return response.IndexOf("HTTP Error 429", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+               response.IndexOf("Too Many Requests", StringComparison.OrdinalIgnoreCase) >= 0
+    End Function
+
+    Private Function ShouldOfferKnowledgeCompaction(response As String) As Boolean
+        If String.IsNullOrWhiteSpace(_knowledgeContent) Then
+            Return False
+        End If
+
+        If String.IsNullOrWhiteSpace(response) Then
+            Return True
+        End If
+
+        Return IsKnowledgeRateLimitResponse(response)
+    End Function
+
+    Private Function GetStoredCompactPrompt() As String
+        Try
+            Return If(My.Settings.DiscussLastCompactPrompt, "")
+        Catch
+            Return ""
+        End Try
+    End Function
+
+    Private Function PromptForCompactPrompt() As String
+        Dim previousPrompt As String = GetStoredCompactPrompt()
+        Dim proposedPrompt As String = If(String.IsNullOrWhiteSpace(_context.SP_Compact), previousPrompt, _context.SP_Compact)
+
+        Dim promptText As String =
+            ShowCustomInputBox(
+                "Enter the prompt used to compact the selected knowledge document(s)." & vbCrLf & vbCrLf &
+                "Ctrl+P inserts your last saved compact prompt. The dialog always proposes the default prompt first.",
+                $"{AN} - Compact Knowledge",
+                False,
+                proposedPrompt,
+                previousPrompt,
+                Context:=_context)
+
+        If promptText = "ESC" Then
+            Return Nothing
+        End If
+
+        promptText = If(promptText, "").Trim()
+
+        If promptText.Length = 0 Then
+            ShowCustomMessageBox("No compact prompt was entered.")
+            Return Nothing
+        End If
+
+        If promptText <> _context.SP_Compact.Trim() Then
+            Try
+                My.Settings.DiscussLastCompactPrompt = promptText
+                My.Settings.Save()
+            Catch
+            End Try
+        End If
+
+        Return promptText
+    End Function
+
+    Private Function ShowKnowledgeDocumentManagerDialog(entries As IReadOnlyList(Of KnowledgeDocumentEntry),
+                                                        preselectedNumbers As IEnumerable(Of Integer),
+                                                        instruction As String) As KnowledgeDocumentManagerResult
+        Dim result As New KnowledgeDocumentManagerResult With {
+            .Action = KnowledgeDocumentManagerAction.None,
+            .SelectedDocumentNumbers = New List(Of Integer)()
+        }
+
+        If entries Is Nothing OrElse entries.Count = 0 Then
+            Return result
+        End If
+
+        Using dlg As New Form() With {
+            .Text = $"{AN} - Manage Knowledge Documents",
+            .StartPosition = FormStartPosition.CenterParent,
+            .FormBorderStyle = FormBorderStyle.Sizable,
+            .MinimizeBox = False,
+            .MaximizeBox = True,
+            .ShowInTaskbar = False,
+            .TopMost = True,
+            .Font = New System.Drawing.Font("Segoe UI", 9.0F, FontStyle.Regular, GraphicsUnit.Point),
+            .AutoScaleMode = AutoScaleMode.Dpi,
+            .Size = New System.Drawing.Size(820, 620),
+            .MinimumSize = New System.Drawing.Size(640, 420)
+        }
+            Try
+                dlg.Icon = Me.Icon
+            Catch
+            End Try
+
+            Dim outer As New TableLayoutPanel() With {
+                .Dock = DockStyle.Fill,
+                .ColumnCount = 1,
+                .RowCount = 4,
+                .Padding = New Padding(16, 12, 16, 12)
+            }
+            outer.RowStyles.Add(New RowStyle(SizeType.AutoSize))
+            outer.RowStyles.Add(New RowStyle(SizeType.AutoSize))
+            outer.RowStyles.Add(New RowStyle(SizeType.Percent, 100.0F))
+            outer.RowStyles.Add(New RowStyle(SizeType.AutoSize))
+            dlg.Controls.Add(outer)
+
+            Dim lblInstruction As New Label() With {
+                .AutoSize = True,
+                .Dock = DockStyle.Top,
+                .Text = instruction & vbCrLf & vbCrLf &
+                        $"Current knowledge: {entries.Count:N0} document(s), {If(_knowledgeContent, "").Length:N0} characters.",
+                .MaximumSize = New System.Drawing.Size(760, 0),
+                .Margin = New Padding(0, 0, 0, 8)
+            }
+            outer.Controls.Add(lblInstruction, 0, 0)
+
+            Dim txtFilter As New TextBox() With {
+                .Dock = DockStyle.Top,
+                .Margin = New Padding(0, 0, 0, 8)
+            }
+            outer.Controls.Add(txtFilter, 0, 1)
+
+            Dim chkList As New CheckedListBox() With {
+                .Dock = DockStyle.Fill,
+                .CheckOnClick = True,
+                .IntegralHeight = False
+            }
+            outer.Controls.Add(chkList, 0, 2)
+
+            Dim pnlButtons As New FlowLayoutPanel() With {
+                .Dock = DockStyle.Fill,
+                .FlowDirection = FlowDirection.RightToLeft,
+                .WrapContents = True,
+                .AutoSize = True,
+                .Padding = New Padding(0, 8, 0, 0),
+                .Margin = New Padding(0)
+            }
+            outer.Controls.Add(pnlButtons, 0, 3)
+
+            Dim btnClose As New Button() With {.Text = "Close", .AutoSize = True}
+            Dim btnEdit As New Button() With {.Text = "Edit Selected", .AutoSize = True}
+            Dim btnDelete As New Button() With {.Text = "Delete Selected", .AutoSize = True}
+            Dim btnCompact As New Button() With {.Text = "Compact Selected", .AutoSize = True}
+            Dim btnToggleAll As New Button() With {.Text = "Select All", .AutoSize = True}
+
+            pnlButtons.Controls.Add(btnClose)
+            pnlButtons.Controls.Add(btnEdit)
+            pnlButtons.Controls.Add(btnDelete)
+            pnlButtons.Controls.Add(btnCompact)
+            pnlButtons.Controls.Add(btnToggleAll)
+
+            dlg.CancelButton = btnClose
+
+            Dim selectedNumbers As New HashSet(Of Integer)()
+
+            If preselectedNumbers IsNot Nothing Then
+                For Each number In preselectedNumbers
+                    selectedNumbers.Add(number)
+                Next
+            End If
+
+            Dim allItems As New List(Of KnowledgeDocumentSelectionItem)()
+
+            For Each entry In entries.OrderBy(Function(x) x.StartIndex).ThenBy(Function(x) x.Number)
+                allItems.Add(New KnowledgeDocumentSelectionItem(entry.Number, entry.DisplayText))
+            Next
+
+            Dim isUpdating As Boolean = False
+
+            Dim rebuildList As System.Action =
+                Sub()
+                    Dim filter As String = If(txtFilter.Text, "").Trim()
+
+                    isUpdating = True
+                    chkList.BeginUpdate()
+
+                    Try
+                        chkList.Items.Clear()
+
+                        For Each item In allItems
+                            If filter.Length = 0 OrElse
+                               item.DisplayText.IndexOf(filter, StringComparison.OrdinalIgnoreCase) >= 0 Then
+                                chkList.Items.Add(item, selectedNumbers.Contains(item.Number))
+                            End If
+                        Next
+                    Finally
+                        chkList.EndUpdate()
+                        isUpdating = False
+                    End Try
+                End Sub
+
+            Dim areAllVisibleItemsChecked As Func(Of Boolean) =
+                Function() As Boolean
+                    If chkList.Items.Count = 0 Then
+                        Return False
+                    End If
+
+                    For i As Integer = 0 To chkList.Items.Count - 1
+                        If Not chkList.GetItemChecked(i) Then
+                            Return False
+                        End If
+                    Next
+
+                    Return True
+                End Function
+
+            Dim updateToggleText As System.Action =
+                Sub()
+                    btnToggleAll.Text = If(areAllVisibleItemsChecked.Invoke(), "Unselect All", "Select All")
+                End Sub
+
+            Dim getSelectedNumbers As Func(Of List(Of Integer)) =
+                Function() As List(Of Integer)
+                    Return selectedNumbers.OrderBy(Function(x) x).ToList()
+                End Function
+
+            Dim acceptAction As Action(Of KnowledgeDocumentManagerAction) =
+                Sub(requestedAction As KnowledgeDocumentManagerAction)
+                    Dim chosen As List(Of Integer) = getSelectedNumbers.Invoke()
+
+                    If chosen.Count = 0 Then
+                        ShowCustomMessageBox("Select at least one knowledge document first.")
+                        Return
+                    End If
+
+                    result.Action = requestedAction
+                    result.SelectedDocumentNumbers = chosen
+                    dlg.DialogResult = DialogResult.OK
+                    dlg.Close()
+                End Sub
+
+            AddHandler txtFilter.TextChanged,
+                Sub()
+                    rebuildList.Invoke()
+                    updateToggleText.Invoke()
+                End Sub
+
+            AddHandler chkList.ItemCheck,
+                Sub(sender As Object, args As ItemCheckEventArgs)
+                    If isUpdating Then
+                        Return
+                    End If
+
+                    Dim item As KnowledgeDocumentSelectionItem = DirectCast(chkList.Items(args.Index), KnowledgeDocumentSelectionItem)
+
+                    If args.NewValue = CheckState.Checked Then
+                        selectedNumbers.Add(item.Number)
+                    Else
+                        selectedNumbers.Remove(item.Number)
+                    End If
+
+                    chkList.BeginInvoke(
+                        New MethodInvoker(
+                            Sub()
+                                updateToggleText.Invoke()
+                            End Sub))
+                End Sub
+
+            AddHandler chkList.DoubleClick,
+                Sub()
+                    Dim idx As Integer = chkList.SelectedIndex
+                    If idx >= 0 Then
+                        chkList.SetItemChecked(idx, Not chkList.GetItemChecked(idx))
+                    End If
+                End Sub
+
+            AddHandler btnToggleAll.Click,
+                Sub()
+                    Dim shouldCheck As Boolean = Not areAllVisibleItemsChecked.Invoke()
+
+                    isUpdating = True
+                    chkList.BeginUpdate()
+
+                    Try
+                        For i As Integer = 0 To chkList.Items.Count - 1
+                            Dim item As KnowledgeDocumentSelectionItem = DirectCast(chkList.Items(i), KnowledgeDocumentSelectionItem)
+                            chkList.SetItemChecked(i, shouldCheck)
+
+                            If shouldCheck Then
+                                selectedNumbers.Add(item.Number)
+                            Else
+                                selectedNumbers.Remove(item.Number)
+                            End If
+                        Next
+                    Finally
+                        chkList.EndUpdate()
+                        isUpdating = False
+                    End Try
+
+                    updateToggleText.Invoke()
+                End Sub
+
+            AddHandler btnCompact.Click, Sub() acceptAction.Invoke(KnowledgeDocumentManagerAction.CompactSelected)
+            AddHandler btnDelete.Click, Sub() acceptAction.Invoke(KnowledgeDocumentManagerAction.DeleteSelected)
+            AddHandler btnEdit.Click, Sub() acceptAction.Invoke(KnowledgeDocumentManagerAction.EditSelected)
+            AddHandler btnClose.Click,
+                Sub()
+                    result.Action = KnowledgeDocumentManagerAction.None
+                    result.SelectedDocumentNumbers = getSelectedNumbers.Invoke()
+                    dlg.DialogResult = DialogResult.Cancel
+                    dlg.Close()
+                End Sub
+
+            rebuildList.Invoke()
+            updateToggleText.Invoke()
+
+            dlg.ShowDialog(Me)
+        End Using
+
+        Return result
+    End Function
+
+    Private Function DeleteKnowledgeDocuments(selectedDocumentNumbers As IEnumerable(Of Integer)) As Integer
+        If selectedDocumentNumbers Is Nothing Then
+            Return 0
+        End If
+
+        Dim selectedSet As New HashSet(Of Integer)(selectedDocumentNumbers)
+        If selectedSet.Count = 0 Then
+            Return 0
+        End If
+
+        Dim confirmDelete As Integer =
+            ShowCustomYesNoBox(
+                $"Are you sure you want to delete {selectedSet.Count:N0} selected knowledge document(s) from the current knowledge?",
+                "Yes, delete",
+                "No, keep",
+                $"{AN} - Delete Knowledge Documents")
+
+        If confirmDelete <> 1 Then
+            Return 0
+        End If
+
+        Dim existingEntries As List(Of KnowledgeDocumentEntry) = ParseKnowledgeDocuments()
+        Dim remainingEntries As List(Of KnowledgeDocumentEntry) =
+            existingEntries.
+                Where(Function(x) Not selectedSet.Contains(x.Number)).
+                ToList()
+
+        Dim removedCount As Integer = existingEntries.Count - remainingEntries.Count
+
+        If removedCount <= 0 Then
+            Return 0
+        End If
+
+        If remainingEntries.Count = 0 Then
+            DeleteCurrentKnowledge()
+        Else
+            ApplyKnowledgeContentMutation(BuildKnowledgeContentFromEntries(remainingEntries))
+            AppendSystemMessage($"Deleted {removedCount:N0} knowledge document(s).")
+        End If
+
+        Return removedCount
+    End Function
+
+    Private Function EditKnowledgeDocuments(selectedDocumentNumbers As IEnumerable(Of Integer)) As Integer
+        If selectedDocumentNumbers Is Nothing Then
+            Return 0
+        End If
+
+        Dim selectedSet As New HashSet(Of Integer)(selectedDocumentNumbers)
+        If selectedSet.Count = 0 Then
+            Return 0
+        End If
+
+        Dim entries As List(Of KnowledgeDocumentEntry) = ParseKnowledgeDocuments()
+        Dim editedCount As Integer = 0
+
+        For i As Integer = 0 To entries.Count - 1
+            If Not selectedSet.Contains(entries(i).Number) Then
+                Continue For
+            End If
+
+            Dim entry As KnowledgeDocumentEntry = entries(i)
+            Dim tempPath As String =
+                Path.Combine(
+                    Path.GetTempPath(),
+                    $"redink-discuss-docedit-{Guid.NewGuid():N}-document{entry.Number}.txt")
+
+            Try
+                File.WriteAllText(tempPath, If(entry.Content, ""), Encoding.UTF8)
+
+                Dim wasSaved As Boolean? = Nothing
+                ShowTextFileEditor(
+                    tempPath,
+                    $"Edit knowledge document document{entry.Number}" &
+                    If(String.IsNullOrWhiteSpace(entry.Name), "", $" ({entry.Name})"),
+                    False,
+                    _context,
+                    wasSaved,
+                    Me.Handle)
+
+                If wasSaved.HasValue AndAlso wasSaved.Value Then
+                    entry.Content = File.ReadAllText(tempPath, Encoding.UTF8)
+                    entries(i) = entry
+                    editedCount += 1
+                End If
+            Catch ex As Exception
+                AppendSystemMessage($"Could not edit document{entry.Number}: {ex.Message}")
+            Finally
+                Try
+                    If File.Exists(tempPath) Then
+                        File.Delete(tempPath)
+                    End If
+                Catch
+                End Try
+            End Try
+        Next
+
+        If editedCount > 0 Then
+            ApplyKnowledgeContentMutation(BuildKnowledgeContentFromEntries(entries))
+            AppendSystemMessage($"Edited {editedCount:N0} knowledge document(s).")
+        End If
+
+        Return editedCount
+    End Function
+
+    Private Async Function CompactKnowledgeDocumentsAsync(selectedDocumentNumbers As IEnumerable(Of Integer)) As Task(Of Integer)
+        If selectedDocumentNumbers Is Nothing Then
+            Return 0
+        End If
+
+        Dim selectedSet As New HashSet(Of Integer)(selectedDocumentNumbers)
+        If selectedSet.Count = 0 Then
+            Return 0
+        End If
+
+        Dim compactPrompt As String = PromptForCompactPrompt()
+        If String.IsNullOrWhiteSpace(compactPrompt) Then
+            Return 0
+        End If
+
+        Dim entries As List(Of KnowledgeDocumentEntry) = ParseKnowledgeDocuments()
+        Dim targetEntries As List(Of KnowledgeDocumentEntry) =
+            entries.
+                Where(Function(x) selectedSet.Contains(x.Number)).
+                OrderBy(Function(x) x.StartIndex).
+                ThenBy(Function(x) x.Number).
+                ToList()
+
+        If targetEntries.Count = 0 Then
+            Return 0
+        End If
+
+        Dim compactedCount As Integer = 0
+        Dim failedCount As Integer = 0
+        Dim cancelled As Boolean = False
+
+        ShowProgressBarInSeparateThread($"{AN} Compact Knowledge", "Compacting selected knowledge documents...")
+        ProgressBarModule.CancelOperation = False
+        ProgressBarModule.GlobalProgressMax = targetEntries.Count
+        ProgressBarModule.GlobalProgressValue = 0
+        ProgressBarModule.GlobalProgressLabel = "Starting..."
+
+        Try
+            For i As Integer = 0 To targetEntries.Count - 1
+                If ProgressBarModule.CancelOperation Then
+                    cancelled = True
+                    Exit For
+                End If
+
+                Dim entry As KnowledgeDocumentEntry = targetEntries(i)
+
+                ProgressBarModule.GlobalProgressValue = i + 1
+                ProgressBarModule.GlobalProgressLabel = $"Compacting document{entry.Number}..."
+
+                Dim sb As New StringBuilder()
+                sb.AppendLine($"Document tag: document{entry.Number}")
+
+                If Not String.IsNullOrWhiteSpace(entry.Name) Then
+                    sb.AppendLine($"Document name: {entry.Name}")
+                End If
+
+                sb.AppendLine("<DOCUMENT_TO_COMPACT>")
+                sb.AppendLine(If(entry.Content, ""))
+                sb.AppendLine("</DOCUMENT_TO_COMPACT>")
+
+                Dim compactedText As String = Await CallLlmWithSelectedModelAsync(compactPrompt, sb.ToString())
+                compactedText = If(compactedText, "").Trim()
+
+                If String.IsNullOrWhiteSpace(compactedText) Then
+                    failedCount += 1
+                    AppendSystemMessage($"Compaction returned an empty response for document{entry.Number}. The original content was kept.")
+                    Continue For
+                End If
+
+                If IsKnowledgeRateLimitResponse(compactedText) Then
+                    failedCount += 1
+                    AppendSystemMessage($"Compaction returned a 429-style response for document{entry.Number}. The original content was kept.")
+                    Continue For
+                End If
+
+                For j As Integer = 0 To entries.Count - 1
+                    If entries(j).Number = entry.Number Then
+                        Dim updatedEntry As KnowledgeDocumentEntry = entries(j)
+                        updatedEntry.Content = compactedText
+                        entries(j) = updatedEntry
+                        compactedCount += 1
+                        Exit For
+                    End If
+                Next
+            Next
+        Finally
+            ProgressBarModule.CancelOperation = True
+        End Try
+
+        If compactedCount > 0 Then
+            ApplyKnowledgeContentMutation(BuildKnowledgeContentFromEntries(entries))
+            AppendSystemMessage($"Compacted {compactedCount:N0} knowledge document(s).")
+        End If
+
+        If failedCount > 0 Then
+            AppendSystemMessage($"The original content was preserved for {failedCount:N0} knowledge document(s).")
+        End If
+
+        If cancelled Then
+            AppendSystemMessage("Compaction cancelled by user.")
+        End If
+
+        Return compactedCount
+    End Function
+
+    Private Async Function ManageKnowledgeDocumentsAsync(Optional instruction As String = "") As Task(Of Integer)
+        Dim totalAffectedCount As Integer = 0
+        Dim selectedDocumentNumbers As New List(Of Integer)()
+        Dim nextInstruction As String =
+            If(
+                String.IsNullOrWhiteSpace(instruction),
+                "Select one or more knowledge documents, then choose Compact Selected, Delete Selected, or Edit Selected.",
+                instruction)
+
+        NormalizeKnowledgeDocumentsForManagementIfNeeded()
+
+        Do
+            Dim entries As List(Of KnowledgeDocumentEntry) = ParseKnowledgeDocuments()
+
+            If entries.Count = 0 Then
+                Exit Do
+            End If
+
+            Dim selection As KnowledgeDocumentManagerResult =
+                ShowKnowledgeDocumentManagerDialog(entries, selectedDocumentNumbers, nextInstruction)
+
+            If selection.Action = KnowledgeDocumentManagerAction.None Then
+                Exit Do
+            End If
+
+            Dim affectedCount As Integer = 0
+
+            Select Case selection.Action
+                Case KnowledgeDocumentManagerAction.CompactSelected
+                    affectedCount = Await CompactKnowledgeDocumentsAsync(selection.SelectedDocumentNumbers)
+
+                Case KnowledgeDocumentManagerAction.DeleteSelected
+                    affectedCount = DeleteKnowledgeDocuments(selection.SelectedDocumentNumbers)
+
+                Case KnowledgeDocumentManagerAction.EditSelected
+                    affectedCount = EditKnowledgeDocuments(selection.SelectedDocumentNumbers)
+            End Select
+
+            totalAffectedCount += affectedCount
+
+            If String.IsNullOrWhiteSpace(_knowledgeContent) Then
+                Exit Do
+            End If
+
+            Dim remainingNumbers As New HashSet(Of Integer)(ParseKnowledgeDocuments().Select(Function(x) x.Number))
+            selectedDocumentNumbers =
+                selection.SelectedDocumentNumbers.
+                    Where(Function(x) remainingNumbers.Contains(x)).
+                    ToList()
+
+            nextInstruction = "Choose another action, or close the selector when you are finished."
+        Loop
+
+        Return totalAffectedCount
+    End Function
+
+    Private Async Function TryHandleKnowledgeCompactionOpportunityAsync(response As String,
+                                                                        originalUserText As String,
+                                                                        toolTriggerDetected As Boolean) As Task(Of Boolean)
+        If Not ShouldOfferKnowledgeCompaction(response) Then
+            Return False
+        End If
+
+        RemoveAssistantThinking()
+
+        If String.IsNullOrWhiteSpace(response) Then
+            AppendSystemMessage("The AI returned an empty response. This can indicate that the local knowledge is too large.")
+        Else
+            AppendSystemMessage("The AI returned a 429-style response. This can indicate that the local knowledge is too large.")
+        End If
+
+        Dim openManager As Integer =
+            ShowCustomYesNoBox(
+                "Do you want to open the knowledge document manager now? You can compact, edit, or delete selected knowledge documents.",
+                "Yes, manage knowledge",
+                "No, not now",
+                $"{AN} - Manage Knowledge")
+
+        If openManager <> 1 Then
+            Return True
+        End If
+
+        Dim affectedCount As Integer =
+            Await ManageKnowledgeDocumentsAsync(
+                "Select one or more knowledge documents. Compact uses the same prompt for all selected documents.")
+
+        BringDiscussFormToFront()
+
+        If affectedCount <= 0 Then
+            Return True
+        End If
+
+        Dim retryPrompt As Integer =
+            ShowCustomYesNoBox(
+                "Knowledge management is complete. Do you want to retry your last prompt now?",
+                "Yes, retry",
+                "No, not now",
+                $"{AN} - Retry Prompt")
+
+        If retryPrompt = 1 Then
+            ShowAssistantThinking()
+            Await SendAsync(originalUserText, toolTriggerDetected)
+        End If
+
+        Return True
+    End Function
+
 #End Region
+
 
 #Region "Chat Actions"
 
@@ -2781,6 +3870,10 @@ Public Class DiscussInky
     ''' Closes the DiscussInky form.
     ''' </summary>
     Private Sub OnClose(sender As Object, e As EventArgs)
+        If Not ConfirmCloseWhenKnowledgePersisted() Then
+            Return
+        End If
+
         Me.Close()
     End Sub
 
@@ -2861,7 +3954,9 @@ Public Class DiscussInky
             e.SuppressKeyPress = True
             OnSend(Me, EventArgs.Empty)
         ElseIf e.KeyCode = Keys.Escape Then
-            Me.Close()
+            e.SuppressKeyPress = True
+            e.Handled = True
+            OnClose(Me, EventArgs.Empty)
         End If
     End Sub
 
@@ -3236,6 +4331,10 @@ Public Class DiscussInky
 
                     answer = If(answer, "").Trim()
 
+                    If Await TryHandleKnowledgeCompactionOpportunityAsync(answer, userText, toolTriggerDetected) Then
+                        Return
+                    End If
+
                     ' Process InkyMemory updates from LLM response (if enabled)
                     If _chkInkyMemory.Checked Then
                         answer = SharedMethods.ProcessInkyMemoryResponse(answer, _context.INI_InkyMemoryCap)
@@ -3267,6 +4366,10 @@ Public Class DiscussInky
             sw.Stop()
 
             stdAnswer = If(stdAnswer, "").Trim()
+
+            If Await TryHandleKnowledgeCompactionOpportunityAsync(stdAnswer, userText, toolTriggerDetected) Then
+                Return
+            End If
 
             ' Process InkyMemory updates from LLM response (if enabled)
             If _chkInkyMemory.Checked Then
@@ -3499,7 +4602,9 @@ Public Class DiscussInky
     ''' <summary>
     ''' Converts assistant markdown to HTML and appends it to the transcript with a custom display name.
     ''' </summary>
-    Private Sub AppendAssistantMarkdownWithName(md As String, displayName As String)
+    Private Sub AppendAssistantMarkdownWithName(md As String,
+                                               displayName As String,
+                                               Optional forwardToTalkToMe As Boolean = True)
         md = If(md, "")
         Dim body = Markdig.Markdown.ToHtml(md, _mdPipeline)
         Dim t = body.Trim()
@@ -3530,7 +4635,9 @@ Public Class DiscussInky
             End If
         End If
 
-        ForwardOutputToTalkToMe(displayName, md)
+        If forwardToTalkToMe Then
+            ForwardOutputToTalkToMe(displayName, md)
+        End If
     End Sub
 
 #End Region
@@ -3926,7 +5033,8 @@ Public Class DiscussInky
 
                 ' Display and record the responder's message
                 If Not String.IsNullOrWhiteSpace(responderMessage) Then
-                    AppendAutoResponderHtml(responderDisplayName, responderMessage)
+                    AppendAutoResponderHtml(responderDisplayName, responderMessage, forwardToTalkToMe:=False)
+                    ForwardOutputToTalkToMe(responderDisplayName, responderMessage)
                     _history.Add(("autoresponder", $"{responderDisplayName}: {responderMessage}"))
                 End If
 
@@ -3947,7 +5055,8 @@ Public Class DiscussInky
 
                 ' Display and record the chatbot's response
                 If Not String.IsNullOrWhiteSpace(chatbotResponse) Then
-                    AppendAssistantMarkdown(chatbotResponse)
+                    AppendAssistantMarkdownWithName(chatbotResponse, _currentPersonaName, forwardToTalkToMe:=False)
+                    ForwardOutputToTalkToMe(_currentPersonaName, chatbotResponse)
                     _history.Add(("assistant", chatbotResponse))
                 End If
 
@@ -4166,7 +5275,9 @@ Public Class DiscussInky
     ''' <summary>
     ''' Appends an autoresponder message with distinct styling.
     ''' </summary>
-    Private Sub AppendAutoResponderHtml(responderName As String, text As String)
+    Private Sub AppendAutoResponderHtml(responderName As String,
+                                        text As String,
+                                        Optional forwardToTalkToMe As Boolean = True)
         Dim body = Markdig.Markdown.ToHtml(text, _mdPipeline)
         Dim t = body.Trim()
         Dim whoHtml = WebUtility.HtmlEncode(responderName)
@@ -4196,7 +5307,9 @@ Public Class DiscussInky
             End If
         End If
 
-        ForwardOutputToTalkToMe(responderName, text)
+        If forwardToTalkToMe Then
+            ForwardOutputToTalkToMe(responderName, text)
+        End If
     End Sub
 
 #End Region
@@ -4652,7 +5765,8 @@ Public Class DiscussInky
             End If
 
             If Not String.IsNullOrWhiteSpace(mainResponse) Then
-                AppendAssistantMarkdownWithName(mainResponse, mainDisplayName)
+                AppendAssistantMarkdownWithName(mainResponse, mainDisplayName, forwardToTalkToMe:=False)
+                ForwardOutputToTalkToMe(mainDisplayName, mainResponse)
                 ' Store with display name prefix for Sort It Out mode (like autoresponder)
                 _history.Add(("assistant", $"{mainDisplayName}: {mainResponse}"))
             End If
@@ -4685,7 +5799,8 @@ Public Class DiscussInky
                 End If
 
                 If Not String.IsNullOrWhiteSpace(responderMessage) Then
-                    AppendAutoResponderHtml(responderDisplayName, responderMessage)
+                    AppendAutoResponderHtml(responderDisplayName, responderMessage, forwardToTalkToMe:=False)
+                    ForwardOutputToTalkToMe(responderDisplayName, responderMessage)
                     _history.Add(("autoresponder", $"{responderDisplayName}: {responderMessage}"))
                 End If
 
@@ -4705,7 +5820,8 @@ Public Class DiscussInky
                 End If
 
                 If Not String.IsNullOrWhiteSpace(mainBotResponse) Then
-                    AppendAssistantMarkdownWithName(mainBotResponse, mainDisplayName)
+                    AppendAssistantMarkdownWithName(mainBotResponse, mainDisplayName, forwardToTalkToMe:=False)
+                    ForwardOutputToTalkToMe(mainDisplayName, mainBotResponse)
                     ' Store with display name prefix for Sort It Out mode (like autoresponder)
                     _history.Add(("assistant", $"{mainDisplayName}: {mainBotResponse}"))
                 End If

@@ -56,6 +56,12 @@ Namespace SharedLibrary
         Private _isBusy As Boolean = False
         Private _returnFocusAfterStart As Action = Nothing
         Private _speechOutputRefreshTimer As System.Windows.Forms.Timer
+        Private ReadOnly _toolTip As New ToolTip() With {
+            .AutoPopDelay = 10000,
+            .InitialDelay = 300,
+            .ReshowDelay = 150
+        }
+        Private _speechOutputFlashPhase As Boolean = False
 
         Private _rootLayout As TableLayoutPanel
         Private WithEvents btnStartStop As Button
@@ -73,7 +79,7 @@ Namespace SharedLibrary
             RestoreBoundsSafe()
 
             _speechOutputRefreshTimer = New System.Windows.Forms.Timer() With {
-                .Interval = 250,
+                .Interval = 500,
                 .Enabled = True
             }
             AddHandler _speechOutputRefreshTimer.Tick, Sub(sender As Object, e As EventArgs) UpdateSpeechOutputUi()
@@ -120,7 +126,7 @@ Namespace SharedLibrary
             _rootLayout.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
             _rootLayout.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
             _rootLayout.ColumnStyles.Add(New ColumnStyle(SizeType.Percent, 100.0F))
-            _rootLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))
+            _rootLayout.RowStyles.Add(New RowStyle(SizeType.Percent, 100.0F))
 
             btnStartStop = New Button() With {
                 .Text = ChrW(&H25B6),
@@ -130,7 +136,8 @@ Namespace SharedLibrary
                 .MaximumSize = New Size(22, 22),
                 .Margin = New Padding(0, 0, 4, 0),
                 .Padding = New Padding(0),
-                .UseVisualStyleBackColor = True
+                .UseVisualStyleBackColor = True,
+                .Anchor = AnchorStyles.Left
             }
 
             btnSpeechOutput = New Button() With {
@@ -143,7 +150,8 @@ Namespace SharedLibrary
                 .Padding = New Padding(0),
                 .UseVisualStyleBackColor = True,
                 .Visible = False,
-                .TabStop = False
+                .TabStop = False,
+                .Anchor = AnchorStyles.Left
             }
 
             btnConfigure = New Button() With {
@@ -154,7 +162,8 @@ Namespace SharedLibrary
                 .MaximumSize = New Size(22, 22),
                 .Margin = New Padding(0, 0, 6, 0),
                 .Padding = New Padding(0),
-                .UseVisualStyleBackColor = True
+                .UseVisualStyleBackColor = True,
+                .Anchor = AnchorStyles.Left
             }
 
             lblTranscript = New Label() With {
@@ -308,6 +317,18 @@ Namespace SharedLibrary
         End Sub
 
         Private Sub btnSpeechOutput_Click(sender As Object, e As EventArgs) Handles btnSpeechOutput.Click
+            If _speechAdapter.IsSpeechOutputActive Then
+                Try
+                    _speechAdapter.StopSpeechOutput()
+                    SetDisplayText("Speech output stopped.")
+                Catch ex As Exception
+                    SetDisplayText("Stop failed: " & ex.Message)
+                End Try
+
+                UpdateSpeechOutputUi()
+                Return
+            End If
+
             If _isBusy Then
                 Return
             End If
@@ -541,6 +562,7 @@ Namespace SharedLibrary
                 btnStartStop.BackColor = SystemColors.Control
             End If
 
+            UpdateButtonToolTips()
             UpdateSpeechOutputUi()
         End Sub
 
@@ -580,9 +602,51 @@ Namespace SharedLibrary
                 Return
             End If
 
-            btnSpeechOutput.Visible = _speechAdapter.IsSpeechOutputActive
-            btnSpeechOutput.Enabled = False
-            btnSpeechOutput.BackColor = Color.FromArgb(220, 240, 220)
+            Dim isActive As Boolean = _speechAdapter.IsSpeechOutputActive
+
+            btnSpeechOutput.Visible = isActive
+            btnSpeechOutput.Enabled = isActive
+
+            If isActive Then
+                _speechOutputFlashPhase = Not _speechOutputFlashPhase
+
+                If _speechOutputFlashPhase Then
+                    btnSpeechOutput.Text = ChrW(&H25A0)
+                    btnSpeechOutput.Font = New Font("Segoe UI Symbol", 9.0F, FontStyle.Regular, GraphicsUnit.Point)
+                    btnSpeechOutput.BackColor = Color.FromArgb(255, 228, 228)
+                Else
+                    btnSpeechOutput.Text = Char.ConvertFromUtf32(&H1F50A)
+                    btnSpeechOutput.Font = New Font("Segoe UI Emoji", 9.0F, FontStyle.Regular, GraphicsUnit.Point)
+                    btnSpeechOutput.BackColor = Color.FromArgb(255, 246, 180)
+                End If
+            Else
+                _speechOutputFlashPhase = False
+                btnSpeechOutput.Text = Char.ConvertFromUtf32(&H1F50A)
+                btnSpeechOutput.Font = New Font("Segoe UI Emoji", 9.0F, FontStyle.Regular, GraphicsUnit.Point)
+                btnSpeechOutput.BackColor = Color.FromArgb(220, 240, 220)
+            End If
+
+            UpdateButtonToolTips()
+        End Sub
+
+        Private Sub UpdateButtonToolTips()
+            If _toolTip Is Nothing Then
+                Return
+            End If
+
+            _toolTip.SetToolTip(
+                btnStartStop,
+                If(_speechAdapter IsNot Nothing AndAlso _speechAdapter.IsListening,
+                   "Stop speech recognition.",
+                   "Start speech recognition."))
+
+            _toolTip.SetToolTip(btnConfigure, "Configure Talk to me.")
+
+            If _speechAdapter IsNot Nothing AndAlso _speechAdapter.IsSpeechOutputActive Then
+                _toolTip.SetToolTip(btnSpeechOutput, "Stop speech output.")
+            Else
+                _toolTip.SetToolTip(btnSpeechOutput, "Speech output is idle.")
+            End If
         End Sub
 
         Private Sub ApplyCalculatedMinimumSize()

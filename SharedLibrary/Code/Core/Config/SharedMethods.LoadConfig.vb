@@ -160,6 +160,7 @@ Namespace SharedLibrary
                 context.SP_Convincing = If(configDict.ContainsKey("SP_Convincing"), configDict("SP_Convincing"), Default_SP_Convincing)
                 context.SP_NoFillers = If(configDict.ContainsKey("SP_NoFillers"), configDict("SP_NoFillers"), Default_SP_NoFillers)
                 context.SP_Podcast = If(configDict.ContainsKey("SP_Podcast"), configDict("SP_Podcast"), Default_SP_Podcast)
+                context.SP_Compact = If(configDict.ContainsKey("SP_Compact"), configDict("SP_Compact"), Default_SP_Compact)
                 context.SP_MyStyle_Word = If(configDict.ContainsKey("SP_MyStyle_Word"), configDict("SP_MyStyle_Word"), Default_SP_MyStyle_Word)
                 context.SP_MyStyle_Outlook = If(configDict.ContainsKey("SP_MyStyle_Outlook"), configDict("SP_MyStyle_Outlook"), Default_SP_MyStyle_Outlook)
                 context.SP_MyStyle_Apply = If(configDict.ContainsKey("SP_MyStyle_Apply"), configDict("SP_MyStyle_Apply"), Default_SP_MyStyle_Apply)

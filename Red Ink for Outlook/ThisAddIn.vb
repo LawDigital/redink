@@ -123,6 +123,21 @@ Partial Public Class ThisAddIn
         End Get
     End Property
 
+    Public ReadOnly Property LocalTimeContext As String
+        Get
+            Dim localNow As System.DateTimeOffset = System.DateTimeOffset.Now
+            Dim localTz As System.TimeZoneInfo = System.TimeZoneInfo.Local
+            Dim localZoneName As String = If(
+                localTz.IsDaylightSavingTime(System.DateTime.Now),
+                localTz.DaylightName,
+                localTz.StandardName)
+
+            Return "Current local runtime time (ISO 8601): " &
+                localNow.ToString("yyyy-MM-dd HH:mm:ss zzz", Globalization.CultureInfo.InvariantCulture) &
+                $". Local timezone: {localZoneName} ({localTz.Id}). Unless the user explicitly asks for UTC or another timezone, use this local timezone for user-facing dates and times."
+        End Get
+    End Property
+
 
     <DllImport("user32.dll", SetLastError:=True)>
     Private Shared Function FindWindow(

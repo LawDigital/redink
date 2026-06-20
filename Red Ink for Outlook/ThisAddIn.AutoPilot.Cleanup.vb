@@ -54,9 +54,13 @@ Partial Public Class ThisAddIn
     Private Const AP_AutoDeleteUiYieldFolderInterval As Integer = 10
     Private Const AP_AutoDeleteProgressItemInterval As Integer = 500
     Private Const AP_AutoDeleteProgressFolderInterval As Integer = 25
+    Private Const AP_AutoDeleteDiagnosticRejectLogLimit As Integer = 20
+    Private Const AP_AutoDeleteDiagnosticErrorLogLimit As Integer = 20
 
     Private _apAutoDeleteTimer As System.Threading.Timer = Nothing
     Private _apAutoDeleteCheckRunning As Integer = 0
+    Private _apAutoDeleteDiagnosticRejectLogCount As Integer = 0
+    Private _apAutoDeleteDiagnosticErrorLogCount As Integer = 0
 
     Private Structure AutoDeleteCleanupStats
         Public ScannedCount As Integer
@@ -114,6 +118,9 @@ Partial Public Class ThisAddIn
         Dim pass2 As AutoDeleteCleanupStats
         Dim sw = Stopwatch.StartNew()
 
+        '_apAutoDeleteDiagnosticRejectLogCount = 0
+        '_apAutoDeleteDiagnosticErrorLogCount = 0
+
         Try
             ApDashboardLog($"🗑 Auto-delete cleanup started ({trigger}).", "info")
 
@@ -166,6 +173,41 @@ Partial Public Class ThisAddIn
             Throw New OperationCanceledException(ct)
         End If
     End Sub
+
+    Private Sub LogAutoDeleteRejectDiagnostic(message As String)
+        'If _apAutoDeleteDiagnosticRejectLogCount >= AP_AutoDeleteDiagnosticRejectLogLimit Then Return
+
+        '_apAutoDeleteDiagnosticRejectLogCount += 1
+        'ApDashboardLog($"🗑 Auto-delete diagnostic: {message}", "step")
+    End Sub
+
+    Private Sub LogAutoDeleteErrorDiagnostic(message As String)
+        'If _apAutoDeleteDiagnosticErrorLogCount >= AP_AutoDeleteDiagnosticErrorLogLimit Then Return
+
+        '_apAutoDeleteDiagnosticErrorLogCount += 1
+        'ApDashboardLog($"🗑 Auto-delete error diagnostic: {message}", "warn")
+    End Sub
+
+    Private Function GetAutoDeleteMailDiagnosticLabel(mi As MailItem, folderPath As String) As String
+        Dim subjectText As String = ""
+        Dim messageClassText As String = ""
+
+        If mi IsNot Nothing Then
+            Try
+                subjectText = If(mi.Subject, "")
+            Catch
+            End Try
+
+            Try
+                messageClassText = If(mi.MessageClass, "")
+            Catch
+            End Try
+        End If
+
+        subjectText = subjectText.Replace(vbCr, " ").Replace(vbLf, " ").Trim()
+
+        Return $"Folder='{folderPath}', Subject='{subjectText}', MessageClass='{messageClassText}'"
+    End Function
 
     Private Sub PumpAutoDeleteUi(ByRef stats As AutoDeleteCleanupStats,
                                  ct As CancellationToken,
@@ -341,6 +383,25 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
+    Private Function IsAutoDeleteMailFolder(folder As MAPIFolder) As Boolean
+        If folder Is Nothing Then Return False
+
+        Try
+            If folder.DefaultItemType <> OlItemType.olMailItem Then Return False
+        Catch
+            Return False
+        End Try
+
+        Try
+            Dim defaultMessageClass = If(folder.DefaultMessageClass, "")
+            If String.IsNullOrWhiteSpace(defaultMessageClass) Then Return False
+
+            Return defaultMessageClass.StartsWith("IPM.Note", StringComparison.OrdinalIgnoreCase)
+        Catch
+            Return False
+        End Try
+    End Function
+
     Private Sub ApplyEligibilityToGroupInFolderTree(folder As MAPIFolder,
                                                     groupId As String,
                                                     answeredUtc As DateTime,
@@ -350,44 +411,41 @@ Partial Public Class ThisAddIn
         If folder Is Nothing Then Return
 
         Dim items As Items = Nothing
-        Dim restrictedItems As Items = Nothing
         Dim subFolders As Folders = Nothing
 
         Try
-            Try
-                If folder.DefaultItemType = OlItemType.olMailItem Then
-                    items = folder.Items
-                    restrictedItems = items.Restrict(BuildCleanupGroupRestriction(groupId))
+            If IsAutoDeleteMailFolder(folder) Then
+                items = folder.Items
 
-                    For i As Integer = restrictedItems.Count To 1 Step -1
-                        Dim obj As Object = Nothing
-                        Dim mi As MailItem = Nothing
+                For i As Integer = items.Count To 1 Step -1
+                    Dim obj As Object = Nothing
+                    Dim mi As MailItem = Nothing
 
-                        Try
-                            obj = restrictedItems(i)
-                            mi = TryCast(obj, MailItem)
-                            If mi Is Nothing Then Continue For
+                    Try
+                        obj = items(i)
+                        mi = TryCast(obj, MailItem)
+                        If mi Is Nothing Then Continue For
 
-                            StampCleanupMetadata(
-                                mi,
-                                groupId,
-                                isEligible:=True,
-                                answeredUtc:=answeredUtc,
-                                deleteAfterUtc:=deleteAfterUtc,
-                                saveItem:=True)
+                        If Not String.Equals(GetCleanupGroupId(mi), groupId, StringComparison.OrdinalIgnoreCase) Then Continue For
 
-                            stampedCount += 1
-                        Catch
-                        Finally
-                            If mi IsNot Nothing Then Try : Marshal.ReleaseComObject(mi) : Catch : End Try
-                            If obj IsNot Nothing AndAlso Not ReferenceEquals(obj, mi) Then
-                                Try : Marshal.ReleaseComObject(obj) : Catch : End Try
-                            End If
-                        End Try
-                    Next
-                End If
-            Catch
-            End Try
+                        StampCleanupMetadata(
+                            mi,
+                            groupId,
+                            isEligible:=True,
+                            answeredUtc:=answeredUtc,
+                            deleteAfterUtc:=deleteAfterUtc,
+                            saveItem:=True)
+
+                        stampedCount += 1
+                    Catch
+                    Finally
+                        If mi IsNot Nothing Then Try : Marshal.ReleaseComObject(mi) : Catch : End Try
+                        If obj IsNot Nothing AndAlso Not ReferenceEquals(obj, mi) Then
+                            Try : Marshal.ReleaseComObject(obj) : Catch : End Try
+                        End If
+                    End Try
+                Next
+            End If
 
             subFolders = folder.Folders
             For i As Integer = 1 To subFolders.Count
@@ -403,7 +461,6 @@ Partial Public Class ThisAddIn
         Catch
         Finally
             If subFolders IsNot Nothing Then Try : Marshal.ReleaseComObject(subFolders) : Catch : End Try
-            If restrictedItems IsNot Nothing Then Try : Marshal.ReleaseComObject(restrictedItems) : Catch : End Try
             If items IsNot Nothing Then Try : Marshal.ReleaseComObject(items) : Catch : End Try
         End Try
     End Sub
@@ -611,9 +668,7 @@ Partial Public Class ThisAddIn
                                                   ct As CancellationToken)
 
         Dim items As Items = Nothing
-        Dim restrictedItems As Items = Nothing
         Dim folderPath As String = "(unknown folder)"
-        Dim restriction As String = ""
         Dim processedInFolder As Integer = 0
 
         Try
@@ -622,16 +677,11 @@ Partial Public Class ThisAddIn
             Catch
             End Try
 
-            Try
-                If folder.DefaultItemType <> OlItemType.olMailItem Then Return
-            Catch
-            End Try
+            If Not IsAutoDeleteMailFolder(folder) Then Return
 
             items = folder.Items
-            restriction = BuildAutoDeleteRestriction(nowUtc)
-            restrictedItems = items.Restrict(restriction)
 
-            For i As Integer = restrictedItems.Count To 1 Step -1
+            For i As Integer = items.Count To 1 Step -1
                 Dim obj As Object = Nothing
                 Dim mi As MailItem = Nothing
 
@@ -641,9 +691,11 @@ Partial Public Class ThisAddIn
                         PumpAutoDeleteUi(stats, ct, folderPath)
                     End If
 
-                    obj = restrictedItems(i)
+                    obj = items(i)
                     mi = TryCast(obj, MailItem)
                     If mi Is Nothing Then Continue For
+
+                    If Not ShouldAutoDeleteMail(mi, nowUtc, folderPath) Then Continue For
 
                     stats.ScannedCount += 1
                     PumpAutoDeleteUi(stats, ct, folderPath)
@@ -652,8 +704,9 @@ Partial Public Class ThisAddIn
                     stats.DeletedCount += 1
                 Catch ex As OperationCanceledException
                     Throw
-                Catch
+                Catch ex As System.Exception
                     stats.ErrorCount += 1
+                    LogAutoDeleteErrorDiagnostic($"Folder='{folderPath}', ItemIndex={i}: {ex.Message}")
                 Finally
                     If mi IsNot Nothing Then Try : Marshal.ReleaseComObject(mi) : Catch : End Try
                     If obj IsNot Nothing AndAlso Not ReferenceEquals(obj, mi) Then
@@ -667,7 +720,6 @@ Partial Public Class ThisAddIn
             stats.ErrorCount += 1
             ApDashboardLog($"🗑 Auto-delete folder scan error: {folderPath} — {ex.Message}", "warn")
         Finally
-            If restrictedItems IsNot Nothing Then Try : Marshal.ReleaseComObject(restrictedItems) : Catch : End Try
             If items IsNot Nothing Then Try : Marshal.ReleaseComObject(items) : Catch : End Try
         End Try
     End Sub
@@ -682,20 +734,52 @@ Partial Public Class ThisAddIn
             deleteAfterProperty & " <= '" & nowUtcText & "'"
     End Function
 
-    Private Function ShouldAutoDeleteMail(mi As MailItem, nowUtc As DateTime) As Boolean
+    Private Function ShouldAutoDeleteMail(mi As MailItem,
+                                          nowUtc As DateTime,
+                                          folderPath As String) As Boolean
+
         If mi Is Nothing Then Return False
+
+        Dim label = GetAutoDeleteMailDiagnosticLabel(mi, folderPath)
 
         Dim groupId = GetCleanupGroupId(mi)
         If String.IsNullOrWhiteSpace(groupId) Then Return False
 
         Dim eligibleRaw As String = Nothing
-        If Not TryGetNamedStringProperty(mi, AP_CleanupEligibleProperty, eligibleRaw) Then Return False
-        If Not "true".Equals(eligibleRaw, StringComparison.OrdinalIgnoreCase) Then Return False
+        If Not TryGetNamedStringProperty(mi, AP_CleanupEligibleProperty, eligibleRaw) Then
+            LogAutoDeleteRejectDiagnostic($"{label}, GroupId='{groupId}': missing eligible flag.")
+            Return False
+        End If
+
+        If Not "true".Equals(eligibleRaw, StringComparison.OrdinalIgnoreCase) Then
+            LogAutoDeleteRejectDiagnostic($"{label}, GroupId='{groupId}': eligible flag is '{eligibleRaw}'.")
+            Return False
+        End If
+
+        Dim deleteAfterRaw As String = Nothing
+        If Not TryGetNamedStringProperty(mi, AP_CleanupDeleteAfterUtcProperty, deleteAfterRaw) Then
+            LogAutoDeleteRejectDiagnostic($"{label}, GroupId='{groupId}': missing delete-after timestamp.")
+            Return False
+        End If
+
+        If String.IsNullOrWhiteSpace(deleteAfterRaw) Then
+            LogAutoDeleteRejectDiagnostic($"{label}, GroupId='{groupId}': blank delete-after timestamp.")
+            Return False
+        End If
 
         Dim deleteAfterUtc As DateTime
-        If Not TryGetNamedDateUtcProperty(mi, AP_CleanupDeleteAfterUtcProperty, deleteAfterUtc) Then Return False
+        If Not TryParseCleanupUtcValue(deleteAfterRaw, deleteAfterUtc) Then
+            LogAutoDeleteRejectDiagnostic($"{label}, GroupId='{groupId}': invalid delete-after timestamp '{deleteAfterRaw}'.")
+            Return False
+        End If
 
-        Return deleteAfterUtc <= nowUtc
+        If deleteAfterUtc > nowUtc Then
+            LogAutoDeleteRejectDiagnostic(
+                $"{label}, GroupId='{groupId}': delete-after {deleteAfterUtc.ToString("o", CultureInfo.InvariantCulture)} is later than now {nowUtc.ToString("o", CultureInfo.InvariantCulture)}.")
+            Return False
+        End If
+
+        Return True
     End Function
 
     Private Function TryGetNamedStringProperty(mi As MailItem, propertyName As String, ByRef value As String) As Boolean
@@ -712,18 +796,27 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
-    Private Function TryGetNamedDateUtcProperty(mi As MailItem, propertyName As String, ByRef value As DateTime) As Boolean
+    Private Function TryParseCleanupUtcValue(raw As String, ByRef value As DateTime) As Boolean
         value = DateTime.MinValue
-
-        Dim raw As String = Nothing
-        If Not TryGetNamedStringProperty(mi, propertyName, raw) Then Return False
         If String.IsNullOrWhiteSpace(raw) Then Return False
 
         Dim parsed As DateTime
+
+        If DateTime.TryParseExact(
+            raw,
+            "o",
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.RoundtripKind,
+            parsed) Then
+
+            value = parsed.ToUniversalTime()
+            Return True
+        End If
+
         If DateTime.TryParse(
             raw,
             CultureInfo.InvariantCulture,
-            DateTimeStyles.RoundtripKind Or DateTimeStyles.AssumeUniversal,
+            DateTimeStyles.AssumeUniversal Or DateTimeStyles.AdjustToUniversal,
             parsed) Then
 
             value = parsed.ToUniversalTime()
@@ -731,6 +824,15 @@ Partial Public Class ThisAddIn
         End If
 
         Return False
+    End Function
+
+    Private Function TryGetNamedDateUtcProperty(mi As MailItem, propertyName As String, ByRef value As DateTime) As Boolean
+        value = DateTime.MinValue
+
+        Dim raw As String = Nothing
+        If Not TryGetNamedStringProperty(mi, propertyName, raw) Then Return False
+
+        Return TryParseCleanupUtcValue(raw, value)
     End Function
 
 End Class

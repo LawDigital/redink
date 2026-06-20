@@ -122,6 +122,7 @@ Namespace SharedLibrary
         Function GetSpeechOutputSummary() As String
         Function ConfigureSpeechOutput(owner As System.Windows.Forms.IWin32Window) As String
         Function ToggleSpeechOutputEnabled() As Boolean
+        Sub StopSpeechOutput()
         Function SubmitExternalSpeechAsync(speakerName As String,
                                            text As String,
                                            cancellationToken As CancellationToken) As Task(Of Boolean)

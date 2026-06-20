@@ -181,8 +181,31 @@ Namespace SharedLibrary
             ' JSON toggle button (added only when applicable later)
             Dim btnToggleJson As System.Windows.Forms.Button = Nothing
 
+            ' Word-wrap toggle is always available
+            Dim btnToggleWordWrap As New System.Windows.Forms.Button()
+            btnToggleWordWrap.AutoSize = True
+            btnToggleWordWrap.AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink
+            btnToggleWordWrap.Margin = New System.Windows.Forms.Padding(0, 0, 12, 0)
+            btnToggleWordWrap.Padding = New System.Windows.Forms.Padding(5)
+
+            Dim applyWordWrap As System.Action(Of Boolean) =
+                Sub(enabled As Boolean)
+                    textEditor.WordWrap = enabled
+                    textEditor.ScrollBars = If(enabled, System.Windows.Forms.ScrollBars.Vertical, System.Windows.Forms.ScrollBars.Both)
+                    btnToggleWordWrap.Text = If(enabled, "Word Wrap: On", "Word Wrap: Off")
+                End Sub
+
             flowButtons.Controls.Add(btnSave)
             flowButtons.Controls.Add(btnCancel)
+            flowButtons.Controls.Add(btnToggleWordWrap)
+            flowButtons.Controls.SetChildIndex(btnToggleWordWrap, 1)
+
+            applyWordWrap(False)
+
+            AddHandler btnToggleWordWrap.Click,
+                Sub(sender As Object, e As System.EventArgs)
+                    applyWordWrap(Not textEditor.WordWrap)
+                End Sub
 
             ' Enter = Save, Esc = Cancel
             editorForm.AcceptButton = btnSave

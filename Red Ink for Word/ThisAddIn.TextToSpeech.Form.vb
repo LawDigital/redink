@@ -609,10 +609,10 @@ Partial Public Class ThisAddIn
                 PopulateOpenAIVoices(selectedLanguage2, cmbVoice2A, cmbVoice2B)
             Else
                 If Not String.IsNullOrEmpty(selectedLanguage1) Then
-                    tasks.Add(LoadVoicesIntoComboBoxesAsync(selectedLanguage1, cmbVoice1A, cmbVoice1B))
+                    tasks.Add(LoadVoicesIntoComboBoxesAsync(selectedLanguage1, cmbLanguage1, cmbVoice1A, cmbVoice1B))
                 End If
                 If Not String.IsNullOrEmpty(selectedLanguage2) Then
-                    tasks.Add(LoadVoicesIntoComboBoxesAsync(selectedLanguage2, cmbVoice2A, cmbVoice2B))
+                    tasks.Add(LoadVoicesIntoComboBoxesAsync(selectedLanguage2, cmbLanguage2, cmbVoice2A, cmbVoice2B))
                 End If
             End If
 
@@ -704,7 +704,7 @@ Partial Public Class ThisAddIn
             If TTS_SelectedEngine = TTSEngine.OpenAI Then
                 PopulateOpenAIVoices(lang, cmbVoice1A, cmbVoice1B)
             Else
-                Await LoadVoicesIntoComboBoxesAsync(lang, cmbVoice1A, cmbVoice1B)
+                Await LoadVoicesIntoComboBoxesAsync(lang, cmbLanguage1, cmbVoice1A, cmbVoice1B)
             End If
         End Sub
 
@@ -718,7 +718,7 @@ Partial Public Class ThisAddIn
             If TTS_SelectedEngine = TTSEngine.OpenAI Then
                 PopulateOpenAIVoices(lang, cmbVoice2A, cmbVoice2B)
             Else
-                Await LoadVoicesIntoComboBoxesAsync(lang, cmbVoice2A, cmbVoice2B)
+                Await LoadVoicesIntoComboBoxesAsync(lang, cmbLanguage2, cmbVoice2A, cmbVoice2B)
             End If
         End Sub
 
@@ -731,13 +731,23 @@ Partial Public Class ThisAddIn
         ''' <param name="comboB">Second voice combo box to populate.</param>
 
         Private Async Function LoadVoicesIntoComboBoxesAsync(languageCode As String,
+                                                           languageCombo As Forms.ComboBox,
                                                            comboA As Forms.ComboBox,
                                                            comboB As Forms.ComboBox) As System.Threading.Tasks.Task
             Try
-                Dim allVoices As List(Of GoogleVoice) = Await GetVoicesByLanguageAsync(languageCode)
+                Dim requestedLanguageCode As String = If(languageCode, "").Trim()
+                If String.IsNullOrEmpty(requestedLanguageCode) Then Exit Function
+
+                Dim allVoices As List(Of GoogleVoice) = Await GetVoicesByLanguageAsync(requestedLanguageCode)
+                If allVoices Is Nothing Then Exit Function
+
+                Dim currentLanguageCode As String = If(TryCast(languageCombo.SelectedItem, String), "").Trim()
+                If Not currentLanguageCode.Equals(requestedLanguageCode, StringComparison.OrdinalIgnoreCase) Then
+                    Exit Function
+                End If
+
                 comboA.Items.Clear()
                 comboB.Items.Clear()
-                If allVoices Is Nothing Then Exit Function
 
                 ' STRICT FILTER:
                 ' Only keep voices whose Name starts with "<langCode>-"
@@ -745,7 +755,7 @@ Partial Public Class ThisAddIn
                 ' voices like "Schedar" etc.
                 Dim filtered = allVoices.Where(
                     Function(v) Not String.IsNullOrEmpty(v.Name) AndAlso
-                                v.Name.StartsWith(languageCode & "-", StringComparison.OrdinalIgnoreCase)
+                                v.Name.StartsWith(requestedLanguageCode & "-", StringComparison.OrdinalIgnoreCase)
                 ).ToList()
 
                 For Each v In filtered

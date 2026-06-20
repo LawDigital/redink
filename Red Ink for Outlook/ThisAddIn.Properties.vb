@@ -892,6 +892,16 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_Compact As String
+        Get
+            Return _context.SP_Compact
+        End Get
+        Set(value As String)
+            _context.SP_Compact = value
+        End Set
+    End Property
+
+
     Public Shared Property SP_Podcast As String
         Get
             Return _context.SP_Podcast

@@ -189,6 +189,7 @@ Namespace SharedLibrary
             Property SP_Convincing As String
             Property SP_NoFillers As String
             Property SP_Podcast As String
+            Property SP_Compact As String
             Property SP_MyStyle_Word As String
             Property SP_MyStyle_Outlook As String
             Property SP_MyStyle_Apply As String
@@ -547,6 +548,7 @@ Namespace SharedLibrary
         Public Property SP_Convincing As String Implements ISharedContext.SP_Convincing
         Public Property SP_NoFillers As String Implements ISharedContext.SP_NoFillers
         Public Property SP_Podcast As String Implements ISharedContext.SP_Podcast
+        Public Property SP_Compact As String Implements ISharedContext.SP_Compact
         Public Property SP_MyStyle_Word As String Implements ISharedContext.SP_MyStyle_Word
         Public Property SP_MyStyle_Outlook As String Implements ISharedContext.SP_MyStyle_Outlook
         Public Property SP_MyStyle_Apply As String Implements ISharedContext.SP_MyStyle_Apply
