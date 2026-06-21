@@ -387,6 +387,7 @@ Namespace SharedLibrary
         Public Const DEFAULT_UPDATE_INI_SILENT_MODE As Integer = 0
 
         Public Const DEFAULT_CHUNK_OCR_PAGES As Integer = 0
+        Public Const DEFAULT_WEBIMPORT_MAX_DOWNLOAD_BYTES As Long = 50L * 1024L * 1024L
 
         ' Boolean default constants (True)
 
