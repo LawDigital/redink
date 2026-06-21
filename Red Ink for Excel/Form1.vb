@@ -400,7 +400,7 @@ Public Class frmAIChat
                 Replace("{Location}", ThisAddIn.Location) &
                 $" Your name is '{AN5}'. The current date and time is: {DateTime.Now.ToString("MMMM dd, yyyy hh:mm tt")}. " &
                 If(chkIncludeDocText.Checked, vbLf & "You have access to the user's document. " & vbLf, "") &
-                If(chkIncludeselection.Checked, vbLf & "You have access to a selection of user's document. " & vbLf & " ", "") &
+                If(chkIncludeselection.Checked Or chkIncludeDocText.Checked, vbLf & "You have access to the user's current selection or focus within the document. " & vbLf & " ", "") &
                 If(My.Settings.DoCommands, _context.SP_Add_ChatExcel_Commands, _context.SP_Add_Chat_NoCommands)
 
             ' Inject InkyMemory into system prompt if enabled
@@ -442,40 +442,39 @@ Public Class frmAIChat
                 docText = Globals.ThisAddIn.ConvertRangeToString(usedRange, True)
             End If
 
-            ' Always determine selection or active cell content/address
-            Dim appx As Excel.Application = Globals.ThisAddIn.Application
-            Dim used As Excel.Range = appx.ActiveSheet.UsedRange
-            Dim selection As Excel.Range = TryCast(appx.Selection, Excel.Range)
-            Dim intersectedRange As Excel.Range = Nothing
+            If chkIncludeselection.Checked Or chkIncludeDocText.Checked Then
+                Dim appx As Excel.Application = Globals.ThisAddIn.Application
+                Dim used As Excel.Range = appx.ActiveSheet.UsedRange
+                Dim selection As Excel.Range = TryCast(appx.Selection, Excel.Range)
+                Dim intersectedRange As Excel.Range = Nothing
 
-            If selection IsNot Nothing Then
-                Try
-                    intersectedRange = appx.Intersect(selection, used)
-                Catch
-                    intersectedRange = Nothing
-                End Try
-            End If
+                If selection IsNot Nothing Then
+                    Try
+                        intersectedRange = appx.Intersect(selection, used)
+                    Catch
+                        intersectedRange = Nothing
+                    End Try
+                End If
 
-            If intersectedRange IsNot Nothing AndAlso intersectedRange.Cells.Count > 0 Then
-                ' Non-empty selection: include its content
-                selectiontext = Globals.ThisAddIn.ConvertRangeToString(intersectedRange, True, True)
-                selectedcells = intersectedRange.Address(False, False)
-            Else
-                ' No selection or empty selection: fall back to active cell (if within UsedRange)
-                Dim activeCell As Excel.Range = appx.ActiveCell
-                Dim activeInUsed As Excel.Range = Nothing
-                Try
-                    activeInUsed = appx.Intersect(activeCell, used)
-                Catch
-                    activeInUsed = Nothing
-                End Try
-                If activeInUsed IsNot Nothing AndAlso activeInUsed.Cells.Count > 0 Then
-                    selectiontext = Globals.ThisAddIn.ConvertRangeToString(activeInUsed, True, True)
-                    selectedcells = activeInUsed.Address(False, False)
+                If intersectedRange IsNot Nothing AndAlso intersectedRange.Cells.Count > 0 Then
+                    selectiontext = Globals.ThisAddIn.ConvertRangeToString(intersectedRange, True, True)
+                    selectedcells = intersectedRange.Address(False, False)
                 Else
-                    ' Active cell outside UsedRange: still report its address and value
-                    selectiontext = Globals.ThisAddIn.ConvertRangeToString(activeCell, True, True)
-                    selectedcells = activeCell.Address(False, False)
+                    Dim activeCell As Excel.Range = appx.ActiveCell
+                    Dim activeInUsed As Excel.Range = Nothing
+                    Try
+                        activeInUsed = appx.Intersect(activeCell, used)
+                    Catch
+                        activeInUsed = Nothing
+                    End Try
+
+                    If activeInUsed IsNot Nothing AndAlso activeInUsed.Cells.Count > 0 Then
+                        selectiontext = Globals.ThisAddIn.ConvertRangeToString(activeInUsed, True, True)
+                        selectedcells = activeInUsed.Address(False, False)
+                    ElseIf activeCell IsNot Nothing Then
+                        selectiontext = Globals.ThisAddIn.ConvertRangeToString(activeCell, True, True)
+                        selectedcells = activeCell.Address(False, False)
+                    End If
                 End If
             End If
 
@@ -503,26 +502,29 @@ Public Class frmAIChat
             ' Construct the full prompt
             Dim fullPrompt As New StringBuilder()
 
-            Dim app As Excel.Application = Globals.ThisAddIn.Application
-            Dim workbookName As String = app.ActiveWorkbook.Name
-            Dim worksheetName As String = app.ActiveSheet.Name
-            Dim combinedName As String = workbookName & " - " & worksheetName
+            Dim combinedName As String = ""
+
+            If chkIncludeDocText.Checked Or chkIncludeselection.Checked Then
+                Dim app As Excel.Application = Globals.ThisAddIn.Application
+                Dim workbookName As String = app.ActiveWorkbook.Name
+                Dim worksheetName As String = app.ActiveSheet.Name
+                combinedName = workbookName & " - " & worksheetName
+            End If
 
             If Not String.IsNullOrEmpty(docText) Then
                 fullPrompt.AppendLine("You have access to the user's worksheet. The user's current worksheet is '" & combinedName & "' and has the following content: <RANGEOFCELLS>" & docText & "</RANGEOFCELLS>")
-            ElseIf Not String.IsNullOrEmpty(selectiontext) Then
-                fullPrompt.AppendLine("You have access to the user's worksheet. The user's current worksheet is '" & combinedName & "'.")
+            ElseIf chkIncludeselection.Checked AndAlso Not String.IsNullOrEmpty(selectiontext) Then
+                fullPrompt.AppendLine("You have access to a selection of the user's worksheet. The user's current worksheet is '" & combinedName & "'.")
             ElseIf chkIncludeselection.Checked Then
                 fullPrompt.AppendLine("The user has granted you access to a selection of the worksheet '" & combinedName & "' but it is empty.")
             ElseIf chkIncludeDocText.Checked Then
                 fullPrompt.AppendLine("The user has granted you access to the worksheet '" & combinedName & "' but the entire worksheet is empty.")
             End If
 
-            ' Always include where the user stands or what is selected
-            If Not String.IsNullOrEmpty(selectedcells) Then
+            If (chkIncludeselection.Checked Or chkIncludeDocText.Checked) AndAlso Not String.IsNullOrEmpty(selectedcells) Then
                 fullPrompt.AppendLine("The user is focused on or has selected the following cells: " & selectedcells)
             End If
-            If Not String.IsNullOrEmpty(selectiontext) Then
+            If (chkIncludeselection.Checked Or chkIncludeDocText.Checked) AndAlso Not String.IsNullOrEmpty(selectiontext) Then
                 fullPrompt.AppendLine("Focused/selected cells content: <RANGEOFCELLS>" & selectiontext & "</RANGEOFCELLS>")
             End If
 

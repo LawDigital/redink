@@ -428,8 +428,6 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
-            CurrentDate = "(Current Date: " & DateTime.Now.ToString("dd-MMM-yyyy", CultureInfo.GetCultureInfo("en-US")) & ")"
-
             Dim result As System.String = Await ProcessSelectedText(
             InterpolateAtRuntime(SP_Explain),
             True,

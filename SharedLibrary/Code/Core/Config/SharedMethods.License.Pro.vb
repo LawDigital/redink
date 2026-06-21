@@ -886,21 +886,22 @@ Namespace SharedLibrary
                 Dim lastError As String = ""
                 For attempt As Integer = 1 To ApiRetryCount
                     Try
-                        Using client As New HttpClient()
-                            client.Timeout = TimeSpan.FromMilliseconds(ApiTimeoutMs)
-                            client.DefaultRequestHeaders.Add("User-Agent", $"{AN}/1.0")
+                        Dim httpResponse = SendHttpRequestAsync(
+                            New SharedHttpRequest() With {
+                                .Url = url,
+                                .Method = "GET",
+                                .TimeoutMs = ApiTimeoutMs,
+                                .UserAgent = $"{AN}/1.0",
+                                .StackPreference = HttpStackPreference.PreferConfiguredDefault
+                            }).GetAwaiter().GetResult()
 
-                            Dim task = client.GetStringAsync(url)
-                            task.Wait()
+                        Dim json = httpResponse.GetBodyAsString()
+                        result.RawJson = json
 
-                            Dim json = task.Result
-                            result.RawJson = json
+                        LogLicenseEvent("API Response", $"Attempt {attempt} via {httpResponse.UsedStack}: {TruncateForLog(json, 500)}")
 
-                            LogLicenseEvent("API Response", $"Attempt {attempt}: {TruncateForLog(json, 500)}")
-
-                            ' Parse response
-                            Return ParseLicenseApiResponse(json, action)
-                        End Using
+                        ' Parse response
+                        Return ParseLicenseApiResponse(json, action)
 
                     Catch ex As Exception
                         lastError = ex.Message

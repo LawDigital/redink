@@ -1672,6 +1672,66 @@ Namespace My
                 Me("DiscussLastSessionStateXml") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property TalkToMeSpeechOutputEnabled() As Boolean
+            Get
+                Return CType(Me("TalkToMeSpeechOutputEnabled"),Boolean)
+            End Get
+            Set
+                Me("TalkToMeSpeechOutputEnabled") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property TalkToMeSpeechOutputMode() As String
+            Get
+                Return CType(Me("TalkToMeSpeechOutputMode"),String)
+            End Get
+            Set
+                Me("TalkToMeSpeechOutputMode") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property DiscussLastCompactPrompt() As String
+            Get
+                Return CType(Me("DiscussLastCompactPrompt"),String)
+            End Get
+            Set
+                Me("DiscussLastCompactPrompt") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("1")>  _
+        Public Property TalkToMeSpeechOutputSpeed() As Double
+            Get
+                Return CType(Me("TalkToMeSpeechOutputSpeed"),Double)
+            End Get
+            Set
+                Me("TalkToMeSpeechOutputSpeed") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property TalkToMeSpeechOutputUseSpeakerSpecificVoices() As Boolean
+            Get
+                Return CType(Me("TalkToMeSpeechOutputUseSpeakerSpecificVoices"),Boolean)
+            End Get
+            Set
+                Me("TalkToMeSpeechOutputUseSpeakerSpecificVoices") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

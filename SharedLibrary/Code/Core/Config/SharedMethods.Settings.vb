@@ -1037,6 +1037,8 @@ Namespace SharedLibrary
                     Return context.INI_STT_Azure_SpeechKey
                 Case "BrandingName"
                     Return context.INI_BrandingName
+                Case "HttpStack"
+                    Return context.INI_HttpStack
                 Case "LogoPath"
                     Return context.INI_LogoPath
                 Case "LogoPathMedium"
@@ -1425,6 +1427,8 @@ Namespace SharedLibrary
                     context.INI_STT_Azure_SpeechKey = value
                 Case "BrandingName"
                     context.INI_BrandingName = value
+                Case "HttpStack"
+                    context.INI_HttpStack = value
                 Case "LogoPath"
                     context.INI_LogoPath = value
                 Case "LogoPathMedium"
@@ -1913,6 +1917,7 @@ Namespace SharedLibrary
                     {"DocCheckPathLocal", context.INI_DocCheckPathLocal},
                     {"DocStylePath", context.INI_DocStylePath},
                     {"DocStylePathLocal", context.INI_DocStylePathLocal},
+                    {"HttpStack", context.INI_HttpStack},
                     {"BrandingName", context.INI_BrandingName},
                     {"LogoPath", context.INI_LogoPath},
                     {"LogoPathMedium", context.INI_LogoPathMedium},
@@ -1937,6 +1942,7 @@ Namespace SharedLibrary
                     {"SP_Friendly", context.SP_Friendly},
                     {"SP_Convincing", context.SP_Convincing},
                     {"SP_NoFillers", context.SP_NoFillers},
+                    {"SP_Compact", context.SP_Compact},
                     {"SP_Podcast", context.SP_Podcast},
                     {"SP_MyStyle_Word", context.SP_MyStyle_Word},
                     {"SP_MyStyle_Outlook", context.SP_MyStyle_Outlook},
@@ -2213,6 +2219,7 @@ Namespace SharedLibrary
                 {"SP_Friendly", Default_SP_Friendly},
                 {"SP_Convincing", Default_SP_Convincing},
                 {"SP_NoFillers", Default_SP_NoFillers},
+                {"SP_Compact", Default_SP_Compact},
                 {"SP_Podcast", Default_SP_Podcast},
                 {"SP_MyStyle_Word", Default_SP_MyStyle_Word},
                 {"SP_MyStyle_Outlook", Default_SP_MyStyle_Outlook},
@@ -2556,6 +2563,7 @@ Namespace SharedLibrary
                     {"AssembleMaxContextSummaryChars", context.INI_AssembleMaxContextSummaryChars.ToString()},
                     {"UpdateCheckInterval", context.INI_UpdateCheckInterval.ToString()},
                     {"UpdatePath", context.INI_UpdatePath},
+                    {"HttpStack", context.INI_HttpStack},
                     {"BrandingName", context.INI_BrandingName},
                     {"LogoPath", context.INI_LogoPath},
                     {"LogoPathMedium", context.INI_LogoPathMedium},
@@ -3368,6 +3376,7 @@ Namespace SharedLibrary
             variableValues.Add("STT_Azure", context.INI_STT_Azure)
             variableValues.Add("STT_Azure_SpeechKey", context.INI_STT_Azure_SpeechKey)
             variableValues.Add("TTSEndpoint", context.INI_TTSEndpoint)
+            variableValues.Add("HttpStack", context.INI_HttpStack)
             variableValues.Add("BrandingName", context.INI_BrandingName)
             variableValues.Add("LogoPath", context.INI_LogoPath)
             variableValues.Add("LogoPathMedium", context.INI_LogoPathMedium)
@@ -3419,6 +3428,7 @@ Namespace SharedLibrary
             variableValues.Add("SP_Friendly", context.SP_Friendly)
             variableValues.Add("SP_Convincing", context.SP_Convincing)
             variableValues.Add("SP_NoFillers", context.SP_NoFillers)
+            variableValues.Add("SP_Compact", context.SP_Compact)
             variableValues.Add("SP_Podcast", context.SP_Podcast)
             variableValues.Add("SP_MyStyle_Word", context.SP_MyStyle_Word)
             variableValues.Add("SP_MyStyle_Outlook", context.SP_MyStyle_Outlook)
@@ -3617,6 +3627,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_Friendly") Then context.SP_Friendly = CStr(updatedValues("SP_Friendly"))
                 If updatedValues.ContainsKey("SP_Convincing") Then context.SP_Convincing = CStr(updatedValues("SP_Convincing"))
                 If updatedValues.ContainsKey("SP_NoFillers") Then context.SP_NoFillers = CStr(updatedValues("SP_NoFillers"))
+                If updatedValues.ContainsKey("SP_Compact") Then context.SP_Compact = CStr(updatedValues("SP_Compact"))
                 If updatedValues.ContainsKey("SP_Podcast") Then context.SP_Podcast = CStr(updatedValues("SP_Podcast"))
                 If updatedValues.ContainsKey("SP_MyStyle_Word") Then context.SP_MyStyle_Word = CStr(updatedValues("SP_MyStyle_Word"))
                 If updatedValues.ContainsKey("SP_MyStyle_Outlook") Then context.SP_MyStyle_Outlook = CStr(updatedValues("SP_MyStyle_Outlook"))
@@ -3776,6 +3787,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("DocStylePath") Then context.INI_DocStylePath = CStr(updatedValues("DocStylePath"))
                 If updatedValues.ContainsKey("DocStylePathLocal") Then context.INI_DocStylePathLocal = CStr(updatedValues("DocStylePathLocal"))
                 If updatedValues.ContainsKey("PromptLib_Transcript") Then context.INI_PromptLibPath_Transcript = CStr(updatedValues("PromptLib_Transcript"))
+                If updatedValues.ContainsKey("HttpStack") Then context.INI_HttpStack = CStr(updatedValues("HttpStack"))
                 If updatedValues.ContainsKey("BrandingName") Then context.INI_BrandingName = CStr(updatedValues("BrandingName"))
                 If updatedValues.ContainsKey("LogoPath") Then context.INI_LogoPath = CStr(updatedValues("LogoPath"))
                 If updatedValues.ContainsKey("LogoPathMedium") Then context.INI_LogoPathMedium = CStr(updatedValues("LogoPathMedium"))

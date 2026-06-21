@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 19.6.2026
+' 21.6.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -60,7 +60,7 @@ Partial Public Class ThisAddIn
     Public Const AN6 As String = "Inky"
     Public Const AN4 As String = "redink_"
 
-    Public Shared Version As String = "V.190626" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.210626" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -85,7 +85,7 @@ Partial Public Class ThisAddIn
     Private Const InPlacePrefix As String = "Replace:"
     Private Const NewDocPrefix As String = "Newdoc:"
     Private Const ObjectTrigger2 As String = "(clip)"
-    Private Const ToolTrigger As String = "(a)"
+    Private Const ToolTrigger As String = "(ag)"
     Private Const KBTrigger As String = "(kb)"
     Private Const AddmailTrigger As String = "(addmail)"
 
@@ -120,6 +120,21 @@ Partial Public Class ThisAddIn
         Get
             Return "Current date (ISO 8601 yyyy-MM-dd): " &
                DateTime.Now.ToString("yyyy-MM-dd", Globalization.CultureInfo.InvariantCulture)
+        End Get
+    End Property
+
+    Public ReadOnly Property LocalTimeContext As String
+        Get
+            Dim localNow As System.DateTimeOffset = System.DateTimeOffset.Now
+            Dim localTz As System.TimeZoneInfo = System.TimeZoneInfo.Local
+            Dim localZoneName As String = If(
+                localTz.IsDaylightSavingTime(System.DateTime.Now),
+                localTz.DaylightName,
+                localTz.StandardName)
+
+            Return "Current local runtime time (ISO 8601): " &
+                localNow.ToString("yyyy-MM-dd HH:mm:ss zzz", Globalization.CultureInfo.InvariantCulture) &
+                $". Local timezone: {localZoneName} ({localTz.Id}). Unless the user explicitly asks for UTC or another timezone, use this local timezone for user-facing dates and times."
         End Get
     End Property
 

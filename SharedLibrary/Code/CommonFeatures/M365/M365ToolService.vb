@@ -769,7 +769,9 @@ Namespace SharedLibrary
         Private Function FormatDateAnchorLocal(value As DateTime?) As String
             If Not value.HasValue Then Return ""
             Dim localValue As DateTimeOffset = New DateTimeOffset(value.Value.ToUniversalTime()).ToLocalTime()
-            Return localValue.ToString("dd MMM yyyy HH:mm 'UTC'zzz", Globalization.CultureInfo.InvariantCulture)
+            Return localValue.ToString("dd MMM yyyy HH:mm", Globalization.CultureInfo.InvariantCulture) &
+                " local (UTC" &
+                localValue.ToString("zzz", Globalization.CultureInfo.InvariantCulture) & ")"
         End Function
 
         Private Function FormatDateLocalDate(value As DateTime?) As String

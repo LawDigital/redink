@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Excel"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 17.6.2026
+' 21.6.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -56,7 +56,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.170626" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.210626" & SharedMethods.VersionQualifier
 
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
@@ -196,6 +196,24 @@ Partial Public Class ThisAddIn
         ' Other startup tasks
 
         SharedMethods.Initialize(Me.CustomTaskPanes)
+
+        Try
+            If System.Threading.SynchronizationContext.Current Is Nothing Then
+                System.Threading.SynchronizationContext.SetSynchronizationContext(
+                    New System.Windows.Forms.WindowsFormsSynchronizationContext())
+            End If
+
+            Using anchor As New System.Windows.Forms.Control()
+                Dim h = anchor.Handle
+            End Using
+
+            SharedLibrary.Agents.WebView2JsSandbox.Initialize(
+                System.Threading.SynchronizationContext.Current,
+                System.IO.Path.Combine(System.IO.Path.GetTempPath(), "RedInk_JsSandbox"))
+        Catch
+            ' URL import will report "sandbox_uninitialized" if this failed.
+        End Try
+
         InitializeAddInFeatures()
     End Sub
 

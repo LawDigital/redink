@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 17.6.2026
+' 21.6.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -54,7 +54,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.170626" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.210626" & SharedMethods.VersionQualifier
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
     Public Const AN5 As String = "RI" ' for bubble comments 
@@ -365,7 +365,29 @@ Partial Public Class ThisAddIn
     Public FormatInstruction As String = ""
     Public SearchTerms As String
     Public SearchContext As String
-    Public CurrentDate As String = "(Current Date: " & DateTime.Now.ToString("dd-MMM-yyyy", CultureInfo.GetCultureInfo("en-US")) & ")"
+
+    Public ReadOnly Property CurrentDate As String
+        Get
+            Return "Current date (ISO 8601 yyyy-MM-dd): " &
+                DateTime.Now.ToString("yyyy-MM-dd", Globalization.CultureInfo.InvariantCulture)
+        End Get
+    End Property
+
+    Public ReadOnly Property LocalTimeContext As String
+        Get
+            Dim localNow As System.DateTimeOffset = System.DateTimeOffset.Now
+            Dim localTz As System.TimeZoneInfo = System.TimeZoneInfo.Local
+            Dim localZoneName As String = If(
+                localTz.IsDaylightSavingTime(System.DateTime.Now),
+                localTz.DaylightName,
+                localTz.StandardName)
+
+            Return "Current local runtime time (ISO 8601): " &
+                localNow.ToString("yyyy-MM-dd HH:mm:ss zzz", Globalization.CultureInfo.InvariantCulture) &
+                $". Local timezone: {localZoneName} ({localTz.Id}). Unless the user explicitly asks for UTC or another timezone, use this local timezone for user-facing dates and times."
+        End Get
+    End Property
+
     Public SysPrompt As String
     Public OldParty, NewParty As String
     Public SelectedText As String

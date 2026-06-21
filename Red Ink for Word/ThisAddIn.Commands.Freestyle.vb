@@ -1139,8 +1139,6 @@ Partial Public Class ThisAddIn
             InsertDocs = ""
             MyStyleInsert = ""
 
-            CurrentDate = "(Current Date: " & DateTime.Now.ToString("dd-MMM-yyyy", CultureInfo.GetCultureInfo("en-US")) & ")"
-
             ' Initialize option flags for various processing modes
             Dim NoText As Boolean = False
             Dim DoMarkup As Boolean = False
@@ -1353,8 +1351,8 @@ Partial Public Class ThisAddIn
                 AddItem("reload", "Reload the configuration from disk and rebuild menus.")
                 AddItem("reset", "Reset local configuration to defaults and rebuild menus.")
                 AddItem("cleanmenu", "Remove old context menus and rebuild them.")
-                AddItem("simplemen", "Toggle simple menu mode.")
-                AddItem("menunames", "Provide a list of menu names available for 'SimpleMeduHide' parameter.")
+                AddItem("simplemenu", "Toggle simple menu mode.")
+                AddItem("menunames", "Provide a list of menu names available for 'SimpleMenuHide' parameter (only Word).")
 
                 ' INI UPDATE / SIGNING
                 AddItem("iniupdate", "Check for and apply configuration updates.")

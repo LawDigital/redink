@@ -970,9 +970,8 @@ Public Class frmAIChat
                         Replace("{Location}", ThisAddIn.Location) &
                         $" Your name is '{AN5}'. The current date and time is: {DateTime.Now.ToString("MMMM dd, yyyy hh:mm tt")}." &
                         If(chkIncludeDocText.Checked, vbLf & "You have access to the user's active document." & vbLf, "") &
-                        If(chkIncludeselection.Checked, vbLf & "You have access to a selection of the active document." & vbLf, "") &
-                        If(chkIncludeOtherDocs.Checked, vbLf & "You also have read-only access to all other open Word documents for context only. Commands must never target those other documents." & vbLf, "") &
-                        If(My.Settings.DoCommands And (chkIncludeDocText.Checked Or chkIncludeselection.Checked),
+                        If(chkIncludeselection.Checked Or chkIncludeDocText.Checked, vbLf & "You have access to the current selection or cursor context in the active document." & vbLf, "") &
+                        If(chkIncludeOtherDocs.Checked, vbLf & "You also have read-only access to all other open Word documents for context only. Commands must never target those other documents." & vbLf, "") & If(My.Settings.DoCommands And (chkIncludeDocText.Checked Or chkIncludeselection.Checked),
                            _context.SP_Add_ChatWord_Commands,
                            _context.SP_Add_Chat_NoCommands)
 
@@ -1034,14 +1033,16 @@ Public Class frmAIChat
             ' Extract active document text (if checkbox enabled)
             Dim docText As String = If(chkIncludeDocText.Checked, GetActiveDocumentText(), "")
 
-            ' Extract selection text or cursor context (if checkbox enabled)
-            Dim selectionText As String = If(chkIncludeselection.Checked Or chkIncludeDocText.Checked,
-                                             GetCurrentSelectionText(), "")
+            ' Extract selection text or cursor context when either selection or full document access is enabled
+            Dim selectionText As String = ""
 
-            ' If full document included but no selection, get cursor context instead
             Dim sel As Microsoft.Office.Interop.Word.Selection = Globals.ThisAddIn.Application.Selection
-            If sel IsNot Nothing AndAlso sel.Start = sel.End Then
-                selectionText = GetCursorContext(CursorPositionCount)
+            If chkIncludeselection.Checked Or chkIncludeDocText.Checked Then
+                selectionText = GetCurrentSelectionText()
+
+                If sel IsNot Nothing AndAlso sel.Start = sel.End Then
+                    selectionText = GetCursorContext(CursorPositionCount)
+                End If
             End If
 
             ' Gather other open Word documents (if checkbox enabled)
@@ -1066,7 +1067,7 @@ Public Class frmAIChat
 
             ' Add selection or cursor context if present
             If Not String.IsNullOrEmpty(selectionText) Then
-                If chkIncludeDocText.Checked AndAlso sel.Start = sel.End Then
+                If sel IsNot Nothing AndAlso sel.Start = sel.End Then
                     fullPrompt.AppendLine($"In the user's document '{Globals.ThisAddIn.Application.ActiveDocument.Name}' the cursor is currently positioned in the following context: '{selectionText}'")
                 Else
                     fullPrompt.AppendLine($"In the user's document '{Globals.ThisAddIn.Application.ActiveDocument.Name}' the user has selected the following text: '{selectionText}'")

@@ -51,14 +51,14 @@ Partial Public Class DragDropForm
 
         Select Case _selectionMode
             Case DragDropMode.FileOnly
-                Me.Text = "Drag & Drop Your File or Click Browse"
-                Me.Label2.Text = "Drop or browse for a file."
+                Me.Text = "Your File/Link"
+                Me.Label2.Text = "Drop or browse for a file or link."
             Case DragDropMode.DirectoryOnly
-                Me.Text = "Drag & Drop Your Folder or Click Browse"
+                Me.Text = "Your Folder"
                 Me.Label2.Text = "Drop or browse for a folder."
             Case DragDropMode.FileOrDirectory
-                Me.Text = "Drag & Drop Your File or Folder, or Click Browse"
-                Me.Label2.Text = "Drop or browse for a file or folder."
+                Me.Text = "Your File/Folder/Link"
+                Me.Label2.Text = "Drop or browse for a file, folder, or link."
         End Select
 
         AdjustFormLayout()
@@ -87,43 +87,150 @@ Partial Public Class DragDropForm
     End Sub
 
     Private Sub DragDropForm_DragEnter(sender As Object, e As DragEventArgs) Handles MyBase.DragEnter
+        If e.Data Is Nothing Then
+            e.Effect = DragDropEffects.None
+            Return
+        End If
+
         If e.Data.GetDataPresent(DataFormats.FileDrop) Then
             e.Effect = DragDropEffects.Copy
-        Else
-            e.Effect = DragDropEffects.None
+            Return
         End If
+
+        If _selectionMode <> DragDropMode.DirectoryOnly Then
+            Dim droppedUrl As String = ""
+            If SharedLibrary.SharedLibrary.SharedMethods.TryGetDroppedInternetLink(e.Data, droppedUrl) Then
+                e.Effect = DragDropEffects.Copy
+                Return
+            End If
+        End If
+
+        e.Effect = DragDropEffects.None
     End Sub
 
-    Private Sub DragDropForm_DragDrop(sender As Object, e As DragEventArgs) Handles MyBase.DragDrop
+    Private Async Sub DragDropForm_DragDrop(sender As Object, e As DragEventArgs) Handles MyBase.DragDrop
         Try
-            Dim paths As String() = CType(e.Data.GetData(DataFormats.FileDrop), String())
-            If paths Is Nothing OrElse paths.Length = 0 Then Return
+            If e.Data Is Nothing Then
+                Return
+            End If
 
-            Dim droppedPath As String = paths(0)
-            Dim isDir As Boolean = Directory.Exists(droppedPath)
-            Dim isFile As Boolean = File.Exists(droppedPath)
+            If e.Data.GetDataPresent(DataFormats.FileDrop) Then
+                Dim paths As String() = TryCast(e.Data.GetData(DataFormats.FileDrop), String())
+                If paths IsNot Nothing AndAlso paths.Length > 0 Then
+                    Dim droppedPath As String = paths(0)
+                    Dim droppedUrl As String = ""
 
-            Select Case _selectionMode
-                Case DragDropMode.FileOnly
-                    If Not isFile Then
-                        SharedMethods.ShowCustomMessageBox("Please drop a file, not a folder.")
+                    If _selectionMode <> DragDropMode.DirectoryOnly AndAlso
+                       String.Equals(Path.GetExtension(droppedPath), ".url", StringComparison.OrdinalIgnoreCase) Then
+
+                        If SharedLibrary.SharedLibrary.SharedMethods.TryReadInternetShortcutUrl(droppedPath, droppedUrl) Then
+                            If Await TryHandleDroppedInternetLinkAsync(droppedUrl) Then
+                                Return
+                            End If
+                        End If
+
+                        SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("The dropped internet shortcut could not be read. You may want to try again.")
                         Return
                     End If
 
-                Case DragDropMode.DirectoryOnly
-                    If Not isDir Then
-                        SharedMethods.ShowCustomMessageBox("Please drop a folder, not a file.")
-                        Return
-                    End If
+                    Dim isDir As Boolean = Directory.Exists(droppedPath)
+                    Dim isFile As Boolean = File.Exists(droppedPath)
 
-                Case DragDropMode.FileOrDirectory
-            End Select
+                    Select Case _selectionMode
+                        Case DragDropMode.FileOnly
+                            If Not isFile Then
+                                SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Please drop a file/link, not a folder.")
+                                Return
+                            End If
 
-            _selectedFilePath = droppedPath
-            Me.DialogResult = DialogResult.OK
-            Me.Close()
+                        Case DragDropMode.DirectoryOnly
+                            If Not isDir Then
+                                SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Please drop a folder, not a file.")
+                                Return
+                            End If
+
+                        Case DragDropMode.FileOrDirectory
+                    End Select
+
+                    _selectedFilePath = droppedPath
+                    Me.DialogResult = DialogResult.OK
+                    Me.Close()
+                    Return
+                End If
+            End If
+
+            If _selectionMode <> DragDropMode.DirectoryOnly Then
+                Dim droppedUrl As String = ""
+                If SharedLibrary.SharedLibrary.SharedMethods.TryGetDroppedInternetLink(e.Data, droppedUrl) Then
+                    Await TryHandleDroppedInternetLinkAsync(droppedUrl)
+                    Return
+                End If
+            End If
+
         Catch ex As Exception
-            SharedMethods.ShowCustomMessageBox("Error: " & ex.Message)
+            SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error: " & ex.Message)
+        End Try
+    End Sub
+
+    Private Async Function TryHandleDroppedInternetLinkAsync(url As String) As System.Threading.Tasks.Task(Of Boolean)
+        If _selectionMode = DragDropMode.DirectoryOnly Then
+            SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Please drop a folder, not an internet link.")
+            Return False
+        End If
+
+        If Globals.ThisAddIn Is Nothing Then
+            SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("The dropped internet link could not be processed. You may want to try again.")
+            Return False
+        End If
+
+        Dim splash As SplashScreenWorks = Nothing
+        Dim tempFilePath As String = ""
+
+        Try
+            splash = ShowBusySplash("Importing website or file link, please wait...")
+            Await System.Threading.Tasks.Task.Yield()
+
+            tempFilePath = Await Globals.ThisAddIn.CreateTempFileFromUrlAsync(url)
+
+        Finally
+            CloseBusySplash(splash)
+        End Try
+
+        If String.IsNullOrWhiteSpace(tempFilePath) OrElse Not File.Exists(tempFilePath) Then
+            SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("The dropped internet link could not be retrieved. You may want to try again.")
+            Return False
+        End If
+
+        _selectedFilePath = tempFilePath
+        Me.DialogResult = DialogResult.OK
+        Me.Close()
+        Return True
+    End Function
+
+    Private Function ShowBusySplash(message As String) As SplashScreenWorks
+        Dim splash As New SplashScreenWorks(message)
+        splash.StartPosition = FormStartPosition.CenterScreen
+        splash.ShowInTaskbar = False
+        splash.TopMost = True
+        splash.Show(Me)
+        splash.BringToFront()
+        splash.Refresh()
+        Return splash
+    End Function
+
+    Private Sub CloseBusySplash(splash As SplashScreenWorks)
+        If splash Is Nothing Then
+            Return
+        End If
+
+        Try
+            If splash.IsDisposed Then
+                Return
+            End If
+
+            splash.Close()
+            splash.Dispose()
+        Catch
         End Try
     End Sub
 
