@@ -189,6 +189,7 @@ Namespace SharedLibrary
             Property SP_Convincing As String
             Property SP_NoFillers As String
             Property SP_Podcast As String
+            Property SP_Compact As String
             Property SP_MyStyle_Word As String
             Property SP_MyStyle_Outlook As String
             Property SP_MyStyle_Apply As String
@@ -376,6 +377,8 @@ Namespace SharedLibrary
             Property INI_LogoPath As String
             Property INI_BrandingName As String
 
+            Property INI_HttpStack As String
+
             ' InkyMemory settings
             Property INI_InkyMemoryCap As Integer
             Property SP_Add_InkyMemory As String
@@ -545,6 +548,7 @@ Namespace SharedLibrary
         Public Property SP_Convincing As String Implements ISharedContext.SP_Convincing
         Public Property SP_NoFillers As String Implements ISharedContext.SP_NoFillers
         Public Property SP_Podcast As String Implements ISharedContext.SP_Podcast
+        Public Property SP_Compact As String Implements ISharedContext.SP_Compact
         Public Property SP_MyStyle_Word As String Implements ISharedContext.SP_MyStyle_Word
         Public Property SP_MyStyle_Outlook As String Implements ISharedContext.SP_MyStyle_Outlook
         Public Property SP_MyStyle_Apply As String Implements ISharedContext.SP_MyStyle_Apply
@@ -723,6 +727,8 @@ Namespace SharedLibrary
         Public Property INI_LogoPathMedium As String Implements ISharedContext.INI_LogoPathMedium
         Public Property INI_LogoPath As String Implements ISharedContext.INI_LogoPath
         Public Property INI_BrandingName As String Implements ISharedContext.INI_BrandingName
+
+        Public Property INI_HttpStack As String Implements ISharedContext.INI_HttpStack
 
         Public Property INI_InkyMemoryCap As Integer Implements ISharedContext.INI_InkyMemoryCap
         Public Property SP_Add_InkyMemory As String Implements ISharedContext.SP_Add_InkyMemory

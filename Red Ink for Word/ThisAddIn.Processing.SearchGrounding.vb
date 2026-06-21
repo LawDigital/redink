@@ -56,8 +56,6 @@ Partial Public Class ThisAddIn
             Dim SysPromptTemp As String
             Dim SearchResults As List(Of String)
 
-            CurrentDate = DateAndTime.Now.ToString("MMMM d, yyyy")
-
             SysPromptTemp = InterpolateAtRuntime(INI_ISearch_SearchTerm_SP)
 
             ' Use polling instead of Await to stay on UI thread

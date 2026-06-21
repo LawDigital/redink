@@ -23,6 +23,16 @@ Option Strict Off
 
 Partial Public Class ThisAddIn
 
+    ''' <summary>
+    ''' Retrieves content from a web URL and stores it as a temporary file.
+    ''' Documents are downloaded as original files; websites are retrieved via the shared WebView2 importer and stored as text.
+    ''' </summary>
+    Public Async Function CreateTempFileFromUrlAsync(url As System.String) As System.Threading.Tasks.Task(Of System.String)
+        Return Await SharedLibrary.SharedLibrary.SharedMethods.CreateTempFileFromUrlAsync(
+            url,
+            SharedLibrary.SharedLibrary.SharedMethods.GetDefaultWebImportSupportedExtensions(INI_AllowLegacyDocFiles, True))
+    End Function
+
 
     ''' <summary>
     ''' Attempts plaintext extraction for Word (.doc/.docx/.rtf), Excel (.xls/.xlsx), or PowerPoint (.ppt/.pptx),

@@ -30,6 +30,16 @@ Imports SharedLibrary.SharedLibrary.SharedMethods
 Partial Public Class ThisAddIn
 
     ''' <summary>
+    ''' Retrieves content from a web URL and stores it as a temporary file.
+    ''' Documents are downloaded as original files; websites are retrieved via the shared WebView2 importer and stored as text.
+    ''' </summary>
+    Public Async Function CreateTempFileFromUrlAsync(url As String) As Task(Of String)
+        Return Await SharedLibrary.SharedLibrary.SharedMethods.CreateTempFileFromUrlAsync(
+            url,
+            SharedLibrary.SharedLibrary.SharedMethods.GetDefaultWebImportSupportedExtensions(INI_AllowLegacyDocFiles, False))
+    End Function
+
+    ''' <summary>
     ''' Opens a drag-and-drop selection form, obtains a file path, normalizes it,
     ''' validates existence, and returns the absolute path or empty string on failure.
     ''' </summary>
