@@ -1204,11 +1204,21 @@ Partial Public Class ThisAddIn
 
         ShowSettingsWindow(Settings, SettingsTips)
 
-        Dim splash As New Slib.Splashscreen("Updating menu following your changes ...")
+        Dim splash As New SLib.SplashScreen("Updating menu following your changes ...")
         splash.Show()
         splash.Refresh()
 
+        RemoveMenu = True
+        MenusAdded = False
         AddContextMenu()
+
+        Try
+            If Globals.Ribbons.Ribbon1 IsNot Nothing Then
+                Globals.Ribbons.Ribbon1.ApplyRibbonVisibilityConfiguration()
+            End If
+        Catch
+            ' non-critical
+        End Try
 
         splash.Close()
 

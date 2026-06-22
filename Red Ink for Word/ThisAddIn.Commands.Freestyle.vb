@@ -2391,7 +2391,27 @@ Partial Public Class ThisAddIn
             ' Toggle simplemenu
             If OtherPrompt.StartsWith("simplemenu", StringComparison.OrdinalIgnoreCase) Then
                 INI_SimpleMenuOverride = Not INI_SimpleMenuOverride
+
+                Try
+                    My.Settings.Item("SimpleMenuOverride") = INI_SimpleMenuOverride
+                    My.Settings.Item("SimpleMenuOverrideIsSet") = True
+                    My.Settings.Save()
+                Catch
+                    ' non-critical
+                End Try
+
+                RemoveMenu = True
+                MenusAdded = False
                 AddContextMenu()
+
+                Try
+                    If Globals.Ribbons.Ribbon1 IsNot Nothing Then
+                        Globals.Ribbons.Ribbon1.ApplyRibbonVisibilityConfiguration()
+                    End If
+                Catch
+                    ' non-critical
+                End Try
+
                 Return
             End If
 

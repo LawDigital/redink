@@ -915,6 +915,18 @@ Namespace My
                 Me("SimpleMenuOverride") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property SimpleMenuOverrideIsSet() As Boolean
+            Get
+                Return CType(Me("SimpleMenuOverrideIsSet"),Boolean)
+            End Get
+            Set
+                Me("SimpleMenuOverrideIsSet") = value
+            End Set
+        End Property
     End Class
 End Namespace
 
