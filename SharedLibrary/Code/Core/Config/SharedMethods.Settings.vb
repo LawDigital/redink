@@ -669,6 +669,14 @@ Namespace SharedLibrary
                                                    End Try
                                                Next
                                                Try
+                                                   If settingControls.ContainsKey("SimpleMenuOverride") Then
+                                                       My.Settings.Item("SimpleMenuOverrideIsSet") = True
+                                                   End If
+                                               Catch
+                                                   ' Ignore if the My.Settings entry does not exist
+                                               End Try
+
+                                               Try
                                                    My.Settings.Save()
                                                Catch
                                                    ' Ignore save errors silently

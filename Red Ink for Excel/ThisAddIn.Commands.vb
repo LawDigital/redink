@@ -1459,7 +1459,18 @@ Partial Public Class ThisAddIn
         Dim splash As New SplashScreen("Updating menu following your changes ...")
         splash.Show()
         splash.Refresh()
+        RemoveMenu = True
+        MenusAdded = False
         AddContextMenu()
+
+        Try
+            If Globals.Ribbons.Ribbon1 IsNot Nothing Then
+                Globals.Ribbons.Ribbon1.ApplyRibbonVisibilityConfiguration()
+            End If
+        Catch
+            ' non-critical
+        End Try
+
         splash.Close()
     End Sub
 
