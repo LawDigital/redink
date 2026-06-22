@@ -274,7 +274,6 @@ Namespace SharedLibrary
                 context.INI_MarkupMethodWordOverride = My.Settings.MarkupMethodWordOverride
                 context.INI_MarkupMethodOutlookOverride = My.Settings.MarkupMethodOutlookOverride
                 context.INI_MarkupAuthor = My.Settings.MarkupAuthor
-                context.INI_SimpleMenuOverride = My.Settings.SimpleMenuOverride
 
                 ' Boolean parameters.
                 context.INI_DoubleS = ParseBoolean(configDict, "DoubleS")
@@ -292,6 +291,16 @@ Namespace SharedLibrary
                 context.INI_DoMarkupWord = ParseBoolean(configDict, "DoMarkupWord", DEFAULT_BOOL_DOMARKUPWORD)
                 context.INI_RoastMe = ParseBoolean(configDict, "RoastMe", False)
                 context.INI_SimpleMenuDefault = ParseBoolean(configDict, "SimpleMenuDefault", DEFAULT_SIMPLEMENUDEFAULT)
+                context.INI_SimpleMenuOverride = context.INI_SimpleMenuDefault
+
+                Dim simpleMenuOverrideIsSet As Boolean = False
+                If TryGetMySettingBoolean("SimpleMenuOverrideIsSet", simpleMenuOverrideIsSet) AndAlso simpleMenuOverrideIsSet Then
+                    Dim simpleMenuOverrideValue As Boolean = False
+                    If TryGetMySettingBoolean("SimpleMenuOverride", simpleMenuOverrideValue) Then
+                        context.INI_SimpleMenuOverride = simpleMenuOverrideValue
+                    End If
+                End If
+
                 context.INI_APIDebug = ParseBoolean(configDict, "APIDebug")
                 context.INI_AutoPilotAutoStart = ParseBoolean(configDict, "AutoPilotAutoStart")
                 context.INI_AutoPilotSchedulerLocalChat = ParseBoolean(configDict, "AutoPilotSchedulerLocalChat")
@@ -593,6 +602,31 @@ Namespace SharedLibrary
 
             Dim value As String = If(configDict(key), "").Trim().ToLowerInvariant()
             Return value = "yes" OrElse value = "true" OrElse value = "ja" OrElse value = "wahr"
+        End Function
+
+        Private Shared Function TryGetMySettingBoolean(settingName As String, ByRef result As Boolean) As Boolean
+            result = False
+
+            If String.IsNullOrWhiteSpace(settingName) Then
+                Return False
+            End If
+
+            Try
+                Dim rawValue As Object = My.Settings.Item(settingName)
+
+                If rawValue Is Nothing Then
+                    Return False
+                End If
+
+                If TypeOf rawValue Is Boolean Then
+                    result = CBool(rawValue)
+                    Return True
+                End If
+
+                Return Boolean.TryParse(rawValue.ToString().Trim(), result)
+            Catch
+                Return False
+            End Try
         End Function
 
 

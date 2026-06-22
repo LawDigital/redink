@@ -2379,7 +2379,9 @@ Partial Public Class ThisAddIn
         ShowSettingsWindow(Settings, SettingsTips)
 
         Globals.Ribbons.Ribbon1.UpdateRibbon()
+        Globals.Ribbons.Ribbon1.ApplyRibbonVisibilityConfiguration()
         Globals.Ribbons.Ribbon2.UpdateRibbon()
+        Globals.Ribbons.Ribbon2.ApplyRibbonVisibilityConfiguration()
 
     End Sub
 

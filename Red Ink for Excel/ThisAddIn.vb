@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Excel"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 21.6.2026
+' 22.6.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -56,7 +56,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.210626" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.220626" & SharedMethods.VersionQualifier
 
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"

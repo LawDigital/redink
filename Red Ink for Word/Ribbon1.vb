@@ -554,8 +554,15 @@ Public Class Ribbon1
         End If
     End Sub
 
-    Public Sub ApplySimpleModeToRibbonControls(
-        ByVal controlNames As String,
+    Public Sub ApplyRibbonVisibilityConfiguration()
+        ApplySimpleModeToRibbonControls(
+            ThisAddIn.INI_SimpleMenuHide,
+            ThisAddIn.INI_MenuBlock,
+            ThisAddIn.INI_SimpleMenuOverride
+        )
+    End Sub
+
+    Public Sub ApplySimpleModeToRibbonControls(ByVal controlNames As String,
         ByVal blockedControlNames As String,
         ByVal simpleMode As Boolean
     )
