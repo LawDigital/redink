@@ -1473,7 +1473,12 @@ Partial Public Class ThisAddIn
 
                 ' Encode selected text (e.g., API key) and copy to clipboard
                 If String.Equals(OtherPrompt.Trim(), "encode", StringComparison.OrdinalIgnoreCase) Then
-                    Dim Key As String = CodeAPIKey(RemoveCR(selection.Text))
+                    Dim encChoice As Integer = SLib.ShowCustomYesNoBox(
+                        "Which encryption do you want to use for this key?",
+                        "Strong (recommended)", "Standard (legacy XOR)",
+                        $"{AN} Freestyle - Encode")
+                    If encChoice <> 1 AndAlso encChoice <> 2 Then Return
+                    Dim Key As String = CodeAPIKey(RemoveCR(selection.Text), encChoice = 1)
                     SLib.PutInClipboard(Key)
                     selection.Range.Collapse(Direction:=Word.WdCollapseDirection.wdCollapseEnd)
                     selection.TypeText(vbCrLf & "Encoded key (also in clipboard):" & vbCrLf & Key)

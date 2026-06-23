@@ -594,6 +594,12 @@ Namespace SharedLibrary
             encodedText = encodedText.Replace(vbCr, "").Replace(vbLf, "")
             encodedText = encodedText.Replace(" ", "")
 
+            ' Auto-detect a strong (AES-256) value by its marker prefix and decrypt accordingly.
+            ' Legacy XOR values are pure Base64 and can never start with this marker.
+            If encodedText.StartsWith(StrongApiKeyMarker, StringComparison.Ordinal) Then
+                Return DecodeStringStrong(encodedText.Substring(StrongApiKeyMarker.Length), pTerm)
+            End If
+
             Dim encryptedBytes As Byte() = DecodeBase64(encodedText)
             If encryptedBytes Is Nothing Then
                 Return "Error: Invalid Base64 input"
@@ -620,12 +626,29 @@ Namespace SharedLibrary
 
 
         ''' <summary>
-        ''' XOR-encodes <paramref name="inputText"/> using <paramref name="pTerm"/> and returns the result as Base64.
+        ''' Marker prefix that identifies a strong (AES-256) encrypted API key. Legacy XOR values are pure
+        ''' Base64 and can never begin with this marker, so it enables transparent auto-detection on decode.
+        ''' </summary>
+        Private Shared ReadOnly StrongApiKeyMarker As String = "$RIK1$"
+
+        ''' <summary>
+        ''' Encodes <paramref name="inputText"/> using <paramref name="pTerm"/>. By default uses the legacy XOR scheme
+        ''' (Base64). When <paramref name="useStrong"/> is True, uses AES-256 (marker-prefixed). The return value is a
+        ''' single string that is stored in the configuration file the same way for both schemes.
         ''' </summary>
         ''' <param name="inputText">Plain text to encode.</param>
-        ''' <param name="pTerm">XOR key term used for encoding.</param>
-        ''' <returns>Base64-encoded XOR output.</returns>
-        Public Shared Function CodeString(ByVal inputText As String, ByVal pTerm As String) As String
+        ''' <param name="pTerm">Key term used for encoding (XOR term or strong-encryption CodeBasis).</param>
+        ''' <param name="useStrong">When True, produces a strong AES-256 token instead of legacy XOR.</param>
+        ''' <returns>Encoded output, or a string starting with "Error: " on strong-encryption failure.</returns>
+        Public Shared Function CodeString(ByVal inputText As String, ByVal pTerm As String, Optional ByVal useStrong As Boolean = True) As String
+            If useStrong Then
+                Dim strongBody As String = CodeStringStrong(inputText, pTerm)
+                If strongBody.StartsWith("Error:", StringComparison.Ordinal) Then
+                    Return strongBody
+                End If
+                Return StrongApiKeyMarker & strongBody
+            End If
+
             Dim inputBytes() As Byte = System.Text.Encoding.UTF8.GetBytes(inputText)
             Dim pTermBytes() As Byte = System.Text.Encoding.UTF8.GetBytes(pTerm)
             Dim encryptedBytes(inputBytes.Length - 1) As Byte
@@ -643,9 +666,148 @@ Namespace SharedLibrary
         End Function
 
         ''' <summary>
+        ''' Strong encryptor: AES-256-CBC with a PBKDF2(SHA-256)-derived key, authenticated with HMAC-SHA256
+        ''' (Encrypt-then-MAC). Returns the Base64 body (without marker), or "Error: ..." on failure (never throws).
+        ''' </summary>
+        Private Shared Function CodeStringStrong(ByVal inputText As String, ByVal pTerm As String) As String
+            If inputText Is Nothing Then inputText = ""
+            If String.IsNullOrEmpty(pTerm) Then Return "Error: Missing CodeBasis"
+
+            Try
+                Const iterations As Integer = 100000
+                Dim salt(15) As Byte
+                Dim iv(15) As Byte
+                Using rng As System.Security.Cryptography.RandomNumberGenerator = System.Security.Cryptography.RandomNumberGenerator.Create()
+                    rng.GetBytes(salt)
+                    rng.GetBytes(iv)
+                End Using
+
+                Dim aesKey() As Byte
+                Dim macKey() As Byte
+                Using kdf As New System.Security.Cryptography.Rfc2898DeriveBytes(pTerm, salt, iterations, System.Security.Cryptography.HashAlgorithmName.SHA256)
+                    aesKey = kdf.GetBytes(32)
+                    macKey = kdf.GetBytes(32)
+                End Using
+
+                Dim cipher() As Byte
+                Using aes As System.Security.Cryptography.Aes = System.Security.Cryptography.Aes.Create()
+                    aes.KeySize = 256
+                    aes.Mode = System.Security.Cryptography.CipherMode.CBC
+                    aes.Padding = System.Security.Cryptography.PaddingMode.PKCS7
+                    aes.Key = aesKey
+                    aes.IV = iv
+                    Dim plain() As Byte = System.Text.Encoding.UTF8.GetBytes(inputText)
+                    Using enc As System.Security.Cryptography.ICryptoTransform = aes.CreateEncryptor()
+                        cipher = enc.TransformFinalBlock(plain, 0, plain.Length)
+                    End Using
+                End Using
+
+                Dim authData() As Byte = StrongConcatBytes(salt, iv, cipher)
+                Dim tag() As Byte
+                Using hmac As New System.Security.Cryptography.HMACSHA256(macKey)
+                    tag = hmac.ComputeHash(authData)
+                End Using
+
+                Return System.Convert.ToBase64String(StrongConcatBytes(authData, tag))
+            Catch
+                Return "Error: Strong encryption failed"
+            End Try
+        End Function
+
+        ''' <summary>
+        ''' Strong decryptor: verifies HMAC-SHA256 and decrypts a body produced by <see cref="CodeStringStrong"/>.
+        ''' Receives the Base64 body with the marker already stripped. Returns plaintext, or "Error: ..." (never throws).
+        ''' </summary>
+        Private Shared Function DecodeStringStrong(ByVal body As String, ByVal pTerm As String) As String
+            If String.IsNullOrEmpty(pTerm) Then Return "Error: Missing CodeBasis"
+
+            Dim blob() As Byte = DecodeBase64(body)
+            If blob Is Nothing Then Return "Error: Invalid Base64 input"
+
+            Const iterations As Integer = 100000
+            Const saltLen As Integer = 16
+            Const ivLen As Integer = 16
+            Const tagLen As Integer = 32
+
+            If blob.Length < saltLen + ivLen + 16 + tagLen Then Return "Error: Invalid strong-encrypted input"
+
+            Dim salt(saltLen - 1) As Byte
+            Dim iv(ivLen - 1) As Byte
+            System.Array.Copy(blob, 0, salt, 0, saltLen)
+            System.Array.Copy(blob, saltLen, iv, 0, ivLen)
+
+            Dim cipherLen As Integer = blob.Length - saltLen - ivLen - tagLen
+            Dim cipher(cipherLen - 1) As Byte
+            System.Array.Copy(blob, saltLen + ivLen, cipher, 0, cipherLen)
+
+            Dim tag(tagLen - 1) As Byte
+            System.Array.Copy(blob, blob.Length - tagLen, tag, 0, tagLen)
+
+            Dim aesKey() As Byte
+            Dim macKey() As Byte
+            Using kdf As New System.Security.Cryptography.Rfc2898DeriveBytes(pTerm, salt, iterations, System.Security.Cryptography.HashAlgorithmName.SHA256)
+                aesKey = kdf.GetBytes(32)
+                macKey = kdf.GetBytes(32)
+            End Using
+
+            Dim authLen As Integer = blob.Length - tagLen
+            Dim authData(authLen - 1) As Byte
+            System.Array.Copy(blob, 0, authData, 0, authLen)
+
+            Dim expected() As Byte
+            Using hmac As New System.Security.Cryptography.HMACSHA256(macKey)
+                expected = hmac.ComputeHash(authData)
+            End Using
+
+            If Not StrongFixedTimeEquals(expected, tag) Then
+                Return "Error: Authentication failed (wrong CodeBasis or tampered key)"
+            End If
+
+            Try
+                Using aes As System.Security.Cryptography.Aes = System.Security.Cryptography.Aes.Create()
+                    aes.KeySize = 256
+                    aes.Mode = System.Security.Cryptography.CipherMode.CBC
+                    aes.Padding = System.Security.Cryptography.PaddingMode.PKCS7
+                    aes.Key = aesKey
+                    aes.IV = iv
+                    Using dec As System.Security.Cryptography.ICryptoTransform = aes.CreateDecryptor()
+                        Dim plain() As Byte = dec.TransformFinalBlock(cipher, 0, cipher.Length)
+                        Return System.Text.Encoding.UTF8.GetString(plain)
+                    End Using
+                End Using
+            Catch
+                Return "Error: Decryption failed"
+            End Try
+        End Function
+
+        ''' <summary>Concatenates the supplied byte arrays into a single array.</summary>
+        Private Shared Function StrongConcatBytes(ParamArray arrays As Byte()()) As Byte()
+            Dim total As Integer = 0
+            For Each a As Byte() In arrays
+                total += a.Length
+            Next
+            Dim result(total - 1) As Byte
+            Dim offset As Integer = 0
+            For Each a As Byte() In arrays
+                System.Array.Copy(a, 0, result, offset, a.Length)
+                offset += a.Length
+            Next
+            Return result
+        End Function
+
+        ''' <summary>Constant-time comparison of two byte arrays to avoid timing side-channels on the HMAC tag.</summary>
+        Private Shared Function StrongFixedTimeEquals(a As Byte(), b As Byte()) As Boolean
+            If a Is Nothing OrElse b Is Nothing OrElse a.Length <> b.Length Then Return False
+            Dim diff As Integer = 0
+            For i As Integer = 0 To a.Length - 1
+                diff = diff Or (a(i) Xor b(i))
+            Next
+            Return diff = 0
+        End Function
+
+        ''' <summary>
         ''' Retrieves the computer's domain/workgroup name via WMI (<c>Win32_ComputerSystem.Domain</c>).
         ''' </summary>
-        ''' <returns>The domain/workgroup name, or an empty string on failure.</returns>
         Public Shared Function GetDomain() As String
             Try
                 ' Initialize a WMI query to get the Domain property from Win32_ComputerSystem
