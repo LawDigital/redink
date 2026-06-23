@@ -5078,31 +5078,42 @@ Partial Public Class ThisAddIn
         Catch
         End Try
 
-        Try
-            Dim cursorPos As Integer = Selection.Range.Start
+        ' Only treat a main-text position as "inside a comment" when the user has NOT made a
+        ' real text selection. A broad selection (e.g. the entire document) can merely overlap a
+        ' comment's anchor/scope; in that case the user is editing the main text, not the comment,
+        ' and must not be routed to the comment-processing pipeline. Selections inside the comments
+        ' story are already handled by the wdCommentsStory branch above.
+        Dim isInsertionPoint As Boolean =
+            (Selection.Type = Word.WdSelectionType.wdSelectionIP) OrElse
+            (Selection.Range.Start = Selection.Range.End)
 
-            For Each c As Word.Comment In doc.Comments
-                Dim anchor As Word.Range = Nothing
+        If isInsertionPoint AndAlso Selection.StoryType = Word.WdStoryType.wdMainTextStory Then
+            Try
+                Dim cursorPos As Integer = Selection.Range.Start
 
-                Try
-                    anchor = c.Scope
-                Catch
+                For Each c As Word.Comment In doc.Comments
+                    Dim anchor As Word.Range = Nothing
+
                     Try
-                        anchor = c.Reference
+                        anchor = c.Scope
                     Catch
-                        anchor = Nothing
+                        Try
+                            anchor = c.Reference
+                        Catch
+                            anchor = Nothing
+                        End Try
                     End Try
-                End Try
 
-                If anchor IsNot Nothing AndAlso
-                   cursorPos >= anchor.Start AndAlso
-                   cursorPos <= anchor.End Then
-                    activeComment = c
-                    Return True
-                End If
-            Next
-        Catch
-        End Try
+                    If anchor IsNot Nothing AndAlso
+                       cursorPos >= anchor.Start AndAlso
+                       cursorPos <= anchor.End Then
+                        activeComment = c
+                        Return True
+                    End If
+                Next
+            Catch
+            End Try
+        End If
 
         Return False
     End Function
