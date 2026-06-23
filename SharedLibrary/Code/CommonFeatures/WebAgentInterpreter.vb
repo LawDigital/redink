@@ -131,7 +131,7 @@ Namespace SharedLibrary
         Public Sub New()
             _cookieContainer = New System.Net.CookieContainer()
             _handler = New System.Net.Http.HttpClientHandler() With {
-            .AllowAutoRedirect = True,
+            .AllowAutoRedirect = False,
             .AutomaticDecompression = System.Net.DecompressionMethods.GZip Or System.Net.DecompressionMethods.Deflate,
             .UseCookies = True,
             .CookieContainer = _cookieContainer
@@ -1671,6 +1671,9 @@ Namespace SharedLibrary
             Dim absolute As System.Uri
             If Not System.Uri.TryCreate(url, System.UriKind.Absolute, absolute) Then
                 Throw New System.Exception("URL must be absolute (include scheme). Got: " & url)
+            End If
+            If Not IsAllowedNetworkUrl(url) Then
+                Throw New System.Exception("http_request: Only non-loopback, non-private absolute HTTP/HTTPS URLs are allowed: " & url)
             End If
             Dim method = parms.Value(Of System.String)("method")
             If System.String.IsNullOrWhiteSpace(method) Then method = "GET"
@@ -3668,14 +3671,84 @@ Namespace SharedLibrary
                     Return False
                 End If
 
-                If System.String.Equals(uri.Host, "localhost", System.StringComparison.OrdinalIgnoreCase) Then
+                If Not System.String.IsNullOrWhiteSpace(uri.UserInfo) Then
                     Return False
                 End If
+
+                Dim host As System.String = If(uri.Host, "").Trim().ToLowerInvariant()
+                If host = "" Then
+                    Return False
+                End If
+
+                If host = "localhost" OrElse
+                   host.EndsWith(".local", System.StringComparison.OrdinalIgnoreCase) OrElse
+                   host.EndsWith(".internal", System.StringComparison.OrdinalIgnoreCase) OrElse
+                   host.EndsWith(".home", System.StringComparison.OrdinalIgnoreCase) Then
+                    Return False
+                End If
+
+                Dim literalIp As System.Net.IPAddress = Nothing
+                If System.Net.IPAddress.TryParse(host, literalIp) Then
+                    Return Not IsPrivateInterpreterIpAddress(literalIp)
+                End If
+
+                Try
+                    For Each resolvedAddress As System.Net.IPAddress In System.Net.Dns.GetHostAddresses(uri.DnsSafeHost)
+                        If IsPrivateInterpreterIpAddress(resolvedAddress) Then
+                            Return False
+                        End If
+                    Next
+                Catch
+                    ' Fail closed: if the host cannot be resolved, do not allow the request.
+                    Return False
+                End Try
 
                 Return True
             Catch
                 Return False
             End Try
+        End Function
+
+        Private Function IsPrivateInterpreterIpAddress(address As System.Net.IPAddress) As System.Boolean
+            If address Is Nothing Then
+                Return True
+            End If
+
+            If System.Net.IPAddress.IsLoopback(address) Then
+                Return True
+            End If
+
+            Dim bytes As System.Byte() = address.GetAddressBytes()
+
+            If address.AddressFamily = System.Net.Sockets.AddressFamily.InterNetwork Then
+                If bytes.Length <> 4 Then
+                    Return True
+                End If
+
+                If bytes(0) = 10 Then Return True
+                If bytes(0) = 127 Then Return True
+                If bytes(0) = 169 AndAlso bytes(1) = 254 Then Return True
+                If bytes(0) = 172 AndAlso bytes(1) >= 16 AndAlso bytes(1) <= 31 Then Return True
+                If bytes(0) = 192 AndAlso bytes(1) = 168 Then Return True
+                If bytes(0) = 100 AndAlso bytes(1) >= 64 AndAlso bytes(1) <= 127 Then Return True
+                If bytes(0) = 0 Then Return True
+
+                Return False
+            End If
+
+            If address.AddressFamily = System.Net.Sockets.AddressFamily.InterNetworkV6 Then
+                If address.IsIPv6LinkLocal OrElse address.IsIPv6SiteLocal Then
+                    Return True
+                End If
+
+                If bytes.Length = 16 AndAlso (bytes(0) And &HFE) = &HFC Then
+                    Return True
+                End If
+
+                Return False
+            End If
+
+            Return True
         End Function
 
 
