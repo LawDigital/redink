@@ -41,45 +41,45 @@ II.	Inbox Board	180
 JJ.	Mail Mover	182
 KK.	Microsoft 365 Mail Search	183
 LL.	Inky AutoPilot	184
-MM.	Using Red Ink in other programs	198
+MM.	Using Red Ink in other programs	199
 III.	INSTALLATION	201
 A.	For those who can't wait: The one-click installation	201
-B.	The installation in more detail	202
-C.	Preparation: API access	205
-D.	Step 1: Download the installer/installations package	207
-E.	Step 2: Run the installer	208
-F.	Step 3: Initial configuration using the wizard	209
-G.	Step 4: Enter license	211
-H.	Step 5: Install helper (optional, can be done later)	212
-I.	Step 6: Using add-ins	213
-J.	Step 7: Making further adjustments as necessary	214
-K.	Installation of the browser extension	215
-IV.	CONFIGURATION (FOR ADVANCED USERS)	215
-A.	Configuration file "redink.ini"	215
-B.	Configuration Wizard	251
-C.	Registry Fix Function	253
-D.	License Management	255
-E.	Prompt library	258
-F.	Other alternative language models	259
-G.	Configuring Tooling / Agentic Mode	262
-H.	OAuth2.0 (e.g. Google Vertex API)	267
-I.	Configuration of Advanced API Calls	267
-J.	MCP Converter	271
-K.	Automatic loading of configuration and template files	274
-L.	Automatic updating of INI files	276
-M.	Security features	277
-N.	Simplified Menu, Deactivate Functions	280
-O.	Use of a different logo for Red Ink	281
-P.	Information for Developers / Source Code	281
-V.	FAQS	285
-VI.	RELEASE NOTES	297
-VII.	ROADMAP	313
-ANNEX 1: IDEAS TO GET TO KNOW RED INK	314
-ANNEX 2: PROGRAMMING RESPONSE TEMPLATES	316
-ANNEX 3: WEB AGENT SCRIPTING	319
-ANNEX 4: AUTOMATIC INI UPDATE	340
-ANNEX 5: INSTALLATION WITH CENTRAL CONFIGURATION	352
-ANNEX 6: DATA COLLECTOR SCHEMA FILE	363
+B.	The installation in more detail	203
+C.	Preparation: API access	206
+D.	Step 1: Download the installer/installations package	208
+E.	Step 2: Run the installer	209
+F.	Step 3: Initial configuration using the wizard	210
+G.	Step 4: Enter license	212
+H.	Step 5: Install helper (optional, can be done later)	213
+I.	Step 6: Using add-ins	214
+J.	Step 7: Making further adjustments as necessary	215
+K.	Installation of the browser extension	216
+IV.	CONFIGURATION (FOR ADVANCED USERS)	216
+A.	Configuration file "redink.ini"	216
+B.	Configuration Wizard	252
+C.	Registry Fix Function	254
+D.	License Management	256
+E.	Prompt library	259
+F.	Other alternative language models	260
+G.	Configuring Tooling / Agentic Mode	263
+H.	OAuth2.0 (e.g. Google Vertex API)	268
+I.	Configuration of Advanced API Calls	269
+J.	MCP Converter	272
+K.	Automatic loading of configuration and template files	275
+L.	Automatic updating of INI files	277
+M.	Security features	278
+N.	Simplified Menu, Deactivate Functions	281
+O.	Use of a different logo for Red Ink	282
+P.	Information for Developers / Source Code	282
+V.	FAQS	286
+VI.	RELEASE NOTES	299
+VII.	ROADMAP	314
+ANNEX 1: IDEAS TO GET TO KNOW RED INK	315
+ANNEX 2: PROGRAMMING RESPONSE TEMPLATES	317
+ANNEX 3: WEB AGENT SCRIPTING	320
+ANNEX 4: AUTOMATIC INI UPDATE	341
+ANNEX 5: INSTALLATION WITH CENTRAL CONFIGURATION	353
+ANNEX 6: DATA COLLECTOR SCHEMA FILE	364
 
 I. OVERVIEW
 1 Red Ink is an AI tool developed for daily office use, which is integrated directly into Word, Excel and Outlook in the form of Microsoft Office add-ins, allowing various AI functions to be performed with your own texts, worksheets and emails. Prompts can be entered directly, but it is also possible to have the AI translate, revise, summarize, comment on, and search a selected text, cells in a worksheet, or email chains. Even a chatbot is available, the tool can transcribe, create audiobooks from texts, and can also be accessed from the browser. What is special about Red Ink, however, in contrast to most other AI tools, is that you can work with the AI directly in Word, Excel and Outlook; there is no need to switch back and forth to the browser.
@@ -1416,6 +1416,26 @@ LL. Inky AutoPilot
 * Voicemail sender address – only emails with the specified sender address will be accepted and processed as voicemails. It usually comes from the respective mobile phone company.
 * Caller ID mapping file – here you must specify the path of the file that contains the list of permitted users of the voicemail service. This is a text file in CSV format, i.e. on each line, the phone number is given first, then a comma, and then the email address to which the reply is sent. ("+41795553025,peter.pan@company.com"). It is used to determine to whom in the company the reply to the voicemail should be sent.
 * Source selection: If the model supports tool calling and external sources (e.g., web retrieval, databases) are configured, they can be activated here.
+* Sender Tool Policy: Here it is possible to withhold certain skills and tools from specific senders or to allow them only for them. This is defined in a corresponding text file, the full path of which can be specified here. For example, it has the following content:
+
+; Red Ink AutoPilot — per-sender tool policy
+; First match wins. report_inability is always available.
+
+; Trusted internal staff: full access
+*@mycompany.com = ALL
+
+; A partner who may only ever run the contract-review skill (Option B)
+review@partner.com = ONLY skill_contract_review
+
+; A limited sender restricted to two specific tools
+intern@mycompany.com = summarize_thread, web_grounding
+
+; A blocked sender: the model can only decline
+noreply@spam.com = NONE
+
+; Everyone else (no specific match): inherit all tools
+DEFAULT = ALL
+The "report_inability" tool is always functional so that the user always receives a response. If a skill is selected and executed, the tools enabled within it can also be executed; however, all others remain blocked. Care must therefore be taken to ensure that only what the model is permitted to use is enabled within the skill – potentially also outside the skill. If the user can set up a scheduled task, it has no restrictions. If no file is specified, all authorized users can use all tools – provided they pass the other checkpoints.
 * Confirmation dialog: Summary of all settings before starting.
 458 All settings are saved locally (and also in the registry as a backup) and suggested as default values the next time it is launched. If the monitored mailbox is changed, the filter and whitelist are reset to their default values.
 459 If the configuration parameter AutoPilotAutoStart is set to True and a saved configuration from a previous session exists, AutoPilot will automatically start with the last used settings when Outlook is opened. The operator is shown a 30-second countdown dialog in which they can cancel the automatic start or open the full configuration dialog instead. If the countdown expires without operator intervention, AutoPilot starts in unattended mode: The catch-up preview is skipped (all accumulated emails are processed automatically), and replies to non-whitelisted senders are automatically approved instead of blocking the operator with a release dialog.
@@ -1836,7 +1856,7 @@ If a device name is used, the respective user is activated on the device.
 * LicenseDoNotTouchUserID: If the user ID stored in the respective add-in corresponds to the user ID listed in this parameter, then it will not be deleted or overwritten, regardless of the preceding parameters. Multiple user IDs can be listed, separated by a comma.
 592 Licenses purchased via the online shop usually renew automatically unless they have been cancelled. If a license expires, it is deactivated and the add-in can no longer be used after a short transition period until it is licensed again. Uninstallation is possible at any time.
 593 If there is an error when accessing the license server, you should check whether your own network infrastructure (firewall, proxy, http stack) allows this access (an https call to redink.ai) at all. The add-ins are equipped with two stacks, in case one is not compatible with the existing infrastructure. They can be controlled via the "HttpStack" parameter.
-594 If an online connection is not possible for security reasons, Red Ink can also be operated in offline license mode. In this case, a special agreement with LawDigital AG is necessary. An offline license key will then be provided, which is limited in time. User administration is then the responsibility of the customer. These offline domain license keys can be identified by the prefix "RI-DOM-1:" and must be entered for the "LicenseKey" parameter in the configuration file. They are digitally signed.
+594 If an online connection is not possible for security reasons, Red Ink can also be operated in offline license mode. In this case, a special agreement with LawDigital AG is necessary. An offline license key will then be provided, which is limited in time and limited to the customer's domain or individual systems (retrievable via the command prompt with "ipconfig" or "hostname"). User administration is then the responsibility of the customer. These offline domain license keys can be identified by the prefix "RI-DOM-1:" and must be entered for the "LicenseKey" parameter in the configuration file. They are digitally signed.
 595 Furthermore, it is also possible to operate your own license server. This option also requires an agreement with LawDigital and is intended for service providers.
 E. Prompt library
 596 The Word add-in supports the use of a prompt library if the corresponding parameter ("PromptLib") points to a valid path with a corresponding text file. The prompt library is accessed in Freestyle by entering nothing in the prompt input field and pressing OK. In Chat for Word, Discuss this, and Local Chat, it can be accessed by entering the isolated character "/".
@@ -1886,6 +1906,7 @@ F. Other alternative language models
 * Embedding = True: The model is configured to provide embedding vectors (this is used, for example, for the Knowledge Store to enable semantic search).
 * WebGrounding = True: The model is used for Web Grounding and is configured accordingly (AutoPilot can then call it as a tool for this purpose).
 * DeepResearch = True: The model is used for Deep Research and is configured accordingly (AutoPilot can then call it as a tool for this purpose).
+* TalkToMe = True: The model is used for the Talk-To-Me function (speech recognition). This should be a fast model. It does not need to master speech recognition itself.
 615 For the agentic mode, further corresponding entries can be used. These can then be used for sub-agents. For example, for an alternative model, "SubAgentModel1 = True" could be entered. This model can then be used for a sub-agent if "SubAgentModel1" is specified as the model in its header.
 G. Configuring Tooling / Agentic Mode
 616 If configured alternate models support so-called Tooling, i.e., are able to select from a defined list of data sources (and other tools) and formulate instructions that they need to complete their task, then this can also be used in Red Ink. Red Ink is then operated in agentic mode. The model in question can be provided with additional data sources (see para. 91 et seq.), but also various other tools (see para. 425 et seq. et seq.). In the context of Red Ink, additional data sources refer to the Special Services, provided they have been supplemented in the configuration file with the necessary information for tooling queries. For MCP sources, the MCP converter (para. 632 et seq.) does this automatically.
@@ -2687,19 +2708,24 @@ E=1.5.12.200"Voice Mode" for Discuss this introduced, also the option to manage
 W=1.5.18.200
 O=1.5.18.200
 E=1.5.14.200
-Documentation updated; finetuning of the Correct and Improve prompts; improved SSRF protection in WebAgent; strong API encryption added; bug fix SimpleMenuDefault and Save Settings
+Documentation updated; finetuning of the Correct and Improve prompts; improved SSRF protection in WebAgent; strong API encryption added; bug fix SimpleMenuDefault and Save Settings25.6.2026
+
+W=1.5.20.200
+O=1.5.19.200
+Agentic tools are now enabled by default; in AutoPilot, access to tools can be controlled per user; bug fix when applying Word comments
 Note: Version numbers with x.x.x.2nn are Preview-Releases.
 
 
 VII. ROADMAP
 698 Further planned developments:
 * More tools for AutoPilot
-* Support for MacOS, the "new" Outlook and other platforms
 * Ability to have a directory with two versions of a file compared
 * FileMover
-* New models for speech recognition/transcription
 * Automatic model-based anonymization
-* App for Mobile
+* Addition text-to-speech tools
+Separately available:
+* Web add-in for MacOS and the "new" Outlook
+* Red Ink app for mobile phones and tablets
 
 
 ANNEX 1: IDEAS TO GET TO KNOW RED INK
@@ -4056,10 +4082,10 @@ If desired, a functionally well-formulated German sample text for exactly these 
 
 
 
-23 June 2026	1
+25 June 2026	1
 
 
-	23 June 2026 
+	25 June 2026 
 
 
 

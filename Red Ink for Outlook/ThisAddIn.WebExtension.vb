@@ -1172,8 +1172,11 @@ Partial Public Class ThisAddIn
         Public SupportsFileUploads As System.Boolean = False
         Public ToolingEnabled As System.Boolean = False
         Public SelectedToolNames As System.Collections.Generic.List(Of String) = New System.Collections.Generic.List(Of String)()
-        Public SelectedMainToolNames As System.Collections.Generic.List(Of String) = New System.Collections.Generic.List(Of String)()
-        Public SelectedAdvancedToolNames As System.Collections.Generic.List(Of String) = New System.Collections.Generic.List(Of String)()
+        ' Opt-out persistence: store only the tools the user explicitly turned OFF.
+        ' Anything not listed is on by default (incl. newly added tools). Renamed from the
+        ' legacy "Selected..." fields so old opt-in values are dropped on first load.
+        Public DeselectedMainToolNames As System.Collections.Generic.List(Of String) = New System.Collections.Generic.List(Of String)()
+        Public DeselectedAdvancedToolNames As System.Collections.Generic.List(Of String) = New System.Collections.Generic.List(Of String)()
         Public AgentModeEnabled As System.Boolean = False
         Public PreAgentModelKey As System.String = ""
         Public PreAgentUseSecondApi As System.Boolean = False
@@ -1660,10 +1663,9 @@ Partial Public Class ThisAddIn
 
         Try
             Dim st = LoadInkyState()
-            MigrateLocalChatToolSelections(st, includeInteractiveM365Tools)
 
             Dim selectedNameSet As New HashSet(Of String)(
-                If(st.SelectedMainToolNames, New List(Of String)()),
+                ResolveLocalChatSelectedMainToolNames(st, includeInteractiveM365Tools),
                 StringComparer.OrdinalIgnoreCase)
 
             For Each t In GetLocalChatMainSelectableTools(includeInteractiveM365Tools)
@@ -2166,35 +2168,15 @@ Partial Public Class ThisAddIn
                             If enabled Then
                                 Dim effectiveAgentTools =
                 GetLocalChatEffectiveTools(
-                    st.SelectedMainToolNames,
-                    ResolveLocalChatAdvancedToolNamesForEnabledState(st.SelectedAdvancedToolNames, includeInteractiveM365Tools:=True),
+                    ResolveLocalChatSelectedMainToolNames(st, includeInteractiveM365Tools:=True),
+                    ResolveLocalChatSelectedAdvancedToolNames(st, includeInteractiveM365Tools:=True),
                     True,
                     includeInteractiveM365Tools:=True)
 
                                 If effectiveAgentTools.Count = 0 AndAlso Not IsChatAgentWorkspaceConnected() Then
-                                    Dim selectedMainToolNames As List(Of String) = Nothing
-                                    Dim selectedAdvancedToolNames As List(Of String) = Nothing
-
-                                    Await SwitchToUi(
-                    Sub()
-                        selectedMainToolNames =
-                            ShowLocalChatToolSelectionDialog(
-                                If(st.SelectedMainToolNames, New List(Of String)()),
-                                ResolveLocalChatAdvancedToolNamesForEnabledState(st.SelectedAdvancedToolNames, includeInteractiveM365Tools:=True),
-                                selectedAdvancedToolNames,
-                                includeInteractiveM365Tools:=True)
-                    End Sub).ConfigureAwait(False)
-
-                                    If selectedMainToolNames Is Nothing Then
-                                        Return JsonOk(New With {.ok = True, .cancelled = True})
-                                    End If
-
-                                    st.SelectedMainToolNames = selectedMainToolNames
-                                    st.SelectedAdvancedToolNames =
-                    NormalizeLocalChatAdvancedToolNames(selectedAdvancedToolNames, includeInteractiveM365Tools:=True)
-                                Else
-                                    st.SelectedAdvancedToolNames =
-                    ResolveLocalChatAdvancedToolNamesForEnabledState(st.SelectedAdvancedToolNames, includeInteractiveM365Tools:=True)
+                                    ' Opt-out defaults keep all tools on unless the user deselected them all.
+                                    ' Do not auto-open the selection dialog here; report a plain error instead.
+                                    Return JsonErr("Agent mode requires at least one tool or a connected workspace. All tools are on by default — use the Tools button to re-enable some (or connect a workspace), then try again.")
                                 End If
 
                                 st.ToolingEnabled = True
@@ -2324,58 +2306,24 @@ Partial Public Class ThisAddIn
 
                                 ' Ensure sources are actually selected (prompt user if necessary)
                                 Dim effectiveAgentTools =
-    GetLocalChatEffectiveTools(
-        st.SelectedMainToolNames,
-        ResolveLocalChatAdvancedToolNamesForEnabledState(st.SelectedAdvancedToolNames, includeInteractiveM365Tools:=True),
-        True,
-        includeInteractiveM365Tools:=True)
+                                            GetLocalChatEffectiveTools(
+                                                ResolveLocalChatSelectedMainToolNames(st, includeInteractiveM365Tools:=True),
+                                                ResolveLocalChatSelectedAdvancedToolNames(st, includeInteractiveM365Tools:=True),
+                                                True,
+                                                includeInteractiveM365Tools:=True)
 
                                 If effectiveAgentTools.Count = 0 AndAlso Not IsChatAgentWorkspaceConnected() Then
-                                    Dim selectedMainToolNames As List(Of String) = Nothing
-                                    Dim selectedAdvancedToolNames As List(Of String) = Nothing
-
-                                    Try
-                                        Await SwitchToUi(
-                                            Sub()
-                                                selectedMainToolNames =
-                                                    ShowLocalChatToolSelectionDialog(
-                                                        If(st.SelectedMainToolNames, New List(Of String)()),
-                                                        ResolveLocalChatAdvancedToolNamesForEnabledState(st.SelectedAdvancedToolNames, includeInteractiveM365Tools:=True),
-                                                        selectedAdvancedToolNames,
-                                                        includeInteractiveM365Tools:=True)
-                                            End Sub).ConfigureAwait(False)
-                                    Catch
-                                    End Try
-
-                                    If selectedMainToolNames IsNot Nothing Then
-                                        st.SelectedMainToolNames = selectedMainToolNames
-                                        st.SelectedAdvancedToolNames =
-                                            NormalizeLocalChatAdvancedToolNames(selectedAdvancedToolNames, includeInteractiveM365Tools:=True)
-
-                                        st.SelectedToolNames =
-                                            GetLocalChatEffectiveTools(
-                                                st.SelectedMainToolNames,
-                                                ResolveLocalChatAdvancedToolNamesForEnabledState(st.SelectedAdvancedToolNames, includeInteractiveM365Tools:=True),
-                                                True,
-                                                includeInteractiveM365Tools:=True).
-                                                Select(Function(tl) tl.ToolName).
-                                                Distinct(StringComparer.OrdinalIgnoreCase).
-                                                ToList()
-                                    Else
-                                        ' User cancelled — abort the toggle
-                                        st.AgentModelActive = False
-                                        st.SelectedModelKey = st.PreAgentModelKey
-                                        st.UseSecondApi = st.PreAgentUseSecondApi
-                                        st.PreAgentModelKey = ""
-                                        st.PreAgentUseSecondApi = False
-                                        st.AgentModeEnabled = False
-                                        _chatAdvancedToolsEnabled = False
-                                        SaveInkyState(st)
-                                        Return JsonErr($"Agent model requires {ToolFriendlyName.ToLower()} to be selected. Please select at least one source and try again.")
-                                    End If
-                                Else
-                                    st.SelectedAdvancedToolNames =
-                                        ResolveLocalChatAdvancedToolNamesForEnabledState(st.SelectedAdvancedToolNames, includeInteractiveM365Tools:=True)
+                                    ' Opt-out defaults keep all tools on unless the user deselected them all.
+                                    ' Abort the toggle and restore the previous model instead of auto-opening a dialog.
+                                    st.AgentModelActive = False
+                                    st.SelectedModelKey = st.PreAgentModelKey
+                                    st.UseSecondApi = st.PreAgentUseSecondApi
+                                    st.PreAgentModelKey = ""
+                                    st.PreAgentUseSecondApi = False
+                                    st.AgentModeEnabled = False
+                                    _chatAdvancedToolsEnabled = False
+                                    SaveInkyState(st)
+                                    Return JsonErr($"The agent model requires at least one {ToolFriendlyName.ToLower()} or a connected workspace. All tools are on by default — use the Tools button to re-enable some, then try again.")
                                 End If
 
                                 ' Only now is agent mode actually active.
@@ -2654,8 +2602,8 @@ Partial Public Class ThisAddIn
                                 Sub()
                                     selectedMainToolNames =
                                         ShowLocalChatToolSelectionDialog(
-                                            If(st.SelectedMainToolNames, New List(Of String)()),
-                                            If(st.SelectedAdvancedToolNames, New List(Of String)()),
+                                            ResolveLocalChatSelectedMainToolNames(st, includeInteractiveM365Tools),
+                                            ResolveLocalChatSelectedAdvancedToolNames(st, includeInteractiveM365Tools),
                                             selectedAdvancedToolNames,
                                             includeInteractiveM365Tools)
                                 End Sub).ConfigureAwait(False)
@@ -2664,8 +2612,10 @@ Partial Public Class ThisAddIn
                                 Return JsonOk(New With {.ok = True, .cancelled = True})
                             End If
 
-                            st.SelectedMainToolNames = selectedMainToolNames
-                            st.SelectedAdvancedToolNames = If(selectedAdvancedToolNames, New List(Of String)())
+                            st.DeselectedMainToolNames =
+                                ComputeLocalChatDeselectedMainToolNames(selectedMainToolNames, includeInteractiveM365Tools)
+                            st.DeselectedAdvancedToolNames =
+                                ComputeLocalChatDeselectedAdvancedToolNames(If(selectedAdvancedToolNames, New List(Of String)()), includeInteractiveM365Tools)
                             _selectedToolsForChat = GetLocalChatEffectiveSelection(st, includeInteractiveM365Tools)
 
                             If HasLocalChatAnyCallableTools(st, includeInteractiveM365Tools) Then
@@ -2678,8 +2628,8 @@ Partial Public Class ThisAddIn
                             Return JsonOk(New With {
                                 .ok = True,
                                 .tools = GetToolListForBrowser(includeInteractiveM365Tools:=True),
-                                .count = st.SelectedMainToolNames.Count,
-                                .advancedCount = st.SelectedAdvancedToolNames.Count,
+                                .count = ResolveLocalChatSelectedMainToolNames(st, includeInteractiveM365Tools).Count,
+                                .advancedCount = ResolveLocalChatSelectedAdvancedToolNames(st, includeInteractiveM365Tools).Count,
                                 .toolingEnabled = st.ToolingEnabled,
                                 .advancedToolsEnabled = st.AgentModeEnabled
                             })
@@ -2702,7 +2652,9 @@ Partial Public Class ThisAddIn
                             Dim includeInteractiveM365Tools As Boolean = True
 
                             If enabled AndAlso Not EnsureToolsSelected(st, includeInteractiveM365Tools:=includeInteractiveM365Tools) Then
-                                Return JsonOk(New With {.ok = False, .openSources = True, .error = "No tools selected"})
+                                ' Opt-out defaults keep all tools on unless the user deselected them all.
+                                ' Report a plain error rather than signalling the UI to auto-open the selection dialog.
+                                Return JsonErr("Tooling requires at least one tool or a connected workspace. All tools are on by default — use the Tools button to re-enable some, then try again.")
                             End If
 
                             st.ToolingEnabled = enabled
@@ -2734,9 +2686,9 @@ Partial Public Class ThisAddIn
                                 .enabled = st.ToolingEnabled,
                                 .supportsTooling = CurrentModelSupportsTooling(st),
                                 .tools = GetToolListForBrowser(includeInteractiveM365Tools:=True),
-                                .selectedCount = If(st.SelectedMainToolNames, New List(Of String)()).Count,
+                                .selectedCount = ResolveLocalChatSelectedMainToolNames(st, includeInteractiveM365Tools:=True).Count,
                                 .advancedToolsEnabled = st.AgentModeEnabled,
-                                .advancedSelectedCount = If(st.SelectedAdvancedToolNames, New List(Of String)()).Count
+                                .advancedSelectedCount = ResolveLocalChatSelectedAdvancedToolNames(st, includeInteractiveM365Tools:=True).Count
                             })
                         Catch ex As Exception
                             Return JsonErr("Failed to get tooling state: " & ex.Message)
@@ -4555,34 +4507,12 @@ Partial Public Class ThisAddIn
     End Function
 
 
+    ' Opt-out migration is handled by renaming the persisted fields (old "Selected..." values
+    ' simply do not bind to the new "Deselected..." fields), so no in-place migration is needed.
+    ' Retained as a no-op to keep existing call sites stable.
     Private Sub MigrateLocalChatToolSelections(st As InkyState,
                                            Optional includeInteractiveM365Tools As Boolean = True)
-        If st Is Nothing Then Return
-
-        If (st.SelectedMainToolNames IsNot Nothing AndAlso st.SelectedMainToolNames.Count > 0) OrElse
-           (st.SelectedAdvancedToolNames IsNot Nothing AndAlso st.SelectedAdvancedToolNames.Count > 0) Then
-            Return
-        End If
-
-        If st.SelectedToolNames Is Nothing OrElse st.SelectedToolNames.Count = 0 Then
-            Return
-        End If
-
-        Dim legacySet As New HashSet(Of String)(st.SelectedToolNames, StringComparer.OrdinalIgnoreCase)
-
-        st.SelectedMainToolNames =
-            GetLocalChatMainSelectableTools(includeInteractiveM365Tools).
-                Where(Function(t) legacySet.Contains(t.ToolName)).
-                Select(Function(t) t.ToolName).
-                Distinct(StringComparer.OrdinalIgnoreCase).
-                ToList()
-
-        st.SelectedAdvancedToolNames =
-            GetLocalChatAdvancedSelectableTools(includeInteractiveM365Tools).
-                Where(Function(t) legacySet.Contains(t.ToolName)).
-                Select(Function(t) t.ToolName).
-                Distinct(StringComparer.OrdinalIgnoreCase).
-                ToList()
+        ' Intentionally left blank.
     End Sub
 
     Private Function GetLocalChatEffectiveSelection(st As InkyState,
@@ -4591,14 +4521,11 @@ Partial Public Class ThisAddIn
             Return New List(Of ModelConfig)()
         End If
 
-        MigrateLocalChatToolSelections(st, includeInteractiveM365Tools)
-        st.SelectedAdvancedToolNames =
-            NormalizeLocalChatAdvancedToolNames(st.SelectedAdvancedToolNames, includeInteractiveM365Tools)
-
+        ' Opt-out defaults: resolve selected = available-for-state minus the user's deselections.
         Dim effective =
             GetLocalChatEffectiveTools(
-                st.SelectedMainToolNames,
-                st.SelectedAdvancedToolNames,
+                ResolveLocalChatSelectedMainToolNames(st, includeInteractiveM365Tools),
+                ResolveLocalChatSelectedAdvancedToolNames(st, includeInteractiveM365Tools),
                 st.AgentModeEnabled,
                 includeInteractiveM365Tools)
 
