@@ -43,7 +43,7 @@ Partial Public Class ThisAddIn
         Try
             Dim json As New JObject From {
                 {"T", "AutoPilot"},
-                {"V", 2},
+                {"V", 3},
                 {"AP_FilterRules", If(My.Settings.AP_FilterRules, "")},
                 {"AP_WhitelistedSenders", If(My.Settings.AP_WhitelistedSenders, "")},
                 {"AP_SubjectTriggerWord", If(My.Settings.AP_SubjectTriggerWord, "")},
@@ -66,6 +66,7 @@ Partial Public Class ThisAddIn
                 {"AP_EnableUserFiles", My.Settings.AP_EnableUserFiles},
                 {"AP_EnablePrivacyProtection", My.Settings.AP_EnablePrivacyProtection},
                 {"AP_SelectedExternalToolNames", If(My.Settings.AP_SelectedExternalToolNames, "")},
+                {"AP_SenderToolPolicyPath", If(My.Settings.AP_SenderToolPolicyPath, "")},
                 {"D", Date.UtcNow.ToString("o")}
             }
 
@@ -139,6 +140,7 @@ Partial Public Class ThisAddIn
             My.Settings.AP_EnableUserFiles = GetJsonBoolean(json, "AP_EnableUserFiles", My.Settings.AP_EnableUserFiles)
             My.Settings.AP_EnablePrivacyProtection = GetJsonBoolean(json, "AP_EnablePrivacyProtection", My.Settings.AP_EnablePrivacyProtection)
             My.Settings.AP_SelectedExternalToolNames = GetJsonString(json, "AP_SelectedExternalToolNames")
+            My.Settings.AP_SenderToolPolicyPath = GetJsonString(json, "AP_SenderToolPolicyPath")
 
             My.Settings.Save()
 

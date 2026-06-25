@@ -1722,8 +1722,8 @@ Public Class DiscussInky
     Private Sub OnAdvancedToolsChanged(sender As Object, e As EventArgs)
         Try
             Globals.ThisAddIn.PersistDiscussInkyToolSelection(
-                Globals.ThisAddIn.SplitPersistedToolNames(CStr(My.Settings("SelectedMainToolNames"))),
-                Globals.ThisAddIn.SplitPersistedToolNames(CStr(My.Settings("SelectedAdvancedToolNames"))),
+                Globals.ThisAddIn.GetDiscussInkyEffectiveMainToolNames(),
+                Globals.ThisAddIn.GetDiscussInkyEffectiveAdvancedToolNames(),
                 _chkAdvancedTools.Checked)
         Catch
         End Try

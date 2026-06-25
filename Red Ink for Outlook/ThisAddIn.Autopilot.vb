@@ -446,6 +446,9 @@ Partial Public Class ThisAddIn
             _apSelectedTools = Nothing
         End If
 
+        ' Load the optional per-sender tool policy for this session (additive layer).
+        LoadSenderToolPolicy(config.SenderToolPolicyPath)
+
         Dim initializeDashboard As System.Action =
             Sub()
                 _apDashboard = New LogWindow()
@@ -1933,9 +1936,11 @@ Partial Public Class ThisAddIn
                     Dim useToolsForThisMail As Boolean = (modelOverrideConfig Is Nothing OrElse overrideSupportsTooling)
 
                     If useToolsForThisMail AndAlso _apSelectedTools IsNot Nothing AndAlso _apSelectedTools.Count > 0 Then
+                        ' Apply the additive per-sender tool policy (no-op when no policy is configured).
+                        Dim senderTools As List(Of ModelConfig) = ResolveToolsForSender(mailInfo.SenderEmail, _apSelectedTools)
                         response = Await ExecuteToolingLoop(
                             systemPrompt, userPrompt,
-                            _apSelectedTools, _apUseSecondApi,
+                            senderTools, _apUseSecondApi,
                             hideSplash:=True, hideLogWindow:=True,
                             cancellationToken:=ct,
                             binaryOutputDirectory:=_apCurrentTempDir,
@@ -4686,9 +4691,12 @@ Partial Public Class ThisAddIn
                 Dim modelCanCallTools As Boolean = ModelSupportsTooling(_apBaseModelConfig)
 
                 If modelCanCallTools AndAlso _apSelectedTools IsNot Nothing AndAlso _apSelectedTools.Count > 0 Then
+                    ' Apply the additive per-sender tool policy using the caller's email of record
+                    ' (the caller-ID-mapped address), not the voicemail system sender.
+                    Dim senderTools As List(Of ModelConfig) = ResolveToolsForSender(recipientEmail, _apSelectedTools)
                     response = Await ExecuteToolingLoop(
                         systemPrompt, userPrompt,
-                        _apSelectedTools, _apUseSecondApi,
+                        senderTools, _apUseSecondApi,
                         hideSplash:=True, hideLogWindow:=True,
                         cancellationToken:=ct,
                         binaryOutputDirectory:=tempDir,
