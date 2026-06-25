@@ -1042,7 +1042,6 @@ Partial Public Class ThisAddIn
                                                           Optional executionMode As String = AP_TaskExecutionModeEmail)
         If st Is Nothing Then Return
 
-        MigrateLocalChatToolSelections(st, includeInteractiveM365Tools:=True)
         st.ToolingEnabled = True
         st.AgentModeEnabled = True
 
@@ -1056,43 +1055,39 @@ Partial Public Class ThisAddIn
                 Select(Function(t) t.ToolName.Trim()),
             StringComparer.OrdinalIgnoreCase)
 
-        st.SelectedMainToolNames =
-            If(st.SelectedMainToolNames, New List(Of String)()).
-                Where(Function(name) Not String.IsNullOrWhiteSpace(name) AndAlso
-                                     allowedMainToolNames.Contains(name.Trim())).
-                Select(Function(name) name.Trim()).
-                Distinct(StringComparer.OrdinalIgnoreCase).
-                ToList()
+        ' Opt-out: start from the user's effective selection (all available minus deselections),
+        ' then keep only what is executable for this scheduled-task mode.
+        Dim selectedMain = ResolveLocalChatSelectedMainToolNames(st, includeInteractiveM365Tools:=True).
+            Where(Function(name) allowedMainToolNames.Contains(name.Trim())).
+            Distinct(StringComparer.OrdinalIgnoreCase).
+            ToList()
 
-        st.SelectedAdvancedToolNames =
-            ResolveLocalChatAdvancedToolNamesForEnabledState(
-                st.SelectedAdvancedToolNames,
-                includeInteractiveM365Tools:=True).
-                    Where(Function(name) Not String.IsNullOrWhiteSpace(name) AndAlso
-                                         allowedAdvancedToolNames.Contains(name.Trim())).
-                    Select(Function(name) name.Trim()).
-                    Distinct(StringComparer.OrdinalIgnoreCase).
-                    ToList()
+        Dim selectedAdvanced = ResolveLocalChatSelectedAdvancedToolNames(st, includeInteractiveM365Tools:=True).
+            Where(Function(name) allowedAdvancedToolNames.Contains(name.Trim())).
+            Distinct(StringComparer.OrdinalIgnoreCase).
+            ToList()
 
         Dim effectiveTools =
             FilterScheduledTaskExecutableTools(
-                GetLocalChatEffectiveSelection(st, includeInteractiveM365Tools:=True),
+                GetLocalChatEffectiveTools(selectedMain, selectedAdvanced, True, includeInteractiveM365Tools:=True),
                 executionMode)
 
         If (effectiveTools Is Nothing OrElse effectiveTools.Count = 0) AndAlso
            Not IsChatAgentWorkspaceConnected() Then
 
-            st.SelectedMainToolNames = GetScheduledTaskAllMainSelectableToolNames(executionMode)
+            ' Nothing executable survived — force all mode-allowed tools on.
+            selectedMain = GetScheduledTaskAllMainSelectableToolNames(executionMode)
 
-            st.SelectedAdvancedToolNames =
+            selectedAdvanced =
                 GetScheduledTaskAllAdvancedExecutionTools(executionMode).
+                    Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
                     Select(Function(t) t.ToolName.Trim()).
                     Distinct(StringComparer.OrdinalIgnoreCase).
                     ToList()
 
             effectiveTools =
                 FilterScheduledTaskExecutableTools(
-                    GetLocalChatEffectiveSelection(st, includeInteractiveM365Tools:=True),
+                    GetLocalChatEffectiveTools(selectedMain, selectedAdvanced, True, includeInteractiveM365Tools:=True),
                     executionMode)
         End If
 
@@ -1248,15 +1243,15 @@ Partial Public Class ThisAddIn
     Private Sub EnsureScheduledTaskLocalChatEmailMainToolSelection(st As InkyState)
         If st Is Nothing Then Return
 
-        MigrateLocalChatToolSelections(st, includeInteractiveM365Tools:=True)
+        ' Opt-out: main tools are on by default. Only intervene if the user deselected
+        ' everything, in which case fall back to all email-mode main tools.
+        Dim resolvedMain = ResolveLocalChatSelectedMainToolNames(st, includeInteractiveM365Tools:=True)
+        If resolvedMain IsNot Nothing AndAlso
+           resolvedMain.Any(Function(name) Not String.IsNullOrWhiteSpace(name)) Then
+            Return
+        End If
 
-        Dim hasMainSelection As Boolean =
-            st.SelectedMainToolNames IsNot Nothing AndAlso
-            st.SelectedMainToolNames.Any(Function(name) Not String.IsNullOrWhiteSpace(name))
-
-        If hasMainSelection Then Return
-
-        st.SelectedMainToolNames = GetScheduledTaskAllMainSelectableToolNames(AP_TaskExecutionModeEmail)
+        st.DeselectedMainToolNames = New List(Of String)()
     End Sub
 
     Private Function MergeScheduledTaskExecutionTools(selectedTools As IEnumerable(Of ModelConfig),
@@ -1833,8 +1828,8 @@ Partial Public Class ThisAddIn
         targetState.PreAgentModelKey = sourceState.PreAgentModelKey
         targetState.PreAgentUseSecondApi = sourceState.PreAgentUseSecondApi
         targetState.SelectedToolNames = New List(Of String)(If(sourceState.SelectedToolNames, New List(Of String)()))
-        targetState.SelectedMainToolNames = New List(Of String)(If(sourceState.SelectedMainToolNames, New List(Of String)()))
-        targetState.SelectedAdvancedToolNames = New List(Of String)(If(sourceState.SelectedAdvancedToolNames, New List(Of String)()))
+        targetState.DeselectedMainToolNames = New List(Of String)(If(sourceState.DeselectedMainToolNames, New List(Of String)()))
+        targetState.DeselectedAdvancedToolNames = New List(Of String)(If(sourceState.DeselectedAdvancedToolNames, New List(Of String)()))
 
         EnsureScheduledTaskLocalChatToolSelection(
             targetState,
