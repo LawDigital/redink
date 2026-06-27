@@ -496,12 +496,12 @@ Public Class frmAIChat
     ''' When checked, silently includes all other open Word documents in prompt.
     ''' Calls GatherSelectedDocuments(IncludeName:=True, ExceptCurrent:=True, SilentAndGetAll:=True).
     ''' Each document wrapped in numbered DOCUMENTn tags with document name.
-    ''' Not persisted (defaults to unchecked on form load).
+    ''' Persisted to My.Settings.ChatIncludeOtherOpenWordDocs.
     ''' </summary>
     Private WithEvents chkIncludeOtherDocs As New System.Windows.Forms.CheckBox() With {
         .Text = "Include all other open Word docs",
         .AutoSize = True,
-        .Checked = False
+        .Checked = My.Settings.ChatIncludeOtherOpenWordDocs
     }
 
     ' =========================================================================
@@ -783,6 +783,7 @@ Public Class frmAIChat
         AddHandler chkPermitCommands.Click, AddressOf chkPermitCommands_Click
         AddHandler chkStayOnTop.Click, AddressOf chkStayontop_Click
         AddHandler chkConvertMarkdown.Click, AddressOf chkConvertMarkdown_Click
+        AddHandler chkIncludeOtherDocs.Click, AddressOf chkIncludeOtherDocs_Click
         AddHandler chkInkyMemory.Click, AddressOf chkInkyMemory_Click
         AddHandler lnkEditMemory.LinkClicked, AddressOf lnkEditMemory_LinkClicked
 
@@ -1748,6 +1749,14 @@ Public Class frmAIChat
         My.Settings.ChatInkyMemory = chkInkyMemory.Checked
         My.Settings.Save()
         lnkEditMemory.Visible = chkInkyMemory.Checked
+    End Sub
+
+    ''' <summary>
+    ''' Handles chkIncludeOtherDocs checkbox click. Persists preference.
+    ''' </summary>
+    Private Sub chkIncludeOtherDocs_Click(sender As Object, e As EventArgs)
+        My.Settings.ChatIncludeOtherOpenWordDocs = chkIncludeOtherDocs.Checked
+        My.Settings.Save()
     End Sub
 
     ''' <summary>
