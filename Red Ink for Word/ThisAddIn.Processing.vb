@@ -84,7 +84,7 @@ Partial Public Class ThisAddIn
     ' - ParaFormatInline: Boolean flag to format paragraphs inline.
     ' - InPlace: Boolean flag to indicate that the output should replace the selected text.
     ' - DoMarkup: Boolean flag to indicate that the output should be provided as a markup of the selected text.
-    ' - MarkupMethod: Integer to indicate the markup method to be used: 1 = Word, 2 = Diff Surgical, 3 = DiffW, 4 = Regex, 5 = Diff Legacy
+    ' - MarkupMethod: Integer to indicate the markup method to be used: 1 = Word, 2 = Diff Surgical, 3 = DiffW, 4 = Regex, 5 = Diff Surgical (no sentence collapsing), 6 = Diff Legacy
     ' - PutInClipboard: Boolean flag to output the processed text in the clipboard.
     ' - PutInBubbles: Boolean flag to output the processed text in bubbles
     ' - SelectionMandatory: Boolean flag to enforce text selection before processing.
@@ -592,6 +592,20 @@ Partial Public Class ThisAddIn
         Dim selection As Microsoft.Office.Interop.Word.Selection = application.Selection
         Dim currentdoc As Word.Document = selection.Document
 
+        ' ===== Markup-method normalization =====
+        ' Method 5 = "surgical diff without sentence-level collapsing": run the standard surgical
+        ' path (method 2) but with sentence diffing disabled for this run. Method 6 = legacy diff.
+        ' Every other markup method keeps sentence diffing at its default (enabled). Normalizing the
+        ' ByVal MarkupMethod here lets the rest of the pipeline keep using its existing "= 2" checks.
+        If DoMarkup Then
+            If MarkupMethod = 5 Then
+                SurgicalSentenceDiffEnabled = False
+                MarkupMethod = 2
+            Else
+                SurgicalSentenceDiffEnabled = True
+            End If
+        End If
+
         Dim savedUiWindow As Word.Window = Nothing
         Dim savedUiSelection As Word.Range = Nothing
 
@@ -1075,7 +1089,7 @@ Partial Public Class ThisAddIn
                         ShowCustomMessageBox("Your selected text Is larger than the maximum output your LLM can supposedly generate. Therefore, the output may be shorter than expected based On maximum tokens supported, which Is " & MaxToken & " tokens. Your input (With formatting information, As the Case may be) has an estimated To be " & EstimatedTokens & " tokens). Therefore, check whether the output Is complete.", AN, 15)
                     End If
 
-                    If DoMarkup AndAlso (MarkupMethod = 2 OrElse MarkupMethod = 5) AndAlso Len(SelectedText) > INI_MarkupDiffCap AndAlso Not DoSilent Then
+                    If DoMarkup AndAlso (MarkupMethod = 2 OrElse MarkupMethod = 6) AndAlso Len(SelectedText) > INI_MarkupDiffCap AndAlso Not DoSilent Then
                         Dim MarkupChange As Integer = SLib.ShowCustomYesNoBox($"The selected text exceeds the defined cap For the Diff markup method at {INI_MarkupDiffCap} chars (your selection has {Len(SelectedText)} chars). {If(KeepFormat, "This may be because HTML codes have been inserted to keep the formatting (you can turn this off in the settings). ", "")}How Do you want To Continue?", "Use Diff In Window compare instead", If(MarkupMethod = 2, "Use Diff", "Use Diff Classic"))
                         Select Case MarkupChange
                             Case 1
@@ -1565,7 +1579,7 @@ Partial Public Class ThisAddIn
                             visibleSelectedText = selection.Text
                         End If
 
-                        If DoMarkup AndAlso (MarkupMethod = 2 OrElse MarkupMethod = 3 OrElse MarkupMethod = 5) Then
+                        If DoMarkup AndAlso (MarkupMethod = 2 OrElse MarkupMethod = 3 OrElse MarkupMethod = 6) Then
                             SelectedText = SerializedSelectedText
                         Else
                             SelectedText = visibleSelectedText
@@ -1641,7 +1655,7 @@ Partial Public Class ThisAddIn
 
                         If InPlace Then
                             If DoMarkup Then
-                                If MarkupMethod = 5 Or MarkupMethod = 3 Then
+                                If MarkupMethod = 6 Or MarkupMethod = 3 Then
                                     If MarkupMethod = 3 Then
                                         InsertTextWithMarkdown(selection, LLMResult, trailingCR)
                                         'If INI_MarkdownConvert Then LLMResult = RemoveMarkdownFormatting(LLMResult)
@@ -1662,10 +1676,13 @@ Partial Public Class ThisAddIn
                                 ElseIf MarkupMethod = 2 Then
                                     Dim SaveRng As Range = rng.Duplicate
                                     CompareAndInsertSurgical(SelectedText, LLMResult, rng, trailingCR)
+                                    Debug.WriteLine($"DOWNSTREAM after Surgical: '{SaveRng.Document.Range(System.Math.Max(0, SaveRng.Start), System.Math.Min(SaveRng.End, SaveRng.Document.Content.End)).Text.Replace(" ", "·")}'")
                                     Dim pattern As String = "\{\{(WFLD|WENT|WFNT):.*?\}\}"
                                     If Not NoFormatAndFieldSaving Or Regex.IsMatch(LLMResult, pattern) Then
                                         RestoreSpecialTextElements(SaveRng)
+                                        Debug.WriteLine($"DOWNSTREAM after RestoreSpecialTextElements: '{SaveRng.Document.Range(System.Math.Max(0, SaveRng.Start), System.Math.Min(SaveRng.End, SaveRng.Document.Content.End)).Text.Replace(" ", "·")}'")
                                         SaveRng.Document.Fields.Update()
+                                        Debug.WriteLine($"DOWNSTREAM after Fields.Update: '{SaveRng.Document.Range(System.Math.Max(0, SaveRng.Start), System.Math.Min(SaveRng.End, SaveRng.Document.Content.End)).Text.Replace(" ", "·")}'")
                                     End If
                                 Else
                                     If INI_MarkdownConvert Then LLMResult = RemoveMarkdownFormatting(LLMResult)
@@ -1713,7 +1730,7 @@ Partial Public Class ThisAddIn
                             selection.Collapse(Word.WdCollapseDirection.wdCollapseEnd)
                             rng = selection.Range
                             If DoMarkup Then
-                                If MarkupMethod = 5 Or MarkupMethod = 3 Then
+                                If MarkupMethod = 6 Or MarkupMethod = 3 Then
                                     Dim Pattern As String = ""
                                     If MarkupMethod = 3 Then
                                         Pattern = "\{\{.*?\}\}"
@@ -3001,7 +3018,7 @@ Partial Public Class ThisAddIn
 
 
 
-    ' ========================== Surgical Markup (MarkupMethod 2) ==========================
+    ' ========================== Surgical Markup (MarkupMethod 2 & 5) ==========================
 
     ''' <summary>
     ''' Represents a single word-level run from the DiffPlex output: Unchanged, Inserted, or Deleted.
@@ -3137,6 +3154,7 @@ Partial Public Class ThisAddIn
 
         Dim originalTrack As Boolean = doc.TrackRevisions
         Dim originalUpdate As Boolean = wordApp.ScreenUpdating
+        Dim originalSmartCutPaste As Boolean = wordApp.Options.SmartCutPaste
 
         Const maxFindTextLength As Integer = 200
         Const uiYieldIntervalMs As Integer = 40
@@ -3145,6 +3163,14 @@ Partial Public Class ThisAddIn
         Try
             wordApp.ScreenUpdating = False
             doc.TrackRevisions = False
+
+            ' Disable Word's "Smart Cut and Paste" for the duration of the surgical patch.
+            ' When enabled, Range.Delete() on a word-like range makes Word automatically remove an
+            ' adjacent space to avoid perceived double spaces. Because the diff engine manages
+            ' separators explicitly, that auto-adjustment eats a space the patch intends to keep,
+            ' gluing a surviving word to the inserted replacement (e.g. "mächtigen Werkzeug" ->
+            ' "mächtigenWerkzeug", "nur auf" -> "nurauf"). Restored in the Finally block.
+            wordApp.Options.SmartCutPaste = False
 
             Debug.WriteLine("SurgicalMarkup: text1 length=" & text1.Length & " text2 length=" & text2.Length)
 
@@ -3170,72 +3196,16 @@ Partial Public Class ThisAddIn
                           Replace(vbLf, " {vbLf} ")
 
             ' ======================================================================
-            ' STEP 3: Word-level diff via DiffPlex
+            ' STEP 3+4: Build diff runs. This is the original word-level path unless
+            '           SurgicalSentenceDiffEnabled is True, in which case a sentence-first
+            '           pass collapses fully rewritten sentences (see BuildSurgicalDiffRuns).
             ' ======================================================================
-            Dim tokenList1 As List(Of String) = TokenizeDiffUnits(text1)
-            Dim tokenList2 As List(Of String) = TokenizeDiffUnits(text2)
-
             Debug.WriteLine("==== Surgical raw text1 ====")
             Debug.WriteLine(DebugVisualizeToken(text1))
             Debug.WriteLine("==== Surgical raw text2 ====")
             Debug.WriteLine(DebugVisualizeToken(text2))
-            DebugDumpTokenList("Surgical tokenList1", tokenList1)
-            DebugDumpTokenList("Surgical tokenList2", tokenList2)
 
-            Dim words1 As String = String.Join(Environment.NewLine, tokenList1)
-            Dim words2 As String = String.Join(Environment.NewLine, tokenList2)
-
-            Dim diffBuilder As New InlineDiffBuilder(New Differ())
-            Dim diffResult As DiffPaneModel = diffBuilder.BuildDiffModel(words1, words2)
-
-            ' ======================================================================
-            ' STEP 4: Merge consecutive same-type tokens into runs.
-            '         Line-break, placeholder, and whitespace tokens stay isolated.
-            ' ======================================================================
-            Dim runs As New List(Of DiffRun)(System.Math.Max(4, diffResult.Lines.Count))
-            Dim currentRunType As ChangeType = ChangeType.Unchanged
-            Dim currentRunWords As New List(Of String)
-            Dim lastTokenText As String = Nothing
-
-            For i As Integer = 0 To diffResult.Lines.Count - 1
-                Dim line = diffResult.Lines(i)
-                Dim wordText As String = If(line.Text, String.Empty)
-                If wordText.Length = 0 Then Continue For
-
-                Dim isLB As Boolean = IsDiffLineBreakToken(wordText)
-                Dim isPlaceholderToken As Boolean = IsDiffPlaceholderToken(wordText)
-                Dim isWhitespaceToken As Boolean = IsDiffWhitespaceToken(wordText)
-
-                Dim prevWasLB As Boolean = (currentRunWords.Count > 0 AndAlso IsDiffLineBreakToken(lastTokenText))
-                Dim prevWasPlaceholder As Boolean = (currentRunWords.Count > 0 AndAlso IsDiffPlaceholderToken(lastTokenText))
-                Dim prevWasWhitespace As Boolean = (currentRunWords.Count > 0 AndAlso IsDiffWhitespaceToken(lastTokenText))
-
-                If (line.Type <> currentRunType OrElse
-                    isLB OrElse
-                    isPlaceholderToken OrElse
-                    isWhitespaceToken OrElse
-                    prevWasLB OrElse
-                    prevWasPlaceholder OrElse
-                    prevWasWhitespace) AndAlso currentRunWords.Count > 0 Then
-
-                    runs.Add(New DiffRun With {
-                        .RunType = currentRunType,
-                        .Text = String.Concat(currentRunWords)
-                    })
-                    currentRunWords.Clear()
-                End If
-
-                currentRunType = line.Type
-                currentRunWords.Add(wordText)
-                lastTokenText = wordText
-            Next
-
-            If currentRunWords.Count > 0 Then
-                runs.Add(New DiffRun With {
-                    .RunType = currentRunType,
-                    .Text = String.Concat(currentRunWords)
-                })
-            End If
+            Dim runs As List(Of DiffRun) = BuildSurgicalDiffRuns(text1, text2)
 
             DebugDumpRuns("Runs after STEP 4 (before restore)", runs)
 
@@ -3501,6 +3471,30 @@ Partial Public Class ThisAddIn
                                 Continue Do
                             End If
 
+                            ' DiffPlex sometimes bundles the isolated leading whitespace run into the
+                            ' DELETED side of a replacement cluster (deletedCore = " Handlangerin") while
+                            ' the INSERTED side has no leading whitespace (insertedCore = "Unterstützung").
+                            ' The candidates below append only the *trailing* whitespace to both sides, so
+                            ' the leading separator is deleted with no counterpart in the insert, gluing the
+                            ' inserted word to the preceding survivor (e.g. "mächtigen Handlangerin" ->
+                            ' "mächtigenUnterstützung"). Mirror the leading separator onto the insert.
+                            If hasDeleted AndAlso hasInserted AndAlso
+                               deletedCoreText.Length > 0 AndAlso insertedCoreText.Length > 0 Then
+
+                                Dim delLeadLen As Integer = 0
+                                Do While delLeadLen < deletedCoreText.Length AndAlso
+                                         (deletedCoreText(delLeadLen) = " "c OrElse deletedCoreText(delLeadLen) = ControlChars.Tab)
+                                    delLeadLen += 1
+                                Loop
+
+                                Dim insLeadIsWhitespace As Boolean =
+                                    insertedCoreText(0) = " "c OrElse insertedCoreText(0) = ControlChars.Tab
+
+                                If delLeadLen > 0 AndAlso Not insLeadIsWhitespace Then
+                                    insertedCoreText = deletedCoreText.Substring(0, delLeadLen) & insertedCoreText
+                                End If
+                            End If
+
                             Dim trailingWhitespace As String = Nothing
                             Dim hasTrailingWhitespace As Boolean =
                                 ri < runs.Count AndAlso
@@ -3549,7 +3543,12 @@ Partial Public Class ThisAddIn
                                 ' Only absorb whitespace when deleting word-like content.
                                 ' Do not absorb whitespace for punctuation-only deletions, e.g. "," -> "",
                                 ' because that would turn "FlyHigh, gemäss" into "FlyHighgemäss".
-                                If ShouldAbsorbWhitespaceForPureDeletion(deletedCoreText) AndAlso hasTrailingWhitespace Then
+                                ' The trailing whitespace is an *unchanged* (surviving) separator, so it may
+                                ' only be absorbed when a leading whitespace remains to separate the
+                                ' surrounding survivors. Without a leading space (e.g. the deleted word is
+                                ' preceded by punctuation), absorbing the trailing space removes the only
+                                ' separator and sticks the two surrounding words together (e.g. "a/b c" -> "a/c").
+                                If ShouldAbsorbWhitespaceForPureDeletion(deletedCoreText) AndAlso hasTrailingWhitespace AndAlso hasLeadingWhitespace Then
                                     operationCandidates.Add(New SurgicalOperationCandidate With {
                                         .DeleteText = deletedCoreText & trailingWhitespace,
                                         .InsertText = String.Empty,
@@ -3609,6 +3608,10 @@ Partial Public Class ThisAddIn
 
                                     Dim deleteStart As Integer = candidateRange.Start
 
+                                    Dim delCtxStart As Integer = System.Math.Max(targetRange.Start, deleteStart - 15)
+                                    Dim delCtxEnd As Integer = System.Math.Min(rangeEnd, deleteStart + 15)
+                                    Debug.WriteLine($"    DELETE anchor: searchStart={op.SearchStart} found deleteStart={deleteStart} drift={deleteStart - op.SearchStart} ctx='{DebugVisualizeToken(doc.Range(delCtxStart, delCtxEnd).Text)}'")
+
                                     doc.TrackRevisions = True
                                     candidateRange.Delete()
                                     doc.TrackRevisions = False
@@ -3635,6 +3638,11 @@ Partial Public Class ThisAddIn
                             If Not String.IsNullOrEmpty(appliedOperation.InsertText) Then
                                 cursor.Collapse(WdCollapseDirection.wdCollapseStart)
 
+                                Dim insPos As Integer = cursor.Start
+                                Dim insCtxStart As Integer = System.Math.Max(targetRange.Start, insPos - 15)
+                                Dim insCtxEndBefore As Integer = System.Math.Min(rangeEnd, insPos + 15)
+                                Debug.WriteLine($"    INSERT@{insPos} (no re-anchor) text='{DebugVisualizeToken(appliedOperation.InsertText)}' ctxBefore='{DebugVisualizeToken(doc.Range(insCtxStart, insCtxEndBefore).Text)}'")
+
                                 doc.TrackRevisions = True
                                 cursor.InsertAfter(appliedOperation.InsertText)
                                 doc.TrackRevisions = False
@@ -3642,6 +3650,9 @@ Partial Public Class ThisAddIn
                                 cursor.SetRange(cursor.End, cursor.End)
                                 rangeEnd = targetRange.End
                                 cacheDirty = True
+
+                                Dim insCtxEndAfter As Integer = System.Math.Min(rangeEnd, insCtxStart + 40)
+                                Debug.WriteLine($"    INSERT done: cursor={cursor.Start} ctxAfter='{DebugVisualizeToken(doc.Range(insCtxStart, insCtxEndAfter).Text)}'")
                             End If
 
                         Case Else
@@ -3660,6 +3671,7 @@ Partial Public Class ThisAddIn
         Finally
             doc.TrackRevisions = originalTrack
             wordApp.ScreenUpdating = originalUpdate
+            wordApp.Options.SmartCutPaste = originalSmartCutPaste
 
             wordApp.Selection.SetRange(targetRange.Start, targetRange.End)
         End Try
@@ -3668,6 +3680,360 @@ Partial Public Class ThisAddIn
     Public Sub ApplySurgicalReplacement(originalText As String, newText As String, targetRange As Range, Optional trailingCR As Boolean = False)
         CompareAndInsertSurgical(originalText, newText, targetRange, trailingCR)
     End Sub
+
+    ''' <summary>
+    ''' Builds the surgical diff runs for the tokenized original/revised text. When
+    ''' <see cref="SurgicalSentenceDiffEnabled"/> is False this is exactly the original word-level
+    ''' behavior. When True, a sentence-first pass is performed: fully rewritten sentences (below the
+    ''' retention threshold, with no placeholder or break token) are collapsed into a single tracked
+    ''' delete + insert, while all other regions are delegated back to the word-level engine so their
+    ''' behavior and safety are unchanged.
+    ''' </summary>
+    ''' <param name="text1">Tokenized original text (placeholders and breaks already tokenized).</param>
+    ''' <param name="text2">Tokenized revised text (placeholders and breaks already tokenized).</param>
+    ''' <returns>The ordered list of diff runs consumed by the surgical apply loop.</returns>
+    Private Shared Function BuildSurgicalDiffRuns(ByVal text1 As String, ByVal text2 As String) As List(Of DiffRun)
+
+        ' Disabled: reproduce the original word-level behavior exactly.
+        If Not SurgicalSentenceDiffEnabled Then
+            Return BuildWordLevelDiffRuns(text1, text2)
+        End If
+
+        ' Sentence-first. Segmentation runs on the tokenized stream, so placeholders ([[MF#]]) are
+        ' atomic and paragraph/line breaks ({vbCrLf}-style tokens) act as hard boundaries.
+        Dim sentences1 As List(Of String) = SplitTokenizedIntoSentences(text1)
+        Dim sentences2 As List(Of String) = SplitTokenizedIntoSentences(text2)
+
+        Dim diffBuilder As New InlineDiffBuilder(New Differ())
+        Dim sentenceModel As DiffPaneModel = diffBuilder.BuildDiffModel(
+            String.Join(Environment.NewLine, sentences1),
+            String.Join(Environment.NewLine, sentences2))
+
+        Dim runs As New List(Of DiffRun)()
+        Dim pendingDeleted As New List(Of String)()
+        Dim pendingInserted As New List(Of String)()
+
+        For Each line As DiffPiece In sentenceModel.Lines
+            Dim sentenceText As String = If(line.Text, String.Empty)
+
+            Select Case line.Type
+                Case ChangeType.Deleted
+                    pendingDeleted.Add(sentenceText)
+
+                Case ChangeType.Inserted
+                    pendingInserted.Add(sentenceText)
+
+                Case Else
+                    ' Unchanged (or unexpected): flush any pending change group first.
+                    If pendingDeleted.Count > 0 OrElse pendingInserted.Count > 0 Then
+                        AppendSentenceGroupRuns(runs, pendingDeleted, pendingInserted)
+                        pendingDeleted.Clear()
+                        pendingInserted.Clear()
+                    End If
+
+                    If sentenceText.Length > 0 Then
+                        runs.AddRange(BuildWordLevelDiffRuns(sentenceText, sentenceText))
+                    End If
+            End Select
+        Next
+
+        If pendingDeleted.Count > 0 OrElse pendingInserted.Count > 0 Then
+            AppendSentenceGroupRuns(runs, pendingDeleted, pendingInserted)
+            pendingDeleted.Clear()
+            pendingInserted.Clear()
+        End If
+
+        Return runs
+    End Function
+
+    ''' <summary>
+    ''' Emits diff runs for one aligned sentence change group. DiffPlex reports a fully rewritten
+    ''' block as N deletions followed by N insertions (not interleaved 1:1 pairs), so equal-count
+    ''' groups are aligned positionally and each sentence pair is evaluated independently: a pair that
+    ''' is almost entirely rewritten and free of placeholders/breaks is collapsed into a single
+    ''' tracked delete + insert, otherwise it is delegated to the word-level engine. Splits, merges
+    ''' (differing counts), and pure deletions/insertions are delegated as a whole so their behavior
+    ''' and safety are identical to the original path.
+    ''' </summary>
+    ''' <param name="runs">Target run list to append to.</param>
+    ''' <param name="deletedSentences">Deleted sentence segments in this group.</param>
+    ''' <param name="insertedSentences">Inserted sentence segments in this group.</param>
+    Private Shared Sub AppendSentenceGroupRuns(
+        ByVal runs As List(Of DiffRun),
+        ByVal deletedSentences As List(Of String),
+        ByVal insertedSentences As List(Of String))
+
+        ' Differing counts (sentence split/merge) or a pure deletion/insertion cannot be aligned
+        ' unambiguously, so hand the whole group to the word-level engine (original, safe behavior).
+        If deletedSentences.Count <> insertedSentences.Count OrElse deletedSentences.Count = 0 Then
+            runs.AddRange(BuildWordLevelDiffRuns(
+                String.Concat(deletedSentences),
+                String.Concat(insertedSentences)))
+            Return
+        End If
+
+        ' Equal counts: align sentences positionally and decide per pair. Adjacent collapsed pairs
+        ' are re-merged by the STEP 8 cluster loop (which concatenates deletes/inserts in document
+        ' order), so this yields clean per-sentence tracked changes while staying lossless.
+        For idx As Integer = 0 To deletedSentences.Count - 1
+            AppendSentencePairRuns(runs, deletedSentences(idx), insertedSentences(idx))
+        Next
+    End Sub
+
+    ''' <summary>
+    ''' Emits diff runs for one positionally aligned sentence pair. The pair is collapsed into a
+    ''' single tracked delete + insert only when it is almost entirely rewritten (retention below the
+    ''' threshold), both sides meet the minimum length, and neither side contains a field/footnote/
+    ''' endnote/paragraph-format placeholder or a break token. Otherwise the pair is delegated to the
+    ''' word-level engine so its behavior and safety are identical to the original path.
+    ''' </summary>
+    ''' <param name="runs">Target run list to append to.</param>
+    ''' <param name="deletedSentence">Deleted sentence segment.</param>
+    ''' <param name="insertedSentence">Inserted sentence segment.</param>
+    Private Shared Sub AppendSentencePairRuns(
+        ByVal runs As List(Of DiffRun),
+        ByVal deletedSentence As String,
+        ByVal insertedSentence As String)
+
+        Dim hasPlaceholder As Boolean =
+            SentenceGroupContainsPlaceholder(deletedSentence) OrElse
+            SentenceGroupContainsPlaceholder(insertedSentence)
+
+        Dim hasBreak As Boolean =
+            SentenceGroupContainsBreakToken(deletedSentence) OrElse
+            SentenceGroupContainsBreakToken(insertedSentence)
+
+        Dim collapse As Boolean = False
+
+        If Not hasPlaceholder AndAlso Not hasBreak Then
+            Dim deletedCore As String = deletedSentence.Trim()
+            Dim insertedCore As String = insertedSentence.Trim()
+
+            If deletedCore.Length >= SurgicalSentenceMinLength AndAlso
+               insertedCore.Length >= SurgicalSentenceMinLength Then
+
+                If SentenceRetentionRatio(deletedCore, insertedCore) < SurgicalSentenceRetentionThreshold Then
+                    collapse = True
+                End If
+            End If
+        End If
+
+        If collapse Then
+            ' One tracked delete + one tracked insert for this sentence. STEP 7 strips placeholders
+            ' from deletions (none here) and STEP 8 applies it as a single edit.
+            If deletedSentence.Length > 0 Then
+                runs.Add(New DiffRun With {.RunType = ChangeType.Deleted, .Text = deletedSentence})
+            End If
+            If insertedSentence.Length > 0 Then
+                runs.Add(New DiffRun With {.RunType = ChangeType.Inserted, .Text = insertedSentence})
+            End If
+        Else
+            ' Delegate to the existing word-level engine so behavior is unchanged.
+            runs.AddRange(BuildWordLevelDiffRuns(deletedSentence, insertedSentence))
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' Original word-level diff-run builder extracted from the surgical engine. Tokenizes both
+    ''' sides, runs the DiffPlex inline diff, and merges consecutive same-type tokens into runs while
+    ''' keeping line-break, placeholder, and whitespace tokens isolated.
+    ''' </summary>
+    ''' <param name="text1">Tokenized original text.</param>
+    ''' <param name="text2">Tokenized revised text.</param>
+    ''' <returns>The list of merged diff runs.</returns>
+    Private Shared Function BuildWordLevelDiffRuns(ByVal text1 As String, ByVal text2 As String) As List(Of DiffRun)
+
+        Dim tokenList1 As List(Of String) = TokenizeDiffUnits(text1)
+        Dim tokenList2 As List(Of String) = TokenizeDiffUnits(text2)
+
+        Dim words1 As String = String.Join(Environment.NewLine, tokenList1)
+        Dim words2 As String = String.Join(Environment.NewLine, tokenList2)
+
+        Dim diffBuilder As New InlineDiffBuilder(New Differ())
+        Dim diffResult As DiffPaneModel = diffBuilder.BuildDiffModel(words1, words2)
+
+        Dim runs As New List(Of DiffRun)(System.Math.Max(4, diffResult.Lines.Count))
+        Dim currentRunType As ChangeType = ChangeType.Unchanged
+        Dim currentRunWords As New List(Of String)
+        Dim lastTokenText As String = Nothing
+
+        For i As Integer = 0 To diffResult.Lines.Count - 1
+            Dim line = diffResult.Lines(i)
+            Dim wordText As String = If(line.Text, String.Empty)
+            If wordText.Length = 0 Then Continue For
+
+            Dim isLB As Boolean = IsDiffLineBreakToken(wordText)
+            Dim isPlaceholderToken As Boolean = IsDiffPlaceholderToken(wordText)
+            Dim isWhitespaceToken As Boolean = IsDiffWhitespaceToken(wordText)
+
+            Dim prevWasLB As Boolean = (currentRunWords.Count > 0 AndAlso IsDiffLineBreakToken(lastTokenText))
+            Dim prevWasPlaceholder As Boolean = (currentRunWords.Count > 0 AndAlso IsDiffPlaceholderToken(lastTokenText))
+            Dim prevWasWhitespace As Boolean = (currentRunWords.Count > 0 AndAlso IsDiffWhitespaceToken(lastTokenText))
+
+            If (line.Type <> currentRunType OrElse
+                isLB OrElse
+                isPlaceholderToken OrElse
+                isWhitespaceToken OrElse
+                prevWasLB OrElse
+                prevWasPlaceholder OrElse
+                prevWasWhitespace) AndAlso currentRunWords.Count > 0 Then
+
+                runs.Add(New DiffRun With {
+                    .RunType = currentRunType,
+                    .Text = String.Concat(currentRunWords)
+                })
+                currentRunWords.Clear()
+            End If
+
+            currentRunType = line.Type
+            currentRunWords.Add(wordText)
+            lastTokenText = wordText
+        Next
+
+        If currentRunWords.Count > 0 Then
+            runs.Add(New DiffRun With {
+                .RunType = currentRunType,
+                .Text = String.Concat(currentRunWords)
+            })
+        End If
+
+        Return runs
+    End Function
+
+    ''' <summary>
+    ''' Splits tokenized text into lossless sentence segments. Concatenating the returned segments
+    ''' reproduces the input exactly. Boundaries are placed after sentence terminators ('.', '!',
+    ''' '?') that are followed by whitespace, and immediately after any paragraph/line-break token so
+    ''' a segment never spans a break. Trailing whitespace stays on the segment that owns it.
+    ''' </summary>
+    ''' <param name="tokenizedText">Tokenized text (placeholders/breaks already tokenized).</param>
+    ''' <returns>Ordered, lossless list of sentence segments.</returns>
+    Private Shared Function SplitTokenizedIntoSentences(ByVal tokenizedText As String) As List(Of String)
+
+        Dim result As New List(Of String)()
+        If String.IsNullOrEmpty(tokenizedText) Then
+            Return result
+        End If
+
+        Dim sb As New System.Text.StringBuilder()
+        Dim i As Integer = 0
+        Dim length As Integer = tokenizedText.Length
+
+        Do While i < length
+            Dim ch As Char = tokenizedText(i)
+            sb.Append(ch)
+
+            ' Hard boundary right after a break token so segments never span a break.
+            If ch = "}"c Then
+                Dim current As String = sb.ToString()
+                If current.EndsWith("{vbCrLf}", StringComparison.Ordinal) OrElse
+                   current.EndsWith("{vbCr}", StringComparison.Ordinal) OrElse
+                   current.EndsWith("{vbLf}", StringComparison.Ordinal) OrElse
+                   current.EndsWith("{vbVt}", StringComparison.Ordinal) Then
+
+                    Do While i + 1 < length AndAlso tokenizedText(i + 1) = " "c
+                        i += 1
+                        sb.Append(tokenizedText(i))
+                    Loop
+
+                    result.Add(sb.ToString())
+                    sb.Clear()
+                    i += 1
+                    Continue Do
+                End If
+            End If
+
+            ' Sentence terminator followed by whitespace: end the segment (keep the whitespace).
+            If ch = "."c OrElse ch = "!"c OrElse ch = "?"c Then
+
+                Do While i + 1 < length AndAlso
+                         (tokenizedText(i + 1) = "."c OrElse
+                          tokenizedText(i + 1) = "!"c OrElse
+                          tokenizedText(i + 1) = "?"c OrElse
+                          tokenizedText(i + 1) = """"c OrElse
+                          tokenizedText(i + 1) = ")"c OrElse
+                          tokenizedText(i + 1) = "]"c OrElse
+                          tokenizedText(i + 1) = "'"c)
+                    i += 1
+                    sb.Append(tokenizedText(i))
+                Loop
+
+                If i + 1 < length AndAlso
+                   (tokenizedText(i + 1) = " "c OrElse tokenizedText(i + 1) = ControlChars.Tab) Then
+
+                    Do While i + 1 < length AndAlso
+                             (tokenizedText(i + 1) = " "c OrElse tokenizedText(i + 1) = ControlChars.Tab)
+                        i += 1
+                        sb.Append(tokenizedText(i))
+                    Loop
+
+                    result.Add(sb.ToString())
+                    sb.Clear()
+                End If
+            End If
+
+            i += 1
+        Loop
+
+        If sb.Length > 0 Then
+            result.Add(sb.ToString())
+        End If
+
+        Return result
+    End Function
+
+    ''' <summary>
+    ''' Computes the fraction of the original sentence's words that survive into the revised sentence
+    ''' (0.0 = fully rewritten, 1.0 = same word set). Case-insensitive and allocation-light.
+    ''' </summary>
+    ''' <param name="oldSentence">Original sentence text.</param>
+    ''' <param name="newSentence">Revised sentence text.</param>
+    ''' <returns>Retention ratio in the range 0.0 to 1.0.</returns>
+    Private Shared Function SentenceRetentionRatio(ByVal oldSentence As String, ByVal newSentence As String) As Double
+
+        If String.IsNullOrWhiteSpace(oldSentence) Then Return 0.0
+
+        Dim splitChars As Char() = {" "c, ControlChars.Tab}
+        Dim oldWords As String() = oldSentence.Split(splitChars, StringSplitOptions.RemoveEmptyEntries)
+        If oldWords.Length = 0 Then Return 0.0
+
+        Dim newWords As New HashSet(Of String)(
+            newSentence.Split(splitChars, StringSplitOptions.RemoveEmptyEntries),
+            StringComparer.OrdinalIgnoreCase)
+
+        Dim kept As Integer = 0
+        For Each w As String In oldWords
+            If newWords.Contains(w) Then kept += 1
+        Next
+
+        Return kept / oldWords.Length
+    End Function
+
+    ''' <summary>
+    ''' Returns True when the text contains a tokenized special placeholder ([[MF#]]), which maps to
+    ''' a field, footnote, endnote, or paragraph-format element. Such sentences are never collapsed so
+    ''' the real Word construct is preserved by the word-level path.
+    ''' </summary>
+    ''' <param name="value">Tokenized text to inspect.</param>
+    ''' <returns>True if a placeholder token is present; otherwise False.</returns>
+    Private Shared Function SentenceGroupContainsPlaceholder(ByVal value As String) As Boolean
+        If String.IsNullOrEmpty(value) Then Return False
+        Return value.IndexOf("[[MF", StringComparison.Ordinal) >= 0
+    End Function
+
+    ''' <summary>
+    ''' Returns True when the text contains a tokenized paragraph/line-break marker. Such sentences
+    ''' are never collapsed so paragraph and line structure is preserved by the word-level path.
+    ''' </summary>
+    ''' <param name="value">Tokenized text to inspect.</param>
+    ''' <returns>True if a break token is present; otherwise False.</returns>
+    Private Shared Function SentenceGroupContainsBreakToken(ByVal value As String) As Boolean
+        If String.IsNullOrEmpty(value) Then Return False
+        Return value.IndexOf("{vbCrLf}", StringComparison.Ordinal) >= 0 OrElse
+               value.IndexOf("{vbCr}", StringComparison.Ordinal) >= 0 OrElse
+               value.IndexOf("{vbLf}", StringComparison.Ordinal) >= 0 OrElse
+               value.IndexOf("{vbVt}", StringComparison.Ordinal) >= 0
+    End Function
 
     ''' <summary>
     ''' Represents one candidate surgical edit operation for a diff cluster.
@@ -4467,6 +4833,7 @@ Partial Public Class ThisAddIn
 
         Dim originalTrack As Boolean = doc.TrackRevisions
         Dim originalUpdate As Boolean = wordApp.ScreenUpdating
+        Dim originalSmartCutPaste As Boolean = wordApp.Options.SmartCutPaste
 
         ' Declare position variables BEFORE the Try so they are still valid in Finally:
         Dim docStart As Integer
@@ -4477,6 +4844,12 @@ Partial Public Class ThisAddIn
 
             wordApp.ScreenUpdating = False
             doc.TrackRevisions = False
+
+            ' Disable Word's "Smart Cut and Paste" for the duration of the markup application.
+            ' When enabled, Range.Delete() on a word-like range makes Word automatically remove an
+            ' adjacent space to avoid perceived double spaces, which can glue a surviving word to the
+            ' inserted replacement (e.g. "mächtigen Werkzeug" -> "mächtigenWerkzeug"). Restored in Finally.
+            wordApp.Options.SmartCutPaste = False
 
             Using BeginMarkupAuthorScope(wordApp)
 
@@ -4653,6 +5026,7 @@ Partial Public Class ThisAddIn
             doc.TrackRevisions = originalTrack
 
             wordApp.ScreenUpdating = originalUpdate
+            wordApp.Options.SmartCutPaste = originalSmartCutPaste
 
             ' Set range to the full inserted length
             Dim endPosInserted As Integer = targetRange.End

@@ -137,6 +137,26 @@ Partial Public Class ThisAddIn
 
     Public Const IgnoreMarkups As Boolean = False ' Whether to ignore markups in the text when doing a search
 
+    ' MarkupMethod 2 & 5
+
+    ' Set to True to enable optional sentence-level diff switching in the surgical markup engine.
+    ' When a sentence is almost entirely rewritten (retention below the threshold, and the sentence
+    ' contains no field/footnote/endnote/paragraph-format placeholder and no paragraph/line break),
+    ' it is applied as a single tracked delete + insert for cleaner, more readable revisions.
+    ' When False, the engine keeps the original word-level behavior fully unchanged.
+    Public Shared SurgicalSentenceDiffEnabled As Boolean = True
+
+    ' Maximum fraction of the original sentence's words that may survive for a collapse to occur
+    ' (0.2 = collapse only when roughly 80% or more of the words changed).
+    Private Const SurgicalSentenceRetentionThreshold As Double = 0.2
+
+    ' Minimum trimmed length (in characters) a sentence must have on both sides before it may be
+    ' collapsed. Shorter fragments are already emitted as a single cluster, so collapsing them
+    ' would only reduce readability without saving work.
+    Private Const SurgicalSentenceMinLength As Integer = 25
+
+    ' Voice Processing
+
     Private Const VoskSource = "https://alphacephei.com/vosk/models"
     Private Const WhisperSource = "https://huggingface.co/ggerganov/whisper.cpp/tree/main"
 
