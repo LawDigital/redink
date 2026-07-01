@@ -3292,6 +3292,16 @@ Partial Public Class ThisAddIn
                 Dim ri As Integer = 0
                 Dim uiYieldStopwatch As Stopwatch = Stopwatch.StartNew()
 
+                ' Navigation cache: mirrors the live text of [cacheStart, rangeEnd) so unchanged,
+                ' whitespace, and break runs can be matched in memory instead of one COM call per
+                ' character. Only trusted when the length matches the position span (no field/footnote
+                ' skew); otherwise the original per-character COM path is used. Refreshed after each edit.
+                Dim cacheStart As Integer = cursor.Start
+                Dim cacheText As String = Nothing
+                Dim cacheValid As Boolean = False
+                Dim cacheDirty As Boolean = False
+                LoadSurgicalNavCache(doc, cacheStart, rangeEnd, cacheText, cacheValid)
+
                 Do While ri < runs.Count
                     If uiYieldStopwatch.ElapsedMilliseconds >= uiYieldIntervalMs Then
                         System.Windows.Forms.Application.DoEvents()
@@ -3314,6 +3324,13 @@ Partial Public Class ThisAddIn
                     Select Case run.RunType
 
                         Case ChangeType.Unchanged
+                            ' Refresh the navigation cache once after each mutation (positions shifted).
+                            If cacheDirty Then
+                                cacheStart = cursor.Start
+                                LoadSurgicalNavCache(doc, cacheStart, rangeEnd, cacheText, cacheValid)
+                                cacheDirty = False
+                            End If
+
                             Dim isLineBreakRun As Boolean = IsDiffLineBreakToken(runText)
                             Dim isWhitespaceRun As Boolean = IsDiffWhitespaceToken(runText)
                             Dim isSpecialPlaceholderRunCurrent As Boolean = IsSpecialPlaceholderRun(runText)
@@ -3336,15 +3353,26 @@ Partial Public Class ThisAddIn
                                 Dim pos As Integer = cursor.Start
                                 Dim matched As Integer = 0
 
-                                Do While matched < expectedBreaks.Length AndAlso pos < rangeEnd
-                                    Dim peekRange As Range = doc.Range(pos, System.Math.Min(pos + 1, rangeEnd))
-                                    Dim expectedChar As String = expectedBreaks.Substring(matched, 1)
+                                If cacheValid Then
+                                    ' Fast path: match breaks against the in-memory cache (no COM per character).
+                                    Do While matched < expectedBreaks.Length AndAlso pos < rangeEnd
+                                        Dim ci As Integer = pos - cacheStart
+                                        If ci >= 0 AndAlso ci < cacheText.Length AndAlso cacheText(ci) = expectedBreaks(matched) Then
+                                            matched += 1
+                                        End If
+                                        pos += 1
+                                    Loop
+                                Else
+                                    Do While matched < expectedBreaks.Length AndAlso pos < rangeEnd
+                                        Dim peekRange As Range = doc.Range(pos, System.Math.Min(pos + 1, rangeEnd))
+                                        Dim expectedChar As String = expectedBreaks.Substring(matched, 1)
 
-                                    If peekRange.Text = expectedChar Then
-                                        matched += 1
-                                    End If
-                                    pos += 1
-                                Loop
+                                        If peekRange.Text = expectedChar Then
+                                            matched += 1
+                                        End If
+                                        pos += 1
+                                    Loop
+                                End If
 
                                 cursor.SetRange(pos, pos)
 
@@ -3353,41 +3381,72 @@ Partial Public Class ThisAddIn
                                 Dim pos As Integer = cursor.Start
                                 Dim matched As Integer = 0
 
-                                Do While matched < expected.Length AndAlso pos < rangeEnd
-                                    Dim peekRange As Range = doc.Range(pos, System.Math.Min(pos + 1, rangeEnd))
-                                    Dim expectedChar As String = expected.Substring(matched, 1)
+                                If cacheValid Then
+                                    ' Fast path: match whitespace against the in-memory cache (no COM per character).
+                                    Do While matched < expected.Length AndAlso pos < rangeEnd
+                                        Dim ci As Integer = pos - cacheStart
+                                        If ci >= 0 AndAlso ci < cacheText.Length AndAlso cacheText(ci) = expected(matched) Then
+                                            matched += 1
+                                            pos += 1
+                                        Else
+                                            Exit Do
+                                        End If
+                                    Loop
+                                Else
+                                    Do While matched < expected.Length AndAlso pos < rangeEnd
+                                        Dim peekRange As Range = doc.Range(pos, System.Math.Min(pos + 1, rangeEnd))
+                                        Dim expectedChar As String = expected.Substring(matched, 1)
 
-                                    If peekRange.Text = expectedChar Then
-                                        matched += 1
-                                        pos += 1
-                                    Else
-                                        Exit Do
-                                    End If
-                                Loop
+                                        If peekRange.Text = expectedChar Then
+                                            matched += 1
+                                            pos += 1
+                                        Else
+                                            Exit Do
+                                        End If
+                                    Loop
+                                End If
 
                                 cursor.SetRange(pos, pos)
 
                             Else
-                                Dim searchRange As Range = doc.Range(cursor.Start, rangeEnd)
                                 Dim runFindText As String = NormalizeForWordFind(runText)
+                                Dim advanced As Boolean = False
 
-                                Dim wasTruncated As Boolean = False
-                                Dim found As Boolean = ExecuteWordFind(searchRange, runFindText, wasTruncated, maxFindTextLength)
-
-                                If found Then
-                                    If wasTruncated Then
-                                        Dim fullLen As Integer = runFindText.Length
-                                        Dim estimatedEnd As Integer = searchRange.Start + fullLen
-                                        If estimatedEnd > rangeEnd Then estimatedEnd = rangeEnd
-                                        cursor.SetRange(estimatedEnd, estimatedEnd)
-                                    Else
-                                        cursor.SetRange(searchRange.End, searchRange.End)
+                                ' Fast path: locate the unchanged anchor in the cache instead of a COM Find.
+                                If cacheValid AndAlso runFindText.Length > 0 AndAlso runFindText.Length <= maxFindTextLength Then
+                                    Dim startIdx As Integer = cursor.Start - cacheStart
+                                    If startIdx >= 0 AndAlso startIdx <= cacheText.Length Then
+                                        Dim hit As Integer = cacheText.IndexOf(runFindText, startIdx, StringComparison.OrdinalIgnoreCase)
+                                        If hit >= 0 Then
+                                            Dim matchEndPos As Integer = cacheStart + hit + runFindText.Length
+                                            If matchEndPos > rangeEnd Then matchEndPos = rangeEnd
+                                            cursor.SetRange(matchEndPos, matchEndPos)
+                                            advanced = True
+                                        End If
                                     End If
-                                Else
-                                    Debug.WriteLine($"SurgicalMarkup: Anchor not found, advancing by estimate. Run text='{Left(runText, 80)}'")
-                                    Dim estimatedLen As Integer = runFindText.Length
-                                    Dim newPos As Integer = System.Math.Min(cursor.Start + estimatedLen, rangeEnd)
-                                    cursor.SetRange(newPos, newPos)
+                                End If
+
+                                If Not advanced Then
+                                    Dim searchRange As Range = doc.Range(cursor.Start, rangeEnd)
+
+                                    Dim wasTruncated As Boolean = False
+                                    Dim found As Boolean = ExecuteWordFind(searchRange, runFindText, wasTruncated, maxFindTextLength)
+
+                                    If found Then
+                                        If wasTruncated Then
+                                            Dim fullLen As Integer = runFindText.Length
+                                            Dim estimatedEnd As Integer = searchRange.Start + fullLen
+                                            If estimatedEnd > rangeEnd Then estimatedEnd = rangeEnd
+                                            cursor.SetRange(estimatedEnd, estimatedEnd)
+                                        Else
+                                            cursor.SetRange(searchRange.End, searchRange.End)
+                                        End If
+                                    Else
+                                        Debug.WriteLine($"SurgicalMarkup: Anchor not found, advancing by estimate. Run text='{Left(runText, 80)}'")
+                                        Dim estimatedLen As Integer = runFindText.Length
+                                        Dim newPos As Integer = System.Math.Min(cursor.Start + estimatedLen, rangeEnd)
+                                        cursor.SetRange(newPos, newPos)
+                                    End If
                                 End If
                             End If
 
@@ -3556,6 +3615,7 @@ Partial Public Class ThisAddIn
 
                                     cursor.SetRange(deleteStart, deleteStart)
                                     rangeEnd = targetRange.End
+                                    cacheDirty = True
 
                                     appliedOperation = op
                                     operationSucceeded = True
@@ -3581,6 +3641,7 @@ Partial Public Class ThisAddIn
 
                                 cursor.SetRange(cursor.End, cursor.End)
                                 rangeEnd = targetRange.End
+                                cacheDirty = True
                             End If
 
                         Case Else
@@ -3933,6 +3994,37 @@ Partial Public Class ThisAddIn
             Return .Execute()
         End With
     End Function
+
+    ''' <summary>
+    ''' Loads the live text of [<paramref name="startPos"/>, <paramref name="endPos"/>) into an
+    ''' in-memory cache used by the surgical navigation loop, avoiding one COM call per character.
+    ''' The cache is only marked valid when its length equals the position span, i.e. when one
+    ''' document position maps to exactly one text character (no field/footnote skew). When invalid,
+    ''' callers fall back to the original per-character COM navigation so behavior is unchanged.
+    ''' </summary>
+    ''' <param name="doc">Document being patched.</param>
+    ''' <param name="startPos">Start position of the cached window.</param>
+    ''' <param name="endPos">End position of the cached window.</param>
+    ''' <param name="cacheText">Receives the cached text (never Nothing).</param>
+    ''' <param name="cacheValid">Receives whether the cache is safe to index by position.</param>
+    Private Shared Sub LoadSurgicalNavCache(ByVal doc As Word.Document, ByVal startPos As Integer, ByVal endPos As Integer, ByRef cacheText As String, ByRef cacheValid As Boolean)
+        Try
+            If doc Is Nothing OrElse endPos <= startPos Then
+                cacheText = String.Empty
+                cacheValid = True
+                Return
+            End If
+
+            cacheText = doc.Range(startPos, endPos).Text
+            If cacheText Is Nothing Then cacheText = String.Empty
+
+            ' Trust the cache only when 1 position == 1 character across the window.
+            cacheValid = (cacheText.Length = (endPos - startPos))
+        Catch ex As System.Exception
+            cacheText = String.Empty
+            cacheValid = False
+        End Try
+    End Sub
 
 
     ''' <summary>

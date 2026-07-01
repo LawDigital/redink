@@ -452,13 +452,23 @@ Partial Public Class ThisAddIn
             Return False
         End Try
 
+        ' A folder that defaults to mail items can still report a blank or non-"IPM.Note"
+        ' DefaultMessageClass. This is common for Deleted Items and for some Sent Items /
+        ' IMAP folders. Rejecting those folders here previously caused the entire Deleted
+        ' Items folder (the "Bin") to be skipped, so expired AutoPilot items were never
+        ' propagated as eligible nor deleted. Each candidate item is still validated via
+        ' TryCast to MailItem and by its cleanup metadata before deletion, so scanning
+        ' these folders is safe. Only reject folders whose DefaultMessageClass clearly
+        ' identifies a non-mail folder (appointments, contacts, tasks, notes, journals).
         Try
             Dim defaultMessageClass = If(folder.DefaultMessageClass, "")
-            If String.IsNullOrWhiteSpace(defaultMessageClass) Then Return False
+            If String.IsNullOrWhiteSpace(defaultMessageClass) Then Return True
+            If defaultMessageClass.StartsWith("IPM.Note", StringComparison.OrdinalIgnoreCase) Then Return True
+            If defaultMessageClass.StartsWith("IPM.Post", StringComparison.OrdinalIgnoreCase) Then Return True
 
-            Return defaultMessageClass.StartsWith("IPM.Note", StringComparison.OrdinalIgnoreCase)
-        Catch
             Return False
+        Catch
+            Return True
         End Try
     End Function
 
