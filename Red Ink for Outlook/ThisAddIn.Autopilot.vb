@@ -3484,6 +3484,16 @@ Partial Public Class ThisAddIn
                         If mi2 Is Nothing Then Continue For
                         If mi2.Categories Is Nothing OrElse Not mi2.Categories.Contains(AP_CategoryName) Then Continue For
 
+                        ' When a cleanup group id is supplied, bind the move/stamp to the
+                        ' exact reply we just sent for this group instead of blindly taking
+                        ' the most recent categorized item. This prevents an older AutoPilot
+                        ' reply from being picked (and the just-sent reply from being left in
+                        ' Sent Items without persisted cleanup metadata, so it is never deleted).
+                        If Not String.IsNullOrWhiteSpace(groupId) AndAlso
+                           Not String.Equals(GetCleanupGroupId(mi2), groupId, StringComparison.OrdinalIgnoreCase) Then
+                            Continue For
+                        End If
+
                         movedObj = mi2.Move(inkyFolder)
                         movedMail = TryCast(movedObj, MailItem)
 
