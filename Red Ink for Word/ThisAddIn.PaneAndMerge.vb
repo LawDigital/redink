@@ -227,11 +227,12 @@ Partial Public Class ThisAddIn
                 New SelectionItem("Diff", 2),
                 New SelectionItem("Diff Window", 3),
                 New SelectionItem("Regex", 4),
-                New SelectionItem("Diff Classic", 5),
-                New SelectionItem("None", 6)
+                New SelectionItem("Diff (words only)", 5),
+                New SelectionItem("Diff Classic", 6),
+                New SelectionItem("None", 7)
             }
 
-            Dim DefaultItem As Integer = 6
+            Dim DefaultItem As Integer = 7
             If INI_DoMarkupWord Then
                 DefaultItem = Override(INI_MarkupMethodWord, INI_MarkupMethodWordOverride)
             End If
@@ -250,8 +251,8 @@ Partial Public Class ThisAddIn
                 INI_KeepFormat2,
                 INI_KeepParaFormatInline,
                 Override(INI_ReplaceText2, INI_ReplaceText2Override),
-                If(picked < 6, True, False),
-                If(picked < 6, picked, Override(INI_MarkupMethodWord, INI_MarkupMethodWordOverride)),
+                If(picked < 7, True, False),
+                If(picked < 7, picked, Override(INI_MarkupMethodWord, INI_MarkupMethodWordOverride)),
                 False,
                 False,
                 True,
