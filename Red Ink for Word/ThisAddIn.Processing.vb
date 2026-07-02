@@ -3193,14 +3193,21 @@ Partial Public Class ThisAddIn
             ' ======================================================================
             ' STEP 2: Normalize line breaks to explicit tokens
             ' ======================================================================
+            ' Normalize ALL paragraph/line breaks (CRLF, CR, LF) to a single canonical
+            ' {vbCrLf} token before diffing. The source uses CR paragraph marks while the
+            ' LLM output frequently uses bare LF; emitting distinct {vbCr}/{vbLf} tokens
+            ' made DiffPlex treat identical breaks as delete+insert pairs, which scrambled
+            ' the words around paragraph boundaries and pulled paragraph marks into delete
+            ' clusters that Word.Find cannot match (leaving free-floating text). Manual
+            ' line breaks ({vbVt}) stay distinct so Chr(11) is preserved.
             text1 = text1.Replace(manualLineBreak, " {vbVt} ").
                           Replace(vbCrLf, " {vbCrLf} ").
-                          Replace(vbCr, " {vbCr} ").
-                          Replace(vbLf, " {vbLf} ")
+                          Replace(vbCr, " {vbCrLf} ").
+                          Replace(vbLf, " {vbCrLf} ")
             text2 = text2.Replace(manualLineBreak, " {vbVt} ").
                           Replace(vbCrLf, " {vbCrLf} ").
-                          Replace(vbCr, " {vbCr} ").
-                          Replace(vbLf, " {vbLf} ")
+                          Replace(vbCr, " {vbCrLf} ").
+                          Replace(vbLf, " {vbCrLf} ")
 
             ' ======================================================================
             ' STEP 3+4: Build diff runs. This is the original word-level path unless
