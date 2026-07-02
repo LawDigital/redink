@@ -3160,16 +3160,23 @@ Partial Public Class ThisAddIn
         Const uiYieldIntervalMs As Integer = 40
         Dim manualLineBreak As String = ChrW(11).ToString()
 
+        Dim splash As SLib.SplashScreen = Nothing
+
         Try
+
+            splash = New SLib.SplashScreen("Applying markup... press 'Esc' to abort")
+
+            Dim splashOwnerHwnd As IntPtr = GetWordMainWindowHandle()
+            If splashOwnerHwnd <> IntPtr.Zero Then
+                splash.Show(New SharedLibrary.SharedLibrary.WindowWrapper(splashOwnerHwnd))
+            Else
+                splash.Show()
+            End If
+            splash.Refresh()
+
             wordApp.ScreenUpdating = False
             doc.TrackRevisions = False
 
-            ' Disable Word's "Smart Cut and Paste" for the duration of the surgical patch.
-            ' When enabled, Range.Delete() on a word-like range makes Word automatically remove an
-            ' adjacent space to avoid perceived double spaces. Because the diff engine manages
-            ' separators explicitly, that auto-adjustment eats a space the patch intends to keep,
-            ' gluing a surviving word to the inserted replacement (e.g. "mächtigen Werkzeug" ->
-            ' "mächtigenWerkzeug", "nur auf" -> "nurauf"). Restored in the Finally block.
             wordApp.Options.SmartCutPaste = False
 
             Debug.WriteLine("SurgicalMarkup: text1 length=" & text1.Length & " text2 length=" & text2.Length)
@@ -3669,6 +3676,16 @@ Partial Public Class ThisAddIn
         Catch ex As System.Exception
             Debug.WriteLine("SurgicalMarkup error: " & ex.Message & vbCrLf & ex.StackTrace)
         Finally
+            ' Always close the progress splash (covers the normal, exception, and Esc-abort paths).
+            If splash IsNot Nothing Then
+                Try
+                    splash.Close()
+                Catch
+                    ' Ignore: splash may already be closed/disposed.
+                End Try
+                splash = Nothing
+            End If
+
             doc.TrackRevisions = originalTrack
             wordApp.ScreenUpdating = originalUpdate
             wordApp.Options.SmartCutPaste = originalSmartCutPaste

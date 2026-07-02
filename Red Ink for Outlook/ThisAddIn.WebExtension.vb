@@ -1134,16 +1134,29 @@ Partial Public Class ThisAddIn
     End Function
 
     ''' <summary>
-    ''' Returns localized greeting based on current UI culture.
+    ''' Returns the host application's UI culture two-letter ISO code or "en" fallback.
+    ''' </summary>
+    Private Function GetHostUiLanguageTwoLetter() As System.String
+        Try
+            Dim lcid As System.Int32 =
+                Application.LanguageSettings.LanguageID(Microsoft.Office.Core.MsoAppLanguageID.msoLanguageIDUI)
+
+            Return New System.Globalization.CultureInfo(lcid).TwoLetterISOLanguageName
+        Catch
+            Try
+                Return System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName
+            Catch
+                Return "en"
+            End Try
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Returns localized greeting based on the Outlook UI language.
     ''' </summary>
     Private Function GetFriendlyGreeting() As System.String
         Dim name As System.String = GetBotName()
-        Dim tl As System.String
-        Try
-            tl = System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName
-        Catch
-            tl = "en"
-        End Try
+        Dim tl As System.String = GetHostUiLanguageTwoLetter()
 
         Select Case tl
             Case "de" : Return $"Hallo! Ich bin {name}. Wie kann ich helfen?"
@@ -1195,14 +1208,10 @@ Partial Public Class ThisAddIn
     End Class
 
     ''' <summary>
-    ''' Returns current UI culture two-letter ISO code or "en" fallback.
+    ''' Returns the Outlook UI language two-letter ISO code or "en" fallback.
     ''' </summary>
     Private Function GetUserLanguageTwoLetter() As System.String
-        Try
-            Return System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName
-        Catch
-            Return "en"
-        End Try
+        Return GetHostUiLanguageTwoLetter()
     End Function
 
     ''' <summary>

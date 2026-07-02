@@ -2289,7 +2289,11 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Public Sub HelpMeInky()
         If _win Is Nothing OrElse _win.IsDisposed Then
-            _win = New HelpMeInky(_context, RDV)
+            _win = New HelpMeInky(
+                _context,
+                RDV,
+                New System.Globalization.CultureInfo(
+                    Globals.ThisAddIn.Application.LanguageSettings.LanguageID(Microsoft.Office.Core.MsoAppLanguageID.msoLanguageIDUI)).DisplayName)
         End If
         ' No owner needed
         _win.ShowRaised()

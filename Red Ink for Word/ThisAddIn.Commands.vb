@@ -1009,7 +1009,7 @@ Partial Public Class ThisAddIn
         If INILoadFail() Then Return
 
         If _win Is Nothing OrElse _win.IsDisposed Then
-            _win = New HelpMeInky(_context, RDV)
+            _win = New HelpMeInky(_context, RDV, Globals.ThisAddIn.GetWordDefaultInterfaceLanguage())
         End If
         ' No owner needed
         _win.ShowRaised()
