@@ -1347,8 +1347,17 @@ Partial Public Class ThisAddIn
 
             Dim trailingCR As Boolean = SelectedText.EndsWith(vbCrLf) Or SelectedText.EndsWith(vbCr) Or SelectedText.EndsWith(vbLf)
 
+            Dim selectedTextForProcessing As String = SelectedText
+            Dim ignoredSelectedSpaces As String = ""
+            Dim reviewTrailingSpaces As String = ""
+            Dim restoreReviewTrailingSpaces As Boolean = False
+
+            If Not KeepFormat Then
+                StripTrailingSpaces(SelectedText, selectedTextForProcessing, ignoredSelectedSpaces)
+            End If
+
             ' Call LLM function with selected text
-            Dim LLMResult As String = Await LLM(SysCommand & If(KeepFormat, " " & SP_Add_KeepHTMLIntact, SP_Add_KeepInlineIntact), "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>", "", "", 0)
+            Dim LLMResult As String = Await LLM(SysCommand & If(KeepFormat, " " & SP_Add_KeepHTMLIntact, SP_Add_KeepInlineIntact), "<TEXTTOPROCESS>" & selectedTextForProcessing & "</TEXTTOPROCESS>", "", "", 0)
 
             LLMResult = LLMResult.Replace("<TEXTTOPROCESS>", "").Replace("</TEXTTOPROCESS>", "")
 
@@ -1358,9 +1367,6 @@ Partial Public Class ThisAddIn
 
             ' Remove horizontal whitespace (incl. NBSP) between real newline tokens (CRLF/CR/LF)
             LLMResult = System.Text.RegularExpressions.Regex.Replace(LLMResult, "(\r\n|\r|\n)[^\S\r\n]+(\r\n|\r|\n)", "$1$2")
-
-            Debug.WriteLine("TrailingCR=" & trailingCR)
-            Debug.WriteLine($"Selection='{selection.Text}'")
 
             ' Replace the selected text with the processed result
             If Not String.IsNullOrWhiteSpace(LLMResult) Then
@@ -1373,8 +1379,17 @@ Partial Public Class ThisAddIn
                     Dim suggestedForReview As String =
                         If(KeepFormat, SLib.RemoveHTML(LLMResult), LLMResult)
 
+                    Dim strippedOriginalForReview As String = originalForReview
+                    Dim strippedSuggestedForReview As String = suggestedForReview
+                    Dim ignoredSuggestedSpaces As String = ""
+
+                    StripTrailingSpaces(originalForReview, strippedOriginalForReview, reviewTrailingSpaces)
+                    StripTrailingSpaces(suggestedForReview, strippedSuggestedForReview, ignoredSuggestedSpaces)
+
+                    restoreReviewTrailingSpaces = reviewTrailingSpaces.Length > 0
+
                     Dim reviewed As String = Nothing
-                    Using dlg As New ReviewChangesDialog(originalForReview, suggestedForReview)
+                    Using dlg As New ReviewChangesDialog(strippedOriginalForReview, strippedSuggestedForReview)
                         If dlg.ShowDialog() <> System.Windows.Forms.DialogResult.OK Then
                             ' Cancel = do absolutely nothing
                             Return
@@ -1396,6 +1411,11 @@ Partial Public Class ThisAddIn
 
                     SelectedText = selection.Text
                     SLib.InsertTextWithFormat(LLMResult, range, Inplace, Not trailingCR)
+
+                    If Inplace AndAlso restoreReviewTrailingSpaces Then
+                        RestoreTrailingSpacesAtSelectionEnd(selection, reviewTrailingSpaces, trailingCR)
+                    End If
+
                     If DoMarkup Then
                         Dim markupCompareText As String = SLib.RemoveHTML(LLMResult)
 
@@ -1423,6 +1443,10 @@ Partial Public Class ThisAddIn
                             SLib.InsertTextWithMarkdown(selection, LLMResult & "<p>MARKUP:<br></p>", trailingCR)
                         Else
                             SLib.InsertTextWithMarkdown(selection, LLMResult, trailingCR)
+                        End If
+
+                        If restoreReviewTrailingSpaces Then
+                            RestoreTrailingSpacesAtSelectionEnd(selection, reviewTrailingSpaces, trailingCR)
                         End If
                     Else
                         ' Insert two new line breaks and select final position while preserving formatting.
@@ -1818,6 +1842,22 @@ Partial Public Class ThisAddIn
 
             Dim trailingCR As Boolean = selectedText.EndsWith(vbCrLf)
 
+            ' Word returns a paragraph mark as a single vbCr (not vbCrLf) in Selection.Text,
+            ' so a plain EndsWith(vbCrLf) check misses selections that end at a paragraph break.
+            ' Detect that case explicitly so an in-place replacement keeps the closing paragraph
+            ' mark instead of swallowing it (which would merge the paragraph with the next one).
+            Dim selectionEndsWithPara As Boolean =
+                selectedText.EndsWith(vbCrLf) OrElse
+                selectedText.EndsWith(vbCr) OrElse
+                selectedText.EndsWith(vbLf)
+
+            Dim textToProcess As String = selectedText
+            Dim trailingSpaces As String = ""
+
+            StripTrailingSpaces(textToProcess, textToProcess, trailingSpaces)
+
+            Dim hasTrailingSpaces As Boolean = trailingSpaces.Length > 0
+
             ' Call LLM function with selected text
 
             Dim LLMResult As String
@@ -1831,7 +1871,7 @@ Partial Public Class ThisAddIn
             Dim UserPrompt As String = ""
 
             If Not NoText Then
-                UserPrompt = "<TEXTTOPROCESS>" & selectedText & "</TEXTTOPROCESS>"
+                UserPrompt = "<TEXTTOPROCESS>" & textToProcess & "</TEXTTOPROCESS>"
             End If
 
             If DoAddMail Then
@@ -1852,8 +1892,13 @@ Partial Public Class ThisAddIn
 
             If DoMarkup AndAlso MarkupMethod = 4 AndAlso Not NoText Then
 
+                Dim reviewSuggested As String = LLMResult
+                Dim ignoredSuggestedSpaces As String = ""
+
+                StripTrailingSpaces(reviewSuggested, reviewSuggested, ignoredSuggestedSpaces)
+
                 Dim reviewed As String = Nothing
-                Using dlg As New ReviewChangesDialog(selectedText, LLMResult)
+                Using dlg As New ReviewChangesDialog(textToProcess, reviewSuggested)
                     If dlg.ShowDialog() <> System.Windows.Forms.DialogResult.OK Then
                         Return
                     End If
@@ -1902,8 +1947,8 @@ Partial Public Class ThisAddIn
                 If Not DoInplace Then
                     selection.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
                 Else
-                    If Not trailingCR And LLMResult.EndsWith(ControlChars.Lf) Then LLMResult = LLMResult.TrimEnd(ControlChars.Lf)
-                    If Not trailingCR And LLMResult.EndsWith(ControlChars.Cr) Then LLMResult = LLMResult.TrimEnd(ControlChars.Cr)
+                    If Not selectionEndsWithPara And LLMResult.EndsWith(ControlChars.Lf) Then LLMResult = LLMResult.TrimEnd(ControlChars.Lf)
+                    If Not selectionEndsWithPara And LLMResult.EndsWith(ControlChars.Cr) Then LLMResult = LLMResult.TrimEnd(ControlChars.Cr)
                 End If
 
                 ' Insert result
@@ -1911,7 +1956,16 @@ Partial Public Class ThisAddIn
                     SLib.InsertTextWithMarkdown(selection, vbCrLf & LLMResult & vbCrLf & "<p>MARKUP:<br></p>", trailingCR)
                 Else
                     If DoInplace Then
-                        SLib.InsertTextWithMarkdown(selection, LLMResult, trailingCR)
+                        Dim insertText As String = LLMResult
+                        Dim ignoredInsertSpaces As String = ""
+
+                        StripTrailingSpaces(insertText, insertText, ignoredInsertSpaces)
+
+                        SLib.InsertTextWithMarkdown(selection, insertText, selectionEndsWithPara)
+
+                        If hasTrailingSpaces Then
+                            RestoreTrailingSpacesAtSelectionEnd(selection, trailingSpaces, selectionEndsWithPara)
+                        End If
                     Else
                         SLib.InsertTextWithMarkdown(selection, vbCrLf & LLMResult & vbCrLf, trailingCR)
                     End If
@@ -1959,6 +2013,71 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
+    Private Shared Sub StripTrailingSpaces(source As String, ByRef strippedText As String, ByRef trailingSpaces As String)
+        strippedText = If(source, "")
+        trailingSpaces = ""
+
+        If String.IsNullOrEmpty(source) Then Return
+
+        Dim contentEnd As Integer = source.Length
+        While contentEnd > 0 AndAlso (source(contentEnd - 1) = ControlChars.Cr OrElse source(contentEnd - 1) = ControlChars.Lf)
+            contentEnd -= 1
+        End While
+
+        Dim spaceStart As Integer = contentEnd
+        While spaceStart > 0 AndAlso source(spaceStart - 1) = " "c
+            spaceStart -= 1
+        End While
+
+        trailingSpaces = source.Substring(spaceStart, contentEnd - spaceStart)
+
+        If trailingSpaces.Length > 0 Then
+            strippedText = source.Substring(0, spaceStart) & source.Substring(contentEnd)
+        End If
+    End Sub
+
+    Private Shared Function ReapplyTrailingSpaces(text As String, trailingSpaces As String) As String
+        Dim result As String = If(text, "")
+        If String.IsNullOrEmpty(trailingSpaces) Then Return result
+
+        Dim contentEnd As Integer = result.Length
+        While contentEnd > 0 AndAlso (result(contentEnd - 1) = ControlChars.Cr OrElse result(contentEnd - 1) = ControlChars.Lf)
+            contentEnd -= 1
+        End While
+
+        Return result.Substring(0, contentEnd) & trailingSpaces & result.Substring(contentEnd)
+    End Function
+
+    Private Shared Sub RestoreTrailingSpacesAtSelectionEnd(selection As Microsoft.Office.Interop.Word.Selection,
+                                                           trailingSpaces As String,
+                                                           selectionEndsWithPara As Boolean)
+        If selection Is Nothing OrElse String.IsNullOrEmpty(trailingSpaces) Then Return
+
+        Dim tailRange As Microsoft.Office.Interop.Word.Range = Nothing
+        Dim markerRange As Microsoft.Office.Interop.Word.Range = Nothing
+
+        Try
+            tailRange = selection.Range.Duplicate()
+            tailRange.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
+
+            If selectionEndsWithPara AndAlso tailRange.Start > 0 Then
+                markerRange = tailRange.Duplicate()
+                markerRange.MoveStart(Microsoft.Office.Interop.Word.WdUnits.wdCharacter, -1)
+
+                Dim markerText As String = markerRange.Text
+                If markerText = ControlChars.Cr OrElse markerText = ControlChars.Lf Then
+                    markerRange.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseStart)
+                    markerRange.InsertAfter(trailingSpaces)
+                    Exit Sub
+                End If
+            End If
+
+            tailRange.InsertAfter(trailingSpaces)
+        Finally
+            If markerRange IsNot Nothing Then Marshal.ReleaseComObject(markerRange) : markerRange = Nothing
+            If tailRange IsNot Nothing Then Marshal.ReleaseComObject(tailRange) : tailRange = Nothing
+        End Try
+    End Sub
 
     Private Async Function InsertClipboard() As System.Threading.Tasks.Task
         Try

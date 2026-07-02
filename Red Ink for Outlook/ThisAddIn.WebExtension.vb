@@ -1138,16 +1138,36 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Function GetHostUiLanguageTwoLetter() As System.String
         Try
-            Dim lcid As System.Int32 =
-                Application.LanguageSettings.LanguageID(Microsoft.Office.Core.MsoAppLanguageID.msoLanguageIDUI)
+            Dim app As Microsoft.Office.Interop.Outlook.Application = Nothing
+            Dim languageSettings As Microsoft.Office.Core.LanguageSettings = Nothing
 
-            Return New System.Globalization.CultureInfo(lcid).TwoLetterISOLanguageName
-        Catch
             Try
-                Return System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName
+                app = Me.Application
             Catch
-                Return "en"
+                app = Nothing
             End Try
+
+            If app IsNot Nothing Then
+                Try
+                    languageSettings = app.LanguageSettings
+                Catch
+                    languageSettings = Nothing
+                End Try
+            End If
+
+            If languageSettings IsNot Nothing Then
+                Dim lcid As System.Int32 =
+                    languageSettings.LanguageID(Microsoft.Office.Core.MsoAppLanguageID.msoLanguageIDUI)
+
+                Return New System.Globalization.CultureInfo(lcid).TwoLetterISOLanguageName
+            End If
+        Catch
+        End Try
+
+        Try
+            Return System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName
+        Catch
+            Return "en"
         End Try
     End Function
 
