@@ -75,8 +75,8 @@ Public Class frmAIChat
     Private PreceedingNewline As String = ""
     ''' <summary>Persisted prior chat restored once at start of session.</summary>
     Private OldChat As String = ""
-    ''' <summary>User interface culture name derived from Excel UI language.</summary>
-    Private UserLanguage As String = New CultureInfo(Globals.ThisAddIn.Application.LanguageSettings.LanguageID(MsoAppLanguageID.msoLanguageIDUI)).Name
+    ''' <summary>User interface culture display name derived from Excel UI language.</summary>
+    Private UserLanguage As String = New CultureInfo(Globals.ThisAddIn.Application.LanguageSettings.LanguageID(MsoAppLanguageID.msoLanguageIDUI)).DisplayName
     ''' <summary>System (instruction) prompt sent with each LLM call.</summary>
     Private SystemPrompt As String = ""
 

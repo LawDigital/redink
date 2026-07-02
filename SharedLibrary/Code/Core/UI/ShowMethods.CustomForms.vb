@@ -75,9 +75,35 @@ Namespace SharedLibrary
         ''' The window handle if a known Office application class is found; otherwise <see cref="IntPtr.Zero"/>.
         ''' </returns>
         Private Shared Function GetOfficeApplicationHwnd() As IntPtr
+            ' Prefer the host window captured at add-in startup (UpdateHandler.HostHandle).
+            ' It points at the actually running host (Outlook, Word or Excel). Probing by
+            ' window class below would otherwise return a different Office app that merely
+            ' happens to be open (e.g. Word in the background while the Outlook add-in shows
+            ' a dialog), parenting the dialog to the wrong application, pushing it behind
+            ' that app and stealing focus from it.
+            Dim host As System.IntPtr = UpdateHandler.HostHandle
+            If host <> System.IntPtr.Zero Then
+                ' If the user is currently working in another top-level window of the SAME
+                ' host process (e.g. an Outlook Inspector while editing an e-mail, rather
+                ' than the main Explorer window), prefer that foreground window as the owner.
+                ' Otherwise parenting to the main host window would bring the main window to
+                ' the front and hide the Inspector the user is actually editing.
+                Dim fg As System.IntPtr = NativeMethods.GetForegroundWindow()
+                If fg <> System.IntPtr.Zero AndAlso fg <> host Then
+                    Dim hostPid As Integer = 0
+                    Dim fgPid As Integer = 0
+                    NativeMethods.GetWindowThreadProcessId(host, hostPid)
+                    NativeMethods.GetWindowThreadProcessId(fg, fgPid)
+                    If hostPid <> 0 AndAlso fgPid = hostPid Then Return fg
+                End If
+
+                Return host
+            End If
+
+            ' Fallbacks (only used if the host handle was not captured at startup).
             ' Try Word first.
-            Dim hwnd As IntPtr = FindWindow("OpusApp", Nothing)
-            If hwnd <> IntPtr.Zero Then Return hwnd
+            Dim hwnd As System.IntPtr = FindWindow("OpusApp", Nothing)
+            If hwnd <> System.IntPtr.Zero Then Return hwnd
 
             ' Try Excel.
             hwnd = FindWindow("XLMAIN", Nothing)

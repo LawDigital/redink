@@ -823,7 +823,7 @@ Namespace SharedLibrary
             ' Determine if a setting is a Boolean based on its key
             Dim booleanSettings As New List(Of String) From {
         "DoubleS", "NoEmDash", "Clean", "MarkdownBubbles", "KeepFormat1", "MarkdownConvert", "ReplaceText1", "SimpleMenuOverride",
-        "KeepFormat2", "KeepParaFormatInline", "ReplaceText2", "DoMarkupOutlook", "DoMarkupWord", "SimpleMenuDefault",
+        "KeepFormat2", "KeepParaFormatInline", "ReplaceText2", "DoMarkupOutlook", "DoMarkupWord", "SimpleMenuDefault", "UseHostColorOutlook",
         "APIDebug", "AutoPilotAutoStart", "AutoPilotSchedulerLocalChat", "ISearch_Approve", "ISearch", "Lib", "ContextMenu", "NoLocalConfig", "SecondAPI", "APIEncrypted", "APIEncrypted_2",
         "OAuth2", "OAuth2_2", "PromptLib", "Ignore", "ToolingLogWindow", "ToolingDryRun", "ForceDrawioLocal", "AllowLegacyDocFiles", "EnablePrivacyForSearch",
         "UpdateIni", "UpdateIniAllowRemote", "UpdateIniNoSignature", "UpdateIniSilentLog", "NoHelperDownload", "KnowledgeStoreUseLLMIndex", "KnowledgeStoreBackgroundIndexing"
@@ -1055,6 +1055,8 @@ Namespace SharedLibrary
                     Return context.INI_LogoPathLarge
                 Case "APIDebug"
                     Return context.INI_APIDebug.ToString()
+                Case "UseHostColorOutlook"
+                    Return context.INI_UseHostColorOutlook.ToString()
                 Case "AutoPilotAutoStart"
                     Return context.INI_AutoPilotAutoStart.ToString()
                 Case "AutoPilotSchedulerLocalChat"
@@ -1445,6 +1447,8 @@ Namespace SharedLibrary
                     context.INI_LogoPathLarge = value
                 Case "APIDebug"
                     context.INI_APIDebug = Boolean.Parse(value)
+                Case "UseHostColorOutlook"
+                    context.INI_UseHostColorOutlook = Boolean.Parse(value)
                 Case "AutoPilotAutoStart"
                     context.INI_AutoPilotAutoStart = Boolean.Parse(value)
                 Case "AutoPilotSchedulerLocalChat"
@@ -1809,6 +1813,7 @@ Namespace SharedLibrary
                     {"ChunkOCR", context.INI_ChunkOCR.ToString()},
                     {"ChatCap", context.INI_ChatCap.ToString()},
                     {"APIDebug", context.INI_APIDebug.ToString()},
+                    {"UseHostColorOutlook", context.INI_UseHostColorOutlook.ToString()},
                     {"AutoPilotAutoStart", context.INI_AutoPilotAutoStart.ToString()},
                     {"AutoPilotSchedulerLocalChat", context.INI_AutoPilotSchedulerLocalChat.ToString()},
                     {"APIKeyEncrypted", context.INI_APIEncrypted.ToString()},
@@ -3299,6 +3304,7 @@ Namespace SharedLibrary
             variableValues.Add("OAuth2Endpoint_2", context.INI_OAuth2Endpoint_2)
             variableValues.Add("OAuth2ATExpiry_2", context.INI_OAuth2ATExpiry_2)
             variableValues.Add("APIDebug", context.INI_APIDebug)
+            variableValues.Add("UseHostColorOutlook", context.INI_UseHostColorOutlook)
             variableValues.Add("AutoPilotAutoStart", context.INI_AutoPilotAutoStart)
             variableValues.Add("AutoPilotSchedulerLocalChat", context.INI_AutoPilotSchedulerLocalChat)
             variableValues.Add("UsageRestrictions", context.INI_UsageRestrictions)
@@ -3593,6 +3599,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("OAuth2Endpoint_2") Then context.INI_OAuth2Endpoint_2 = CStr(updatedValues("OAuth2Endpoint_2"))
                 If updatedValues.ContainsKey("OAuth2ATExpiry_2") Then context.INI_OAuth2ATExpiry_2 = CLng(updatedValues("OAuth2ATExpiry_2"))
                 If updatedValues.ContainsKey("APIDebug") Then context.INI_APIDebug = CBool(updatedValues("APIDebug"))
+                If updatedValues.ContainsKey("UseHostColorOutlook") Then context.INI_UseHostColorOutlook = CBool(updatedValues("UseHostColorOutlook"))
                 If updatedValues.ContainsKey("AutoPilotAutoStart") Then context.INI_AutoPilotAutoStart = CBool(updatedValues("AutoPilotAutoStart"))
                 If updatedValues.ContainsKey("AutoPilotSchedulerLocalChat") Then context.INI_AutoPilotSchedulerLocalChat = CBool(updatedValues("AutoPilotSchedulerLocalChat"))
                 If updatedValues.ContainsKey("UsageRestrictions") Then context.INI_UsageRestrictions = CStr(updatedValues("UsageRestrictions"))

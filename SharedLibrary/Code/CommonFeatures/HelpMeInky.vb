@@ -70,6 +70,9 @@ Namespace SharedLibrary
         ''' <summary>Host application name/version used for prompt enrichment (if provided).</summary>
         Private ReadOnly _hostAppName As String
 
+        ''' <summary>Host application UI language used for the initial welcome (if provided).</summary>
+        Private ReadOnly _hostLanguage As String
+
         ''' <summary>Markdown pipeline used to render assistant responses into HTML.</summary>
         Private ReadOnly _mdPipeline As Markdig.MarkdownPipeline
 
@@ -146,10 +149,12 @@ Namespace SharedLibrary
         ''' </summary>
         ''' <param name="context">Shared application context holding prompts and configuration.</param>
         ''' <param name="hostAppName">Host application name/version used for prompt enrichment.</param>
-        Public Sub New(context As ISharedContext, Optional hostAppName As String = "")
+        ''' <param name="hostLanguage">Host application UI language used for the initial welcome.</param>
+        Public Sub New(context As ISharedContext, Optional hostAppName As String = "", Optional hostLanguage As String = "")
             MyBase.New()
             _context = context
             _hostAppName = hostAppName
+            _hostLanguage = hostLanguage
 
             Me.Text = WindowTitle
             Me.FormBorderStyle = FormBorderStyle.Sizable
@@ -463,7 +468,9 @@ Namespace SharedLibrary
         ''' </summary>
         Private Async Function GenerateWelcomeAsync() As Task
             Dbg("GenerateWelcomeAsync start")
-            Dim langName As String = System.Globalization.CultureInfo.CurrentUICulture.DisplayName
+            Dim langName As String = If(String.IsNullOrWhiteSpace(_hostLanguage),
+                                        System.Globalization.CultureInfo.CurrentUICulture.DisplayName,
+                                        _hostLanguage)
             Dim partOfDay As String = GetPartOfDay()
             Dim manualText As String = Await GetManualOnceAsync()
             Dim systemPrompt As String

@@ -954,6 +954,13 @@
                     "description": "Enable this if non-translation commands such as correction, improvement or shortening should preserve basic formatting in Word and Outlook. This improves fidelity but is slower. Example: True. [KeepFormat2]"
                 },
                 {
+                    "key": "UseHostColorOutlook",
+                    "label": "Use Outlook Host Font Color",
+                    "type": "boolean",
+                    "default": "False",
+                    "description": "Enable this if inserted text in Outlook should use the compose window's default host font color instead of inheriting the color at the insertion point. This affects Outlook insertion behavior only if the runtime supports this setting. Example: True. [UseHostColorOutlook]"
+                },
+                {
                     "key": "ReplaceText1",
                     "label": "Replace Text (Translation)",
                     "type": "boolean",
@@ -1109,8 +1116,6 @@
                     "description": "Maximum number of tool-execution iterations Red Ink may perform in one tooling or agent session before it aborts the loop. Increase this only for complex workflows because each iteration can add cost and runtime. Example: 50. [ToolingMaximumIterations]"
                 }
             ]
-        }
-    ]
     },
     {
       "id": "prompt_resources",

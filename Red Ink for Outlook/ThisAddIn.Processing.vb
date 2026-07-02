@@ -971,11 +971,18 @@ Partial Public Class ThisAddIn
         If String.IsNullOrEmpty(originalText) AndAlso String.IsNullOrEmpty(suggestedText) Then Return
 
         Dim reviewed As String = String.Empty
+        Dim originalForReview As String = If(originalText, String.Empty)
+        Dim suggestedForReview As String = If(suggestedText, String.Empty)
+        Dim trailingSpaces As String = ""
+        Dim ignoredSuggestedSpaces As String = ""
 
-        Using dlg As New ReviewChangesDialog(originalText, suggestedText)
+        StripTrailingSpaces(originalForReview, originalForReview, trailingSpaces)
+        StripTrailingSpaces(suggestedForReview, suggestedForReview, ignoredSuggestedSpaces)
+
+        Using dlg As New ReviewChangesDialog(originalForReview, suggestedForReview)
             Dim res As DialogResult = dlg.ShowDialog()
             If res <> DialogResult.OK Then Return
-            reviewed = If(dlg.ReviewedText, String.Empty)
+            reviewed = ReapplyTrailingSpaces(If(dlg.ReviewedText, String.Empty), trailingSpaces)
         End Using
 
         If String.IsNullOrWhiteSpace(reviewed) Then Return

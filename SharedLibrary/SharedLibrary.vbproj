@@ -174,11 +174,11 @@
     <Reference Include="Microsoft.Extensions.Logging.Abstractions, Version=10.0.0.9, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
       <HintPath>..\packages\Microsoft.Extensions.Logging.Abstractions.10.0.9\lib\net462\Microsoft.Extensions.Logging.Abstractions.dll</HintPath>
     </Reference>
-    <Reference Include="Microsoft.Identity.Client, Version=4.85.0.0, Culture=neutral, PublicKeyToken=0a613f4dd989e8ae, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Identity.Client.4.85.0\lib\net472\Microsoft.Identity.Client.dll</HintPath>
+    <Reference Include="Microsoft.Identity.Client, Version=4.85.2.0, Culture=neutral, PublicKeyToken=0a613f4dd989e8ae, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Identity.Client.4.85.2\lib\net472\Microsoft.Identity.Client.dll</HintPath>
     </Reference>
-    <Reference Include="Microsoft.Identity.Client.Extensions.Msal, Version=4.85.0.0, Culture=neutral, PublicKeyToken=0a613f4dd989e8ae, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Identity.Client.Extensions.Msal.4.85.0\lib\netstandard2.0\Microsoft.Identity.Client.Extensions.Msal.dll</HintPath>
+    <Reference Include="Microsoft.Identity.Client.Extensions.Msal, Version=4.85.2.0, Culture=neutral, PublicKeyToken=0a613f4dd989e8ae, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Identity.Client.Extensions.Msal.4.85.2\lib\netstandard2.0\Microsoft.Identity.Client.Extensions.Msal.dll</HintPath>
     </Reference>
     <Reference Include="Microsoft.IdentityModel.Abstractions, Version=8.19.1.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35, processorArchitecture=MSIL">
       <HintPath>..\packages\Microsoft.IdentityModel.Abstractions.8.19.1\lib\net472\Microsoft.IdentityModel.Abstractions.dll</HintPath>
@@ -400,26 +400,26 @@
     <Reference Include="System.Core" />
     <Reference Include="System.Xml.Linq" />
     <Reference Include="System.Data.DataSetExtensions" />
-    <Reference Include="UglyToad.PdfPig, Version=0.1.14.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
-      <HintPath>..\packages\PdfPig.0.1.14\lib\net471\UglyToad.PdfPig.dll</HintPath>
+    <Reference Include="UglyToad.PdfPig, Version=0.1.15.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
+      <HintPath>..\packages\PdfPig.0.1.15\lib\net471\UglyToad.PdfPig.dll</HintPath>
     </Reference>
-    <Reference Include="UglyToad.PdfPig.Core, Version=0.1.14.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
-      <HintPath>..\packages\PdfPig.0.1.14\lib\net471\UglyToad.PdfPig.Core.dll</HintPath>
+    <Reference Include="UglyToad.PdfPig.Core, Version=0.1.15.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
+      <HintPath>..\packages\PdfPig.0.1.15\lib\net471\UglyToad.PdfPig.Core.dll</HintPath>
     </Reference>
-    <Reference Include="UglyToad.PdfPig.DocumentLayoutAnalysis, Version=0.1.14.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
-      <HintPath>..\packages\PdfPig.0.1.14\lib\net471\UglyToad.PdfPig.DocumentLayoutAnalysis.dll</HintPath>
+    <Reference Include="UglyToad.PdfPig.DocumentLayoutAnalysis, Version=0.1.15.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
+      <HintPath>..\packages\PdfPig.0.1.15\lib\net471\UglyToad.PdfPig.DocumentLayoutAnalysis.dll</HintPath>
     </Reference>
-    <Reference Include="UglyToad.PdfPig.Fonts, Version=0.1.14.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
-      <HintPath>..\packages\PdfPig.0.1.14\lib\net471\UglyToad.PdfPig.Fonts.dll</HintPath>
+    <Reference Include="UglyToad.PdfPig.Fonts, Version=0.1.15.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
+      <HintPath>..\packages\PdfPig.0.1.15\lib\net471\UglyToad.PdfPig.Fonts.dll</HintPath>
     </Reference>
-    <Reference Include="UglyToad.PdfPig.Package, Version=0.1.14.0, Culture=neutral, processorArchitecture=MSIL">
-      <HintPath>..\packages\PdfPig.0.1.14\lib\net471\UglyToad.PdfPig.Package.dll</HintPath>
+    <Reference Include="UglyToad.PdfPig.Package, Version=0.1.15.0, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>..\packages\PdfPig.0.1.15\lib\net471\UglyToad.PdfPig.Package.dll</HintPath>
     </Reference>
-    <Reference Include="UglyToad.PdfPig.Tokenization, Version=0.1.14.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
-      <HintPath>..\packages\PdfPig.0.1.14\lib\net471\UglyToad.PdfPig.Tokenization.dll</HintPath>
+    <Reference Include="UglyToad.PdfPig.Tokenization, Version=0.1.15.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
+      <HintPath>..\packages\PdfPig.0.1.15\lib\net471\UglyToad.PdfPig.Tokenization.dll</HintPath>
     </Reference>
-    <Reference Include="UglyToad.PdfPig.Tokens, Version=0.1.14.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
-      <HintPath>..\packages\PdfPig.0.1.14\lib\net471\UglyToad.PdfPig.Tokens.dll</HintPath>
+    <Reference Include="UglyToad.PdfPig.Tokens, Version=0.1.15.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
+      <HintPath>..\packages\PdfPig.0.1.15\lib\net471\UglyToad.PdfPig.Tokens.dll</HintPath>
     </Reference>
     <Reference Include="Vosk, Version=0.0.0.0, Culture=neutral, processorArchitecture=MSIL">
       <HintPath>..\packages\Vosk.0.3.38\lib\netstandard2.0\Vosk.dll</HintPath>

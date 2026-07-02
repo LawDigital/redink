@@ -4038,7 +4038,7 @@ Public Class DiscussInky
     ''' Requests a short persona-aware welcome message from the LLM.
     ''' </summary>
     Private Async Function GenerateWelcomeAsync() As Task
-        Dim langName = System.Globalization.CultureInfo.CurrentUICulture.DisplayName
+        Dim langName = Globals.ThisAddIn.GetWordDefaultInterfaceLanguage()
         Dim partOfDay = GetPartOfDay()
         Dim dateContext = GetDateContext()
         Dim randomWord = GetRandomModifier()
