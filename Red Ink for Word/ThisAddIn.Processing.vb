@@ -5168,17 +5168,21 @@ Partial Public Class ThisAddIn
             Dim insertedRange As Microsoft.Office.Interop.Word.Range =
             doc.Range(startPos, endPosInserted2)
 
-            ' Find/Replace for runs of two or more spaces → one space
-            With insertedRange.Find
-                .ClearFormatting()
-                .Replacement.ClearFormatting()
-                .Text = "[ ]{2,}"
-                .Replacement.Text = " "
-                .Forward = True
-                .Wrap = Microsoft.Office.Interop.Word.WdFindWrap.wdFindStop
-                .Format = False
-                .MatchWildcards = True
-            End With
+            ' Collapse repeated spaces without using Word wildcard syntax.
+            Do
+                insertedRange.SetRange(startPos, targetRange.End)
+
+                With insertedRange.Find
+                    .ClearFormatting()
+                    .Replacement.ClearFormatting()
+                    .Text = "  "
+                    .Replacement.Text = " "
+                    .Forward = True
+                    .Wrap = Microsoft.Office.Interop.Word.WdFindWrap.wdFindStop
+                    .Format = False
+                    .MatchWildcards = False
+                End With
+            Loop While insertedRange.Find.Execute(Replace:=Microsoft.Office.Interop.Word.WdReplace.wdReplaceAll)
 
             insertedRange.Find.Execute(Replace:=Microsoft.Office.Interop.Word.WdReplace.wdReplaceAll)
 

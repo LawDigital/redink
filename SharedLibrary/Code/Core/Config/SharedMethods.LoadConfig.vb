@@ -302,6 +302,7 @@ Namespace SharedLibrary
                 End If
 
                 context.INI_APIDebug = ParseBoolean(configDict, "APIDebug")
+                context.INI_UseHostColorOutlook = ParseBoolean(configDict, "UseHostColorOutlook")
                 context.INI_AutoPilotAutoStart = ParseBoolean(configDict, "AutoPilotAutoStart")
                 context.INI_AutoPilotSchedulerLocalChat = ParseBoolean(configDict, "AutoPilotSchedulerLocalChat")
                 context.INI_APIEncrypted = ParseBoolean(configDict, "APIKeyEncrypted")

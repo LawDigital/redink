@@ -1227,7 +1227,7 @@ Partial Public Class ThisAddIn
                 editorSel.HomeKey(Microsoft.Office.Interop.Word.WdUnits.wdStory)
 
                 ' Insert the raw LLM result (Markdown), not the pre-converted HTML
-                SLib.InsertTextWithMarkdown(editorSel, LLMResult & vbCrLf & vbCrLf, True)
+                SLib.InsertTextWithMarkdown(editorSel, LLMResult & vbCrLf & vbCrLf, True, INI_UseHostColorOutlook)
             Else
                 ' Convert HTML to plain text for non-HTML formats (optional)
                 Dim doc As New HtmlAgilityPack.HtmlDocument()
@@ -1410,7 +1410,7 @@ Partial Public Class ThisAddIn
                     Dim Plaintext As String = ""
 
                     SelectedText = selection.Text
-                    SLib.InsertTextWithFormat(LLMResult, range, Inplace, Not trailingCR)
+                    SLib.InsertTextWithFormat(LLMResult, range, Inplace, Not trailingCR, INI_UseHostColorOutlook)
 
                     If Inplace AndAlso restoreReviewTrailingSpaces Then
                         RestoreTrailingSpacesAtSelectionEnd(selection, reviewTrailingSpaces, trailingCR)
@@ -1440,9 +1440,9 @@ Partial Public Class ThisAddIn
                         If Not trailingCR And LLMResult.EndsWith(ControlChars.Lf) Then LLMResult = LLMResult.TrimEnd(ControlChars.Lf)
                         If Not trailingCR And LLMResult.EndsWith(ControlChars.Cr) Then LLMResult = LLMResult.TrimEnd(ControlChars.Cr)
                         If DoMarkup AndAlso MarkupMethod <> 3 AndAlso MarkupMethod <> 4 Then
-                            SLib.InsertTextWithMarkdown(selection, LLMResult & "<p>MARKUP:<br></p>", trailingCR)
+                            SLib.InsertTextWithMarkdown(selection, LLMResult & "<p>MARKUP:<br></p>", trailingCR, INI_UseHostColorOutlook)
                         Else
-                            SLib.InsertTextWithMarkdown(selection, LLMResult, trailingCR)
+                            SLib.InsertTextWithMarkdown(selection, LLMResult, trailingCR, INI_UseHostColorOutlook)
                         End If
 
                         If restoreReviewTrailingSpaces Then
@@ -1461,9 +1461,9 @@ Partial Public Class ThisAddIn
                         selection.SetRange(newStart, newEnd)
 
                         If DoMarkup AndAlso MarkupMethod <> 3 AndAlso MarkupMethod <> 4 Then
-                            SLib.InsertTextWithMarkdown(selection, LLMResult & "<p>MARKUP:<br></p>" & vbCrLf, trailingCR)
+                            SLib.InsertTextWithMarkdown(selection, LLMResult & "<p>MARKUP:<br></p>" & vbCrLf, trailingCR, INI_UseHostColorOutlook)
                         Else
-                            SLib.InsertTextWithMarkdown(selection, LLMResult, trailingCR)
+                            SLib.InsertTextWithMarkdown(selection, LLMResult, trailingCR, INI_UseHostColorOutlook)
                         End If
 
                         Dim insertedRange As Microsoft.Office.Interop.Word.Range =
@@ -1953,7 +1953,7 @@ Partial Public Class ThisAddIn
 
                 ' Insert result
                 If DoMarkup AndAlso MarkupMethod <> 3 AndAlso MarkupMethod <> 4 Then
-                    SLib.InsertTextWithMarkdown(selection, vbCrLf & LLMResult & vbCrLf & "<p>MARKUP:<br></p>", trailingCR)
+                    SLib.InsertTextWithMarkdown(selection, vbCrLf & LLMResult & vbCrLf & "<p>MARKUP:<br></p>", trailingCR, INI_UseHostColorOutlook)
                 Else
                     If DoInplace Then
                         Dim insertText As String = LLMResult
@@ -1961,13 +1961,13 @@ Partial Public Class ThisAddIn
 
                         StripTrailingSpaces(insertText, insertText, ignoredInsertSpaces)
 
-                        SLib.InsertTextWithMarkdown(selection, insertText, selectionEndsWithPara)
+                        SLib.InsertTextWithMarkdown(selection, insertText, selectionEndsWithPara, INI_UseHostColorOutlook)
 
                         If hasTrailingSpaces Then
                             RestoreTrailingSpacesAtSelectionEnd(selection, trailingSpaces, selectionEndsWithPara)
                         End If
                     Else
-                        SLib.InsertTextWithMarkdown(selection, vbCrLf & LLMResult & vbCrLf, trailingCR)
+                        SLib.InsertTextWithMarkdown(selection, vbCrLf & LLMResult & vbCrLf, trailingCR, INI_UseHostColorOutlook)
                     End If
                 End If
 
@@ -2176,7 +2176,7 @@ Partial Public Class ThisAddIn
                                      Return 0
                                  End Function)
 
-                        InsertTextWithMarkdown(selection, result, True)
+                        InsertTextWithMarkdown(selection, result, True, INI_UseHostColorOutlook)
                         inserted = True
                         Exit For
 
