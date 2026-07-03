@@ -158,7 +158,10 @@ Namespace SharedLibrary
         ''' <param name="selection">A Word <see cref="Microsoft.Office.Interop.Word.Selection"/> (passed as <see cref="Object"/>).</param>
         ''' <param name="gptResult">The Markdown text to convert and insert.</param>
         ''' <param name="TrailingCR">If <c>True</c>, keeps trailing paragraph breaks; otherwise suppresses them.</param>
-        Public Shared Sub InsertTextWithMarkdown(selection As Object, gptResult As String, TrailingCR As Boolean)
+        Public Shared Sub InsertTextWithMarkdown(selection As Object,
+                                                 gptResult As String,
+                                                 TrailingCR As Boolean,
+                                                 Optional UseHostDefaultFontColor As Boolean = False)
 
             Dim wordSelection As Microsoft.Office.Interop.Word.Selection = CType(selection, Microsoft.Office.Interop.Word.Selection)
             Dim wordRange As Microsoft.Office.Interop.Word.Range = wordSelection.Range
@@ -224,7 +227,7 @@ Namespace SharedLibrary
 
             Debug.WriteLine("ITWM: " & fullhtml)
 
-            InsertTextWithFormat(fullhtml, wordRange, True, Not TrailingCR)
+            InsertTextWithFormat(fullhtml, wordRange, True, Not TrailingCR, UseHostDefaultFontColor)
 
         End Sub
 
@@ -236,7 +239,11 @@ Namespace SharedLibrary
         ''' <param name="range">The Word range that defines the paste target and receives the updated inserted range.</param>
         ''' <param name="ReplaceSelection">If <c>True</c>, pastes over the current selection; otherwise appends at the range end.</param>
         ''' <param name="NoTrailingCR">If <c>True</c> and <paramref name="ReplaceSelection"/> is <c>True</c>, deletes the last paragraph mark after insertion.</param>
-        Public Shared Sub InsertTextWithFormat(formattedText As String, ByRef range As Microsoft.Office.Interop.Word.Range, ReplaceSelection As Boolean, Optional NoTrailingCR As Boolean = False)
+        Public Shared Sub InsertTextWithFormat(formattedText As String,
+                                               ByRef range As Microsoft.Office.Interop.Word.Range,
+                                               ReplaceSelection As Boolean,
+                                               Optional NoTrailingCR As Boolean = False,
+                                               Optional UseHostDefaultFontColor As Boolean = False)
             Try
                 If formattedText Is Nothing OrElse formattedText.Trim() = "" Then
                     Return
@@ -304,17 +311,20 @@ Namespace SharedLibrary
                 Dim isBold As Boolean = (fontSourceRange.Font.Bold = 1)
                 Dim isItalic As Boolean = (fontSourceRange.Font.Italic = 1)
                 Dim fontColor As Integer = fontSourceRange.Font.Color
+                Dim hexColor As String = String.Empty
 
                 ' Guard against ambiguous values (9999999 = mixed formatting in selection)
                 If fontSize <= 0 OrElse fontSize > 1000 Then fontSize = 11.0F
                 If fontName Is Nothing OrElse fontName = "" Then fontName = "Calibri"
 
-                ' Convert Word BGR color to RGB hex string
-                Dim bgr As Integer = fontColor And &HFFFFFF
-                Dim r As Integer = (bgr And &HFF)
-                Dim g As Integer = ((bgr >> 8) And &HFF)
-                Dim b As Integer = ((bgr >> 16) And &HFF)
-                Dim hexColor As String = System.String.Format("#{0:X2}{1:X2}{2:X2}", r, g, b)
+                If Not UseHostDefaultFontColor Then
+                    ' Convert Word BGR color to RGB hex string
+                    Dim bgr As Integer = fontColor And &HFFFFFF
+                    Dim r As Integer = (bgr And &HFF)
+                    Dim g As Integer = ((bgr >> 8) And &HFF)
+                    Dim b As Integer = ((bgr >> 16) And &HFF)
+                    hexColor = System.String.Format("#{0:X2}{1:X2}{2:X2}", r, g, b)
+                End If
 
                 Dim para As Microsoft.Office.Interop.Word.ParagraphFormat = fontSourceRange.ParagraphFormat
                 Dim spaceBefore As Single = para.SpaceBefore
@@ -340,7 +350,10 @@ Namespace SharedLibrary
                 End Select
 
                 ' --- 3) Build CSS strings ---
-                Dim cssBody As String = $"font-family:'{fontName}'; color:{hexColor}; line-height:{lineHeightCss};"
+                Dim cssBody As String = $"font-family:'{fontName}'; line-height:{lineHeightCss};"
+                If Not UseHostDefaultFontColor Then
+                    cssBody &= $" color:{hexColor};"
+                End If
                 Dim cssPara As String = cssBody & $" font-size:{fontSize}pt; margin-top:{spaceBefore}pt; margin-bottom:{spaceAfter}pt;"
                 If isBold Then cssPara &= " font-weight:bold;"
                 If isItalic Then cssPara &= " font-style:italic;"

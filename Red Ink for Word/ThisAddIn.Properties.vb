@@ -296,16 +296,6 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
-    Public Shared Property INI_OpenSSLPath As String
-        Get
-            Return _context.INI_OpenSSLPath
-        End Get
-        Set(value As String)
-            _context.INI_OpenSSLPath = value
-        End Set
-    End Property
-
-
     Public Shared Property INI_OAuth2 As Boolean
         Get
             Return _context.INI_OAuth2

@@ -70,7 +70,6 @@ Namespace SharedLibrary
             Property INI_MarkupMethodOutlook As Integer
             Property INI_MarkupDiffCap As Integer
             Property INI_MarkupRegexCap As Integer
-            Property INI_OpenSSLPath As String
             Property INI_OAuth2 As Boolean
             Property INI_OAuth2ClientMail As String
             Property INI_OAuth2Scopes As String
@@ -99,6 +98,7 @@ Namespace SharedLibrary
             Property INI_OAuth2Endpoint_2 As String
             Property INI_OAuth2ATExpiry_2 As Long
             Property INI_APIDebug As Boolean
+            Property INI_UseHostColorOutlook As Boolean
             Property INI_UsageRestrictions As String
             Property INI_LogPath As String
             Property INI_AllowLegacyDocFiles As Boolean
@@ -433,7 +433,6 @@ Namespace SharedLibrary
         Public Property INI_MarkupMethodOutlook As Integer Implements ISharedContext.INI_MarkupMethodOutlook
         Public Property INI_MarkupDiffCap As Integer Implements ISharedContext.INI_MarkupDiffCap
         Public Property INI_MarkupRegexCap As Integer Implements ISharedContext.INI_MarkupRegexCap
-        Public Property INI_OpenSSLPath As String Implements ISharedContext.INI_OpenSSLPath
         Public Property INI_OAuth2 As Boolean Implements ISharedContext.INI_OAuth2
         Public Property INI_OAuth2ClientMail As String Implements ISharedContext.INI_OAuth2ClientMail
         Public Property INI_OAuth2Scopes As String Implements ISharedContext.INI_OAuth2Scopes
@@ -462,6 +461,7 @@ Namespace SharedLibrary
         Public Property INI_OAuth2Endpoint_2 As String Implements ISharedContext.INI_OAuth2Endpoint_2
         Public Property INI_OAuth2ATExpiry_2 As Long Implements ISharedContext.INI_OAuth2ATExpiry_2
         Public Property INI_APIDebug As Boolean Implements ISharedContext.INI_APIDebug
+        Public Property INI_UseHostColorOutlook As Boolean Implements ISharedContext.INI_UseHostColorOutlook
         Public Property INI_AutoPilotAutoStart As Boolean Implements ISharedContext.INI_AutoPilotAutoStart
         Public Property INI_AutoPilotSchedulerLocalChat As Boolean Implements ISharedContext.INI_AutoPilotSchedulerLocalChat
         Public Property INI_UsageRestrictions As String Implements ISharedContext.INI_UsageRestrictions

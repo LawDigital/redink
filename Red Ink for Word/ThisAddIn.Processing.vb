@@ -3160,16 +3160,23 @@ Partial Public Class ThisAddIn
         Const uiYieldIntervalMs As Integer = 40
         Dim manualLineBreak As String = ChrW(11).ToString()
 
+        Dim splash As SLib.SplashScreen = Nothing
+
         Try
+
+            splash = New SLib.SplashScreen("Applying markup... press 'Esc' to abort")
+
+            Dim splashOwnerHwnd As IntPtr = GetWordMainWindowHandle()
+            If splashOwnerHwnd <> IntPtr.Zero Then
+                splash.Show(New SharedLibrary.SharedLibrary.WindowWrapper(splashOwnerHwnd))
+            Else
+                splash.Show()
+            End If
+            splash.Refresh()
+
             wordApp.ScreenUpdating = False
             doc.TrackRevisions = False
 
-            ' Disable Word's "Smart Cut and Paste" for the duration of the surgical patch.
-            ' When enabled, Range.Delete() on a word-like range makes Word automatically remove an
-            ' adjacent space to avoid perceived double spaces. Because the diff engine manages
-            ' separators explicitly, that auto-adjustment eats a space the patch intends to keep,
-            ' gluing a surviving word to the inserted replacement (e.g. "mächtigen Werkzeug" ->
-            ' "mächtigenWerkzeug", "nur auf" -> "nurauf"). Restored in the Finally block.
             wordApp.Options.SmartCutPaste = False
 
             Debug.WriteLine("SurgicalMarkup: text1 length=" & text1.Length & " text2 length=" & text2.Length)
@@ -3237,10 +3244,22 @@ Partial Public Class ThisAddIn
             End If
 
             ' ======================================================================
-            ' STEP 7: Strip special placeholders from deleted runs
+            ' STEP 7: Strip special placeholders from deleted AND inserted runs.
+            '
+            ' A {{WFLD/WFNT/WENT/PFOR:...}} placeholder always represents an element
+            ' (field, footnote, endnote, paragraph-format marker) that physically already
+            ' exists in the document. When the surrounding sentence is heavily rewritten,
+            ' DiffPlex reports the SAME existing element as a "move": a delete at its old
+            ' position plus an insert at its new position (here the [[MF0]] footnote anchor
+            ' between the two paragraphs). Stripping only the deleted side preserved the
+            ' original element but let the inserted side re-materialize it via
+            ' RestoreSpecialTextElements -> a duplicate footnote. Stripping both sides keeps
+            ' exactly one physical element at its original anchor and never inserts a copy.
+            ' Unchanged placeholders are untouched here and handled by
+            ' AdvanceCursorPastSpecialPlaceholder in STEP 8.
             ' ======================================================================
             For riStrip As Integer = 0 To runs.Count - 1
-                If runs(riStrip).RunType = ChangeType.Deleted Then
+                If runs(riStrip).RunType = ChangeType.Deleted OrElse runs(riStrip).RunType = ChangeType.Inserted Then
                     Dim r As DiffRun = runs(riStrip)
                     r.Text = System.Text.RegularExpressions.Regex.Replace(
                         r.Text,
@@ -3523,8 +3542,37 @@ Partial Public Class ThisAddIn
                                 ' This avoids Word swallowing the separator after a tracked word replacement,
                                 ' but does not put spaces on both sides of the deleted revision.
                                 If hasTrailingWhitespace Then
+                                    ' When the inserted core is a pure paragraph/line break (a relocated
+                                    ' {vbCr}/{vbCrLf} anchor), absorbing the following unchanged space onto
+                                    ' the INSERT side pushes that space to the start of the new paragraph
+                                    ' (" On behalf..."). Keep the break clean by absorbing the separator
+                                    ' onto the DELETE side only; the trailing-whitespace run is still
+                                    ' consumed so it is not left behind.
+                                    Dim insertWithTrailing As String = insertedCoreText
+                                    If Not IsOnlyBreakCharacters(insertedCoreText) Then
+                                        insertWithTrailing = insertedCoreText & trailingWhitespace
+                                    End If
+
                                     operationCandidates.Add(New SurgicalOperationCandidate With {
                                         .DeleteText = deletedCoreText & trailingWhitespace,
+                                        .InsertText = insertWithTrailing,
+                                        .SearchStart = cursor.Start,
+                                        .ConsumeTrailingWhitespaceRun = True
+                                    })
+                                End If
+
+                                ' Preserve the separating space when the trailing whitespace is not
+                                ' physically adjacent to the deleted core - e.g. a paragraph break or a
+                                ' footnote reference sits between the deleted word and that space, so the
+                                ' 'core + space' absorb candidate above cannot match locally and the space
+                                ' itself is a phantom tokenizer space around a break token that never
+                                ' advances the cursor. Without this, the word insert lands with no trailing
+                                ' space and is glued to the next word ("in" + "the" + "subject" ->
+                                ' "inthesubject"). Restricted to word inserts; a pure break insert must stay
+                                ' clean (see the absorb candidate and Fix 2 above).
+                                If hasTrailingWhitespace AndAlso Not IsOnlyBreakCharacters(insertedCoreText) Then
+                                    operationCandidates.Add(New SurgicalOperationCandidate With {
+                                        .DeleteText = deletedCoreText,
                                         .InsertText = insertedCoreText & trailingWhitespace,
                                         .SearchStart = cursor.Start,
                                         .ConsumeTrailingWhitespaceRun = True
@@ -3612,6 +3660,33 @@ Partial Public Class ThisAddIn
                                     Dim delCtxEnd As Integer = System.Math.Min(rangeEnd, deleteStart + 15)
                                     Debug.WriteLine($"    DELETE anchor: searchStart={op.SearchStart} found deleteStart={deleteStart} drift={deleteStart - op.SearchStart} ctx='{DebugVisualizeToken(doc.Range(delCtxStart, delCtxEnd).Text)}'")
 
+                                    If deleteStart > op.SearchStart Then
+                                        Dim gapRange As Range = doc.Range(op.SearchStart, deleteStart)
+                                        Dim gapLength As Integer = deleteStart - op.SearchStart
+                                        Dim revisionCovered As Integer = 0
+
+                                        For Each gapRevision As Microsoft.Office.Interop.Word.Revision In gapRange.Revisions
+                                            If gapRevision.Type = Microsoft.Office.Interop.Word.WdRevisionType.wdRevisionDelete Then
+                                                Dim revStart As Integer = System.Math.Max(gapRevision.Range.Start, op.SearchStart)
+                                                Dim revEnd As Integer = System.Math.Min(gapRevision.Range.End, deleteStart)
+                                                If revEnd > revStart Then revisionCovered += (revEnd - revStart)
+                                            End If
+                                        Next
+
+                                        Dim whitespaceCovered As Integer = 0
+                                        Dim gapText As String = gapRange.Text
+                                        If gapText IsNot Nothing Then
+                                            For Each gapChar As Char In gapText
+                                                If Char.IsWhiteSpace(gapChar) OrElse Char.IsControl(gapChar) Then whitespaceCovered += 1
+                                            Next
+                                        End If
+
+                                        If revisionCovered + whitespaceCovered < gapLength Then
+                                            Debug.WriteLine($"    DELETE anchor rejected (non-local): drift={gapLength} revisionCovered={revisionCovered} whitespace={whitespaceCovered}; trying next candidate.")
+                                            Continue For
+                                        End If
+                                    End If
+
                                     doc.TrackRevisions = True
                                     candidateRange.Delete()
                                     doc.TrackRevisions = False
@@ -3669,6 +3744,16 @@ Partial Public Class ThisAddIn
         Catch ex As System.Exception
             Debug.WriteLine("SurgicalMarkup error: " & ex.Message & vbCrLf & ex.StackTrace)
         Finally
+            ' Always close the progress splash (covers the normal, exception, and Esc-abort paths).
+            If splash IsNot Nothing Then
+                Try
+                    splash.Close()
+                Catch
+                    ' Ignore: splash may already be closed/disposed.
+                End Try
+                splash = Nothing
+            End If
+
             doc.TrackRevisions = originalTrack
             wordApp.ScreenUpdating = originalUpdate
             wordApp.Options.SmartCutPaste = originalSmartCutPaste
@@ -3833,6 +3918,86 @@ Partial Public Class ThisAddIn
         End If
     End Sub
 
+    '''     ''' <summary>
+    ''' Splits tokenized text into the segments between anchor tokens (placeholders and break
+    ''' markers) and the ordered list of those anchors. Concatenating the segments interleaved with
+    ''' the anchors reproduces the tokenized input exactly, so the split is lossless.
+    ''' </summary>
+    ''' <param name="text">Tokenized text to split.</param>
+    ''' <param name="segments">Receives the text between anchors (count = anchors + 1).</param>
+    ''' <param name="anchors">Receives the anchor tokens in source order.</param>
+    Private Shared Sub SplitAtDiffAnchors(
+        ByVal text As String,
+        ByVal segments As List(Of String),
+        ByVal anchors As List(Of String))
+
+        segments.Clear()
+        anchors.Clear()
+
+        Dim sb As New System.Text.StringBuilder()
+        For Each token As String In TokenizeDiffUnits(text)
+            If IsDiffPlaceholderToken(token) OrElse IsDiffLineBreakToken(token) Then
+                segments.Add(sb.ToString())
+                sb.Clear()
+                anchors.Add(token)
+            Else
+                sb.Append(token)
+            End If
+        Next
+        segments.Add(sb.ToString())
+    End Sub
+
+    ''' <summary>
+    ''' Anchor-aware word-level diff. Placeholders ([[MF#]]) and break tokens map to physical,
+    ''' already-existing document elements (footnotes, fields, paragraph marks). If the diff engine is
+    ''' allowed to treat them as ordinary movable tokens, a heavily rewritten neighbourhood lets
+    ''' DiffPlex report them as a "move" (delete at the old spot + insert at the new one), which
+    ''' physically displaces the element - e.g. a footnote jumping across a paragraph boundary. When
+    ''' both sides expose the SAME ordered anchor sequence, only the text BETWEEN anchors is diffed and
+    ''' each anchor is emitted as an Unchanged run, pinning it to its original position. Otherwise the
+    ''' original whole-stream diff is used so behavior is unchanged.
+    ''' </summary>
+    ''' <param name="text1">Tokenized original text.</param>
+    ''' <param name="text2">Tokenized revised text.</param>
+    ''' <returns>The list of merged diff runs.</returns>
+    Private Shared Function BuildWordLevelDiffRuns(ByVal text1 As String, ByVal text2 As String) As List(Of DiffRun)
+
+        Dim segments1 As New List(Of String)()
+        Dim anchors1 As New List(Of String)()
+        Dim segments2 As New List(Of String)()
+        Dim anchors2 As New List(Of String)()
+
+        SplitAtDiffAnchors(text1, segments1, anchors1)
+        SplitAtDiffAnchors(text2, segments2, anchors2)
+
+        Dim anchorsMatch As Boolean = anchors1.Count > 0 AndAlso anchors1.Count = anchors2.Count
+        If anchorsMatch Then
+            For ai As Integer = 0 To anchors1.Count - 1
+                If Not String.Equals(anchors1(ai), anchors2(ai), StringComparison.Ordinal) Then
+                    anchorsMatch = False
+                    Exit For
+                End If
+            Next
+        End If
+
+        If Not anchorsMatch Then
+            Return BuildWordLevelDiffRunsCore(text1, text2)
+        End If
+
+        Dim runs As New List(Of DiffRun)()
+        For si As Integer = 0 To segments1.Count - 1
+            If segments1(si).Length > 0 OrElse segments2(si).Length > 0 Then
+                runs.AddRange(BuildWordLevelDiffRunsCore(segments1(si), segments2(si)))
+            End If
+
+            If si < anchors1.Count Then
+                runs.Add(New DiffRun With {.RunType = ChangeType.Unchanged, .Text = anchors1(si)})
+            End If
+        Next
+
+        Return runs
+    End Function
+
     ''' <summary>
     ''' Original word-level diff-run builder extracted from the surgical engine. Tokenizes both
     ''' sides, runs the DiffPlex inline diff, and merges consecutive same-type tokens into runs while
@@ -3841,7 +4006,7 @@ Partial Public Class ThisAddIn
     ''' <param name="text1">Tokenized original text.</param>
     ''' <param name="text2">Tokenized revised text.</param>
     ''' <returns>The list of merged diff runs.</returns>
-    Private Shared Function BuildWordLevelDiffRuns(ByVal text1 As String, ByVal text2 As String) As List(Of DiffRun)
+    Private Shared Function BuildWordLevelDiffRunsCore(ByVal text1 As String, ByVal text2 As String) As List(Of DiffRun)
 
         Dim tokenList1 As List(Of String) = TokenizeDiffUnits(text1)
         Dim tokenList2 As List(Of String) = TokenizeDiffUnits(text2)
@@ -5003,17 +5168,21 @@ Partial Public Class ThisAddIn
             Dim insertedRange As Microsoft.Office.Interop.Word.Range =
             doc.Range(startPos, endPosInserted2)
 
-            ' Find/Replace for runs of two or more spaces → one space
-            With insertedRange.Find
-                .ClearFormatting()
-                .Replacement.ClearFormatting()
-                .Text = "[ ]{2,}"
-                .Replacement.Text = " "
-                .Forward = True
-                .Wrap = Microsoft.Office.Interop.Word.WdFindWrap.wdFindStop
-                .Format = False
-                .MatchWildcards = True
-            End With
+            ' Collapse repeated spaces without using Word wildcard syntax.
+            Do
+                insertedRange.SetRange(startPos, targetRange.End)
+
+                With insertedRange.Find
+                    .ClearFormatting()
+                    .Replacement.ClearFormatting()
+                    .Text = "  "
+                    .Replacement.Text = " "
+                    .Forward = True
+                    .Wrap = Microsoft.Office.Interop.Word.WdFindWrap.wdFindStop
+                    .Format = False
+                    .MatchWildcards = False
+                End With
+            Loop While insertedRange.Find.Execute(Replace:=Microsoft.Office.Interop.Word.WdReplace.wdReplaceAll)
 
             insertedRange.Find.Execute(Replace:=Microsoft.Office.Interop.Word.WdReplace.wdReplaceAll)
 
