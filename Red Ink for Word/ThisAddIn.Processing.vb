@@ -1,39 +1,38 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
-
+'
 ' =============================================================================
 ' File: ThisAddIn.Processing.vb
 ' Purpose: Drives the Red Ink for Word text-processing pipeline, including selection
 '          validation, chunk iteration, formatting capture/restoration, LLM invocation,
 '          and routing AI output into Word, panes, clipboard, bubbles, podcasts, slides,
-'          and chart/diagram outputs.
+'          and chart/diagram outputs. Surgical tracked-change patching is implemented in
+'          `ThisAddIn.Processing.SurgicalInsert.vb`.
+'
+' Responsibilities:
+'  - Validate the active selection, story context, and processing prerequisites.
+'  - Open undo scopes, normalize working ranges, and iterate chunked processing flows.
+'  - Extract and restore formatting, HTML/Markdown content, fields, and list/paragraph state.
+'  - Build prompts, enforce token/model constraints, and post-process LLM responses.
+'  - Route output to in-place replacement, clipboard panes, new documents, bubbles,
+'    podcast scripts, slide decks, and chart/diagram generation.
+'  - Dispatch non-main-story processing to specialized comment, footnote, and endnote handlers.
 '
 ' Architecture:
-'  - Entry Points & Undo: `ProcessSelectedText` enforces prerequisites, opens `WordUndoScope`,
-'    handles table-aware branching, and delegates to `TrueProcessSelectedText`.
-'  - Story & Chunk Management: re-centers the selection in the main story, bookmarks the
-'    working range, and iterates paragraph chunks while snapshotting styles via
-'    `ParagraphFormatStructure`.
-'  - Formatting & Markdown/HTML: extracts HTML/inline text, performs Markdown conversion,
-'    restores special fields, and reapplies paragraph/list formatting after insertions.
-'  - LLM Workflow: builds prompts (incl. bubbles, TP markup, slides, MyStyle), enforces token
-'    caps, supports alternate models, and post-processes responses (corrections, trimming).
-'  - Markup Generation: offers Word compare, DiffPlex inline tagging, regex-based markups,
-'    and revision-tag helpers (`AddMarkupTags`, `InsertMarkupText`, `SearchAndReplace`).
-'  - Output & UI Surfaces: dispatches results to clipboard panes, new docs, in-place replacements,
-'    podcast scripts, slide decks, bubbles/pushbacks, with progress/cancellation handling.
-'  - Chart / Diagram Output: when `DoChart` is enabled, the LLM is prompted to return draw.io
-'    XML (mxfile). The response is cleaned (`CleanDrawioXml`), saved as a `.drawio` file
-'    (`ProcessChartResult`), and can be opened in an embedded diagrams.net editor
-'    (`OpenDrawioWithWebView2` / `DrawioEditorForm`) for interactive editing and re-save.
-'  - Story Routing: Detects non-main stories (comments, footnotes/endnotes) and routes processing to
-'    specialized handlers (`ProcessSelectedTextInActiveCommentBubble`, `ProcessSelectedTextInActiveFootnote`).
+'  - `ProcessSelectedText` is the main orchestration entry point for validation, undo handling,
+'    story-aware branching, and delegation to downstream processing routines.
+'  - Core processing keeps formatting and structural state stable while coordinating prompt,
+'    response, and insertion workflows across chunked selections.
+'  - Markup orchestration remains in this file, while the surgical diff/apply engine is split
+'    into `ThisAddIn.Processing.SurgicalInsert.vb`.
+'  - Chart/diagram output cleans returned draw.io XML, persists `.drawio` files, and supports
+'    embedded diagrams.net editing through `DrawioEditorForm`.
 '
 ' External Dependencies:
 '  - Microsoft.Office.Interop.Word for document automation and story navigation.
-'  - SharedLibrary.SharedMethods for UI, prompt construction, LLM access, formatting utilities.
-'  - DiffPlex for diff building, Markdig + HtmlAgilityPack for Markdown-to-HTML conversion.
-'  - DocumentFormat.OpenXml, MarkdownToRtfConverter, and additional helpers referenced via SharedLibrary.
+'  - SharedLibrary.SharedMethods for UI, prompt construction, LLM access, and formatting utilities.
+'  - DiffPlex for inline diff-based markup helpers.
+'  - Markdig, HtmlAgilityPack, DocumentFormat.OpenXml, and MarkdownToRtfConverter for content conversion.
 '  - Microsoft.Web.WebView2 (via `DrawioEditorForm`) for embedded diagrams.net editor hosting.
 ' =============================================================================
 

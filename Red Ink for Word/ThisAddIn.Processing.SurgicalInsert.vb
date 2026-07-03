@@ -1,10 +1,45 @@
-﻿
-' Part of "Red Ink for Word"
+﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
-
+'
 ' =============================================================================
 ' File: ThisAddIn.Processing.SurgicalInsert.vb
+' Purpose: Implements the surgical tracked-change insertion engine used by the
+'          Word processing pipeline. It diffs original serialized text against
+'          revised output and replays only localized edits into the live Word
+'          document while preserving existing structure wherever possible.
 '
+' Responsibilities:
+'  - Preserve editor state, tracking state, and local formatting-sensitive context
+'    while applying surgical markup.
+'  - Tokenize and restore protected placeholders for fields, footnotes, endnotes,
+'    paragraph-format markers, and structural break characters.
+'  - Build word-level and sentence-aware diff runs, including patience-diff fallback
+'    behavior for difficult rewrite regions.
+'  - Map diff output onto a live visible atom stream that excludes tracked deletions
+'    and keeps exact Word position spans for safe edit planning.
+'  - Plan tracked deletions/insertions as pending edits and apply them right-to-left
+'    to avoid position drift.
+'  - Preserve boundary whitespace and original break-character patterns, and perform
+'    localized cleanup/debug tracing after edits are applied.
+'
+' Architecture:
+'  - `CompareAndInsertSurgical` is the main orchestration routine for placeholder
+'    tokenization, break normalization, diff construction, live-range alignment,
+'    pending-edit planning, and final tracked application.
+'  - Diff construction is layered: tokenized placeholder/break protection first,
+'    then sentence-aware collapse rules, then word-level/patience diff where needed.
+'  - Application is atom-map-based rather than `Word.Find`-driven, so unchanged text
+'    is aligned against the live visible document stream with exact `[Start, End)`
+'    spans before any edit is executed.
+'  - Final edits are applied in reverse order and followed by local whitespace cleanup
+'    to keep revisions readable and structurally stable.
+'
+' External Dependencies:
+'  - Microsoft.Office.Interop.Word for live range inspection, tracked revisions,
+'    field/revision enumeration, and document mutation.
+'  - DiffPlex for inline diff/LCS fallback used during token-level comparison.
+'  - SharedLibrary.SharedMethods for splash/UI helpers and shared add-in utilities.
+'  - System.Windows.Forms for UI message pumping during long-running surgical passes.
 ' =============================================================================
 
 Option Explicit On
@@ -13,9 +48,6 @@ Option Strict Off
 Imports System.Diagnostics
 Imports System.Runtime.InteropServices
 Imports System.Text.RegularExpressions
-Imports System.Threading
-Imports System.Threading.Tasks
-Imports System.Windows.Forms
 Imports DiffPlex
 Imports DiffPlex.DiffBuilder
 Imports DiffPlex.DiffBuilder.Model
@@ -28,7 +60,13 @@ Imports SLib = SharedLibrary.SharedLibrary.SharedMethods
 
 Partial Public Class ThisAddIn
 
-    ' ========================== Surgical Markup (MarkupMethod 2 & 5) ==========================
+    ' Collapse only clear rewrites. The earlier 0.82 similarity-only threshold treated ordinary
+    ' editing such as "scheduled to depart on" -> "scheduled for" and "more than" -> "over" as
+    ' sentence replacement. A sentence should be replaced wholesale only when both the common-token
+    ' similarity is low enough and the changed-token mass is large enough.
+    Const materialRewriteSimilarityThreshold As Double = 0.72
+    Const materialRewriteChangedTokenRatioThreshold As Double = 0.28
+    Const materialRewriteMinimumChangedTokens As Integer = 10    ' ========================== Surgical Markup (MarkupMethod 2 & 5) ==========================
 
     ''' <summary>
     ''' Represents a single word-level run from the DiffPlex output: Unchanged, Inserted, or Deleted.
@@ -188,8 +226,14 @@ Partial Public Class ThisAddIn
 
             Debug.WriteLine("SurgicalMarkup: text1 length=" & text1.Length & " text2 length=" & text2.Length)
 
+            Dim originalTrailingInlineWhitespace As String = GetTrailingInlineBoundaryWhitespace(text1)
+
             If Not trailingCR Then
                 text2 = text2.TrimEnd(vbCr, vbLf).TrimEnd(vbCr, vbLf)
+            End If
+
+            If originalTrailingInlineWhitespace.Length > 0 Then
+                text2 = EnsureTrailingInlineBoundaryWhitespace(text2, originalTrailingInlineWhitespace)
             End If
 
             ' ======================================================================
@@ -519,6 +563,54 @@ Partial Public Class ThisAddIn
     End Sub
 
     ''' <summary>
+    ''' Returns the exact inline whitespace suffix of the original selection. This suffix is a
+    ''' selection boundary, not edited content: when a user selects a sentence inside a paragraph,
+    ''' Word often includes the following space. The model usually omits that trailing separator,
+    ''' and a normal diff would then delete it. Paragraph marks and manual line breaks are excluded
+    ''' because they are structural content handled separately by the break-token logic.
+    ''' </summary>
+    Private Shared Function GetTrailingInlineBoundaryWhitespace(ByVal value As String) As String
+        If String.IsNullOrEmpty(value) Then
+            Return String.Empty
+        End If
+
+        Dim index As Integer = value.Length - 1
+        Do While index >= 0 AndAlso IsInlineBoundaryWhitespace(value(index))
+            index -= 1
+        Loop
+
+        If index = value.Length - 1 Then
+            Return String.Empty
+        End If
+
+        Return value.Substring(index + 1)
+    End Function
+
+    ''' <summary>
+    ''' Reprojects the original selected range's trailing inline whitespace onto the revised text so
+    ''' the boundary separator is preserved and not marked as a deletion.
+    ''' </summary>
+    Private Shared Function EnsureTrailingInlineBoundaryWhitespace(ByVal value As String, ByVal trailingWhitespace As String) As String
+        If String.IsNullOrEmpty(trailingWhitespace) Then
+            Return If(value, String.Empty)
+        End If
+
+        Dim text As String = If(value, String.Empty)
+        Dim index As Integer = text.Length - 1
+        Do While index >= 0 AndAlso IsInlineBoundaryWhitespace(text(index))
+            index -= 1
+        Loop
+
+        Return text.Substring(0, index + 1) & trailingWhitespace
+    End Function
+
+    Private Shared Function IsInlineBoundaryWhitespace(ByVal ch As Char) As Boolean
+        Return ch = " "c OrElse
+               ch = ControlChars.Tab OrElse
+               ch = ChrW(160)
+    End Function
+
+    ''' <summary>
     ''' Builds the surgical diff runs for the tokenized original/revised text. When
     ''' <see cref="SurgicalSentenceDiffEnabled"/> is False this is exactly the original word-level
     ''' behavior. When True, a sentence-first pass is performed: fully rewritten sentences (below the
@@ -531,13 +623,19 @@ Partial Public Class ThisAddIn
     ''' <returns>The ordered list of diff runs consumed by the surgical apply loop.</returns>
     Private Shared Function BuildSurgicalDiffRuns(ByVal text1 As String, ByVal text2 As String) As System.Collections.Generic.List(Of DiffRun)
 
-        ' The atom-map apply phase can only produce sentence-level markup when the diff stream tells
-        ' it that a sentence or sentence group is a replacement. A pure word-level patience diff is
-        ' correct for small edits, but it over-anchors heavily rewritten paragraphs on common words
-        ' such as "the", "will", "evidence", and party names. That leaves later paragraphs looking
-        ' almost unchanged even when the model has rewritten them. Therefore the diff is now built in
-        ' three layers: paragraph order, sentence alignment, then word-level diff only for sentences
-        ' that are still genuinely close.
+        If Not SurgicalSentenceDiffEnabled Then
+            ' Strict surgical mode: keep the historical word-level markup policy, but still use the
+            ' newer atom-map apply phase. This is useful for proofreading/typo correction, where
+            ' sentence replacement would be visually too coarse.
+            Return BuildWordLevelDiffRuns(text1, text2)
+        End If
+
+        ' Sentence-aware surgical mode: the atom-map apply phase can only produce sentence-level
+        ' markup when the diff stream tells it that a sentence or sentence group is a replacement.
+        ' A pure word-level patience diff is correct for small edits, but it over-anchors heavily
+        ' rewritten paragraphs on common words such as "the", "will", "evidence", and party names.
+        ' Therefore this mode builds the diff in three layers: paragraph order, sentence alignment,
+        ' then word-level diff only for sentences that are still genuinely close.
         Dim paragraphs1 As System.Collections.Generic.List(Of SurgicalParagraphChunk) = SplitTokenizedIntoParagraphChunks(text1)
         Dim paragraphs2 As System.Collections.Generic.List(Of SurgicalParagraphChunk) = SplitTokenizedIntoParagraphChunks(text2)
         RemoveSyntheticEmptyParagraphChunks(paragraphs2)
@@ -924,16 +1022,23 @@ Partial Public Class ThisAddIn
             Return False
         End If
 
-        Dim deletedTokenCount As Integer = CountComparableSentenceTokens(deletedCore)
-        Dim insertedTokenCount As Integer = CountComparableSentenceTokens(insertedCore)
-        If deletedTokenCount < 7 OrElse insertedTokenCount < 7 Then
+        Dim deletedTokens As System.Collections.Generic.List(Of String) = GetComparableSentenceTokens(deletedCore)
+        Dim insertedTokens As System.Collections.Generic.List(Of String) = GetComparableSentenceTokens(insertedCore)
+
+        If deletedTokens.Count < 7 OrElse insertedTokens.Count < 7 Then
             Return False
         End If
 
-        Dim similarity As Double = SentenceSimilarityRatio(deletedCore, insertedCore)
-        Const materialRewriteSimilarityThreshold As Double = 0.82
+        Dim lcsLength As Integer = ComparableTokenLcsLength(deletedTokens, insertedTokens)
+        Dim similarity As Double = (2.0 * lcsLength) / (deletedTokens.Count + insertedTokens.Count)
+        Dim changedTokenCount As Integer = (deletedTokens.Count - lcsLength) + (insertedTokens.Count - lcsLength)
+        Dim changedTokenRatio As Double = changedTokenCount / (deletedTokens.Count + insertedTokens.Count)
 
-        Return similarity < materialRewriteSimilarityThreshold
+
+
+        Return changedTokenCount >= materialRewriteMinimumChangedTokens AndAlso
+               similarity < materialRewriteSimilarityThreshold AndAlso
+               changedTokenRatio >= materialRewriteChangedTokenRatioThreshold
     End Function
 
 
