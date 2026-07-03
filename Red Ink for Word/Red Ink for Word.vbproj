@@ -704,6 +704,7 @@
     <Compile Include="ThisAddIn.Processing.FormatSaveAndRestore.vb" />
     <Compile Include="ThisAddIn.Processing.HTMLToWord.vb" />
     <Compile Include="ThisAddIn.Processing.KnowledgeRAG.vb" />
+    <Compile Include="ThisAddIn.Processing.SurgicalInsert.vb" />
     <Compile Include="ThisAddIn.Processing.Tooling.Logging.vb" />
     <Compile Include="ThisAddIn.Processing.Tooling.M365.vb" />
     <Compile Include="ThisAddIn.Processing.Tooling.Memory.vb" />
