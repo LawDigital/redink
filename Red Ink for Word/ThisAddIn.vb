@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 3.7.2026
+' 4.7.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -54,7 +54,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.030726" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.040726" & SharedMethods.VersionQualifier
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
     Public Const AN5 As String = "RI" ' for bubble comments 
@@ -686,6 +686,11 @@ Partial Public Class ThisAddIn
         End If
 
         AddContextMenu()
+
+        If _context IsNot Nothing AndAlso _context.INIloaded Then
+            SharedMethods.RegisterLicenseCounterUsageAndReport(_context, "WD")
+        End If
+
         UpdateHandler.PeriodicCheckForUpdates(INI_UpdateCheckInterval, RDV, INI_UpdatePath, _context)
 
         ' Initialize model menu buttons on the ribbon

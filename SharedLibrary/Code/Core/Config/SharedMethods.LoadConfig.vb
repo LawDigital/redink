@@ -330,6 +330,9 @@ Namespace SharedLibrary
                 ' Other parameters.
 
                 context.INI_NoHelperDownload = ParseBoolean(configDict, "NoHelperDownload")
+                context.INI_LicenseCounterPath = If(configDict.ContainsKey("LicenseCounterPath"), configDict("LicenseCounterPath"), "")
+                context.INI_LicenseCounterMethod = If(configDict.ContainsKey("LicenseCounterMethod"), configDict("LicenseCounterMethod"), DEFAULT_LICENSECOUNTERMETHOD)
+                context.INI_LicenseCounterAnon = ParseBoolean(configDict, "LicenseCounterAnon", DEFAULT_LICENSECOUNTERANON)
                 context.INI_UpdateCheckInterval = If(configDict.ContainsKey("UpdateCheckInterval"), CInt(configDict("UpdateCheckInterval")), DefaultUpdateIntervalDays)
                 context.INI_UpdatePath = If(configDict.ContainsKey("UpdatePath"), configDict("UpdatePath"), "")
                 context.INI_UpdateIni = ParseBoolean(configDict, "UpdateIni", DEFAULT_BOOL_UPDATEINI)
