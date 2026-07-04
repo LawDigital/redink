@@ -66,6 +66,11 @@ Namespace SharedLibrary
 
         Public Const RegPath_IniPrio As Boolean = False ' True if the registry path shall have priority over the default path
 
+        ' Optional internal tuning values for the offline license counter.
+        ' These are intentionally not exposed in the customer-facing configuration wizard.
+        Public Const LicenseCounterSalt As String = ""
+        Public Const LicenseCounterLicenseFingerprint As String = ""
+
         Private Const RegexSeparator1 As String = "|||"  ' Set also in Word Addin
         Private Const RegexSeparator2 As String = "§§§"  ' Set also in Word Addin
 
@@ -435,6 +440,9 @@ Namespace SharedLibrary
         ' LogFile
 
         Public Const LogFileName As String = "RI_Logfile.txt"
+
+        Public Const DEFAULT_LICENSECOUNTERMETHOD = "Auto"
+        Public Const DEFAULT_LICENSECOUNTERANON = True
 
         ' URLs
         Public Const NewHomeURL As String = "https://redink.ai"   ' Home of the Post Beta Website

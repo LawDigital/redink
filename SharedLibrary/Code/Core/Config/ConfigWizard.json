@@ -51,6 +51,27 @@
                     "description": "Optional support contact shown in license warnings and management messages so users know whom to contact internally. Example: IT Support at int. 312. [LicenseContact]"
                 },
                 {
+                    "key": "LicenseCounterPath",
+                    "label": "License Counter Targets",
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional offline license-counter targets. Leave empty to disable counting completely. You may enter one or more targets separated by line breaks or by |. Supported targets include local folders, UNC shares, and http/https URLs. Example: \\\\server\\share\\redink-licensecounter|https://intranet.example.local/licensecounter. [LicenseCounterPath]"
+                },
+                {
+                    "key": "LicenseCounterMethod",
+                    "label": "License Counter Method",
+                    "type": "string",
+                    "default": "Auto",
+                    "description": "Transport mode for the offline license counter. Recommended values: Auto, File, WebBasic, WebExtended, LocalOnly, AppendFile. Example: Auto. [LicenseCounterMethod]"
+                },
+                {
+                    "key": "LicenseCounterAnon",
+                    "label": "Anonymous License Counter",
+                    "type": "boolean",
+                    "default": "True",
+                    "description": "If True, the offline license counter does not include reversible user data in marker/report payloads. If False, a reversible obfuscated user value may be stored for reporting purposes. Example: True. [LicenseCounterAnon]"
+                },
+                {
                     "key": "LicenseAutoModeSilent",
                     "label": "Silent Activation",
                     "type": "boolean",

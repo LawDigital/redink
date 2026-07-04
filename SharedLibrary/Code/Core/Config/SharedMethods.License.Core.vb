@@ -782,6 +782,68 @@ Namespace SharedLibrary
            productId.StartsWith(TestingProProductIdPrefix, StringComparison.OrdinalIgnoreCase)
         End Function
 
+        Private Shared Function BuildConfigManagedLicenseSuccessMessage(licenseKey As String,
+                                                                       productTitle As String,
+                                                                       userId As String,
+                                                                       totalActivations As Integer,
+                                                                       totalPurchased As Integer,
+                                                                       activationsRemaining As Integer,
+                                                                       alreadyActivated As Boolean) As String
+            Dim safeProductTitle = If(String.IsNullOrEmpty(productTitle) OrElse productTitle = "(no product title available)",
+                                      "(unknown)",
+                                      productTitle)
+
+            Dim successMsg As New StringBuilder()
+
+            If IsOfflineDomainLicenseKey(licenseKey) Then
+                If alreadyActivated Then
+                    successMsg.AppendLine($"Your offline-domain license has been verified locally for this copy of {AN}.")
+                Else
+                    successMsg.AppendLine($"Your offline-domain license has been verified locally and stored for this copy of {AN}.")
+                End If
+            Else
+                If alreadyActivated Then
+                    successMsg.AppendLine($"Your license is already activated for this User ID and has now been registered for this copy of {AN}.")
+                Else
+                    successMsg.AppendLine($"Your license has been automatically activated and registered for this copy of {AN}.")
+                End If
+            End If
+
+            successMsg.AppendLine()
+            successMsg.AppendLine($"Product: {safeProductTitle}")
+            successMsg.AppendLine($"User ID: {userId}")
+
+            If totalPurchased > 0 Then
+                successMsg.AppendLine($"Activations: {totalActivations} of {totalPurchased} used ({activationsRemaining} remaining)")
+            ElseIf IsOfflineDomainLicenseKey(licenseKey) Then
+                successMsg.AppendLine(BuildOfflineDomainLicenseCountingMessage())
+            End If
+
+            successMsg.AppendLine()
+            successMsg.AppendLine("License configured by your administrator.")
+
+            If Not String.IsNullOrEmpty(LicenseContact) Then
+                successMsg.AppendLine()
+                successMsg.AppendLine($"Contact: {LicenseContact}")
+            End If
+
+            Return successMsg.ToString()
+        End Function
+
+        Private Shared Function BuildOfflineDomainLicenseCountingMessage() As String
+            If _licenseContext Is Nothing OrElse String.IsNullOrWhiteSpace(_licenseContext.INI_LicenseCounterPath) Then
+                Return "License Counting: not used"
+            End If
+
+            Dim counterMethod = _licenseContext.INI_LicenseCounterMethod.Trim()
+
+            If String.IsNullOrWhiteSpace(counterMethod) Then
+                Return "License Counting: used"
+            End If
+
+            Return $"License Counting: used ({counterMethod})"
+        End Function
+
 #End Region
 
 
@@ -1117,21 +1179,14 @@ Namespace SharedLibrary
 
                     LogLicenseEvent("Auto Activation", $"Already activated - Product: {productTitle}, Activations: {totalActivations}/{totalPurchased}", alwaysLog:=True)
 
-                    ' Build success message
-                    Dim successMsg As New StringBuilder()
-                    successMsg.AppendLine($"Your license is already activated for this User ID and has now been registered for this copy of {AN}.")
-                    successMsg.AppendLine()
-                    successMsg.AppendLine($"Product: {If(String.IsNullOrEmpty(productTitle) OrElse productTitle = "(no product title available)", "(unknown)", productTitle)}")
-                    successMsg.AppendLine($"User ID: {userId}")
-                    If totalPurchased > 0 Then
-                        successMsg.AppendLine($"Activations: {totalActivations} of {totalPurchased} used ({activationsRemaining} remaining)")
-                    End If
-                    successMsg.AppendLine()
-                    successMsg.AppendLine("License configured by your administrator.")
-                    If Not String.IsNullOrEmpty(LicenseContact) Then
-                        successMsg.AppendLine()
-                        successMsg.AppendLine($"Contact: {LicenseContact}")
-                    End If
+                    Dim successMsg As String = BuildConfigManagedLicenseSuccessMessage(
+                        licenseKey,
+                        productTitle,
+                        userId,
+                        totalActivations,
+                        totalPurchased,
+                        activationsRemaining,
+                        alreadyActivated:=True)
 
                     If Not autoModeSilent AndAlso Not _restoredFromRegistryBackup Then
                         ShowCustomMessageBox(successMsg.ToString(), $"{AN} - License Active")
@@ -1178,21 +1233,14 @@ Namespace SharedLibrary
 
                     LogLicenseEvent("Auto Activation", $"Success - Product: {productTitle}, Activations: {totalActivations}/{totalPurchased}", alwaysLog:=True)
 
-                    ' Build success message
-                    Dim successMsg As New StringBuilder()
-                    successMsg.AppendLine($"Your license has been automatically activated and registered for this copy of {AN}.")
-                    successMsg.AppendLine()
-                    successMsg.AppendLine($"Product: {If(String.IsNullOrEmpty(productTitle) OrElse productTitle = "(no product title available)", "(unknown)", productTitle)}")
-                    successMsg.AppendLine($"User ID: {userId}")
-                    If totalPurchased > 0 Then
-                        successMsg.AppendLine($"Activations: {totalActivations} of {totalPurchased} used ({activationsRemaining} remaining)")
-                    End If
-                    successMsg.AppendLine()
-                    successMsg.AppendLine("This activation was configured by your administrator.")
-                    If Not String.IsNullOrEmpty(LicenseContact) Then
-                        successMsg.AppendLine()
-                        successMsg.AppendLine($"Contact: {LicenseContact}")
-                    End If
+                    Dim successMsg As String = BuildConfigManagedLicenseSuccessMessage(
+                        licenseKey,
+                        productTitle,
+                        userId,
+                        totalActivations,
+                        totalPurchased,
+                        activationsRemaining,
+                        alreadyActivated:=False)
 
                     If Not autoModeSilent AndAlso Not _restoredFromRegistryBackup Then
                         ShowCustomMessageBox(successMsg.ToString(), $"{AN} - License Activated")
@@ -1211,20 +1259,14 @@ Namespace SharedLibrary
 
                     LogLicenseEvent("Auto Activation", $"Verified activated after failed activate call - Product: {recheckResponse.ProductTitle}", alwaysLog:=True)
 
-                    Dim successMsg As New StringBuilder()
-                    successMsg.AppendLine("Your license is activated for this User ID.")
-                    successMsg.AppendLine()
-                    successMsg.AppendLine($"Product: {recheckResponse.ProductTitle}")
-                    successMsg.AppendLine($"User ID: {userId}")
-                    If recheckResponse.TotalActivationsPurchased > 0 Then
-                        successMsg.AppendLine($"Activations: {recheckResponse.TotalActivations} of {recheckResponse.TotalActivationsPurchased} used ({recheckResponse.ActivationsRemaining} remaining)")
-                    End If
-                    successMsg.AppendLine()
-                    successMsg.AppendLine("License configured by your administrator.")
-                    If Not String.IsNullOrEmpty(LicenseContact) Then
-                        successMsg.AppendLine()
-                        successMsg.AppendLine($"Contact: {LicenseContact}")
-                    End If
+                    Dim successMsg As String = BuildConfigManagedLicenseSuccessMessage(
+                        licenseKey,
+                        recheckResponse.ProductTitle,
+                        userId,
+                        recheckResponse.TotalActivations,
+                        recheckResponse.TotalActivationsPurchased,
+                        recheckResponse.ActivationsRemaining,
+                        alreadyActivated:=True)
 
                     If Not autoModeSilent AndAlso Not _restoredFromRegistryBackup Then
                         ShowCustomMessageBox(successMsg.ToString(), $"{AN} - License Active")
