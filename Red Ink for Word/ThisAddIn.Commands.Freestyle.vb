@@ -1344,6 +1344,7 @@ Partial Public Class ThisAddIn
                 AddItem("switch", "Temporarily swap primary and secondary models.")
                 AddItem("clientname", "Copy and show this PC's client identifier (used for UpdateClients and CentralConfigClients).")
                 AddItem("license", "Show license information and access license manage dialog.")
+                AddItem("licensecounter", "Open the offline license-counter evaluator/report tool.")
                 AddItem("offlinelicense", "Create an offline license key using a private key.")
 
                 ' CONFIG / MENU
@@ -1888,6 +1889,11 @@ Partial Public Class ThisAddIn
 
             If String.Equals(OtherPrompt.Trim(), "talktome", StringComparison.OrdinalIgnoreCase) Then
                 Globals.ThisAddIn.ShowTalkToMeWidget()
+                Return
+            End If
+
+            If String.Equals(OtherPrompt.Trim(), "licensecounter", StringComparison.OrdinalIgnoreCase) Then
+                SharedMethods.ShowLicenseCounterEvaluatorDialog(_context)
                 Return
             End If
 

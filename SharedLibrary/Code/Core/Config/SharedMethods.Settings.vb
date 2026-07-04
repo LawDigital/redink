@@ -826,7 +826,7 @@ Namespace SharedLibrary
         "KeepFormat2", "KeepParaFormatInline", "ReplaceText2", "DoMarkupOutlook", "DoMarkupWord", "SimpleMenuDefault", "UseHostColorOutlook",
         "APIDebug", "AutoPilotAutoStart", "AutoPilotSchedulerLocalChat", "ISearch_Approve", "ISearch", "Lib", "ContextMenu", "NoLocalConfig", "SecondAPI", "APIEncrypted", "APIEncrypted_2",
         "OAuth2", "OAuth2_2", "PromptLib", "Ignore", "ToolingLogWindow", "ToolingDryRun", "ForceDrawioLocal", "AllowLegacyDocFiles", "EnablePrivacyForSearch",
-        "UpdateIni", "UpdateIniAllowRemote", "UpdateIniNoSignature", "UpdateIniSilentLog", "NoHelperDownload", "KnowledgeStoreUseLLMIndex", "KnowledgeStoreBackgroundIndexing"
+        "UpdateIni", "UpdateIniAllowRemote", "UpdateIniNoSignature", "UpdateIniSilentLog", "NoHelperDownload", "LicenseCounterAnon", "KnowledgeStoreUseLLMIndex", "KnowledgeStoreBackgroundIndexing"
             }
             Return booleanSettings.Contains(settingKey)
         End Function
@@ -1165,6 +1165,13 @@ Namespace SharedLibrary
                     Return context.INI_OAuth2_2.ToString()
                 Case "NoHelperDownload"
                     Return context.INI_NoHelperDownload.ToString()
+                Case "LicenseCounterPath"
+                    Return context.INI_LicenseCounterPath
+                Case "LicenseCounterMethod"
+                    Return context.INI_LicenseCounterMethod
+                Case "LicenseCounterAnon"
+                    Return context.INI_LicenseCounterAnon.ToString()
+                Case "AutoPilot"
                 Case "AutoPilot"
                     Return context.INI_AutoPilot
                 Case "ToolingLogWindow"
@@ -1547,6 +1554,12 @@ Namespace SharedLibrary
                     context.INI_DataCollectorPath = value
                 Case "NoHelperDownload"
                     context.INI_NoHelperDownload = Boolean.Parse(value)
+                Case "LicenseCounterPath"
+                    context.INI_LicenseCounterPath = value
+                Case "LicenseCounterMethod"
+                    context.INI_LicenseCounterMethod = value
+                Case "LicenseCounterAnon"
+                    context.INI_LicenseCounterAnon = Boolean.Parse(value)
                 Case "AutoPilot"
                     context.INI_AutoPilot = value
                 Case "ToolingLogWindow"
@@ -2043,6 +2056,9 @@ Namespace SharedLibrary
                     {"UpdateIniIgnoreOverride", context.INI_UpdateIniIgnoreOverride},
                     {"UpdateIniSilentMode", context.INI_UpdateIniSilentMode.ToString()},
                     {"UpdateIniSilentLog", context.INI_UpdateIniSilentLog.ToString()},
+                    {"LicenseCounterPath", context.INI_LicenseCounterPath},
+                    {"LicenseCounterMethod", context.INI_LicenseCounterMethod},
+                    {"LicenseCounterAnon", context.INI_LicenseCounterAnon.ToString()},
                     {"AssemblePath", context.INI_AssemblePath},
                     {"AssemblePathLocal", context.INI_AssemblePathLocal},
                     {"KnowledgeStorePath", context.INI_KnowledgeStorePath},
@@ -2351,7 +2367,9 @@ Namespace SharedLibrary
                 {"SimpleMenuHide", DEFAULT_SIMPLEMENUHIDE},
                 {"SP_Assemble_Plan", Default_SP_Assemble_Plan},
                 {"SP_Assemble_Execute", Default_SP_Assemble_Execute},
-                {"SP_Assemble_Summarize", Default_SP_Assemble_Summarize}
+                {"SP_Assemble_Summarize", Default_SP_Assemble_Summarize},
+                {"LicenseCounterMethod", DEFAULT_LICENSECOUNTERMETHOD},
+                {"LicenseCounterAnon", DEFAULT_LICENSECOUNTERANON}
             }
         End Function
 
@@ -2572,6 +2590,9 @@ Namespace SharedLibrary
                     {"UpdateCheckInterval", context.INI_UpdateCheckInterval.ToString()},
                     {"UpdatePath", context.INI_UpdatePath},
                     {"HttpStack", context.INI_HttpStack},
+                    {"M365ClientID", context.INI_M365ClientId},
+                    {"M365TenantID", context.INI_M365TenantId},
+                    {"M365Scopes", context.INI_M365Scopes},
                     {"BrandingName", context.INI_BrandingName},
                     {"LogoPath", context.INI_LogoPath},
                     {"LogoPathMedium", context.INI_LogoPathMedium},
@@ -2588,7 +2609,12 @@ Namespace SharedLibrary
                     {"UpdateIniClients", context.INI_UpdateIniClients},
                     {"UpdateIniIgnoreOverride", context.INI_UpdateIniIgnoreOverride},
                     {"UpdateIniSilentMode", context.INI_UpdateIniSilentMode.ToString()},
-                    {"UpdateIniSilentLog", context.INI_UpdateIniSilentLog.ToString()}
+                    {"UpdateIniSilentLog", context.INI_UpdateIniSilentLog.ToString()},
+                    {"LicenseCounterMethod", context.INI_LicenseCounterMethod},
+                    {"LicenseCounterPath", context.INI_LicenseCounterPath},
+                    {"LicenseCounterAnon", context.INI_LicenseCounterAnon.ToString()},
+                    {"KnowledgeStoreBackgroundIndexing", context.INI_KnowledgeStoreBackgroundIndexing.ToString()},
+                    {"KnowledgeStoreBackgroundIndexingWindow", context.INI_KnowledgeStoreBackgroundIndexingWindow}
                 }
 
                 ' Read the original ini file content
@@ -3521,6 +3547,9 @@ Namespace SharedLibrary
             variableValues.Add("SP_Assemble_Summarize", context.SP_Assemble_Summarize)
             variableValues.Add("InkyMemoryCap", context.INI_InkyMemoryCap)
             variableValues.Add("NoHelperDownload", context.INI_NoHelperDownload)
+            variableValues.Add("LicenseCounterPath", context.INI_LicenseCounterPath)
+            variableValues.Add("LicenseCounterMethod", context.INI_LicenseCounterMethod)
+            variableValues.Add("LicenseCounterAnon", context.INI_LicenseCounterAnon)
             variableValues.Add("AutoPilot", context.INI_AutoPilot)
             variableValues.Add("ToolingLogWindow", context.INI_ToolingLogWindow)
             variableValues.Add("ToolingDryRun", context.INI_ToolingDryRun)
@@ -3803,6 +3832,9 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("LogoPathMedium") Then context.INI_LogoPathMedium = CStr(updatedValues("LogoPathMedium"))
                 If updatedValues.ContainsKey("LogoPathLarge") Then context.INI_LogoPathLarge = CStr(updatedValues("LogoPathLarge"))
                 If updatedValues.ContainsKey("NoHelperDownload") Then context.INI_NoHelperDownload = CBool(updatedValues("NoHelperDownload"))
+                If updatedValues.ContainsKey("LicenseCounterPath") Then context.INI_LicenseCounterPath = CStr(updatedValues("LicenseCounterPath"))
+                If updatedValues.ContainsKey("LicenseCounterMethod") Then context.INI_LicenseCounterMethod = CStr(updatedValues("LicenseCounterMethod"))
+                If updatedValues.ContainsKey("LicenseCounterAnon") Then context.INI_LicenseCounterAnon = CBool(updatedValues("LicenseCounterAnon"))
                 If updatedValues.ContainsKey("InkyMemoryCap") Then context.INI_InkyMemoryCap = CInt(updatedValues("InkyMemoryCap"))
                 If updatedValues.ContainsKey("AutoPilot") Then context.INI_AutoPilot = CStr(updatedValues("AutoPilot"))
                 If updatedValues.ContainsKey("ToolingLogWindow") Then context.INI_ToolingLogWindow = CBool(updatedValues("ToolingLogWindow"))

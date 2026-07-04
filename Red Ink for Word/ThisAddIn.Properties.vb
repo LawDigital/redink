@@ -2434,6 +2434,33 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_LicenseCounterPath As String
+        Get
+            Return _context.INI_LicenseCounterPath
+        End Get
+        Set(value As String)
+            _context.INI_LicenseCounterPath = value
+        End Set
+    End Property
+
+    Public Shared Property INI_LicenseCounterMethod As String
+        Get
+            Return _context.INI_LicenseCounterMethod
+        End Get
+        Set(value As String)
+            _context.INI_LicenseCounterMethod = value
+        End Set
+    End Property
+
+    Public Shared Property INI_LicenseCounterAnon As Boolean
+        Get
+            Return _context.INI_LicenseCounterAnon
+        End Get
+        Set(value As Boolean)
+            _context.INI_LicenseCounterAnon = value
+        End Set
+    End Property
+
     Public Shared Property INI_UpdateIniClients As String
         Get
             Return _context.INI_UpdateIniClients

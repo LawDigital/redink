@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 2.7.2026
+' 4.7.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -60,7 +60,7 @@ Partial Public Class ThisAddIn
     Public Const AN6 As String = "Inky"
     Public Const AN4 As String = "redink_"
 
-    Public Shared Version As String = "V.020726" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.040726" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -191,6 +191,11 @@ Partial Public Class ThisAddIn
     ''' Fallback timer to trigger delayed startup if no Activate event occurs.
     ''' </summary>
     Private startupFallbackTimer As System.Windows.Forms.Timer
+
+    ''' <summary>
+    ''' Periodic offline license-counter timer for long-running Outlook sessions.
+    ''' </summary>
+    Private licenseCounterTimer As System.Threading.Timer
 
     ''' <summary>
     ''' Shared UI synchronization context used by the shared tooling loop.
@@ -397,6 +402,12 @@ Partial Public Class ThisAddIn
             InitializeConfig(True, True)
 
             UpdateHandler.PeriodicCheckForUpdates(INI_UpdateCheckInterval, "Outlook", INI_UpdatePath, _context)
+
+            If _context IsNot Nothing AndAlso _context.INIloaded Then
+                SharedMethods.RegisterLicenseCounterUsageAndReport(_context, "OL")
+                StartLicenseCounterTimer()
+            End If
+
             Dim result = Globals.Ribbons.Ribbon1.UpdateRibbon()
             Globals.Ribbons.Ribbon1.ApplyRibbonVisibilityConfiguration()
             result = Globals.Ribbons.Ribbon2.UpdateRibbon()
@@ -456,6 +467,11 @@ Partial Public Class ThisAddIn
             System.Diagnostics.Debug.WriteLine("ShutdownHttpListener failed: " & ex.Message)
         End Try
 
+        Try
+            StopLicenseCounterTimer()
+        Catch
+        End Try
+
         ' 2) stop watchdog (if you added it)
         Try
             StopListenerWatchdog()
@@ -470,7 +486,40 @@ Partial Public Class ThisAddIn
 
     End Sub
 
+    Private Sub StartLicenseCounterTimer()
+        Try
+            StopLicenseCounterTimer()
+
+            licenseCounterTimer = New System.Threading.Timer(
+                Sub(state As Object)
+                    Try
+                        If _context Is Nothing OrElse Not _context.INIloaded Then
+                            Return
+                        End If
+
+                        SharedMethods.RegisterLicenseCounterUsageAndReport(_context, "OL")
+                    Catch
+                    End Try
+                End Sub,
+                Nothing,
+                TimeSpan.FromHours(SharedMethods.LicenseCounterOutlookTimerHours),
+                TimeSpan.FromHours(SharedMethods.LicenseCounterOutlookTimerHours))
+        Catch
+        End Try
+    End Sub
+
+    Private Sub StopLicenseCounterTimer()
+        Try
+            If licenseCounterTimer IsNot Nothing Then
+                licenseCounterTimer.Dispose()
+                licenseCounterTimer = Nothing
+            End If
+        Catch
+        End Try
+    End Sub
+
     ' Lightweight UI switch helper (matches Excel version)
+
     ''' <summary>
     ''' Ensures execution continuity on the captured UI thread by posting a no-op if current context differs.
     ''' </summary>

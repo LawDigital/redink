@@ -562,6 +562,7 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Code\Core\Config\SharedMethods.License.Core.vb" />
+    <Compile Include="Code\Core\Config\SharedMethods.License.Counter.vb" />
     <Compile Include="Code\Core\Config\SharedMethods.License.Domain.vb" />
     <Compile Include="Code\Core\Config\SharedMethods.License.Private.vb" />
     <Compile Include="Code\Core\Config\SharedMethods.License.Pro.vb" />

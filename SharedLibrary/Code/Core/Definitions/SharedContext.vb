@@ -334,6 +334,9 @@ Namespace SharedLibrary
             Property Location As String
 
             Property INI_NoHelperDownload As Boolean
+            Property INI_LicenseCounterPath As String
+            Property INI_LicenseCounterMethod As String
+            Property INI_LicenseCounterAnon As Boolean
 
             ' Master switch for INI update mechanism
             Property INI_UpdateIni As Boolean
@@ -694,6 +697,9 @@ Namespace SharedLibrary
         Public Property SP_Add_MergePrompt As String Implements ISharedContext.SP_Add_MergePrompt
 
         Public Property INI_NoHelperDownload As Boolean Implements ISharedContext.INI_NoHelperDownload
+        Public Property INI_LicenseCounterPath As String Implements ISharedContext.INI_LicenseCounterPath
+        Public Property INI_LicenseCounterMethod As String Implements ISharedContext.INI_LicenseCounterMethod
+        Public Property INI_LicenseCounterAnon As Boolean Implements ISharedContext.INI_LicenseCounterAnon
         Public Property INI_UpdateIni As Boolean Implements ISharedContext.INI_UpdateIni
         Public Property INI_UpdateIniClients As String Implements ISharedContext.INI_UpdateIniClients
         Public Property INI_UpdateIniAllowRemote As Boolean Implements ISharedContext.INI_UpdateIniAllowRemote
