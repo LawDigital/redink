@@ -168,6 +168,7 @@ Public Class frmAIChat
     Private _loadedContextContent As String = Nothing
     Private _loadedContextPath As String = Nothing
     Private _isUpdatingPersistContextCheckbox As Boolean = False
+    Private _dialogOwnerScope As System.IDisposable = Nothing
     Private ReadOnly _toolTip As New System.Windows.Forms.ToolTip()
 
     Private WithEvents btnLoadContext As New System.Windows.Forms.Button() With {.Text = "Load Context", .AutoSize = True}
@@ -241,6 +242,28 @@ Public Class frmAIChat
         Me.Controls.Add(mainLayout)
 
         _context = context
+    End Sub
+
+    Protected Overrides Sub OnHandleCreated(e As System.EventArgs)
+        MyBase.OnHandleCreated(e)
+
+        If _dialogOwnerScope Is Nothing Then
+            _dialogOwnerScope = SharedMethods.PushDialogOwner(Me)
+        End If
+    End Sub
+
+    Protected Overrides Sub OnHandleDestroyed(e As System.EventArgs)
+        Dim scope As System.IDisposable = _dialogOwnerScope
+        _dialogOwnerScope = Nothing
+
+        If scope IsNot Nothing Then
+            Try
+                scope.Dispose()
+            Catch
+            End Try
+        End If
+
+        MyBase.OnHandleDestroyed(e)
     End Sub
 
     ''' <summary>

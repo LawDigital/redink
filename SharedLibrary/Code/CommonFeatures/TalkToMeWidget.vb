@@ -56,6 +56,7 @@ Namespace SharedLibrary
         Private _isBusy As Boolean = False
         Private _returnFocusAfterStart As Action = Nothing
         Private _speechOutputRefreshTimer As System.Windows.Forms.Timer
+        Private _dialogOwnerScope As System.IDisposable = Nothing
         Private ReadOnly _toolTip As New ToolTip() With {
             .AutoPopDelay = 10000,
             .InitialDelay = 300,
@@ -189,10 +190,28 @@ Namespace SharedLibrary
         Protected Overrides Sub OnHandleCreated(e As EventArgs)
             MyBase.OnHandleCreated(e)
 
+            If _dialogOwnerScope Is Nothing Then
+                _dialogOwnerScope = SharedMethods.PushDialogOwner(Me)
+            End If
+
             If Not _isDisplaySettingsHooked Then
                 AddHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
                 _isDisplaySettingsHooked = True
             End If
+        End Sub
+
+        Protected Overrides Sub OnHandleDestroyed(e As EventArgs)
+            Dim scope As System.IDisposable = _dialogOwnerScope
+            _dialogOwnerScope = Nothing
+
+            If scope IsNot Nothing Then
+                Try
+                    scope.Dispose()
+                Catch
+                End Try
+            End If
+
+            MyBase.OnHandleDestroyed(e)
         End Sub
 
         Private _speechStopTask As Task = Nothing

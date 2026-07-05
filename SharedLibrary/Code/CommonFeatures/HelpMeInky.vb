@@ -143,6 +143,7 @@ Namespace SharedLibrary
 
         ''' <summary>Serializes LLM calls to avoid concurrent model switching/use.</summary>
         Private ReadOnly _modelSemaphore As New Threading.SemaphoreSlim(1, 1)
+        Private _dialogOwnerScope As System.IDisposable = Nothing
 
         ''' <summary>
         ''' Creates the chat form and wires UI event handlers.
@@ -218,6 +219,28 @@ Namespace SharedLibrary
             AddHandler _chkNoTopMost.CheckedChanged, AddressOf OnTopMostChanged
             AddHandler _chkIncludeConfig.CheckedChanged, AddressOf OnIncludeConfigChanged
             AddHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
+        End Sub
+
+        Protected Overrides Sub OnHandleCreated(e As EventArgs)
+            MyBase.OnHandleCreated(e)
+
+            If _dialogOwnerScope Is Nothing Then
+                _dialogOwnerScope = SharedMethods.PushDialogOwner(Me)
+            End If
+        End Sub
+
+        Protected Overrides Sub OnHandleDestroyed(e As EventArgs)
+            Dim scope As System.IDisposable = _dialogOwnerScope
+            _dialogOwnerScope = Nothing
+
+            If scope IsNot Nothing Then
+                Try
+                    scope.Dispose()
+                Catch
+                End Try
+            End If
+
+            MyBase.OnHandleDestroyed(e)
         End Sub
 
         ''' <summary>Writes a diagnostic message to the debug output.</summary>

@@ -927,6 +927,18 @@ Namespace My
                 Me("SimpleMenuOverrideIsSet") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property License_AdminUserIdMappingJson() As String
+            Get
+                Return CType(Me("License_AdminUserIdMappingJson"),String)
+            End Get
+            Set
+                Me("License_AdminUserIdMappingJson") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

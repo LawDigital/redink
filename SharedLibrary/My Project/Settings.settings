@@ -224,5 +224,8 @@
     <Setting Name="SimpleMenuOverrideIsSet" Type="System.Boolean" Scope="User">
       <Value Profile="(Default)">False</Value>
     </Setting>
+    <Setting Name="License_AdminUserIdMappingJson" Type="System.String" Scope="User">
+      <Value Profile="(Default)" />
+    </Setting>
   </Settings>
 </SettingsFile>
