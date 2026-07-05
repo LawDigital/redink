@@ -60,6 +60,7 @@ Public Class DragDropForm
     Private _allowUseActiveDocument As Boolean = False
     Private _usedActiveDocument As Boolean = False
     Private _btnUseActiveDocument As Button = Nothing
+    Private _dialogOwnerScope As System.IDisposable = Nothing
 
     ' Layout constants
     Private Const LabelToButtonSpacing As Integer = 20
@@ -101,6 +102,28 @@ Public Class DragDropForm
             Return _usedActiveDocument
         End Get
     End Property
+
+    Protected Overrides Sub OnHandleCreated(e As System.EventArgs)
+        MyBase.OnHandleCreated(e)
+
+        If _dialogOwnerScope Is Nothing Then
+            _dialogOwnerScope = SharedLibrary.SharedLibrary.SharedMethods.PushDialogOwner(Me)
+        End If
+    End Sub
+
+    Protected Overrides Sub OnHandleDestroyed(e As System.EventArgs)
+        Dim scope As System.IDisposable = _dialogOwnerScope
+        _dialogOwnerScope = Nothing
+
+        If scope IsNot Nothing Then
+            Try
+                scope.Dispose()
+            Catch
+            End Try
+        End If
+
+        MyBase.OnHandleDestroyed(e)
+    End Sub
 
     ''' <summary>
     ''' Initializes the form with drag-and-drop enabled and optional custom label text.

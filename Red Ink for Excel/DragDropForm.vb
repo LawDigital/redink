@@ -38,6 +38,7 @@ Public Class DragDropForm
 
     Private _selectedFilePath As String = String.Empty
     Private _selectionMode As DragDropMode = DragDropMode.FileOnly
+    Private _dialogOwnerScope As System.IDisposable = Nothing
 
     ' Layout constants
     Private Const LabelToButtonSpacing As Integer = 20
@@ -69,6 +70,28 @@ Public Class DragDropForm
             Return _selectionMode
         End Get
     End Property
+
+    Protected Overrides Sub OnHandleCreated(e As System.EventArgs)
+        MyBase.OnHandleCreated(e)
+
+        If _dialogOwnerScope Is Nothing Then
+            _dialogOwnerScope = SharedMethods.PushDialogOwner(Me)
+        End If
+    End Sub
+
+    Protected Overrides Sub OnHandleDestroyed(e As System.EventArgs)
+        Dim scope As System.IDisposable = _dialogOwnerScope
+        _dialogOwnerScope = Nothing
+
+        If scope IsNot Nothing Then
+            Try
+                scope.Dispose()
+            Catch
+            End Try
+        End If
+
+        MyBase.OnHandleDestroyed(e)
+    End Sub
 
     ''' <summary>
     ''' Initializes the form with drag-and-drop enabled and optional custom label text.

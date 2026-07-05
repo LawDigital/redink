@@ -561,6 +561,7 @@
     <Compile Include="Code\CommonFeatures\QuickTranslateWidget.vb">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="Code\Core\Config\SharedMethods.License.Admin.vb" />
     <Compile Include="Code\Core\Config\SharedMethods.License.Core.vb" />
     <Compile Include="Code\Core\Config\SharedMethods.License.Counter.vb" />
     <Compile Include="Code\Core\Config\SharedMethods.License.Domain.vb" />

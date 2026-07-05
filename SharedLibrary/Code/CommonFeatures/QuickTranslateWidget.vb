@@ -65,6 +65,7 @@ Namespace SharedLibrary
 
         ' Track SystemEvents subscription to avoid duplicate handlers
         Private _isDisplaySettingsHooked As Boolean = False
+        Private _dialogOwnerScope As System.IDisposable = Nothing
 
         ' Win32 API for cue banner (placeholder text)
         Private Const EM_SETCUEBANNER As Integer = &H1501
@@ -456,12 +457,30 @@ Namespace SharedLibrary
         Protected Overrides Sub OnHandleCreated(e As EventArgs)
             MyBase.OnHandleCreated(e)
 
+            If _dialogOwnerScope Is Nothing Then
+                _dialogOwnerScope = SharedMethods.PushDialogOwner(Me)
+            End If
+
             SendMessage(txtSourceLanguage.Handle, EM_SETCUEBANNER, IntPtr.Zero, "(auto)")
 
             If Not _isDisplaySettingsHooked Then
                 AddHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
                 _isDisplaySettingsHooked = True
             End If
+        End Sub
+
+        Protected Overrides Sub OnHandleDestroyed(e As EventArgs)
+            Dim scope As System.IDisposable = _dialogOwnerScope
+            _dialogOwnerScope = Nothing
+
+            If scope IsNot Nothing Then
+                Try
+                    scope.Dispose()
+                Catch
+                End Try
+            End If
+
+            MyBase.OnHandleDestroyed(e)
         End Sub
 
         ''' <summary>
