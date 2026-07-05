@@ -305,6 +305,7 @@ Public Class frmAIChat
     ''' Prevents the chat input box from immediately stealing focus back.
     ''' </summary>
     Private _keepFocusOnDocumentAfterCommands As Boolean = False
+    Private _dialogOwnerScope As System.IDisposable = Nothing
 
     ' =========================================================================
     ' Private Fields - Model Configuration
@@ -649,6 +650,28 @@ Public Class frmAIChat
     ' =========================================================================
     ' Form Load Event
     ' =========================================================================
+
+    Protected Overrides Sub OnHandleCreated(e As System.EventArgs)
+        MyBase.OnHandleCreated(e)
+
+        If _dialogOwnerScope Is Nothing Then
+            _dialogOwnerScope = SharedMethods.PushDialogOwner(Me)
+        End If
+    End Sub
+
+    Protected Overrides Sub OnHandleDestroyed(e As System.EventArgs)
+        Dim scope As System.IDisposable = _dialogOwnerScope
+        _dialogOwnerScope = Nothing
+
+        If scope IsNot Nothing Then
+            Try
+                scope.Dispose()
+            Catch
+            End Try
+        End If
+
+        MyBase.OnHandleDestroyed(e)
+    End Sub
 
     ''' <summary>
     ''' Handles form initialization after all controls are created.

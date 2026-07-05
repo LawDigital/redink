@@ -45,6 +45,7 @@ Namespace Agents
         Private pnlButtons As FlowLayoutPanel
         Private outer As TableLayoutPanel
         Private chkAuthorMode As CheckBox
+        Private _dialogOwnerScope As System.IDisposable = Nothing
 
         Private Class Entry
             Public Property Display As String
@@ -175,6 +176,28 @@ Namespace Agents
                     SendMessage(Me.txtFilter.Handle, EM_SETCUEBANNER, CType(1, IntPtr), "Filter…")
                     UpdateButtons()
                 End Sub
+        End Sub
+
+        Protected Overrides Sub OnHandleCreated(e As System.EventArgs)
+            MyBase.OnHandleCreated(e)
+
+            If _dialogOwnerScope Is Nothing Then
+                _dialogOwnerScope = SharedLibrary.SharedMethods.PushDialogOwner(Me)
+            End If
+        End Sub
+
+        Protected Overrides Sub OnHandleDestroyed(e As System.EventArgs)
+            Dim scope As System.IDisposable = _dialogOwnerScope
+            _dialogOwnerScope = Nothing
+
+            If scope IsNot Nothing Then
+                Try
+                    scope.Dispose()
+                Catch
+                End Try
+            End If
+
+            MyBase.OnHandleDestroyed(e)
         End Sub
 
         Private Shared Sub ConfigureStandardButton(button As Button)

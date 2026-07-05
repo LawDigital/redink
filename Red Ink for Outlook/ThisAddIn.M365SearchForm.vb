@@ -132,6 +132,29 @@ Public Class M365SearchTestForm
         .InitialDelay = 400,
         .ReshowDelay = 150
     }
+    Private _dialogOwnerScope As System.IDisposable = Nothing
+
+    Protected Overrides Sub OnHandleCreated(e As System.EventArgs)
+        MyBase.OnHandleCreated(e)
+
+        If _dialogOwnerScope Is Nothing Then
+            _dialogOwnerScope = SharedMethods.PushDialogOwner(Me)
+        End If
+    End Sub
+
+    Protected Overrides Sub OnHandleDestroyed(e As System.EventArgs)
+        Dim scope As System.IDisposable = _dialogOwnerScope
+        _dialogOwnerScope = Nothing
+
+        If scope IsNot Nothing Then
+            Try
+                scope.Dispose()
+            Catch
+            End Try
+        End If
+
+        MyBase.OnHandleDestroyed(e)
+    End Sub
 
     Private Function GetAiHarvestMaxPerCall() As Integer
         Return CInt(Math.Max(1D, Math.Min(CDec(AISearch_MaxCandidateHits), numMax.Value)))

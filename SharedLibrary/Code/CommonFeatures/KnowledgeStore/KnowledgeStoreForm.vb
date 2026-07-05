@@ -44,6 +44,7 @@ Namespace SharedLibrary
 
         Private ReadOnly _context As ISharedContext
         Private _stores As New List(Of KnowledgeStoreCatalog.KnowledgeStoreDefinition)()
+        Private _dialogOwnerScope As System.IDisposable = Nothing
 
         ' ── Left panel: Store list ──
         Private ReadOnly _lstStores As New ListBox()
@@ -96,6 +97,28 @@ Namespace SharedLibrary
         End Sub
 
         Private _runningOperations As Integer = 0
+
+        Protected Overrides Sub OnHandleCreated(e As System.EventArgs)
+            MyBase.OnHandleCreated(e)
+
+            If _dialogOwnerScope Is Nothing Then
+                _dialogOwnerScope = PushDialogOwner(Me)
+            End If
+        End Sub
+
+        Protected Overrides Sub OnHandleDestroyed(e As System.EventArgs)
+            Dim scope As System.IDisposable = _dialogOwnerScope
+            _dialogOwnerScope = Nothing
+
+            If scope IsNot Nothing Then
+                Try
+                    scope.Dispose()
+                Catch
+                End Try
+            End If
+
+            MyBase.OnHandleDestroyed(e)
+        End Sub
 
 #Region "Form Initialization"
 

@@ -1515,12 +1515,16 @@ Namespace SharedLibrary
                 row.ApiResult = ""
                 row.DesiredOccurrences = Math.Max(1, row.DesiredOccurrences + 1)
 
-                If row.IsVerifiedActive OrElse row.VerificationState.Equals("Verified active", StringComparison.OrdinalIgnoreCase) Then
+                Dim rowRepresentsExistingRegistration As Boolean =
+                    row.IsVerifiedActive OrElse
+                    row.VerificationState.Equals("Verified active", StringComparison.OrdinalIgnoreCase) OrElse
+                    row.SourceKind.Equals("Parsed", StringComparison.OrdinalIgnoreCase) OrElse
+                    row.SourceType.IndexOf("Parsed backend", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+                    Not String.IsNullOrWhiteSpace(row.ParsedActivationDate)
+
+                If rowRepresentsExistingRegistration Then
                     row.DesiredState = "DesiredInactive"
                     row.PlannedAction = "Pending deactivation"
-                ElseIf row.DesiredState.Equals("DesiredInactive", StringComparison.OrdinalIgnoreCase) Then
-                    row.DesiredState = "DesiredActive"
-                    row.PlannedAction = "Pending activation"
                 Else
                     row.DesiredState = "DesiredActive"
                     row.PlannedAction = "Pending activation"
@@ -2561,13 +2565,24 @@ Namespace SharedLibrary
                     End Sub
 
                 Dim ownerWnd As System.Windows.Forms.IWin32Window = ResolveDialogOwner()
-                Dim dialogResult As System.Windows.Forms.DialogResult =
-                    If(ownerWnd IsNot Nothing, form.ShowDialog(ownerWnd), form.ShowDialog())
+                Dim ownerScope As System.IDisposable = Nothing
 
-                If dialogResult = System.Windows.Forms.DialogResult.OK Then
-                    config = workingCopy
-                    Return True
-                End If
+                Try
+                    ownerScope = PushDialogOwner(form)
+
+                    If ownerWnd IsNot Nothing Then
+                        form.ShowDialog(ownerWnd)
+                    Else
+                        form.ShowDialog()
+                    End If
+                Finally
+                    If ownerScope IsNot Nothing Then
+                        Try
+                            ownerScope.Dispose()
+                        Catch
+                        End Try
+                    End If
+                End Try
 
                 Return False
             End Using

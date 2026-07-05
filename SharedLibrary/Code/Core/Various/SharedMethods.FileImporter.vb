@@ -1405,11 +1405,24 @@ Namespace SharedLibrary
                     localForm.Opacity = 1
 
                     Dim owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
-                    If owner IsNot Nothing Then
-                        localForm.ShowDialog(owner)
-                    Else
-                        localForm.ShowDialog()
-                    End If
+                    Dim ownerScope As System.IDisposable = Nothing
+
+                    Try
+                        ownerScope = SharedMethods.PushDialogOwner(localForm)
+
+                        If owner IsNot Nothing Then
+                            localForm.ShowDialog(owner)
+                        Else
+                            localForm.ShowDialog()
+                        End If
+                    Finally
+                        If ownerScope IsNot Nothing Then
+                            Try
+                                ownerScope.Dispose()
+                            Catch
+                            End Try
+                        End If
+                    End Try
 
                     refreshTimer.Dispose()
 
