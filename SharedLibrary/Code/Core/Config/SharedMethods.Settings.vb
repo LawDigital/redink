@@ -1989,6 +1989,7 @@ Namespace SharedLibrary
                     {"SP_SwitchParty_Document", context.SP_SwitchParty_Document},
                     {"SP_Anonymize_Document", context.SP_Anonymize_Document},
                     {"SP_Rename", context.SP_Rename},
+                    {"SP_Regex", context.SP_Regex},
                     {"SP_RemoveClutter", context.SP_RemoveClutter},
                     {"SP_Redact", context.SP_Redact},
                     {"SP_CheckforII", context.SP_CheckforII},
@@ -2269,6 +2270,7 @@ Namespace SharedLibrary
                 {"SP_SwitchParty_Document", Default_SP_SwitchParty_Document},
                 {"SP_Anonymize_Document", Default_SP_Anonymize_Document},
                 {"SP_Rename", Default_SP_Rename},
+                {"SP_Regex", Default_SP_Regex},
                 {"SP_RemoveClutter", Default_SP_RemoveClutter},
                 {"SP_Redact", Default_SP_Redact},
                 {"SP_CheckforII", Default_SP_CheckforII},
@@ -3489,6 +3491,7 @@ Namespace SharedLibrary
             variableValues.Add("SP_SwitchParty_Document", context.SP_SwitchParty_Document)
             variableValues.Add("SP_Anonymize_Document", context.SP_Anonymize_Document)
             variableValues.Add("SP_Rename", context.SP_Rename)
+            variableValues.Add("SP_Regex", context.SP_Regex)
             variableValues.Add("SP_RemoveClutter", context.SP_RemoveClutter)
             variableValues.Add("SP_Redact", context.SP_Redact)
             variableValues.Add("SP_CheckforII", context.SP_CheckforII)
@@ -3692,6 +3695,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_SwitchParty_Document") Then context.SP_SwitchParty_Document = CStr(updatedValues("SP_SwitchParty_Document"))
                 If updatedValues.ContainsKey("SP_Anonymize_Document") Then context.SP_Anonymize_Document = CStr(updatedValues("SP_Anonymize_Document"))
                 If updatedValues.ContainsKey("SP_Rename") Then context.SP_Rename = CStr(updatedValues("SP_Rename"))
+                If updatedValues.ContainsKey("SP_Regex") Then context.SP_Regex = CStr(updatedValues("SP_Regex"))
                 If updatedValues.ContainsKey("SP_RemoveClutter") Then context.SP_RemoveClutter = CStr(updatedValues("SP_RemoveClutter"))
                 If updatedValues.ContainsKey("SP_Redact") Then context.SP_Redact = CStr(updatedValues("SP_Redact"))
                 If updatedValues.ContainsKey("SP_CheckforII") Then context.SP_CheckforII = CStr(updatedValues("SP_CheckforII"))

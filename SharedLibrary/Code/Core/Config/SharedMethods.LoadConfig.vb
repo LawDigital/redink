@@ -185,6 +185,7 @@ Namespace SharedLibrary
                 context.SP_SwitchParty_Document = If(configDict.ContainsKey("SP_SwitchParty_Document"), configDict("SP_SwitchParty_Document"), Default_SP_SwitchParty_Document)
                 context.SP_Anonymize_Document = If(configDict.ContainsKey("SP_Anonymize_Document"), configDict("SP_Anonymize_Document"), Default_SP_Anonymize_Document)
                 context.SP_Rename = If(configDict.ContainsKey("SP_Rename"), configDict("SP_Rename"), Default_SP_Rename)
+                context.SP_Regex = If(configDict.ContainsKey("SP_Regex"), configDict("SP_Regex"), Default_SP_Regex)
                 context.SP_RemoveClutter = If(configDict.ContainsKey("SP_RemoveClutter"), configDict("SP_RemoveClutter"), Default_SP_RemoveClutter)
                 context.SP_Redact = If(configDict.ContainsKey("SP_Redact"), configDict("SP_Redact"), Default_SP_Redact)
                 context.SP_CheckforII = If(configDict.ContainsKey("SP_CheckforII"), configDict("SP_CheckforII"), Default_SP_CheckforII)
