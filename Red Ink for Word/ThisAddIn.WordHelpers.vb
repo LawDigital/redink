@@ -3269,123 +3269,688 @@ Partial Public Class ThisAddIn
     End Sub
 
     ''' <summary>Cached regex pattern from previous RegexSearchReplace invocation.</summary>
-    Private Shared LastRegexPattern As String = String.Empty
+    Private Shared LastRegexPattern As System.String = System.String.Empty
 
     ''' <summary>Cached regex options from previous RegexSearchReplace invocation.</summary>
-    Private Shared LastRegexOptions As String = String.Empty
+    Private Shared LastRegexOptions As System.String = System.String.Empty
 
     ''' <summary>Cached replacement text from previous RegexSearchReplace invocation.</summary>
-    Private Shared LastRegexReplace As String = String.Empty
+    Private Shared LastRegexReplace As System.String = System.String.Empty
+
+    Private NotInheritable Class RegexLlmSuggestion
+        Public Property Patterns As System.Collections.Generic.List(Of System.String)
+        Public Property Replacements As System.Collections.Generic.List(Of System.String)
+        Public Property Options As System.String
+        Public Property Feedback As System.String
+        Public Property Warnings As System.Collections.Generic.List(Of System.String)
+        Public Property Assumptions As System.Collections.Generic.List(Of System.String)
+        Public Property Confidence As System.String
+        Public Property RequiresReview As System.Boolean
+        Public Property UsedFallback As System.Boolean
+
+        Public Sub New()
+            Patterns = New System.Collections.Generic.List(Of System.String)()
+            Replacements = Nothing
+            Options = System.String.Empty
+            Feedback = System.String.Empty
+            Warnings = New System.Collections.Generic.List(Of System.String)()
+            Assumptions = New System.Collections.Generic.List(Of System.String)()
+            Confidence = "low"
+            RequiresReview = False
+            UsedFallback = False
+        End Sub
+    End Class
+
+    Private NotInheritable Class RegexPreviewStep
+        Public Property Pattern As System.String
+        Public Property Replacement As System.String
+        Public Property MatchCount As System.Int32
+        Public Property ExampleMatches As System.Collections.Generic.List(Of System.String)
+
+        Public Sub New()
+            ExampleMatches = New System.Collections.Generic.List(Of System.String)()
+        End Sub
+    End Class
+
+    Private NotInheritable Class RegexPreviewInfo
+        Public Property Steps As System.Collections.Generic.List(Of RegexPreviewStep)
+        Public Property TotalMatches As System.Int32
+        Public Property FirstSearchStepIndex As System.Int32
+        Public Property FirstSearchMatchIndex As System.Int32
+        Public Property FirstSearchMatchLength As System.Int32
+
+        Public Sub New()
+            Steps = New System.Collections.Generic.List(Of RegexPreviewStep)()
+            FirstSearchStepIndex = -1
+            FirstSearchMatchIndex = -1
+            FirstSearchMatchLength = 0
+        End Sub
+    End Class
 
     ''' <summary>
-    ''' Performs multi-pattern regex search and replace operations on the current selection or entire document.
-    ''' Supports persistent pattern memory and validation before execution.
+    ''' Performs multi-pattern regex search and replace operations on the current selection or the entire document.
+    ''' Manual regex entry remains supported. An empty confirmed pattern input starts the natural-language workflow.
     ''' </summary>
-    ''' <remarks>
-    ''' Workflow: Prompts for patterns (one per line) → prompts for options (i/m/s/c/r/e flags) →
-    ''' prompts for replacements (one per line, matching pattern count) → validates all patterns →
-    ''' performs replacements or highlights first match if no replacement provided.
-    ''' Previous patterns/options/replacements are cached in static fields (LastRegexPattern, LastRegexOptions, LastRegexReplace).
-    ''' Aborts without changes if pattern count mismatches replacement count or any pattern is invalid.
-    ''' </remarks>
-    Public Sub RegexSearchReplace()
-        Dim sel As Word.Range = Globals.ThisAddIn.Application.Selection.Range
-        Dim docRef As String = "in the selected text"
+    Public Async Sub RegexSearchReplace()
+        Try
+            Dim app As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
+            Dim targetRange As Microsoft.Office.Interop.Word.Range = app.Selection.Range
+            Dim scopeForLlm As System.String = "selected text"
+            Dim scopeDisplay As System.String = "selected text"
 
-        ' Ensure a selection is made
-        If sel Is Nothing OrElse String.IsNullOrWhiteSpace(sel.Text) Then
-            Globals.ThisAddIn.Application.ActiveDocument.Content.Select()
-            sel = Globals.ThisAddIn.Application.Selection.Range
-            docRef = "in the document"
-        End If
+            If targetRange Is Nothing OrElse System.String.IsNullOrWhiteSpace(targetRange.Text) Then
+                app.ActiveDocument.Content.Select()
+                targetRange = app.Selection.Range
+                scopeForLlm = "entire document"
+                scopeDisplay = "entire document"
+            End If
 
-        ' Step 1: Get regex patterns
-        Dim regexPattern As String = ShowCustomInputBox("Step 1: Enter your Regex pattern(s), one per line (more info about Regex: vischerlnk.com/regexinfo):", "Regex Search & Replace", False, LastRegexPattern)?.Trim()
-        If String.IsNullOrEmpty(regexPattern) Then Return
+            Dim llmSuggestion As RegexLlmSuggestion = Nothing
+            Dim patternPrompt As System.String =
+                "Step 1: Enter your regex pattern(s), one per line (or leave empty to let the AI generate a regex pattern):"
 
-        ' Step 2: Get regex options
-        Dim optionsInput As String = ShowCustomInputBox("Enter regex option(s) (i for IgnoreCase, m for Multiline, s for Singleline, c for Compiled, r for RightToLeft, e for ExplicitCapture):", "Regex Search & Replace", True, LastRegexOptions)
-
-        Dim regexOptions As RegexOptions = RegexOptions.None
-
-        If Not String.IsNullOrEmpty(optionsInput) Then
-            ' Add specific options based on user input
-            If optionsInput.Contains("i") Then regexOptions = regexOptions Or RegexOptions.IgnoreCase
-            If optionsInput.Contains("m") Then regexOptions = regexOptions Or RegexOptions.Multiline
-            If optionsInput.Contains("s") Then regexOptions = regexOptions Or RegexOptions.Singleline
-            If optionsInput.Contains("c") Then regexOptions = regexOptions Or RegexOptions.Compiled
-            If optionsInput.Contains("r") Then regexOptions = regexOptions Or RegexOptions.RightToLeft
-            If optionsInput.Contains("e") Then regexOptions = regexOptions Or RegexOptions.ExplicitCapture
-        End If
-
-        ' Step 3: Get replacement text
-        Dim replacementText As String = ShowCustomInputBox("Step 2: Enter your replacement text(s), one on each line, matching to your pattern(s) (leave empty or cancel to only search for the first hit):", "Regex Search & Replace", False, LastRegexReplace)
-
-        ' Update the last-used regex pattern and options
-        LastRegexPattern = regexPattern
-        LastRegexOptions = optionsInput
-        LastRegexReplace = replacementText
-
-        ' Split patterns and replacements into lines
-        Dim patterns() As String = regexPattern.Split(New String() {Environment.NewLine}, StringSplitOptions.RemoveEmptyEntries)
-        Dim replacements() As String = If(Not String.IsNullOrEmpty(replacementText), replacementText.Split(New String() {Environment.NewLine}, StringSplitOptions.None), Nothing)
-
-        ' Check if patterns and replacements match
-        If replacements IsNot Nothing AndAlso patterns.Length <> replacements.Length Then
-            ShowCustomMessageBox("The number of regex patterns does not match the number of replacement lines. Aborting without any replacements done.")
-            Return
-        End If
-
-        ' Validate all regex patterns first
-        For Each pattern As String In patterns
-            Try
-                Dim regexTest As New Regex(pattern, regexOptions)
-            Catch ex As ArgumentException
-                ShowCustomMessageBox($"Your regex pattern '{pattern}' is invalid ({ex.Message}). Aborting without any replacements done.")
+            Dim patternInput As System.String = ShowCustomInputBox(patternPrompt, "Regex Search & Replace", False, LastRegexPattern)
+            If patternInput = "ESC" Then
                 Return
-            End Try
-        Next
+            End If
 
-        ' Perform replacements after validation
-        Dim totalReplacements As Integer = 0
+            If System.String.IsNullOrWhiteSpace(patternInput) Then
+                llmSuggestion = Await GetRegexSuggestionForWord(targetRange, scopeForLlm, scopeDisplay)
+                If llmSuggestion Is Nothing Then
+                    Return
+                End If
 
-        For i As Integer = 0 To patterns.Length - 1
-            Dim pattern As String = patterns(i)
-            Dim replacement As String = If(replacements IsNot Nothing, replacements(i), Nothing)
+                Dim suggestedPatterns As System.String = System.String.Join(System.Environment.NewLine, llmSuggestion.Patterns.ToArray())
+                patternInput = ShowCustomInputBox(patternPrompt, "Regex Search & Replace", False, suggestedPatterns)
+                If patternInput = "ESC" Then
+                    Return
+                End If
+                If System.String.IsNullOrWhiteSpace(patternInput) Then
+                    ShowCustomMessageBox("No regex pattern was confirmed. Aborting without changes.", "Regex Search & Replace")
+                    Return
+                End If
+            End If
 
-            Dim regex As New Regex(pattern, regexOptions)
+            Dim regexPattern As System.String = patternInput.Trim()
+            Dim defaultOptions As System.String = If(llmSuggestion IsNot Nothing, llmSuggestion.Options, LastRegexOptions)
+            Dim defaultReplacement As System.String =
+                If(llmSuggestion IsNot Nothing,
+                   If(llmSuggestion.Replacements IsNot Nothing,
+                      System.String.Join(System.Environment.NewLine, llmSuggestion.Replacements.ToArray()),
+                      System.String.Empty),
+                   LastRegexReplace)
 
-            If Not String.IsNullOrEmpty(replacement) Then
-                ' Perform replacement
-                Dim replacementCount As Integer = 0
-                sel.Text = regex.Replace(sel.Text, Function(match)
-                                                       replacementCount += 1
-                                                       Return replacement
-                                                   End Function)
-                totalReplacements += replacementCount
+            Dim optionsInputRaw As System.String =
+                ShowCustomInputBox(
+                    "Step 2: Enter regex option(s) (i for IgnoreCase, m for Multiline, s for Singleline, c for Compiled, r for RightToLeft, e for ExplicitCapture):",
+                    "Regex Search & Replace",
+                    True,
+                    defaultOptions)
+
+            Dim optionsInput As System.String = NormalizeRegexOptionFlags(optionsInputRaw)
+            Dim regexOptions As System.Text.RegularExpressions.RegexOptions = ParseRegexOptions(optionsInput)
+
+            Dim replacementPrompt As System.String =
+                ShowCustomInputBox(
+                    "Step 3: Enter your replacement text(s), one per line, matching your pattern(s)." &
+                    System.Environment.NewLine &
+                    "Cancel = search only; OK with an empty replacement = delete matches.",
+                    "Regex Search & Replace",
+                    False,
+                    defaultReplacement)
+
+            Dim replacementText As System.String = Nothing
+            Dim shouldCacheReplacement As System.Boolean = False
+
+            If replacementPrompt <> "ESC" Then
+                replacementText = If(replacementPrompt, System.String.Empty)
+                shouldCacheReplacement = True
+            End If
+
+            Dim patterns() As System.String =
+                regexPattern.Split(New System.String() {System.Environment.NewLine}, System.StringSplitOptions.RemoveEmptyEntries)
+
+            If patterns.Length = 0 Then
+                ShowCustomMessageBox("No valid regex patterns were entered. Aborting without changes.", "Regex Search & Replace")
+                Return
+            End If
+
+            Dim replacements() As System.String =
+                If(replacementText IsNot Nothing,
+                   replacementText.Split(New System.String() {System.Environment.NewLine}, System.StringSplitOptions.None),
+                   Nothing)
+
+            If replacements IsNot Nothing AndAlso patterns.Length <> replacements.Length Then
+                ShowCustomMessageBox(
+                    "The number of regex patterns does not match the number of replacement lines. Aborting without changes.",
+                    "Regex Search & Replace")
+                Return
+            End If
+
+            Dim conflictingStepsMessage As System.String =
+                SharedLibrary.SharedLibrary.SharedMethods.GetConflictingRegexStepMessage(patterns, replacements)
+
+            If Not System.String.IsNullOrWhiteSpace(conflictingStepsMessage) Then
+                ShowCustomMessageBox(conflictingStepsMessage, "Regex Search & Replace")
+                Return
+            End If
+
+            Dim regexes As New System.Collections.Generic.List(Of System.Text.RegularExpressions.Regex)()
+
+            For Each pattern As System.String In patterns
+                Try
+                    regexes.Add(
+                        New System.Text.RegularExpressions.Regex(
+                            pattern,
+                            regexOptions,
+                            System.TimeSpan.FromSeconds(2)))
+                Catch ex As System.ArgumentException
+                    ShowCustomMessageBox(
+                        "The regex pattern is invalid:" &
+                        System.Environment.NewLine &
+                        pattern &
+                        System.Environment.NewLine &
+                        System.Environment.NewLine &
+                        ex.Message &
+                        System.Environment.NewLine &
+                        System.Environment.NewLine &
+                        "Aborting without changes.",
+                        "Regex Search & Replace")
+                    Return
+                End Try
+            Next
+
+            Dim preview As RegexPreviewInfo = BuildRegexPreviewForText(targetRange.Text, regexes, replacements, 3)
+
+            If preview.TotalMatches = 0 Then
+                ShowCustomMessageBox(
+                    "No matches were found in the current scope for the current regex pattern(s). Aborting without changes.",
+                    "Regex Search & Replace")
+                Return
+            End If
+
+            LastRegexPattern = regexPattern
+            LastRegexOptions = optionsInput
+            If shouldCacheReplacement Then
+                LastRegexReplace = replacementText
+            End If
+
+            Dim previewMessage As System.String =
+                BuildRegexPreviewMessage(scopeDisplay, optionsInput, preview, replacements, llmSuggestion, True)
+
+            If ShowCustomYesNoBox(
+                previewMessage,
+                If(replacements Is Nothing, "Search", "Replace"),
+                "Cancel",
+                "Regex Search & Replace") <> 1 Then
+                ShowCustomMessageBox("Operation cancelled. No changes were made.", "Regex Search & Replace")
+                Return
+            End If
+
+            If replacements Is Nothing Then
+                For i As System.Int32 = 0 To regexes.Count - 1
+                    Dim firstMatch As System.Text.RegularExpressions.Match = regexes(i).Match(targetRange.Text)
+                    If firstMatch.Success Then
+                        Dim matchRange As Microsoft.Office.Interop.Word.Range = targetRange.Duplicate
+                        matchRange.Start = targetRange.Start + firstMatch.Index
+                        matchRange.End = targetRange.Start + firstMatch.Index + firstMatch.Length
+                        matchRange.Select()
+                        app.ActiveWindow.ScrollIntoView(matchRange, True)
+
+                        ShowCustomMessageBox(
+                            "The search completed." &
+                            System.Environment.NewLine &
+                            "The first match was selected and scrolled into view.",
+                            "Regex Search & Replace")
+                        Return
+                    End If
+                Next
+
+                ShowCustomMessageBox(
+                    "No match was found in the " & scopeDisplay & ".",
+                    "Regex Search & Replace")
+                Return
+            End If
+
+            Dim totalReplacements As System.Int32 = 0
+
+            For i As System.Int32 = 0 To regexes.Count - 1
+                Dim baseRange As Microsoft.Office.Interop.Word.Range = targetRange.Duplicate
+                Dim currentText As System.String = baseRange.Text
+                Dim matches As System.Text.RegularExpressions.MatchCollection = regexes(i).Matches(currentText)
+                Dim replacement As System.String = replacements(i)
+
+                For matchIndex As System.Int32 = matches.Count - 1 To 0 Step -1
+                    Dim match As System.Text.RegularExpressions.Match = matches(matchIndex)
+                    Dim matchRange As Microsoft.Office.Interop.Word.Range = baseRange.Duplicate
+                    matchRange.Start = baseRange.Start + match.Index
+                    matchRange.End = baseRange.Start + match.Index + match.Length
+                    matchRange.Text = match.Result(replacement)
+                    totalReplacements += 1
+                Next
+            Next
+
+            Dim resultMessage As New System.Text.StringBuilder()
+            resultMessage.AppendLine(totalReplacements.ToString() & " replacement(s) were made in the " & scopeDisplay & ".")
+            resultMessage.AppendLine()
+            resultMessage.AppendLine("The replacements were applied in Word range-by-range from the end toward the beginning so that formatting outside the matched ranges is preserved more reliably.")
+            resultMessage.AppendLine("Formatting inside replaced content can still be limited for complex Word structures such as fields, content controls, tables, bookmarks, or similar elements.")
+
+            If llmSuggestion IsNot Nothing AndAlso (llmSuggestion.Warnings.Count > 0 OrElse llmSuggestion.Assumptions.Count > 0) Then
+                resultMessage.AppendLine()
+                resultMessage.AppendLine("The AI warnings and assumptions shown in the preview still apply.")
+            End If
+
+            ShowCustomMessageBox(resultMessage.ToString(), "Regex Search & Replace")
+
+        Catch ex As System.Text.RegularExpressions.RegexMatchTimeoutException
+            ShowCustomMessageBox(
+                "The regex operation exceeded the time limit. No further changes were made." &
+                System.Environment.NewLine &
+                ex.Message,
+                "Regex Search & Replace")
+        Catch ex As System.Exception
+            ShowCustomMessageBox(
+                "Error in RegexSearchReplace:" &
+                System.Environment.NewLine &
+                ex.Message,
+                "Regex Search & Replace")
+        End Try
+    End Sub
+
+    Private Async Function GetRegexSuggestionForWord(targetRange As Microsoft.Office.Interop.Word.Range,
+                                                     scopeForLlm As System.String,
+                                                     scopeDisplay As System.String) As System.Threading.Tasks.Task(Of RegexLlmSuggestion)
+        Dim nlInstruction As System.String =
+            ShowCustomInputBox(
+                "Please describe, in multiple lines, what you want to search and replace.",
+                "Regex Search & Replace",
+                False,
+                System.String.Empty)
+
+        If nlInstruction = "ESC" Then
+            Return Nothing
+        End If
+
+        If System.String.IsNullOrWhiteSpace(nlInstruction) Then
+            ShowCustomMessageBox("No instruction was entered. Aborting without changes.", "Regex Search & Replace")
+            Return Nothing
+        End If
+
+        Dim sampleWasTruncated As System.Boolean = False
+        Dim sampleText As System.String = BuildSafeTextSample(targetRange.Text, 6000, sampleWasTruncated)
+
+        Dim suggestion As RegexLlmSuggestion =
+            Await RequestRegexSuggestionFromLlm(
+                nlInstruction,
+                "Word",
+                scopeForLlm,
+                sampleText,
+                sampleWasTruncated,
+                LastRegexPattern,
+                LastRegexOptions,
+                LastRegexReplace)
+
+        If suggestion Is Nothing Then
+            Return Nothing
+        End If
+
+        If ShowCustomYesNoBox(
+            BuildRegexLlmFeedbackMessage("Word", scopeDisplay, suggestion),
+            "Continue",
+            "Abort",
+            "Regex Search & Replace") <> 1 Then
+            Return Nothing
+        End If
+
+        Return suggestion
+    End Function
+
+    Private Async Function RequestRegexSuggestionFromLlm(nlInstruction As System.String,
+                                                         hostApplicationName As System.String,
+                                                         scopeForLlm As System.String,
+                                                         sampleText As System.String,
+                                                         sampleWasTruncated As System.Boolean,
+                                                         lastPattern As System.String,
+                                                         lastOptions As System.String,
+                                                         lastReplace As System.String) As System.Threading.Tasks.Task(Of RegexLlmSuggestion)
+        Try
+            Dim prompt As System.String =
+                SharedLibrary.SharedLibrary.SharedMethods.BuildRegexLlmRequestPrompt(
+                    nlInstruction,
+                    hostApplicationName,
+                    scopeForLlm,
+                    sampleText,
+                    sampleWasTruncated,
+                    lastPattern,
+                    lastOptions,
+                    lastReplace,
+                    "This feature operates on text content only. It does not support matching or filtering by bold, italic, underline, highlight, font color, styles, fields, comments, tracked formatting, or other non-text properties.")
+
+            Dim llmResponse As System.String =
+                Await LLM(SP_Regex, prompt, "", "", 0, False, False)
+
+            llmResponse = SharedLibrary.SharedLibrary.WebAgentInterpreter.SanitizeLlmResult(llmResponse)
+
+            Dim suggestion As RegexLlmSuggestion = Nothing
+            Dim parseError As System.String = System.String.Empty
+
+            If Not TryParseRegexSuggestion(llmResponse, suggestion, parseError) Then
+                ShowCustomMessageBox(
+                    "The AI response could not be parsed reliably as JSON for regex suggestions." &
+                    System.Environment.NewLine &
+                    System.Environment.NewLine &
+                    parseError,
+                    "Regex Search & Replace")
+                Return Nothing
+            End If
+
+            If suggestion.Patterns.Count = 0 Then
+                ShowCustomMessageBox("The AI did not return any usable regex patterns. Aborting without changes.", "Regex Search & Replace")
+                Return Nothing
+            End If
+
+            If suggestion.Patterns.Count > 5 Then
+                suggestion.Warnings.Add("The AI suggestion contains more than 5 steps. Please review it especially carefully.")
+                suggestion.RequiresReview = True
+            End If
+
+            If suggestion.Replacements IsNot Nothing AndAlso suggestion.Replacements.Count <> suggestion.Patterns.Count Then
+                suggestion.Warnings.Add("The AI returned a different number of replacement lines. The replacement field was not prefilled.")
+                suggestion.Replacements = Nothing
+                suggestion.RequiresReview = True
+            End If
+
+            Return suggestion
+
+        Catch ex As System.Exception
+            ShowCustomMessageBox(
+                "The AI suggestion could not be created." &
+                System.Environment.NewLine &
+                ex.Message,
+                "Regex Search & Replace")
+            Return Nothing
+        End Try
+    End Function
+
+    Private Function TryParseRegexSuggestion(rawResponse As System.String,
+                                             ByRef suggestion As RegexLlmSuggestion,
+                                             ByRef errorMessage As System.String) As System.Boolean
+        suggestion = Nothing
+        errorMessage = System.String.Empty
+
+        If System.String.IsNullOrWhiteSpace(rawResponse) Then
+            errorMessage = "Empty AI response."
+            Return False
+        End If
+
+        Dim jsonText As System.String = rawResponse.Trim()
+        Dim usedFallback As System.Boolean = False
+        Dim parsedObject As Newtonsoft.Json.Linq.JObject = Nothing
+
+        Try
+            parsedObject = Newtonsoft.Json.Linq.JObject.Parse(jsonText)
+        Catch
+            Dim firstBrace As System.Int32 = jsonText.IndexOf("{"c)
+            Dim lastBrace As System.Int32 = jsonText.LastIndexOf("}"c)
+
+            If firstBrace >= 0 AndAlso lastBrace > firstBrace Then
+                Dim candidate As System.String = jsonText.Substring(firstBrace, lastBrace - firstBrace + 1)
+                Try
+                    parsedObject = Newtonsoft.Json.Linq.JObject.Parse(candidate)
+                    usedFallback = True
+                Catch ex As System.Exception
+                    errorMessage = ex.Message
+                    Return False
+                End Try
             Else
-                ' Perform search only
-                Dim match As Match = regex.Match(sel.Text)
-                If match.Success Then
-                    ' Highlight the first match
-                    sel.Start = sel.Start + match.Index
-                    sel.End = sel.Start + match.Length
-                    Globals.ThisAddIn.Application.Selection.Select()
-                    Globals.ThisAddIn.Application.ActiveWindow.ScrollIntoView(sel, True)
-                    Return
-                Else
-                    ShowCustomMessageBox($"No matches found for '{pattern}' {docRef}.")
-                    Return
+                errorMessage = "No JSON object was found."
+                Return False
+            End If
+        End Try
+
+        Dim parsed As New RegexLlmSuggestion()
+        parsed.UsedFallback = usedFallback
+
+        Dim patternsToken As Newtonsoft.Json.Linq.JToken = parsedObject("patterns")
+        If patternsToken Is Nothing OrElse patternsToken.Type <> Newtonsoft.Json.Linq.JTokenType.Array Then
+            errorMessage = "The 'patterns' field is missing or is not an array."
+            Return False
+        End If
+
+        For Each item As Newtonsoft.Json.Linq.JToken In patternsToken
+            If item IsNot Nothing AndAlso item.Type = Newtonsoft.Json.Linq.JTokenType.String Then
+                Dim value As System.String = item.ToString()
+                If Not System.String.IsNullOrWhiteSpace(value) Then
+                    parsed.Patterns.Add(value)
                 End If
             End If
         Next
 
-        If replacements IsNot Nothing Then
-            ShowCustomMessageBox($"{totalReplacements} replacement(s) made {docRef}.")
-        Else
-            ShowCustomMessageBox("Search complete. No replacements were made.")
+        If parsed.Patterns.Count = 0 Then
+            errorMessage = "The 'patterns' field does not contain any usable patterns."
+            Return False
         End If
-    End Sub
+
+        Dim replacementsToken As Newtonsoft.Json.Linq.JToken = parsedObject("replacements")
+        If replacementsToken Is Nothing OrElse replacementsToken.Type = Newtonsoft.Json.Linq.JTokenType.Null Then
+            parsed.Replacements = Nothing
+        ElseIf replacementsToken.Type = Newtonsoft.Json.Linq.JTokenType.Array Then
+            parsed.Replacements = New System.Collections.Generic.List(Of System.String)()
+            For Each item As Newtonsoft.Json.Linq.JToken In replacementsToken
+                If item Is Nothing OrElse item.Type = Newtonsoft.Json.Linq.JTokenType.Null Then
+                    parsed.Replacements.Add(System.String.Empty)
+                Else
+                    parsed.Replacements.Add(item.ToString())
+                End If
+            Next
+        Else
+            errorMessage = "The 'replacements' field is neither null nor an array."
+            Return False
+        End If
+
+        parsed.Options = NormalizeRegexOptionFlags(parsedObject.Value(Of System.String)("options"))
+        parsed.Feedback = If(parsedObject.Value(Of System.String)("feedback"), System.String.Empty)
+        parsed.Confidence = If(parsedObject.Value(Of System.String)("confidence"), "low").Trim().ToLowerInvariant()
+        parsed.RequiresReview = SharedLibrary.SharedLibrary.SharedMethods.GetJsonBooleanValue(parsedObject("requiresReview"), True)
+
+        Dim warningsToken As Newtonsoft.Json.Linq.JToken = parsedObject("warnings")
+        If warningsToken IsNot Nothing AndAlso warningsToken.Type = Newtonsoft.Json.Linq.JTokenType.Array Then
+            For Each item As Newtonsoft.Json.Linq.JToken In warningsToken
+                If item IsNot Nothing AndAlso item.Type = Newtonsoft.Json.Linq.JTokenType.String Then
+                    parsed.Warnings.Add(item.ToString())
+                End If
+            Next
+        End If
+
+        Dim assumptionsToken As Newtonsoft.Json.Linq.JToken = parsedObject("assumptions")
+        If assumptionsToken IsNot Nothing AndAlso assumptionsToken.Type = Newtonsoft.Json.Linq.JTokenType.Array Then
+            For Each item As Newtonsoft.Json.Linq.JToken In assumptionsToken
+                If item IsNot Nothing AndAlso item.Type = Newtonsoft.Json.Linq.JTokenType.String Then
+                    parsed.Assumptions.Add(item.ToString())
+                End If
+            Next
+        End If
+
+        If parsed.UsedFallback Then
+            parsed.Warnings.Add("The AI response had to be reduced to a JSON object first. Please review the result manually.")
+            parsed.RequiresReview = True
+        End If
+
+        suggestion = parsed
+        Return True
+    End Function
+
+    Private Function BuildRegexPreviewForText(sourceText As System.String,
+                                              regexes As System.Collections.Generic.List(Of System.Text.RegularExpressions.Regex),
+                                              replacements() As System.String,
+                                              maxExamplesPerStep As System.Int32) As RegexPreviewInfo
+        Dim preview As New RegexPreviewInfo()
+        Dim workingText As System.String = If(sourceText, System.String.Empty)
+
+        For i As System.Int32 = 0 To regexes.Count - 1
+            Dim stepInfo As New RegexPreviewStep()
+            stepInfo.Pattern = regexes(i).ToString()
+            stepInfo.Replacement = If(replacements IsNot Nothing, replacements(i), Nothing)
+
+            Dim matches As System.Text.RegularExpressions.MatchCollection = regexes(i).Matches(workingText)
+            stepInfo.MatchCount = matches.Count
+            preview.TotalMatches += matches.Count
+
+            Dim exampleCount As System.Int32 = System.Math.Min(matches.Count, maxExamplesPerStep)
+            For exampleIndex As System.Int32 = 0 To exampleCount - 1
+                stepInfo.ExampleMatches.Add(PreviewDisplayText(matches(exampleIndex).Value, 120))
+            Next
+
+            If replacements Is Nothing Then
+                If preview.FirstSearchStepIndex < 0 AndAlso matches.Count > 0 Then
+                    preview.FirstSearchStepIndex = i
+                    preview.FirstSearchMatchIndex = matches(0).Index
+                    preview.FirstSearchMatchLength = matches(0).Length
+                End If
+            Else
+                Dim localReplacement As System.String = replacements(i)
+                workingText = regexes(i).Replace(
+                    workingText,
+                    Function(match As System.Text.RegularExpressions.Match) match.Result(localReplacement))
+            End If
+
+            preview.Steps.Add(stepInfo)
+        Next
+
+        Return preview
+    End Function
+
+    Private Function BuildRegexPreviewMessage(scopeDisplay As System.String,
+                                              optionsInput As System.String,
+                                              preview As RegexPreviewInfo,
+                                              replacements() As System.String,
+                                              llmSuggestion As RegexLlmSuggestion,
+                                              includeWordWarning As System.Boolean) As System.String
+        Dim msg As New System.Text.StringBuilder()
+
+        msg.AppendLine("Regex operation preview")
+        msg.AppendLine("Scope: " & scopeDisplay)
+        msg.AppendLine("Regex steps: " & preview.Steps.Count.ToString())
+        msg.AppendLine("Options: " & If(System.String.IsNullOrWhiteSpace(optionsInput), "(none)", optionsInput))
+        msg.AppendLine("Total matches: " & preview.TotalMatches.ToString())
+
+        For i As System.Int32 = 0 To preview.Steps.Count - 1
+            Dim stepInfo As RegexPreviewStep = preview.Steps(i)
+            msg.AppendLine()
+            msg.AppendLine("Step " & (i + 1).ToString() & ": " & stepInfo.Pattern)
+            msg.AppendLine("Replacement: " & DescribeReplacement(stepInfo.Replacement, replacements Is Nothing))
+            msg.AppendLine("Matches: " & stepInfo.MatchCount.ToString())
+
+            If stepInfo.ExampleMatches.Count > 0 Then
+                msg.AppendLine("Examples:")
+                For Each exampleMatch As System.String In stepInfo.ExampleMatches
+                    msg.AppendLine("  • " & exampleMatch)
+                Next
+            End If
+        Next
+
+        If llmSuggestion IsNot Nothing Then
+            If llmSuggestion.Warnings.Count > 0 Then
+                msg.AppendLine()
+                msg.AppendLine("Warnings:")
+                For Each warning As System.String In llmSuggestion.Warnings
+                    msg.AppendLine("  • " & warning)
+                Next
+            End If
+
+            If llmSuggestion.Assumptions.Count > 0 Then
+                msg.AppendLine()
+                msg.AppendLine("Assumptions:")
+                For Each assumption As System.String In llmSuggestion.Assumptions
+                    msg.AppendLine("  • " & assumption)
+                Next
+            End If
+
+            msg.AppendLine()
+            msg.AppendLine("Confidence: " & llmSuggestion.Confidence)
+            msg.AppendLine("Manual review required: " & If(llmSuggestion.RequiresReview, "Yes", "No"))
+        End If
+
+        If includeWordWarning AndAlso replacements IsNot Nothing Then
+            msg.AppendLine()
+            msg.AppendLine("Word note: Replacements are applied range-by-range for each match. This preserves formatting outside the match more reliably, but complex Word structures can still have limitations.")
+        End If
+
+        msg.AppendLine()
+        msg.AppendLine("Continue?")
+
+        Return msg.ToString()
+    End Function
+
+    Private Function BuildRegexLlmFeedbackMessage(hostApplicationName As System.String,
+                                                  scopeDisplay As System.String,
+                                                  suggestion As RegexLlmSuggestion) As System.String
+        Dim msg As New System.Text.StringBuilder()
+
+        msg.AppendLine("AI suggestion for Regex Search && Replace")
+        msg.AppendLine("Application: " & hostApplicationName)
+        msg.AppendLine("Scope: " & scopeDisplay)
+        msg.AppendLine("Steps: " & suggestion.Patterns.Count.ToString())
+        msg.AppendLine("Options: " & If(System.String.IsNullOrWhiteSpace(suggestion.Options), "(none)", suggestion.Options))
+        msg.AppendLine()
+        msg.AppendLine("What the regex does:")
+        msg.AppendLine(If(System.String.IsNullOrWhiteSpace(suggestion.Feedback), "(no explanation provided)", suggestion.Feedback.Trim()))
+        msg.AppendLine()
+        msg.AppendLine("What will be replaced:")
+
+        If suggestion.Replacements Is Nothing Then
+            msg.AppendLine("Search only; no replacement was proposed.")
+        Else
+            For i As System.Int32 = 0 To System.Math.Min(suggestion.Patterns.Count, suggestion.Replacements.Count) - 1
+                msg.AppendLine("  Step " & (i + 1).ToString() & ": " & DescribeReplacement(suggestion.Replacements(i), False))
+            Next
+        End If
+
+        If suggestion.Warnings.Count > 0 Then
+            msg.AppendLine()
+            msg.AppendLine("Warnings:")
+            For Each warning As System.String In suggestion.Warnings
+                msg.AppendLine("  • " & warning)
+            Next
+        End If
+
+        If suggestion.Assumptions.Count > 0 Then
+            msg.AppendLine()
+            msg.AppendLine("Assumptions:")
+            For Each assumption As System.String In suggestion.Assumptions
+                msg.AppendLine("  • " & assumption)
+            Next
+        End If
+
+        msg.AppendLine()
+        msg.AppendLine("Confidence: " & suggestion.Confidence)
+        msg.AppendLine("Manual review required: " & If(suggestion.RequiresReview, "Yes", "No"))
+
+        Return msg.ToString()
+    End Function
+
+    Private Function ParseRegexOptions(optionChars As System.String) As System.Text.RegularExpressions.RegexOptions
+        Return SharedLibrary.SharedLibrary.SharedMethods.ParseRegexOptionFlags(optionChars)
+    End Function
+
+    Private Function NormalizeRegexOptionFlags(optionChars As System.String) As System.String
+        Return SharedLibrary.SharedLibrary.SharedMethods.NormalizeRegexOptionFlags(optionChars)
+    End Function
+
+    Private Function BuildSafeTextSample(sourceText As System.String,
+                                         maxLength As System.Int32,
+                                         ByRef wasTruncated As System.Boolean) As System.String
+        Return SharedLibrary.SharedLibrary.SharedMethods.BuildSafeTextSample(sourceText, maxLength, wasTruncated)
+    End Function
+
+    Private Function PreviewDisplayText(value As System.String, maxLength As System.Int32) As System.String
+        Return SharedLibrary.SharedLibrary.SharedMethods.PreviewDisplayText(value, maxLength)
+    End Function
+
+    Private Function DescribeReplacement(replacement As System.String, searchOnly As System.Boolean) As System.String
+        Return SharedLibrary.SharedLibrary.SharedMethods.DescribeRegexReplacement(replacement, searchOnly)
+    End Function
 
     ''' <summary>
     ''' Calculates the time span between the first and last revision or comment by a specified user

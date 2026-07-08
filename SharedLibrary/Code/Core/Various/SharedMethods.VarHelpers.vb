@@ -244,11 +244,162 @@ Namespace SharedLibrary
             Return builder.ToString()
         End Function
 
+        Public Shared Function NormalizeRegexOptionFlags(optionChars As System.String) As System.String
+            Dim input As System.String = If(optionChars, System.String.Empty).Trim().ToLowerInvariant()
+            Dim sb As New System.Text.StringBuilder()
 
+            If input.Contains("i"c) Then sb.Append("i")
+            If input.Contains("m"c) Then sb.Append("m")
+            If input.Contains("s"c) Then sb.Append("s")
+            If input.Contains("c"c) Then sb.Append("c")
+            If input.Contains("r"c) Then sb.Append("r")
+            If input.Contains("e"c) Then sb.Append("e")
+
+            Return sb.ToString()
+        End Function
+
+        Public Shared Function ParseRegexOptionFlags(optionChars As System.String) As System.Text.RegularExpressions.RegexOptions
+            Dim normalized As System.String = NormalizeRegexOptionFlags(optionChars)
+            Dim regexOptions As System.Text.RegularExpressions.RegexOptions = System.Text.RegularExpressions.RegexOptions.None
+
+            If normalized.Contains("i"c) Then regexOptions = regexOptions Or System.Text.RegularExpressions.RegexOptions.IgnoreCase
+            If normalized.Contains("m"c) Then regexOptions = regexOptions Or System.Text.RegularExpressions.RegexOptions.Multiline
+            If normalized.Contains("s"c) Then regexOptions = regexOptions Or System.Text.RegularExpressions.RegexOptions.Singleline
+            If normalized.Contains("c"c) Then regexOptions = regexOptions Or System.Text.RegularExpressions.RegexOptions.Compiled
+            If normalized.Contains("r"c) Then regexOptions = regexOptions Or System.Text.RegularExpressions.RegexOptions.RightToLeft
+            If normalized.Contains("e"c) Then regexOptions = regexOptions Or System.Text.RegularExpressions.RegexOptions.ExplicitCapture
+
+            Return regexOptions
+        End Function
+
+        Public Shared Function BuildSafeTextSample(sourceText As System.String,
+                                                   maxLength As System.Int32,
+                                                   ByRef wasTruncated As System.Boolean) As System.String
+            Dim text As System.String = If(sourceText, System.String.Empty)
+            wasTruncated = False
+
+            If text.Length <= maxLength Then
+                Return text
+            End If
+
+            wasTruncated = True
+            Return text.Substring(0, maxLength)
+        End Function
+
+        Public Shared Function PreviewDisplayText(value As System.String, maxLength As System.Int32) As System.String
+            Dim text As System.String = If(value, System.String.Empty)
+            text = text.Replace(vbCr, "\r").Replace(vbLf, "\n")
+
+            If text.Length <= maxLength Then
+                Return text
+            End If
+
+            Return text.Substring(0, maxLength) & "..."
+        End Function
+
+        Public Shared Function DescribeRegexReplacement(replacement As System.String, searchOnly As System.Boolean) As System.String
+            If searchOnly Then
+                Return "(search only)"
+            End If
+
+            If replacement Is Nothing Then
+                Return "(none)"
+            End If
+
+            If replacement.Length = 0 Then
+                Return "(empty - matches will be deleted)"
+            End If
+
+            Return PreviewDisplayText(replacement, 120)
+        End Function
+
+        Public Shared Function BuildRegexLlmRequestPrompt(nlInstruction As System.String,
+                                                          hostApplicationName As System.String,
+                                                          scopeForLlm As System.String,
+                                                          sampleText As System.String,
+                                                          sampleWasTruncated As System.Boolean,
+                                                          lastPattern As System.String,
+                                                          lastOptions As System.String,
+                                                          lastReplace As System.String,
+                                                          Optional hostCapabilities As System.String = "") As System.String
+            Dim prompt As New System.Text.StringBuilder()
+            prompt.AppendLine("Create a regex suggestion for the following Office add-in request.")
+            prompt.AppendLine()
+            prompt.AppendLine("User instruction:")
+            prompt.AppendLine(If(nlInstruction, System.String.Empty).Trim())
+            prompt.AppendLine()
+            prompt.AppendLine("Host application: " & If(hostApplicationName, System.String.Empty))
+            prompt.AppendLine("Current scope: " & If(scopeForLlm, System.String.Empty))
+
+            If Not System.String.IsNullOrWhiteSpace(hostCapabilities) Then
+                prompt.AppendLine("Host capabilities/limitations: " & hostCapabilities)
+            End If
+
+            prompt.AppendLine("Sample truncated: " & sampleWasTruncated.ToString())
+            prompt.AppendLine("Cached LastRegexPattern: " & If(lastPattern, System.String.Empty))
+            prompt.AppendLine("Cached LastRegexOptions: " & If(lastOptions, System.String.Empty))
+            prompt.AppendLine("Cached LastRegexReplace: " & If(lastReplace, System.String.Empty))
+            prompt.AppendLine()
+            prompt.AppendLine("<TEXTSAMPLE>")
+            prompt.AppendLine(If(sampleText, System.String.Empty))
+            prompt.AppendLine("</TEXTSAMPLE>")
+
+            Return prompt.ToString()
+        End Function
+
+        Public Shared Function GetJsonBooleanValue(token As Newtonsoft.Json.Linq.JToken,
+                                                   defaultValue As System.Boolean) As System.Boolean
+            If token Is Nothing OrElse token.Type = Newtonsoft.Json.Linq.JTokenType.Null Then
+                Return defaultValue
+            End If
+
+            Try
+                If token.Type = Newtonsoft.Json.Linq.JTokenType.Boolean Then
+                    Return token.ToObject(Of System.Boolean)()
+                End If
+            Catch
+            End Try
+
+            Dim parsed As System.Boolean
+            If System.Boolean.TryParse(token.ToString(), parsed) Then
+                Return parsed
+            End If
+
+            Return defaultValue
+        End Function
+
+        Public Shared Function GetConflictingRegexStepMessage(patterns() As System.String,
+                                                              replacements() As System.String) As System.String
+            If patterns Is Nothing OrElse replacements Is Nothing Then
+                Return System.String.Empty
+            End If
+
+            Dim stepCount As System.Int32 = System.Math.Min(patterns.Length, replacements.Length)
+
+            For i As System.Int32 = 0 To stepCount - 1
+                For j As System.Int32 = i + 1 To stepCount - 1
+                    If System.String.Equals(patterns(i), patterns(j), System.StringComparison.Ordinal) AndAlso
+                       Not System.String.Equals(replacements(i), replacements(j), System.StringComparison.Ordinal) Then
+                        Return "The same regex pattern appears more than once with different replacements." &
+                               System.Environment.NewLine &
+                               System.Environment.NewLine &
+                               "Pattern: " & patterns(i) &
+                               System.Environment.NewLine &
+                               "Step " & (i + 1).ToString() & " replacement: " & If(replacements(i), System.String.Empty) &
+                               System.Environment.NewLine &
+                               "Step " & (j + 1).ToString() & " replacement: " & If(replacements(j), System.String.Empty) &
+                               System.Environment.NewLine &
+                               System.Environment.NewLine &
+                               "This cannot run deterministically in sequential mode. Use more specific patterns instead."
+                    End If
+                Next
+            Next
+
+            Return System.String.Empty
+        End Function
 
         ''' <summary>
-        ''' Writes a string value to the Windows registry at <paramref name="regPath"/> using the default (unnamed) value.
-        ''' </summary>
+        ''' Writes a string value to the Windows registry at <paramref name="regPath"/> using the default (unnamed) value.     ''' </summary>
         ''' <param name="regPath">Registry path including hive name (e.g., <c>HKEY_CURRENT_USER\...</c>).</param>
         ''' <param name="regValue">Value to write; CR/LF is removed via <see cref="RemoveCR"/>.</param>
         Public Shared Sub WriteToRegistry(ByVal regPath As String, ByVal regValue As String)

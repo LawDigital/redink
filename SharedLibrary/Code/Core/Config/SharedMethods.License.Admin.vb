@@ -151,7 +151,8 @@ Namespace SharedLibrary
                 form.MaximizeBox = False
                 form.ShowInTaskbar = True
                 form.TopMost = True
-                form.MinimumSize = New System.Drawing.Size(1250, 760)
+                form.MinimumSize = New System.Drawing.Size(1500, 760)
+                form.Size = New System.Drawing.Size(1720, 860)
                 form.Font = New System.Drawing.Font("Segoe UI", 9.5F)
 
                 Try
@@ -193,21 +194,25 @@ Namespace SharedLibrary
 
                 Dim filterLayout As New System.Windows.Forms.TableLayoutPanel() With {
                     .Dock = System.Windows.Forms.DockStyle.Fill,
-                    .ColumnCount = 8,
+                    .ColumnCount = 10,
                     .AutoSize = True,
                     .Margin = New System.Windows.Forms.Padding(0, 0, 0, 10)
                 }
                 filterLayout.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.AutoSize))
-                filterLayout.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 25.0F))
+                filterLayout.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 20.0F))
                 filterLayout.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.AutoSize))
-                filterLayout.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 25.0F))
+                filterLayout.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 20.0F))
                 filterLayout.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.AutoSize))
-                filterLayout.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 25.0F))
+                filterLayout.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 20.0F))
                 filterLayout.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.AutoSize))
-                filterLayout.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 25.0F))
+                filterLayout.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 20.0F))
+                filterLayout.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.AutoSize))
+                filterLayout.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 20.0F))
 
                 Dim lblFilterProduct As New System.Windows.Forms.Label() With {.Text = "Product:", .Anchor = System.Windows.Forms.AnchorStyles.Left, .AutoSize = True}
                 Dim cboFilterProduct As New System.Windows.Forms.ComboBox() With {.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList, .Dock = System.Windows.Forms.DockStyle.Fill}
+                Dim lblFilterDesired As New System.Windows.Forms.Label() With {.Text = "Desired State:", .Anchor = System.Windows.Forms.AnchorStyles.Left, .AutoSize = True}
+                Dim cboFilterDesired As New System.Windows.Forms.ComboBox() With {.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList, .Dock = System.Windows.Forms.DockStyle.Fill}
                 Dim lblFilterAction As New System.Windows.Forms.Label() With {.Text = "Action:", .Anchor = System.Windows.Forms.AnchorStyles.Left, .AutoSize = True}
                 Dim cboFilterAction As New System.Windows.Forms.ComboBox() With {.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList, .Dock = System.Windows.Forms.DockStyle.Fill}
                 Dim lblFilterVerify As New System.Windows.Forms.Label() With {.Text = "Verification:", .Anchor = System.Windows.Forms.AnchorStyles.Left, .AutoSize = True}
@@ -217,12 +222,14 @@ Namespace SharedLibrary
 
                 filterLayout.Controls.Add(lblFilterProduct, 0, 0)
                 filterLayout.Controls.Add(cboFilterProduct, 1, 0)
-                filterLayout.Controls.Add(lblFilterAction, 2, 0)
-                filterLayout.Controls.Add(cboFilterAction, 3, 0)
-                filterLayout.Controls.Add(lblFilterVerify, 4, 0)
-                filterLayout.Controls.Add(cboFilterVerify, 5, 0)
-                filterLayout.Controls.Add(lblFilterWarnings, 6, 0)
-                filterLayout.Controls.Add(cboFilterWarnings, 7, 0)
+                filterLayout.Controls.Add(lblFilterDesired, 2, 0)
+                filterLayout.Controls.Add(cboFilterDesired, 3, 0)
+                filterLayout.Controls.Add(lblFilterAction, 4, 0)
+                filterLayout.Controls.Add(cboFilterAction, 5, 0)
+                filterLayout.Controls.Add(lblFilterVerify, 6, 0)
+                filterLayout.Controls.Add(cboFilterVerify, 7, 0)
+                filterLayout.Controls.Add(lblFilterWarnings, 8, 0)
+                filterLayout.Controls.Add(cboFilterWarnings, 9, 0)
                 mainLayout.Controls.Add(filterLayout, 0, 2)
 
                 Dim grid As New System.Windows.Forms.DataGridView() With {
@@ -289,7 +296,7 @@ Namespace SharedLibrary
                 Dim colDesired As New System.Windows.Forms.DataGridViewComboBoxColumn() With {
                     .DataPropertyName = NameOf(AdminLicenseRow.DesiredState),
                     .HeaderText = "Desired State",
-                    .Width = 130,
+                    .Width = 180,
                     .FlatStyle = System.Windows.Forms.FlatStyle.Flat
                 }
                 colDesired.Items.AddRange(New Object() {"Ignore", "DesiredActive", "DesiredInactive"})
@@ -297,7 +304,7 @@ Namespace SharedLibrary
                 Dim colPlanned As New System.Windows.Forms.DataGridViewTextBoxColumn() With {
                     .DataPropertyName = NameOf(AdminLicenseRow.PlannedAction),
                     .HeaderText = "Planned Action",
-                    .Width = 145,
+                    .Width = 190,
                     .ReadOnly = True
                 }
                 Dim colApi As New System.Windows.Forms.DataGridViewTextBoxColumn() With {
@@ -383,8 +390,8 @@ Namespace SharedLibrary
                     Sub()
                         bindingSource.ResetBindings(False)
                         ApplyAdminDuplicateWarnings(rows)
-                        RefreshAdminFilterChoices(cboFilterProduct, cboFilterAction, cboFilterVerify, cboFilterWarnings, rows)
-                        ApplyAdminGridFilters(grid, cboFilterProduct, cboFilterAction, cboFilterVerify, cboFilterWarnings)
+                        RefreshAdminFilterChoices(cboFilterProduct, cboFilterDesired, cboFilterAction, cboFilterVerify, cboFilterWarnings, rows)
+                        ApplyAdminGridFilters(grid, cboFilterProduct, cboFilterDesired, cboFilterAction, cboFilterVerify, cboFilterWarnings)
                     End Sub
 
                 Dim setBusy As Action(Of Boolean) =
@@ -397,13 +404,14 @@ Namespace SharedLibrary
                         System.Windows.Forms.Application.DoEvents()
                     End Sub
 
-                RefreshAdminFilterChoices(cboFilterProduct, cboFilterAction, cboFilterVerify, cboFilterWarnings, rows)
+                RefreshAdminFilterChoices(cboFilterProduct, cboFilterDesired, cboFilterAction, cboFilterVerify, cboFilterWarnings, rows)
 
-                AddHandler cboFilterProduct.SelectedIndexChanged, Sub() ApplyAdminGridFilters(grid, cboFilterProduct, cboFilterAction, cboFilterVerify, cboFilterWarnings)
-                AddHandler cboFilterAction.SelectedIndexChanged, Sub() ApplyAdminGridFilters(grid, cboFilterProduct, cboFilterAction, cboFilterVerify, cboFilterWarnings)
-                AddHandler cboFilterVerify.SelectedIndexChanged, Sub() ApplyAdminGridFilters(grid, cboFilterProduct, cboFilterAction, cboFilterVerify, cboFilterWarnings)
-                AddHandler cboFilterWarnings.SelectedIndexChanged, Sub() ApplyAdminGridFilters(grid, cboFilterProduct, cboFilterAction, cboFilterVerify, cboFilterWarnings)
-                AddHandler grid.DataBindingComplete, Sub() ApplyAdminGridFilters(grid, cboFilterProduct, cboFilterAction, cboFilterVerify, cboFilterWarnings)
+                AddHandler cboFilterProduct.SelectedIndexChanged, Sub() ApplyAdminGridFilters(grid, cboFilterProduct, cboFilterDesired, cboFilterAction, cboFilterVerify, cboFilterWarnings)
+                AddHandler cboFilterDesired.SelectedIndexChanged, Sub() ApplyAdminGridFilters(grid, cboFilterProduct, cboFilterDesired, cboFilterAction, cboFilterVerify, cboFilterWarnings)
+                AddHandler cboFilterAction.SelectedIndexChanged, Sub() ApplyAdminGridFilters(grid, cboFilterProduct, cboFilterDesired, cboFilterAction, cboFilterVerify, cboFilterWarnings)
+                AddHandler cboFilterVerify.SelectedIndexChanged, Sub() ApplyAdminGridFilters(grid, cboFilterProduct, cboFilterDesired, cboFilterAction, cboFilterVerify, cboFilterWarnings)
+                AddHandler cboFilterWarnings.SelectedIndexChanged, Sub() ApplyAdminGridFilters(grid, cboFilterProduct, cboFilterDesired, cboFilterAction, cboFilterVerify, cboFilterWarnings)
+                AddHandler grid.DataBindingComplete, Sub() ApplyAdminGridFilters(grid, cboFilterProduct, cboFilterDesired, cboFilterAction, cboFilterVerify, cboFilterWarnings)
 
                 AddHandler grid.CurrentCellDirtyStateChanged,
                     Sub()
@@ -702,7 +710,7 @@ Namespace SharedLibrary
                             New String() {
                                 "Bulk Add Users",
                                 "Bulk Mark for Deactivation",
-                                "Import Desired List",
+                                "Sync with Imported List",
                                 "Configure User-ID Mapping",
                                 "Export Current Table",
                                 "Export Result Report"
@@ -829,18 +837,21 @@ Namespace SharedLibrary
                             Return
                         End If
 
-                        If choice.StartsWith("Import Desired List", StringComparison.OrdinalIgnoreCase) Then
+                        If choice.StartsWith("Sync with Imported List", StringComparison.OrdinalIgnoreCase) Then
                             If allowedProductIds.Count = 0 Then
                                 ShowCustomMessageBox("Please parse a matching backend license page first.", $"{AN} - Organization License Manager")
                                 Return
                             End If
 
-                            Dim importedCount As Integer = ImportDesiredRowsFromFile(rows, allowedProductIds, parsedProductTitles, mappingConfig)
+                            Dim markedForDeactivationCount As Integer = 0
+                            Dim importedCount As Integer = ImportDesiredRowsFromFile(rows, allowedProductIds, parsedProductTitles, mappingConfig, markedForDeactivationCount)
 
                             If importedCount > 0 Then
                                 changesMadeSinceLastVerify = True
                                 refreshGridState()
-                                setStatus($"{importedCount} desired row(s) imported.", System.Drawing.Color.DarkGreen)
+                                setStatus(
+                                    $"Sync completed. {importedCount} imported user(s) were evaluated. {markedForDeactivationCount} existing activation(s) not present in the imported list are marked for deactivation.",
+                                    If(markedForDeactivationCount > 0, System.Drawing.Color.DarkOrange, System.Drawing.Color.DarkGreen))
                             End If
                             Return
                         End If
@@ -1472,6 +1483,18 @@ Namespace SharedLibrary
                             String.Equals(If(r.InstanceUserId, ""), safeInstanceUserId, StringComparison.Ordinal))
         End Function
 
+        Private Shared Function AdminRowRepresentsExistingActivation(row As AdminLicenseRow) As Boolean
+            If row Is Nothing Then
+                Return False
+            End If
+
+            Return row.IsVerifiedActive OrElse
+                   String.Equals(If(row.VerificationState, ""), "Verified active", StringComparison.OrdinalIgnoreCase) OrElse
+                   String.Equals(If(row.SourceKind, ""), "Parsed", StringComparison.OrdinalIgnoreCase) OrElse
+                   If(row.SourceType, "").IndexOf("Parsed backend", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+                   Not String.IsNullOrWhiteSpace(row.ParsedActivationDate)
+        End Function
+
         Private Shared Function UpsertDesiredRow(rows As BindingList(Of AdminLicenseRow),
                                                  productId As String,
                                                  productTitle As String,
@@ -1505,7 +1528,9 @@ Namespace SharedLibrary
                 }
                 rows.Add(row)
             Else
-                If row.SourceType.IndexOf(sourceType, StringComparison.OrdinalIgnoreCase) < 0 Then
+                If String.IsNullOrWhiteSpace(row.SourceType) Then
+                    row.SourceType = sourceType
+                ElseIf row.SourceType.IndexOf(sourceType, StringComparison.OrdinalIgnoreCase) < 0 Then
                     row.SourceType = $"{row.SourceType} + {sourceType}"
                 End If
 
@@ -1515,14 +1540,7 @@ Namespace SharedLibrary
                 row.ApiResult = ""
                 row.DesiredOccurrences = Math.Max(1, row.DesiredOccurrences + 1)
 
-                Dim rowRepresentsExistingRegistration As Boolean =
-                    row.IsVerifiedActive OrElse
-                    row.VerificationState.Equals("Verified active", StringComparison.OrdinalIgnoreCase) OrElse
-                    row.SourceKind.Equals("Parsed", StringComparison.OrdinalIgnoreCase) OrElse
-                    row.SourceType.IndexOf("Parsed backend", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
-                    Not String.IsNullOrWhiteSpace(row.ParsedActivationDate)
-
-                If rowRepresentsExistingRegistration Then
+                If AdminRowRepresentsExistingActivation(row) Then
                     row.DesiredState = "DesiredInactive"
                     row.PlannedAction = "Pending deactivation"
                 Else
@@ -2026,12 +2044,15 @@ Namespace SharedLibrary
         Private Shared Function ImportDesiredRowsFromFile(rows As BindingList(Of AdminLicenseRow),
                                                           allowedProductIds As HashSet(Of String),
                                                           parsedProductTitles As Dictionary(Of String, String),
-                                                          mappingConfig As AdminUserIdMappingConfig) As Integer
+                                                          mappingConfig As AdminUserIdMappingConfig,
+                                                          ByRef markedForDeactivationCount As Integer) As Integer
+
+            markedForDeactivationCount = 0
 
             Dim fileName As String = ""
 
             Using dialog As New System.Windows.Forms.OpenFileDialog()
-                dialog.Title = $"{AN} - Import Desired List"
+                dialog.Title = $"{AN} - Sync with Imported List"
                 dialog.Filter = "Supported files (*.csv;*.txt;*.json)|*.csv;*.txt;*.json|CSV files (*.csv)|*.csv|Text files (*.txt)|*.txt|JSON files (*.json)|*.json|All files (*.*)|*.*"
                 dialog.Multiselect = False
 
@@ -2048,7 +2069,7 @@ Namespace SharedLibrary
                 Return 0
             End If
 
-            Dim defaultProductId As String = SelectDefaultAdminProductId(allowedProductIds, parsedProductTitles, "Select the default product for imported desired users.")
+            Dim defaultProductId As String = SelectDefaultAdminProductId(allowedProductIds, parsedProductTitles, "Select the default product for imported users.")
             If String.IsNullOrWhiteSpace(defaultProductId) Then
                 Return 0
             End If
@@ -2064,7 +2085,7 @@ Namespace SharedLibrary
                     .ProductId = resolvedProductId,
                     .ProductTitle = resolvedProductTitle,
                     .InstanceUserId = generatedUserId,
-                    .SourceType = "Imported desired list",
+                    .SourceType = "Imported sync list",
                     .SourceKind = "Import"
                 }
 
@@ -2082,7 +2103,7 @@ Namespace SharedLibrary
             Next
 
             Dim previewMessage As New System.Text.StringBuilder()
-            previewMessage.AppendLine($"Import file: {System.IO.Path.GetFileName(fileName)}")
+            previewMessage.AppendLine($"Sync file: {System.IO.Path.GetFileName(fileName)}")
             previewMessage.AppendLine($"Records parsed: {records.Count}")
             previewMessage.AppendLine()
             previewMessage.AppendLine("Preview of generated User IDs:")
@@ -2093,20 +2114,88 @@ Namespace SharedLibrary
                 previewMessage.AppendLine($"- ... and {pendingRows.Count - previewLines.Count} more")
             End If
             previewMessage.AppendLine()
-            previewMessage.AppendLine("Proceed with the import?")
+            previewMessage.AppendLine("Proceed with the synchronization?")
+            previewMessage.AppendLine("Users in the imported list will remain active or be added. Existing activations for synchronized product IDs that are not present in the imported list will be marked for deactivation.")
 
-            Dim proceed As Integer = ShowCustomYesNoBox(previewMessage.ToString().TrimEnd(), "Import", "Cancel", $"{AN} - Import Desired List")
+            Dim proceed As Integer = ShowCustomYesNoBox(previewMessage.ToString().TrimEnd(), "Sync", "Cancel", $"{AN} - Sync with Imported List")
             If proceed <> 1 Then
                 Return 0
             End If
 
+            Dim desiredKeys As New HashSet(Of String)(StringComparer.Ordinal)
+            Dim synchronizedProductIds As New HashSet(Of String)(StringComparer.Ordinal)
             Dim importedCount As Integer = 0
 
             For Each pending As AdminPendingDesiredRow In pendingRows
                 If String.IsNullOrWhiteSpace(pending.WarningText) Then
-                    Dim row As AdminLicenseRow = UpsertDesiredRow(rows, pending.ProductId, pending.ProductTitle, pending.InstanceUserId, pending.SourceType, pending.SourceKind)
-                    row.RequiresReverify = True
-                    importedCount += 1
+                    Dim syncKey As String = BuildAdminKey(pending.ProductId.Trim(), pending.InstanceUserId.Trim())
+
+                    If desiredKeys.Add(syncKey) Then
+                        synchronizedProductIds.Add(pending.ProductId.Trim())
+
+                        Dim row As AdminLicenseRow = FindAdminRowByProductAndInstance(rows, pending.ProductId, pending.InstanceUserId)
+
+                        If row Is Nothing Then
+                            row = New AdminLicenseRow() With {
+                                .IncludeRow = True,
+                                .ProductId = pending.ProductId,
+                                .ProductTitle = pending.ProductTitle,
+                                .InstanceUserId = pending.InstanceUserId,
+                                .ParsedActivationDate = "",
+                                .SourceType = pending.SourceType,
+                                .SourceKind = pending.SourceKind,
+                                .VerificationState = "Not verified",
+                                .DesiredState = "DesiredActive",
+                                .PlannedAction = "Pending activation",
+                                .ApiResult = "",
+                                .WarningText = "",
+                                .Confidence = "",
+                                .ProductAssociationInferred = False,
+                                .IsAmbiguous = False,
+                                .SourceOffset = 0,
+                                .IsVerifiedActive = False,
+                                .RequiresReverify = True,
+                                .DesiredOccurrences = 1
+                            }
+                            rows.Add(row)
+                        Else
+                            Dim rowRepresentsExistingActivation As Boolean = AdminRowRepresentsExistingActivation(row)
+
+                            If String.IsNullOrWhiteSpace(row.SourceType) Then
+                                row.SourceType = pending.SourceType
+                            ElseIf row.SourceType.IndexOf(pending.SourceType, StringComparison.OrdinalIgnoreCase) < 0 Then
+                                row.SourceType = $"{row.SourceType} + {pending.SourceType}"
+                            End If
+
+                            If rowRepresentsExistingActivation Then
+                                row.IncludeRow = False
+                                row.DesiredState = "Ignore"
+                                row.PlannedAction = "Ignore"
+                                row.ApiResult = ""
+                                row.RequiresReverify = False
+                                row.DesiredOccurrences = 1
+                            Else
+                                row.SourceKind = pending.SourceKind
+                                row.IncludeRow = True
+                                row.DesiredState = "DesiredActive"
+                                row.PlannedAction = "Pending activation"
+                                row.ApiResult = ""
+                                row.RequiresReverify = True
+                                row.DesiredOccurrences = 1
+                            End If
+
+                            If String.IsNullOrWhiteSpace(row.ProductTitle) AndAlso Not String.IsNullOrWhiteSpace(pending.ProductTitle) Then
+                                row.ProductTitle = pending.ProductTitle
+                            End If
+                        End If
+
+                        importedCount += 1
+                    Else
+                        Dim duplicateRow As AdminLicenseRow = FindAdminRowByProductAndInstance(rows, pending.ProductId, pending.InstanceUserId)
+                        If duplicateRow IsNot Nothing Then
+                            AppendDistinctAdminWarning(duplicateRow, "Duplicate imported user under the same product. Only one synchronized entry was kept.")
+                        End If
+                    End If
                 Else
                     rows.Add(New AdminLicenseRow() With {
                         .IncludeRow = False,
@@ -2117,13 +2206,50 @@ Namespace SharedLibrary
                         .SourceType = pending.SourceType,
                         .SourceKind = pending.SourceKind,
                         .VerificationState = "Not verified",
-                        .DesiredState = "DesiredActive",
+                        .DesiredState = "Ignore",
                         .PlannedAction = "Invalid/missing user",
                         .ApiResult = "",
                         .WarningText = pending.WarningText,
                         .Confidence = "",
                         .RequiresReverify = False
                     })
+                End If
+            Next
+
+            For Each row As AdminLicenseRow In rows
+                If row Is Nothing Then
+                    Continue For
+                End If
+
+                If String.IsNullOrWhiteSpace(row.ProductId) OrElse String.IsNullOrWhiteSpace(row.InstanceUserId) Then
+                    Continue For
+                End If
+
+                If synchronizedProductIds.Count > 0 AndAlso Not synchronizedProductIds.Contains(row.ProductId.Trim()) Then
+                    Continue For
+                End If
+
+                Dim syncKey As String = BuildAdminKey(row.ProductId.Trim(), row.InstanceUserId.Trim())
+
+                If desiredKeys.Contains(syncKey) Then
+                    Continue For
+                End If
+
+                If AdminRowRepresentsExistingActivation(row) Then
+                    row.IncludeRow = True
+                    row.DesiredState = "DesiredInactive"
+                    row.PlannedAction = "Pending deactivation"
+                    row.ApiResult = ""
+                    row.RequiresReverify = True
+                    row.DesiredOccurrences = 0
+                    markedForDeactivationCount += 1
+                Else
+                    row.IncludeRow = False
+                    row.DesiredState = "Ignore"
+                    row.PlannedAction = "Ignore"
+                    row.ApiResult = ""
+                    row.RequiresReverify = True
+                    row.DesiredOccurrences = 0
                 End If
             Next
 
@@ -2171,7 +2297,7 @@ Namespace SharedLibrary
                     "Should the first row of the imported file be treated as header names?",
                     "Yes",
                     "No",
-                    $"{AN} - Import Desired List") = 1
+                    $"{AN} - Sync with Imported List") = 1
 
             Using parser As New Microsoft.VisualBasic.FileIO.TextFieldParser(fileName, System.Text.Encoding.UTF8)
                 parser.TextFieldType = Microsoft.VisualBasic.FileIO.FieldType.Delimited
@@ -2235,7 +2361,7 @@ Namespace SharedLibrary
                         "Should the first JSON array row be treated as header names?",
                         "Yes",
                         "No",
-                        $"{AN} - Import Desired List") = 1
+                        $"{AN} - Sync with Imported List") = 1
             End If
 
             Dim headers As String() = Nothing
@@ -2549,6 +2675,10 @@ Namespace SharedLibrary
                         workingCopy.ReplaceSpacesWith = txtReplaceSpaces.Text
                         workingCopy.RemoveDiacritics = chkRemoveDiacritics.Checked
 
+                        If workingCopy.ReplaceSpacesWith.Length > 0 Then
+                            workingCopy.RemoveSpaces = False
+                        End If
+
                         If String.IsNullOrWhiteSpace(workingCopy.PrimaryField) Then
                             ShowCustomMessageBox("Please define at least a primary source field.", $"{AN} - User-ID Mapping")
                             Return
@@ -2584,7 +2714,25 @@ Namespace SharedLibrary
                     End If
                 End Try
 
-                Return False
+                If form.DialogResult <> System.Windows.Forms.DialogResult.OK Then
+                    Return False
+                End If
+
+                config.PrimaryField = workingCopy.PrimaryField
+                config.UseSecondaryField = workingCopy.UseSecondaryField
+                config.SecondaryField = workingCopy.SecondaryField
+                config.PrimaryFieldPart = workingCopy.PrimaryFieldPart
+                config.SecondaryFieldPart = workingCopy.SecondaryFieldPart
+                config.Separator = workingCopy.Separator
+                config.UseEmailLocalPart = workingCopy.UseEmailLocalPart
+                config.Lowercase = workingCopy.Lowercase
+                config.Uppercase = workingCopy.Uppercase
+                config.TrimWhitespace = workingCopy.TrimWhitespace
+                config.RemoveSpaces = workingCopy.RemoveSpaces
+                config.ReplaceSpacesWith = workingCopy.ReplaceSpacesWith
+                config.RemoveDiacritics = workingCopy.RemoveDiacritics
+
+                Return True
             End Using
         End Function
 
@@ -2748,10 +2896,10 @@ Namespace SharedLibrary
                 transformed = RemoveAdminDiacritics(transformed)
             End If
 
-            If config.RemoveSpaces Then
-                transformed = System.Text.RegularExpressions.Regex.Replace(transformed, "\s+", "")
-            ElseIf Not String.IsNullOrEmpty(config.ReplaceSpacesWith) Then
+            If Not String.IsNullOrEmpty(config.ReplaceSpacesWith) Then
                 transformed = System.Text.RegularExpressions.Regex.Replace(transformed, "\s+", config.ReplaceSpacesWith)
+            ElseIf config.RemoveSpaces Then
+                transformed = System.Text.RegularExpressions.Regex.Replace(transformed, "\s+", "")
             End If
 
             If config.Lowercase Then
@@ -2857,12 +3005,14 @@ Namespace SharedLibrary
         End Function
 
         Private Shared Sub RefreshAdminFilterChoices(cboFilterProduct As System.Windows.Forms.ComboBox,
+                                                     cboFilterDesired As System.Windows.Forms.ComboBox,
                                                      cboFilterAction As System.Windows.Forms.ComboBox,
                                                      cboFilterVerify As System.Windows.Forms.ComboBox,
                                                      cboFilterWarnings As System.Windows.Forms.ComboBox,
                                                      rows As IEnumerable(Of AdminLicenseRow))
 
             RefreshAdminFilterCombo(cboFilterProduct, "All", rows.Select(Function(r) If(String.IsNullOrWhiteSpace(r.ProductId), "(blank)", r.ProductId)).Distinct().OrderBy(Function(v) v))
+            RefreshAdminFilterCombo(cboFilterDesired, "All", rows.Select(Function(r) If(String.IsNullOrWhiteSpace(r.DesiredState), "(blank)", r.DesiredState)).Distinct().OrderBy(Function(v) v))
             RefreshAdminFilterCombo(cboFilterAction, "All", rows.Select(Function(r) If(String.IsNullOrWhiteSpace(r.PlannedAction), "(blank)", r.PlannedAction)).Distinct().OrderBy(Function(v) v))
             RefreshAdminFilterCombo(cboFilterVerify, "All", rows.Select(Function(r) If(String.IsNullOrWhiteSpace(r.VerificationState), "(blank)", r.VerificationState)).Distinct().OrderBy(Function(v) v))
             RefreshAdminFilterCombo(cboFilterWarnings, "All", New String() {"All", "With warnings", "Without warnings"})
@@ -2900,9 +3050,12 @@ Namespace SharedLibrary
 
         Private Shared Sub ApplyAdminGridFilters(grid As System.Windows.Forms.DataGridView,
                                                  cboFilterProduct As System.Windows.Forms.ComboBox,
+                                                 cboFilterDesired As System.Windows.Forms.ComboBox,
                                                  cboFilterAction As System.Windows.Forms.ComboBox,
                                                  cboFilterVerify As System.Windows.Forms.ComboBox,
                                                  cboFilterWarnings As System.Windows.Forms.ComboBox)
+            Dim visibilityByRow As New Dictionary(Of System.Windows.Forms.DataGridViewRow, Boolean)()
+
             For Each gridRow As System.Windows.Forms.DataGridViewRow In grid.Rows
                 Dim row As AdminLicenseRow = TryCast(gridRow.DataBoundItem, AdminLicenseRow)
                 If row Is Nothing Then Continue For
@@ -2913,6 +3066,12 @@ Namespace SharedLibrary
                 If Not productFilter.Equals("All", StringComparison.OrdinalIgnoreCase) Then
                     Dim rowProduct As String = If(String.IsNullOrWhiteSpace(row.ProductId), "(blank)", row.ProductId)
                     visible = visible AndAlso rowProduct.Equals(productFilter, StringComparison.OrdinalIgnoreCase)
+                End If
+
+                Dim desiredFilter As String = CStr(If(cboFilterDesired.SelectedItem, "All"))
+                If Not desiredFilter.Equals("All", StringComparison.OrdinalIgnoreCase) Then
+                    Dim rowDesired As String = If(String.IsNullOrWhiteSpace(row.DesiredState), "(blank)", row.DesiredState)
+                    visible = visible AndAlso rowDesired.Equals(desiredFilter, StringComparison.OrdinalIgnoreCase)
                 End If
 
                 Dim actionFilter As String = CStr(If(cboFilterAction.SelectedItem, "All"))
@@ -2934,8 +3093,55 @@ Namespace SharedLibrary
                     visible = visible AndAlso String.IsNullOrWhiteSpace(row.WarningText)
                 End If
 
-                gridRow.Visible = visible
+                visibilityByRow(gridRow) = visible
             Next
+
+            Dim currencyManager As System.Windows.Forms.CurrencyManager = Nothing
+            If grid.BindingContext IsNot Nothing AndAlso grid.DataSource IsNot Nothing Then
+                currencyManager = TryCast(grid.BindingContext(grid.DataSource), System.Windows.Forms.CurrencyManager)
+            End If
+
+            If currencyManager IsNot Nothing Then
+                currencyManager.SuspendBinding()
+            End If
+
+            Try
+                Dim fallbackRow As System.Windows.Forms.DataGridViewRow = visibilityByRow.
+                    Where(Function(kvp) kvp.Value).
+                    Select(Function(kvp) kvp.Key).
+                    FirstOrDefault()
+
+                If grid.CurrentCell IsNot Nothing Then
+                    Dim currentRow As System.Windows.Forms.DataGridViewRow = grid.Rows(grid.CurrentCell.RowIndex)
+                    Dim currentRowVisible As Boolean = True
+
+                    If visibilityByRow.TryGetValue(currentRow, currentRowVisible) AndAlso Not currentRowVisible Then
+                        grid.ClearSelection()
+
+                        If fallbackRow IsNot Nothing Then
+                            Dim targetCell As System.Windows.Forms.DataGridViewCell =
+                                fallbackRow.Cells.Cast(Of System.Windows.Forms.DataGridViewCell)().
+                                    FirstOrDefault(Function(c) c.Visible)
+
+                            If targetCell IsNot Nothing Then
+                                grid.CurrentCell = targetCell
+                            Else
+                                grid.CurrentCell = Nothing
+                            End If
+                        Else
+                            grid.CurrentCell = Nothing
+                        End If
+                    End If
+                End If
+
+                For Each kvp As KeyValuePair(Of System.Windows.Forms.DataGridViewRow, Boolean) In visibilityByRow
+                    kvp.Key.Visible = kvp.Value
+                Next
+            Finally
+                If currencyManager IsNot Nothing Then
+                    currencyManager.ResumeBinding()
+                End If
+            End Try
         End Sub
 
         Private Shared Sub ExportAdminRowsToCsv(rows As IEnumerable(Of AdminLicenseRow),

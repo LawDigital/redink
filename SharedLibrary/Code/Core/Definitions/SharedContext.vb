@@ -218,6 +218,7 @@ Namespace SharedLibrary
             Property SP_ExtractSchema As String
             Property SP_MergeDateRows As String
             Property SP_Rename As String
+            Property SP_Regex As String
             Property SP_RemoveClutter As String
             Property SP_Redact As String
             Property SP_CheckforII As String
@@ -583,6 +584,7 @@ Namespace SharedLibrary
 
         Public Property SP_MergeDateRows As String Implements ISharedContext.SP_MergeDateRows
         Public Property SP_Rename As String Implements ISharedContext.SP_Rename
+        Public Property SP_Regex As String Implements ISharedContext.SP_Regex
         Public Property SP_RemoveClutter As String Implements ISharedContext.SP_RemoveClutter
         Public Property SP_Redact As String Implements ISharedContext.SP_Redact
         Public Property SP_CheckforII As String Implements ISharedContext.SP_CheckforII

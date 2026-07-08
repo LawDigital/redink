@@ -1181,6 +1181,15 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_Regex As String
+        Get
+            Return _context.SP_Regex
+        End Get
+        Set(value As String)
+            _context.SP_Regex = value
+        End Set
+    End Property
+
     Public Shared Property SP_RemoveClutter As String
         Get
             Return _context.SP_RemoveClutter
