@@ -830,14 +830,82 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
-    ' ==================== AUDIO PLAYBACK ====================
+    Public Shared Sub ConfigurePlaybackOutput(waveOut As WaveOutEvent)
+        If waveOut Is Nothing Then
+            Return
+        End If
 
+        waveOut.DesiredLatency = 300
+        waveOut.NumberOfBuffers = 4
+    End Sub
+
+    Private NotInheritable Class TimedSilenceSampleProvider
+        Implements NAudio.Wave.ISampleProvider
+
+        Private ReadOnly _waveFormat As NAudio.Wave.WaveFormat
+        Private _remainingSamples As Integer
+
+        Public Sub New(waveFormat As NAudio.Wave.WaveFormat, duration As TimeSpan)
+            _waveFormat = waveFormat
+
+            Dim totalSamples As Double =
+                duration.TotalSeconds *
+                CDbl(waveFormat.SampleRate) *
+                CDbl(waveFormat.Channels)
+
+            _remainingSamples = System.Math.Max(0, CInt(System.Math.Ceiling(totalSamples)))
+        End Sub
+
+        Public ReadOnly Property WaveFormat As NAudio.Wave.WaveFormat Implements NAudio.Wave.ISampleProvider.WaveFormat
+            Get
+                Return _waveFormat
+            End Get
+        End Property
+
+        Public Function Read(buffer As Single(), offset As Integer, count As Integer) As Integer Implements NAudio.Wave.ISampleProvider.Read
+            If _remainingSamples <= 0 Then
+                Return 0
+            End If
+
+            Dim samplesToWrite As Integer = System.Math.Min(count, _remainingSamples)
+            Array.Clear(buffer, offset, samplesToWrite)
+            _remainingSamples -= samplesToWrite
+            Return samplesToWrite
+        End Function
+    End Class
+
+    Public Shared Function CreatePlaybackWaveProvider(audioReader As AudioFileReader,
+                                                      Optional includeLeadingSilence As Boolean = True,
+                                                      Optional leadingSilenceMilliseconds As Integer = 900) As IWaveProvider
+        Dim sampleProvider As NAudio.Wave.ISampleProvider = audioReader
+
+        If Not includeLeadingSilence OrElse leadingSilenceMilliseconds <= 0 Then
+            Return New NAudio.Wave.SampleProviders.SampleToWaveProvider(sampleProvider)
+        End If
+
+        Dim leadingSilence As NAudio.Wave.ISampleProvider =
+            New TimedSilenceSampleProvider(
+                sampleProvider.WaveFormat,
+                TimeSpan.FromMilliseconds(leadingSilenceMilliseconds))
+
+        Dim playbackSequence As New NAudio.Wave.SampleProviders.ConcatenatingSampleProvider(
+            New System.Collections.Generic.List(Of NAudio.Wave.ISampleProvider) From {
+                leadingSilence,
+                sampleProvider
+            })
+
+        Return New NAudio.Wave.SampleProviders.SampleToWaveProvider(playbackSequence)
+    End Function
+
+    ' ==================== AUDIO PLAYBACK ====================
     ''' <summary>
     ''' Plays an MP3 audio file using NAudio WaveOutEvent.
     ''' Displays splash screen with "press Esc to abort" message during playback.
     ''' </summary>
     ''' <param name="filePath">Path to MP3 file.</param>
-    Public Shared Sub PlayAudio(filePath As String)
+    Public Shared Sub PlayAudio(filePath As String,
+                                Optional includeLeadingSilence As Boolean = True,
+                                Optional leadingSilenceMilliseconds As Integer = 900)
 
         Dim splash As New SLib.SplashScreen($"Playing MP3... press 'Esc' to abort")
         If File.Exists(filePath) Then
@@ -849,28 +917,28 @@ Partial Public Class ThisAddIn
 
             If File.Exists(filePath) Then
 
-                Using mp3Reader As New Mp3FileReader(filePath)
+                Using audioReader As New AudioFileReader(filePath)
                     Using waveOut As New WaveOutEvent()
-                        waveOut.Init(mp3Reader)
+                        ConfigurePlaybackOutput(waveOut)
+                        waveOut.Init(CreatePlaybackWaveProvider(audioReader, includeLeadingSilence, leadingSilenceMilliseconds))
                         waveOut.Play()
 
-                        ' Monitor playback state and check for ESC key to abort
-                        ' Check ESC key state: &H8000 = currently pressed, 1 = state toggled since last check
-                        While waveOut.PlaybackState = PlaybackState.Playing
+                        While waveOut.PlaybackState <> PlaybackState.Stopped
                             Thread.Sleep(100)
                             System.Windows.Forms.Application.DoEvents()
+
                             If (GetAsyncKeyState(VK_ESCAPE) And &H8000) <> 0 Then
                                 Exit While
                             End If
+
                             If (GetAsyncKeyState(VK_ESCAPE) And 1) <> 0 Then
                                 Exit While
                             End If
                         End While
 
-                        ' Stop audio playback and dispose resources
                         waveOut.Stop()
-                    End Using ' Automatically disposes waveOut
-                End Using ' Automatically disposes mp3Reader
+                    End Using
+                End Using
 
                 splash.Close()
 
@@ -1049,7 +1117,7 @@ Partial Public Class ThisAddIn
             My.Settings.Save()
 
             If CleanText Then
-                CleanTextPrompt = ShowCustomInputBox("Please enter the prompt to 'clean' the text with (each paragraph will be submitted to this prompt)", "Create Audio", False, CleanTextPrompt).Trim()
+                CleanTextPrompt = ShowCustomInputBox("Please enter the prompt to 'clean' the text with (each paragraph will be submitted to this prompt)", "Create Audio", False, CleanTextPrompt, Context:=_context).Trim()
                 If CleanTextPrompt = "ESC" Then Return
                 If CleanTextPrompt = "" Then
                     CleanText = False

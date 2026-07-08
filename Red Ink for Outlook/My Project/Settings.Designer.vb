@@ -676,7 +676,7 @@ Namespace My
         
         <Global.System.Configuration.UserScopedSettingAttribute(),  _
          Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
-         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+         Global.System.Configuration.DefaultSettingValueAttribute("True")>  _
         Public Property Inky_InkyMemory() As Boolean
             Get
                 Return CType(Me("Inky_InkyMemory"),Boolean)
@@ -755,6 +755,30 @@ Namespace My
             End Get
             Set
                 Me("AP_AutoDeleteAfterHours") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property LastPromptReply() As String
+            Get
+                Return CType(Me("LastPromptReply"),String)
+            End Get
+            Set
+                Me("LastPromptReply") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property AP_SenderToolPolicyPath() As String
+            Get
+                Return CType(Me("AP_SenderToolPolicyPath"),String)
+            End Get
+            Set
+                Me("AP_SenderToolPolicyPath") = value
             End Set
         End Property
     End Class

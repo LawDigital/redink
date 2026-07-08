@@ -69,3 +69,4 @@ Knowledge Store (Local); ; Word, Outlook; KnowledgeStorePathLocal; True; %APPDAT
 
 Agent Resources (Local); ; Word, Outlook; AgenResourcesPathLocal; False; %APPDATA%\microsoft\word\.inky; 
 
+Dictionary (Local); ; Word, Outlook, Excel; DictionaryPathLocal; True; %APPDATA%\microsoft\word; dictionarylocal.txt

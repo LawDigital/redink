@@ -159,7 +159,7 @@
       <Value Profile="(Default)">False</Value>
     </Setting>
     <Setting Name="Inky_InkyMemory" Type="System.Boolean" Scope="User">
-      <Value Profile="(Default)">False</Value>
+      <Value Profile="(Default)">True</Value>
     </Setting>
     <Setting Name="AP_EnableUserMemory" Type="System.Boolean" Scope="User">
       <Value Profile="(Default)">False</Value>
@@ -178,6 +178,12 @@
     </Setting>
     <Setting Name="AP_AutoDeleteAfterHours" Type="System.Int32" Scope="User">
       <Value Profile="(Default)">0</Value>
+    </Setting>
+    <Setting Name="LastPromptReply" Type="System.String" Scope="User">
+      <Value Profile="(Default)" />
+    </Setting>
+    <Setting Name="AP_SenderToolPolicyPath" Type="System.String" Scope="User">
+      <Value Profile="(Default)" />
     </Setting>
   </Settings>
 </SettingsFile>

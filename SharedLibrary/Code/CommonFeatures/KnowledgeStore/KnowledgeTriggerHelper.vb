@@ -1087,12 +1087,32 @@ Namespace SharedLibrary
             If String.IsNullOrWhiteSpace(filePath) Then Return ""
 
             Try
-                Dim fullPath = Path.GetFullPath(filePath)
+                Dim candidate = filePath.Trim()
+
+                If candidate.StartsWith("file://", StringComparison.OrdinalIgnoreCase) Then
+                    Return candidate
+                End If
+
+                If Not Path.IsPathRooted(candidate) Then
+                    Return candidate.Replace("\"c, "/"c)
+                End If
+
+                Dim fullPath = Path.GetFullPath(candidate)
                 Dim uri As New Uri(fullPath)
                 Return uri.AbsoluteUri
             Catch
                 Try
-                    Dim fullPath = Path.GetFullPath(filePath)
+                    Dim candidate = filePath.Trim()
+
+                    If candidate.StartsWith("file://", StringComparison.OrdinalIgnoreCase) Then
+                        Return candidate
+                    End If
+
+                    If Not Path.IsPathRooted(candidate) Then
+                        Return candidate.Replace("\"c, "/"c)
+                    End If
+
+                    Dim fullPath = Path.GetFullPath(candidate)
                     Return "file:///" & fullPath.Replace("\"c, "/"c).Replace(" ", "%20")
                 Catch
                     Return ""

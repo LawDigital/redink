@@ -38,6 +38,7 @@ Imports System.IO
 Imports System.Runtime.InteropServices
 Imports System.Windows.Forms
 Imports Microsoft.Office.Interop.Word
+Imports PdfSharp
 Imports SharedLibrary.SharedLibrary.SharedContext
 
 Namespace SharedLibrary
@@ -422,7 +423,8 @@ Namespace SharedLibrary
                                             Optional ByVal DoOCR As Boolean = False,
                                             Optional ByVal AskUser As Boolean = True,
                                             Optional ByVal context As ISharedContext = Nothing,
-                                            Optional ByVal ocrAdditionalInstruction As String = Nothing) As Task(Of PdfReadResult)
+                                            Optional ByVal ocrAdditionalInstruction As String = Nothing,
+                                            Optional ByVal ShowOcrProgressWindow As Boolean = False) As Task(Of PdfReadResult)
 
             Dim result As New PdfReadResult()
 
@@ -604,7 +606,8 @@ Namespace SharedLibrary
                         End If
                     End If
 
-                    Dim ocrText As String = Await PerformOCR(pdfPath, context, AskUser, ocrAdditionalInstruction)
+                    Dim ocrText As String =
+                        Await PerformOCR(pdfPath, context, AskUser, ocrAdditionalInstruction, ShowOcrProgressWindow)
                     If Not String.IsNullOrWhiteSpace(ocrText) Then
                         result.Content = ocrText
                         Return result
@@ -631,8 +634,15 @@ Namespace SharedLibrary
                                             Optional ByVal DoOCR As Boolean = False,
                                             Optional ByVal AskUser As Boolean = True,
                                             Optional ByVal context As ISharedContext = Nothing,
-                                            Optional ByVal ocrAdditionalInstruction As String = Nothing) As Task(Of String)
-            Dim result = Await ReadPdfAsTextEx(pdfPath, ReturnErrorInsteadOfEmpty, DoOCR, AskUser, context, ocrAdditionalInstruction)
+                                            Optional ByVal ocrAdditionalInstruction As String = Nothing,
+                                            Optional ByVal ShowOcrProgressWindow As Boolean = False) As Task(Of String)
+            Dim result = Await ReadPdfAsTextEx(pdfPath,
+                                               ReturnErrorInsteadOfEmpty,
+                                               DoOCR,
+                                               AskUser,
+                                               context,
+                                               ocrAdditionalInstruction,
+                                               ShowOcrProgressWindow)
             Return result.Content
         End Function
 
@@ -730,7 +740,7 @@ Namespace SharedLibrary
         ''' <param name="askUser">If False, suppresses all UI dialogs (for non-interactive callers like AutoPilot).</param>
         ''' <param name="additionalInstruction">Additional instructions to include in the system prompt for OCR processing.</param>
         ''' <returns>OCR result text, or an empty string if OCR is not available or fails.</returns>
-        Private Shared Async Function PerformOCR(ByVal pdfPath As String,
+        Private Shared Async Function oldPerformOCR(ByVal pdfPath As String,
                                                  context As ISharedContext,
                                                  Optional askUser As Boolean = True,
                                                  Optional additionalInstruction As String = Nothing) As Task(Of String)
@@ -768,6 +778,695 @@ Namespace SharedLibrary
                 RestoreModelConfigScope(context, scope)
             End Try
         End Function
+
+
+        Private Shared Async Function PerformOCR(ByVal pdfPath As String,
+                                                 context As ISharedContext,
+                                                 Optional askUser As Boolean = True,
+                                                 Optional additionalInstruction As String = Nothing,
+                                                 Optional showProgressWindow As Boolean = False) As Task(Of String)
+
+            If Not IsOcrAvailable(context) Then
+                If askUser Then
+                    ShowCustomMessageBox("OCR is not available with your current model configuration.")
+                End If
+                Return ""
+            End If
+
+            Const ChunkOcrMaxRounds As Integer = 3
+
+            If askUser Then showProgressWindow = True
+
+            Dim scope = CaptureModelConfigScope(context)
+
+            Try
+                Dim useSecondAPI As Boolean = False
+                Dim timeOut = context.INI_Timeout
+
+                If Not String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) AndAlso
+                   GetSpecialTaskModel(context, context.INI_AlternateModelPath, "OCR") Then
+
+                    useSecondAPI = True
+                    timeOut = context.INI_Timeout_2
+                End If
+
+                Dim systemPrompt As String = context.SP_InsertClipboard
+                If Not String.IsNullOrWhiteSpace(additionalInstruction) Then
+                    systemPrompt &= Environment.NewLine & Environment.NewLine & additionalInstruction.Trim()
+                End If
+
+                Dim pageCount As Integer = 0
+                Try
+                    Using document As UglyToad.PdfPig.PdfDocument = UglyToad.PdfPig.PdfDocument.Open(pdfPath)
+                        pageCount = document.NumberOfPages
+                    End Using
+                Catch
+                    pageCount = 0
+                End Try
+
+                Dim showStatusWindow As Boolean = askUser OrElse showProgressWindow
+
+                If pageCount <= 0 OrElse context.INI_ChunkOCR <= 0 OrElse pageCount <= context.INI_ChunkOCR Then
+                    Dim result As String =
+                        Await PerformSinglePdfOcrRequest(pdfPath, context, systemPrompt, timeOut, useSecondAPI, Not askUser)
+
+                    Return If(result, "")
+                End If
+
+                Dim statusDialog As OcrChunkStatusDialog = Nothing
+
+                Try
+                    If showStatusWindow Then
+                        statusDialog = New OcrChunkStatusDialog()
+                        statusDialog.Show(
+                            "OCR is running." & Environment.NewLine & Environment.NewLine &
+                            $"Pages done: 0 / {pageCount:N0}" & Environment.NewLine &
+                            "Chunks done: 0")
+                    End If
+
+                    Dim chunkedResult As String =
+                        Await PerformAdaptiveChunkedOcr(pdfPath,
+                                                        context,
+                                                        systemPrompt,
+                                                        timeOut,
+                                                        useSecondAPI,
+                                                        pageCount,
+                                                        context.INI_ChunkOCR,
+                                                        ChunkOcrMaxRounds,
+                                                        statusDialog)
+
+                    If String.IsNullOrWhiteSpace(chunkedResult) Then
+                        Return ""
+                    End If
+
+                    Return chunkedResult
+
+                Finally
+                    If statusDialog IsNot Nothing Then
+                        statusDialog.Dispose()
+                    End If
+                End Try
+
+            Catch ex As OperationCanceledException
+                Return ""
+            Catch ex As System.Exception
+                If askUser Then
+                    ShowCustomMessageBox($"OCR failed: {ex.Message}")
+                End If
+                Return ""
+            Finally
+                RestoreModelConfigScope(context, scope)
+            End Try
+        End Function
+
+        Private Shared Async Function PerformSinglePdfOcrRequest(ByVal pdfPath As String,
+                                                                 context As ISharedContext,
+                                                                 systemPrompt As String,
+                                                                 timeOut As Long,
+                                                                 useSecondAPI As Boolean,
+                                                                 suppressUi As Boolean) As Task(Of String)
+            Dim result As String =
+                Await LLM(context, systemPrompt, "", "", "", timeOut * 2, useSecondAPI, suppressUi, "", pdfPath)
+
+            Return If(result, "")
+        End Function
+
+        Private Shared Async Function PerformAdaptiveChunkedOcr(ByVal pdfPath As String,
+                                                                context As ISharedContext,
+                                                                systemPrompt As String,
+                                                                timeOut As Long,
+                                                                useSecondAPI As Boolean,
+                                                                totalPageCount As Integer,
+                                                                initialChunkSize As Integer,
+                                                                maxRetries As Integer,
+                                                                statusDialog As OcrChunkStatusDialog) As Task(Of String)
+
+            Dim progressState As New OcrChunkProgressState(totalPageCount)
+            Dim sb As New System.Text.StringBuilder()
+            Dim currentStartPage As Integer = 1
+
+            While currentStartPage <= totalPageCount
+                ThrowIfOcrCancelled(statusDialog)
+
+                Dim currentEndPage As Integer = System.Math.Min(totalPageCount, currentStartPage + initialChunkSize - 1)
+
+                Dim chunkText As String =
+                    Await ProcessOcrRangeWithRetries(pdfPath,
+                                                     currentStartPage,
+                                                     currentEndPage,
+                                                     context,
+                                                     systemPrompt,
+                                                     timeOut,
+                                                     useSecondAPI,
+                                                     currentAttempt:=1,
+                                                     currentChunkSize:=initialChunkSize,
+                                                     maxRetries:=maxRetries,
+                                                     progressState:=progressState,
+                                                     statusDialog:=statusDialog)
+
+                If chunkText Is Nothing Then
+                    Return ""
+                End If
+
+                If sb.Length > 0 AndAlso chunkText.Length > 0 Then
+                    sb.AppendLine()
+                    sb.AppendLine()
+                End If
+
+                sb.Append(chunkText)
+                currentStartPage = currentEndPage + 1
+            End While
+
+            If statusDialog IsNot Nothing Then
+                statusDialog.UpdateStatus(
+                    "OCR finished." & Environment.NewLine & Environment.NewLine &
+                    $"Pages done: {progressState.TotalPages:N0} / {progressState.TotalPages:N0}" & Environment.NewLine &
+                    $"Chunks done: {progressState.GetCompletedChunks():N0}")
+                Await System.Threading.Tasks.Task.Delay(150)
+            End If
+
+            Return sb.ToString()
+        End Function
+
+        Private Shared Async Function ProcessOcrRangeWithRetries(ByVal pdfPath As String,
+                                                                 ByVal startPage As Integer,
+                                                                 ByVal endPage As Integer,
+                                                                 context As ISharedContext,
+                                                                 systemPrompt As String,
+                                                                 timeOut As Long,
+                                                                 useSecondAPI As Boolean,
+                                                                 currentAttempt As Integer,
+                                                                 currentChunkSize As Integer,
+                                                                 maxRetries As Integer,
+                                                                 progressState As OcrChunkProgressState,
+                                                                 statusDialog As OcrChunkStatusDialog) As Task(Of String)
+
+            ThrowIfOcrCancelled(statusDialog)
+            UpdateOcrChunkStatus(statusDialog, progressState, startPage, endPage, currentAttempt, maxRetries)
+
+            Dim tempChunkPath As String = Nothing
+            Dim chunkText As String = ""
+
+            Try
+                tempChunkPath = System.IO.Path.Combine(
+                    System.IO.Path.GetTempPath(),
+                    $"RedInk_OCR_{System.Guid.NewGuid():N}_{startPage}_{endPage}.pdf")
+
+                CreatePdfChunkForOcr(pdfPath, tempChunkPath, startPage, endPage)
+
+                chunkText = Await PerformSinglePdfOcrRequest(tempChunkPath,
+                                                             context,
+                                                             systemPrompt,
+                                                             timeOut,
+                                                             useSecondAPI,
+                                                             suppressUi:=True)
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine(
+                    $"OCR chunk attempt failed for pages {startPage}-{endPage} (attempt {currentAttempt} of {maxRetries}): {ex.Message}")
+            Finally
+                If tempChunkPath IsNot Nothing Then
+                    Try
+                        If System.IO.File.Exists(tempChunkPath) Then
+                            System.IO.File.Delete(tempChunkPath)
+                        End If
+                    Catch
+                    End Try
+                End If
+            End Try
+
+            If Not String.IsNullOrWhiteSpace(chunkText) Then
+                progressState.MarkCompleted(startPage, endPage)
+                UpdateOcrChunkStatus(statusDialog, progressState, startPage, endPage, currentAttempt, maxRetries)
+                Return chunkText
+            End If
+
+            If currentAttempt >= maxRetries Then
+                Return Nothing
+            End If
+
+            Dim pageCountInRange As Integer = endPage - startPage + 1
+
+            If pageCountInRange <= 1 Then
+                Return Await ProcessOcrRangeWithRetries(pdfPath,
+                                                        startPage,
+                                                        endPage,
+                                                        context,
+                                                        systemPrompt,
+                                                        timeOut,
+                                                        useSecondAPI,
+                                                        currentAttempt + 1,
+                                                        1,
+                                                        maxRetries,
+                                                        progressState,
+                                                        statusDialog)
+            End If
+
+            Dim reducedChunkSize As Integer = GetReducedChunkSize(pageCountInRange, currentChunkSize)
+            Dim sb As New System.Text.StringBuilder()
+            Dim currentSubStart As Integer = startPage
+
+            While currentSubStart <= endPage
+                ThrowIfOcrCancelled(statusDialog)
+
+                Dim currentSubEnd As Integer = System.Math.Min(endPage, currentSubStart + reducedChunkSize - 1)
+
+                Dim subChunkText As String =
+                    Await ProcessOcrRangeWithRetries(pdfPath,
+                                                     currentSubStart,
+                                                     currentSubEnd,
+                                                     context,
+                                                     systemPrompt,
+                                                     timeOut,
+                                                     useSecondAPI,
+                                                     currentAttempt + 1,
+                                                     reducedChunkSize,
+                                                     maxRetries,
+                                                     progressState,
+                                                     statusDialog)
+
+                If subChunkText Is Nothing Then
+                    Return Nothing
+                End If
+
+                If sb.Length > 0 AndAlso subChunkText.Length > 0 Then
+                    sb.AppendLine()
+                    sb.AppendLine()
+                End If
+
+                sb.Append(subChunkText)
+                currentSubStart = currentSubEnd + 1
+            End While
+
+            Return sb.ToString()
+        End Function
+
+        Private Shared Sub CreatePdfChunkForOcr(ByVal sourcePdfPath As String,
+                                                ByVal outputPdfPath As String,
+                                                ByVal startPage As Integer,
+                                                ByVal endPage As Integer)
+            Using inputDocument As PdfSharp.Pdf.PdfDocument =
+                PdfSharp.Pdf.IO.PdfReader.Open(sourcePdfPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.Import)
+
+                Using outputDocument As New PdfSharp.Pdf.PdfDocument()
+                    For pageIndex As Integer = startPage To endPage
+                        outputDocument.AddPage(inputDocument.Pages(pageIndex - 1))
+                    Next
+
+                    outputDocument.Save(outputPdfPath)
+                End Using
+            End Using
+        End Sub
+
+        Private Shared Function GetReducedChunkSize(pageCountInRange As Integer, currentChunkSize As Integer) As Integer
+            Dim reducedChunkSize As Integer =
+                System.Math.Max(1, CInt(System.Math.Ceiling(currentChunkSize / 2.0R)))
+
+            If reducedChunkSize >= pageCountInRange AndAlso pageCountInRange > 1 Then
+                reducedChunkSize = System.Math.Max(1, CInt(System.Math.Ceiling(pageCountInRange / 2.0R)))
+            End If
+
+            If reducedChunkSize >= pageCountInRange AndAlso pageCountInRange > 1 Then
+                reducedChunkSize = pageCountInRange - 1
+            End If
+
+            Return System.Math.Max(1, reducedChunkSize)
+        End Function
+
+        Private Shared Sub ThrowIfOcrCancelled(statusDialog As OcrChunkStatusDialog)
+            If statusDialog IsNot Nothing AndAlso statusDialog.IsCancelled Then
+                Throw New OperationCanceledException("OCR was cancelled.")
+            End If
+        End Sub
+
+        Private Shared Sub UpdateOcrChunkStatus(statusDialog As OcrChunkStatusDialog,
+                                                progressState As OcrChunkProgressState,
+                                                startPage As Integer,
+                                                endPage As Integer,
+                                                currentAttempt As Integer,
+                                                maxRetries As Integer)
+            If statusDialog Is Nothing OrElse progressState Is Nothing Then
+                Return
+            End If
+
+            Dim completedPages As Integer = progressState.GetCompletedPages()
+            Dim completedChunks As Integer = progressState.GetCompletedChunks()
+
+            statusDialog.UpdateStatus(
+                "OCR is running." & Environment.NewLine & Environment.NewLine &
+                $"Pages done: {completedPages:N0} / {progressState.TotalPages:N0}" & Environment.NewLine &
+                $"Chunks done: {completedChunks:N0}" & Environment.NewLine &
+                $"Now: {startPage:N0}-{endPage:N0}" & Environment.NewLine &
+                $"Round: {currentAttempt:N0} / {maxRetries:N0}")
+        End Sub
+
+        Private NotInheritable Class OcrChunkProgressState
+            Private ReadOnly _syncRoot As New Object()
+            Private _completedPages As Integer
+            Private _completedChunks As Integer
+
+            Public Sub New(totalPages As Integer)
+                Me.TotalPages = totalPages
+            End Sub
+
+            Public ReadOnly Property TotalPages As Integer
+
+            Public Sub MarkCompleted(startPage As Integer, endPage As Integer)
+                Dim pagesCompleted As Integer = System.Math.Max(0, endPage - startPage + 1)
+
+                SyncLock _syncRoot
+                    _completedPages += pagesCompleted
+                    _completedChunks += 1
+                End SyncLock
+            End Sub
+
+            Public Function GetCompletedPages() As Integer
+                SyncLock _syncRoot
+                    Return _completedPages
+                End SyncLock
+            End Function
+
+            Public Function GetCompletedChunks() As Integer
+                SyncLock _syncRoot
+                    Return _completedChunks
+                End SyncLock
+            End Function
+        End Class
+
+        Private NotInheritable Class OcrChunkStatusDialog
+            Implements System.IDisposable
+
+            Private ReadOnly _syncRoot As New Object()
+            Private ReadOnly _readyEvent As New System.Threading.ManualResetEventSlim(False)
+            Private _uiThread As System.Threading.Thread = Nothing
+            Private _statusText As String = "Starting OCR..."
+            Private _cancelled As Boolean = False
+            Private _closeRequested As Boolean = False
+            Private _form As System.Windows.Forms.Form = Nothing
+
+            Public Sub Show(initialText As String)
+                SyncLock _syncRoot
+                    _statusText = initialText
+                    _cancelled = False
+                    _closeRequested = False
+                End SyncLock
+
+                _uiThread = New System.Threading.Thread(AddressOf UiThreadMain) With {
+                    .IsBackground = True
+                }
+                _uiThread.SetApartmentState(System.Threading.ApartmentState.STA)
+                _uiThread.Start()
+
+                _readyEvent.Wait()
+            End Sub
+
+            Public Sub UpdateStatus(text As String)
+                SyncLock _syncRoot
+                    _statusText = text
+                End SyncLock
+            End Sub
+
+            Public ReadOnly Property IsCancelled As Boolean
+                Get
+                    SyncLock _syncRoot
+                        Return _cancelled
+                    End SyncLock
+                End Get
+            End Property
+
+            Private Sub RequestCancel()
+                SyncLock _syncRoot
+                    _cancelled = True
+                    _statusText = "Cancelling OCR..."
+                End SyncLock
+            End Sub
+
+            Private Shared Function GetLowerMiddleLocation(formSize As System.Drawing.Size) As System.Drawing.Point
+                Dim wa As System.Drawing.Rectangle = System.Windows.Forms.Screen.PrimaryScreen.WorkingArea
+                Dim x As Integer = wa.Left + ((wa.Width - formSize.Width) \ 2)
+                Dim y As Integer = wa.Top + CInt((wa.Height * 0.75R) - (formSize.Height / 2.0R))
+
+                If x < wa.Left Then x = wa.Left
+                If y < wa.Top Then y = wa.Top
+                If x + formSize.Width > wa.Right Then x = wa.Right - formSize.Width
+                If y + formSize.Height > wa.Bottom Then y = wa.Bottom - formSize.Height
+
+                Return New System.Drawing.Point(x, y)
+            End Function
+
+            Private Sub UiThreadMain()
+                Try
+                    Dim localForm As New System.Windows.Forms.Form() With {
+                        .Opacity = 0,
+                        .Text = SharedMethods.AN & " OCR",
+                        .FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedDialog,
+                        .StartPosition = System.Windows.Forms.FormStartPosition.Manual,
+                        .MaximizeBox = False,
+                        .MinimizeBox = False,
+                        .ShowInTaskbar = False,
+                        .TopMost = True,
+                        .KeyPreview = True,
+                        .AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font,
+                        .AutoSize = False
+                    }
+
+                    Dim bmpIcon As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
+                    localForm.Icon = System.Drawing.Icon.FromHandle(bmpIcon.GetHicon())
+
+                    Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
+                    localForm.Font = standardFont
+
+                    Dim wa As System.Drawing.Rectangle = System.Windows.Forms.Screen.PrimaryScreen.WorkingArea
+                    Dim paddingAll As Integer = 20
+                    Dim gapAboveButtons As Integer = 10
+                    Dim spacerExtra As Integer = 20
+                    Dim minContentWidth As Integer = 220
+                    Dim maxWindowWidth As Integer = CInt(System.Math.Floor(wa.Width * 0.32))
+                    Dim maxWindowHeight As Integer = CInt(System.Math.Floor(wa.Height * 0.35))
+
+                    Dim cancelButton As New System.Windows.Forms.Button() With {
+                        .Text = "Cancel",
+                        .AutoSize = True,
+                        .Font = standardFont,
+                        .Margin = New System.Windows.Forms.Padding(0)
+                    }
+
+                    Dim bottomFlow As New System.Windows.Forms.FlowLayoutPanel() With {
+                        .FlowDirection = System.Windows.Forms.FlowDirection.LeftToRight,
+                        .AutoSize = True,
+                        .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
+                        .Margin = New System.Windows.Forms.Padding(0)
+                    }
+                    bottomFlow.Controls.Add(cancelButton)
+                    bottomFlow.PerformLayout()
+
+                    Dim reservedBottomHeight As Integer = bottomFlow.PreferredSize.Height + gapAboveButtons
+
+                    Dim statusLabel As New System.Windows.Forms.Label() With {
+                        .Text = If(_statusText, String.Empty),
+                        .Font = standardFont,
+                        .AutoSize = True,
+                        .Margin = New System.Windows.Forms.Padding(0)
+                    }
+
+                    Dim getLabelPreferred As System.Func(Of Integer, System.Drawing.Size) =
+                        Function(w As Integer) As System.Drawing.Size
+                            statusLabel.MaximumSize = New System.Drawing.Size(System.Math.Max(1, w), 0)
+                            Return statusLabel.GetPreferredSize(New System.Drawing.Size(System.Math.Max(1, w), 0))
+                        End Function
+
+                    Dim maxContentWidth As Integer = System.Math.Max(minContentWidth, maxWindowWidth - 2 * paddingAll)
+                    Dim pref As System.Drawing.Size = getLabelPreferred(maxContentWidth)
+                    Dim contentWidth As Integer = System.Math.Max(minContentWidth, System.Math.Min(maxContentWidth, pref.Width))
+                    pref = getLabelPreferred(contentWidth)
+
+                    Dim maxBodyHeightNoScroll As Integer = System.Math.Max(100, maxWindowHeight - reservedBottomHeight - spacerExtra - 2 * paddingAll)
+
+                    While (pref.Height > maxBodyHeightNoScroll) AndAlso ((contentWidth + 2 * paddingAll) < maxWindowWidth)
+                        Dim stepW As Integer = System.Math.Max(20, (maxWindowWidth - 2 * paddingAll - contentWidth) \ 3)
+                        contentWidth = System.Math.Min(maxWindowWidth - 2 * paddingAll, contentWidth + stepW)
+                        pref = getLabelPreferred(contentWidth)
+                    End While
+
+                    Dim bodyPanelHeight As Integer = System.Math.Max(90, System.Math.Min(pref.Height, maxBodyHeightNoScroll))
+
+                    Dim bodyPanel As New System.Windows.Forms.Panel() With {
+                        .AutoSize = False,
+                        .Size = New System.Drawing.Size(contentWidth, bodyPanelHeight),
+                        .Margin = New System.Windows.Forms.Padding(0),
+                        .Padding = New System.Windows.Forms.Padding(0)
+                    }
+
+                    statusLabel.MaximumSize = New System.Drawing.Size(contentWidth, 0)
+                    bodyPanel.Controls.Add(statusLabel)
+                    statusLabel.Location = New System.Drawing.Point(0, 0)
+
+                    Dim table As New System.Windows.Forms.TableLayoutPanel() With {
+                        .Dock = System.Windows.Forms.DockStyle.Fill,
+                        .ColumnCount = 1,
+                        .RowCount = 3,
+                        .Padding = New System.Windows.Forms.Padding(paddingAll),
+                        .AutoSize = False,
+                        .Margin = New System.Windows.Forms.Padding(0)
+                    }
+                    table.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
+                    table.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, bodyPanelHeight))
+                    table.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, spacerExtra))
+                    table.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+
+                    table.Controls.Add(bodyPanel, 0, 0)
+
+                    Dim spacer As New System.Windows.Forms.Panel() With {
+                        .Height = spacerExtra,
+                        .Width = 1,
+                        .Margin = New System.Windows.Forms.Padding(0)
+                    }
+                    table.Controls.Add(spacer, 0, 1)
+
+                    Dim bottomHost As New System.Windows.Forms.Panel() With {
+                        .AutoSize = True,
+                        .Margin = New System.Windows.Forms.Padding(0)
+                    }
+                    bottomHost.Padding = New System.Windows.Forms.Padding(0, gapAboveButtons, 0, 0)
+                    bottomHost.Controls.Add(bottomFlow)
+                    table.Controls.Add(bottomHost, 0, 2)
+
+                    localForm.Controls.Clear()
+                    localForm.Controls.Add(table)
+
+                    Dim clientW As Integer = contentWidth + 2 * paddingAll
+                    Dim clientH As Integer = bodyPanelHeight + spacerExtra + reservedBottomHeight + 2 * paddingAll
+                    clientW = System.Math.Min(clientW, maxWindowWidth)
+                    clientH = System.Math.Min(clientH, maxWindowHeight)
+                    localForm.ClientSize = New System.Drawing.Size(clientW, clientH)
+                    localForm.Location = GetLowerMiddleLocation(localForm.Size)
+
+                    AddHandler cancelButton.Click,
+                        Sub(sender As Object, e As System.EventArgs)
+                            RequestCancel()
+                        End Sub
+
+                    AddHandler localForm.KeyDown,
+                        Sub(sender As Object, e As System.Windows.Forms.KeyEventArgs)
+                            If e.KeyCode = System.Windows.Forms.Keys.Escape Then
+                                RequestCancel()
+                                e.SuppressKeyPress = True
+                            End If
+                        End Sub
+
+                    AddHandler localForm.FormClosing,
+                        Sub(sender As Object, e As System.Windows.Forms.FormClosingEventArgs)
+                            Dim closeRequested As Boolean
+
+                            SyncLock _syncRoot
+                                closeRequested = _closeRequested
+                            End SyncLock
+
+                            If Not closeRequested Then
+                                RequestCancel()
+                            End If
+                        End Sub
+
+                    AddHandler localForm.Shown,
+                        Sub(sender As Object, e As System.EventArgs)
+                            localForm.TopMost = False
+                            localForm.TopMost = True
+                            localForm.Activate()
+                            localForm.BringToFront()
+                        End Sub
+
+                    Dim refreshTimer As New System.Windows.Forms.Timer() With {
+                        .Interval = 100
+                    }
+
+                    AddHandler refreshTimer.Tick,
+                        Sub(sender As Object, e As System.EventArgs)
+                            Dim latestText As String = ""
+                            Dim closeRequested As Boolean = False
+
+                            SyncLock _syncRoot
+                                latestText = _statusText
+                                closeRequested = _closeRequested
+                            End SyncLock
+
+                            statusLabel.Text = latestText
+
+                            If closeRequested Then
+                                refreshTimer.Stop()
+                                localForm.Close()
+                            End If
+                        End Sub
+
+                    SyncLock _syncRoot
+                        _form = localForm
+                    End SyncLock
+
+                    _readyEvent.Set()
+                    refreshTimer.Start()
+                    localForm.Opacity = 1
+
+                    Dim owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+                    Dim ownerScope As System.IDisposable = Nothing
+
+                    Try
+                        ownerScope = SharedMethods.PushDialogOwner(localForm)
+
+                        If owner IsNot Nothing Then
+                            localForm.ShowDialog(owner)
+                        Else
+                            localForm.ShowDialog()
+                        End If
+                    Finally
+                        If ownerScope IsNot Nothing Then
+                            Try
+                                ownerScope.Dispose()
+                            Catch
+                            End Try
+                        End If
+                    End Try
+
+                    refreshTimer.Dispose()
+
+                Catch
+                    _readyEvent.Set()
+                Finally
+                    SyncLock _syncRoot
+                        _form = Nothing
+                    End SyncLock
+                End Try
+            End Sub
+
+            Public Sub Close()
+                SyncLock _syncRoot
+                    _closeRequested = True
+                End SyncLock
+
+                Dim localForm As System.Windows.Forms.Form = Nothing
+
+                SyncLock _syncRoot
+                    localForm = _form
+                End SyncLock
+
+                If localForm IsNot Nothing AndAlso localForm.IsHandleCreated Then
+                    Try
+                        localForm.BeginInvoke(New System.Action(Sub() localForm.Close()))
+                    Catch
+                    End Try
+                End If
+
+                If _uiThread IsNot Nothing AndAlso _uiThread.IsAlive Then
+                    Try
+                        _uiThread.Join(2000)
+                    Catch
+                    End Try
+                End If
+            End Sub
+
+            Public Sub Dispose() Implements System.IDisposable.Dispose
+                Close()
+                _readyEvent.Dispose()
+            End Sub
+        End Class
+
 
         ''' <summary>
         ''' Determines whether OCR is available based on the configured model capabilities.

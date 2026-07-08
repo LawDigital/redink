@@ -160,6 +160,7 @@ Namespace SharedLibrary
                 context.SP_Convincing = If(configDict.ContainsKey("SP_Convincing"), configDict("SP_Convincing"), Default_SP_Convincing)
                 context.SP_NoFillers = If(configDict.ContainsKey("SP_NoFillers"), configDict("SP_NoFillers"), Default_SP_NoFillers)
                 context.SP_Podcast = If(configDict.ContainsKey("SP_Podcast"), configDict("SP_Podcast"), Default_SP_Podcast)
+                context.SP_Compact = If(configDict.ContainsKey("SP_Compact"), configDict("SP_Compact"), Default_SP_Compact)
                 context.SP_MyStyle_Word = If(configDict.ContainsKey("SP_MyStyle_Word"), configDict("SP_MyStyle_Word"), Default_SP_MyStyle_Word)
                 context.SP_MyStyle_Outlook = If(configDict.ContainsKey("SP_MyStyle_Outlook"), configDict("SP_MyStyle_Outlook"), Default_SP_MyStyle_Outlook)
                 context.SP_MyStyle_Apply = If(configDict.ContainsKey("SP_MyStyle_Apply"), configDict("SP_MyStyle_Apply"), Default_SP_MyStyle_Apply)
@@ -184,6 +185,7 @@ Namespace SharedLibrary
                 context.SP_SwitchParty_Document = If(configDict.ContainsKey("SP_SwitchParty_Document"), configDict("SP_SwitchParty_Document"), Default_SP_SwitchParty_Document)
                 context.SP_Anonymize_Document = If(configDict.ContainsKey("SP_Anonymize_Document"), configDict("SP_Anonymize_Document"), Default_SP_Anonymize_Document)
                 context.SP_Rename = If(configDict.ContainsKey("SP_Rename"), configDict("SP_Rename"), Default_SP_Rename)
+                context.SP_Regex = If(configDict.ContainsKey("SP_Regex"), configDict("SP_Regex"), Default_SP_Regex)
                 context.SP_RemoveClutter = If(configDict.ContainsKey("SP_RemoveClutter"), configDict("SP_RemoveClutter"), Default_SP_RemoveClutter)
                 context.SP_Redact = If(configDict.ContainsKey("SP_Redact"), configDict("SP_Redact"), Default_SP_Redact)
                 context.SP_CheckforII = If(configDict.ContainsKey("SP_CheckforII"), configDict("SP_CheckforII"), Default_SP_CheckforII)
@@ -247,8 +249,6 @@ Namespace SharedLibrary
                 context.SP_Assemble_Execute = If(configDict.ContainsKey("SP_Assemble_Execute"), configDict("SP_Assemble_Execute"), Default_SP_Assemble_Execute)
                 context.SP_Assemble_Summarize = If(configDict.ContainsKey("SP_Assemble_Summarize"), configDict("SP_Assemble_Summarize"), Default_SP_Assemble_Summarize)               ' Legacy; was required For Excel Helper.
 
-                ' context.INI_OpenSSLPath = If(configDict.ContainsKey("OpenSSLPath"), configDict("OpenSSLPath"), "%APPDATA%\Microsoft\OpenSSL_Runtime\openssl.exe")
-
                 ' Optional values.
                 context.INI_PreCorrection = If(configDict.ContainsKey("PreCorrection"), configDict("PreCorrection"), "")
                 context.INI_PostCorrection = If(configDict.ContainsKey("PostCorrection"), configDict("PostCorrection"), "")
@@ -265,6 +265,9 @@ Namespace SharedLibrary
                 context.INI_MarkupRegexCap = If(configDict.ContainsKey("MarkupRegexCap"), CInt(configDict("MarkupRegexCap")), DEFAULT_MARKUP_REGEX_CAP)
                 context.INI_ChatCap = If(configDict.ContainsKey("ChatCap"), CInt(configDict("ChatCap")), DEFAULT_CHAT_CAP)
                 context.INI_InkyMemoryCap = If(configDict.ContainsKey("InkyMemoryCap"), CInt(configDict("InkyMemoryCap")), DEFAULT_INKY_MEMORY_CAP)
+                context.INI_SimpleMenuHide = If(configDict.ContainsKey("SimpleMenuHide"), configDict("SimpleMenuHide"), DEFAULT_SIMPLEMENUHIDE)
+                context.INI_MenuBlock = If(configDict.ContainsKey("MenuBlock"), configDict("MenuBlock"), "")
+                context.INI_WebServerBlock = If(configDict.ContainsKey("WebServerBlock"), CInt(configDict("WebServerBlock")), 0)
 
                 ' Load per-user overrides from My.Settings.
                 context.INI_DefaultPrefix = My.Settings.DefaultPrefix
@@ -288,7 +291,19 @@ Namespace SharedLibrary
                 context.INI_DoMarkupOutlook = ParseBoolean(configDict, "DoMarkupOutlook", DEFAULT_BOOL_DOMARKUPOUTLOOK)
                 context.INI_DoMarkupWord = ParseBoolean(configDict, "DoMarkupWord", DEFAULT_BOOL_DOMARKUPWORD)
                 context.INI_RoastMe = ParseBoolean(configDict, "RoastMe", False)
+                context.INI_SimpleMenuDefault = ParseBoolean(configDict, "SimpleMenuDefault", DEFAULT_SIMPLEMENUDEFAULT)
+                context.INI_SimpleMenuOverride = context.INI_SimpleMenuDefault
+
+                Dim simpleMenuOverrideIsSet As Boolean = False
+                If TryGetMySettingBoolean("SimpleMenuOverrideIsSet", simpleMenuOverrideIsSet) AndAlso simpleMenuOverrideIsSet Then
+                    Dim simpleMenuOverrideValue As Boolean = False
+                    If TryGetMySettingBoolean("SimpleMenuOverride", simpleMenuOverrideValue) Then
+                        context.INI_SimpleMenuOverride = simpleMenuOverrideValue
+                    End If
+                End If
+
                 context.INI_APIDebug = ParseBoolean(configDict, "APIDebug")
+                context.INI_UseHostColorOutlook = ParseBoolean(configDict, "UseHostColorOutlook")
                 context.INI_AutoPilotAutoStart = ParseBoolean(configDict, "AutoPilotAutoStart")
                 context.INI_AutoPilotSchedulerLocalChat = ParseBoolean(configDict, "AutoPilotSchedulerLocalChat")
                 context.INI_APIEncrypted = ParseBoolean(configDict, "APIKeyEncrypted")
@@ -316,6 +331,9 @@ Namespace SharedLibrary
                 ' Other parameters.
 
                 context.INI_NoHelperDownload = ParseBoolean(configDict, "NoHelperDownload")
+                context.INI_LicenseCounterPath = If(configDict.ContainsKey("LicenseCounterPath"), configDict("LicenseCounterPath"), "")
+                context.INI_LicenseCounterMethod = If(configDict.ContainsKey("LicenseCounterMethod"), configDict("LicenseCounterMethod"), DEFAULT_LICENSECOUNTERMETHOD)
+                context.INI_LicenseCounterAnon = ParseBoolean(configDict, "LicenseCounterAnon", DEFAULT_LICENSECOUNTERANON)
                 context.INI_UpdateCheckInterval = If(configDict.ContainsKey("UpdateCheckInterval"), CInt(configDict("UpdateCheckInterval")), DefaultUpdateIntervalDays)
                 context.INI_UpdatePath = If(configDict.ContainsKey("UpdatePath"), configDict("UpdatePath"), "")
                 context.INI_UpdateIni = ParseBoolean(configDict, "UpdateIni", DEFAULT_BOOL_UPDATEINI)
@@ -341,12 +359,21 @@ Namespace SharedLibrary
                 context.INI_RenameLibPathLocal = If(configDict.ContainsKey("RenameLibPathLocal"), configDict("RenameLibPathLocal"), "")
                 context.INI_MailMoverPath = If(configDict.ContainsKey("MailMoverPath"), configDict("MailMoverPath"), "")
                 context.INI_MailMoverPathLocal = If(configDict.ContainsKey("MailMoverPathLocal"), configDict("MailMoverPathLocal"), "")
+                context.INI_DataCollectorPath = If(configDict.ContainsKey("DataCollectorPath"), configDict("DataCollectorPath"), "")
 
                 context.INI_Location = If(configDict.ContainsKey("Location"), configDict("Location"), "")
 
                 context.INI_SpeechModelPath = If(configDict.ContainsKey("SpeechModelPath"), configDict("SpeechModelPath"), "")
                 context.INI_TTSEndpoint = If(configDict.ContainsKey("TTSEndpoint"), configDict("TTSEndpoint"), "")
                 context.INI_LocalModelPath = If(configDict.ContainsKey("LocalModelPath"), configDict("LocalModelPath"), "")
+                context.INI_DictionaryPath = If(configDict.ContainsKey("DictionaryPath"), configDict("DictionaryPath"), "")
+                context.INI_DictionaryPathLocal = If(configDict.ContainsKey("DictionaryPathLocal"), configDict("DictionaryPathLocal"), "")
+
+                context.INI_STT_Google = If(configDict.ContainsKey("STT_Google"), configDict("STT_Google"), "")
+                context.INI_STT_OpenAI = If(configDict.ContainsKey("STT_OpenAI"), configDict("STT_OpenAI"), "")
+                context.INI_STT_Azure = If(configDict.ContainsKey("STT_Azure"), configDict("STT_Azure"), "")
+                context.INI_STT_Google_ProjectID = If(configDict.ContainsKey("STT_Google_ProjectID"), configDict("STT_Google_ProjectID"), "")
+                context.INI_STT_Azure_SpeechKey = If(configDict.ContainsKey("STT_Azure_SpeechKey"), configDict("STT_Azure_SpeechKey"), "")
 
                 context.INI_PromptLibPath = If(configDict.ContainsKey("PromptLib"), configDict("PromptLib"), "")
                 context.INI_PromptLibPathLocal = If(configDict.ContainsKey("PromptLibLocal"), configDict("PromptLibLocal"), "")
@@ -371,6 +398,7 @@ Namespace SharedLibrary
                 context.INI_AgentResourcesPathLocal = If(configDict.ContainsKey("AgentResourcesPathLocal"), configDict("AgentResourcesPathLocal"), "")
                 Agents.AgentResources.SetPaths(context.INI_AgentResourcesPath, context.INI_AgentResourcesPathLocal)
 
+                context.INI_ChunkOCR = If(configDict.ContainsKey("ChunkOCR"), CInt(configDict("ChunkOCR")), DEFAULT_CHUNK_OCR_PAGES)
 
                 ' Logo paths
                 context.INI_LogoPath = If(configDict.ContainsKey("LogoPath"), configDict("LogoPath"), "")
@@ -383,6 +411,10 @@ Namespace SharedLibrary
                 SharedMethods.INI_LogoPathMedium_Cached = context.INI_LogoPathMedium
                 SharedMethods.INI_LogoPathLarge_Cached = context.INI_LogoPathLarge
                 SharedMethods.INI_AllowLegacyDocFiles_Cached = context.INI_AllowLegacyDocFiles
+
+                context.INI_HttpStack = If(configDict.ContainsKey("HttpStack"), configDict("HttpStack"), "")
+
+                SharedMethods.INI_HttpStack_Cached = context.INI_HttpStack
 
                 ' Apply administrator-configured registry fixes (e.g., resiliency hardening).
                 ApplyRegistryFixes(configDict, context)
@@ -575,6 +607,31 @@ Namespace SharedLibrary
 
             Dim value As String = If(configDict(key), "").Trim().ToLowerInvariant()
             Return value = "yes" OrElse value = "true" OrElse value = "ja" OrElse value = "wahr"
+        End Function
+
+        Private Shared Function TryGetMySettingBoolean(settingName As String, ByRef result As Boolean) As Boolean
+            result = False
+
+            If String.IsNullOrWhiteSpace(settingName) Then
+                Return False
+            End If
+
+            Try
+                Dim rawValue As Object = My.Settings.Item(settingName)
+
+                If rawValue Is Nothing Then
+                    Return False
+                End If
+
+                If TypeOf rawValue Is Boolean Then
+                    result = CBool(rawValue)
+                    Return True
+                End If
+
+                Return Boolean.TryParse(rawValue.ToString().Trim(), result)
+            Catch
+                Return False
+            End Try
         End Function
 
 

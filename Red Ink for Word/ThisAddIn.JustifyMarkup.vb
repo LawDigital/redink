@@ -83,8 +83,8 @@ Partial Public Class ThisAddIn
     ''' re-acquired in the restored view. Use this for anchoring comments.</param>
     ''' <returns>Text as it would appear after accepting all tracked changes.</returns>
     Private Function GetVisibleTextSafe(ByVal src As Range,
-                                        Optional restoreRange As Range = Nothing,
-                                        Optional ByRef capturedRange As Range = Nothing) As String
+                                    Optional restoreRange As Range = Nothing,
+                                    Optional ByRef capturedRange As Range = Nothing) As String
         capturedRange = Nothing
         If src Is Nothing Then Return String.Empty
 
@@ -96,7 +96,6 @@ Partial Public Class ThisAddIn
             Return String.Empty
         End Try
 
-        ' Fast path: no revisions in this range
         Try
             If src.Revisions.Count = 0 Then
                 capturedRange = src
@@ -110,45 +109,64 @@ Partial Public Class ThisAddIn
         Try
             Dim app As Microsoft.Office.Interop.Word.Application = src.Application
             Dim docObj As Microsoft.Office.Interop.Word.Document = src.Document
-            Dim view As Microsoft.Office.Interop.Word.View = app.ActiveWindow.View
+            Dim docWindow As Microsoft.Office.Interop.Word.Window = docObj.ActiveWindow
 
-            ' Save current view state
+            If docWindow Is Nothing Then
+                capturedRange = src
+                Return raw
+            End If
+
+            Dim view As Microsoft.Office.Interop.Word.View = docWindow.View
+
             Dim origRevView As WdRevisionsView = view.RevisionsView
             Dim origShowRevs As Boolean = view.ShowRevisionsAndComments
 
-            ' Save current selection (only usable if in main story)
-            Dim origSelStart As Integer = app.Selection.Start
-            Dim origSelEnd As Integer = app.Selection.End
+            Dim origActiveWindow As Microsoft.Office.Interop.Word.Window = Nothing
+            Try
+                origActiveWindow = app.ActiveWindow
+            Catch
+            End Try
+
+            Dim origSelStart As Integer = 0
+            Dim origSelEnd As Integer = 0
+            Dim haveOrigSelection As Boolean = False
+            Try
+                origSelStart = app.Selection.Start
+                origSelEnd = app.Selection.End
+                haveOrigSelection = True
+            Catch
+            End Try
 
             Try
-                ' Select the target range so Word treats it as the live Selection
+                If origActiveWindow Is Nothing OrElse Not Object.ReferenceEquals(origActiveWindow, docWindow) Then
+                    docWindow.Activate()
+                End If
+
                 src.Select()
 
-                ' Switch to Final view — Selection.Text now returns accepted text
                 view.RevisionsView = WdRevisionsView.wdRevisionsViewFinal
                 view.ShowRevisionsAndComments = False
-
-                ' Capture the selection boundaries in Final view
-                Dim finalSelStart As Integer = app.Selection.Start
-                Dim finalSelEnd As Integer = app.Selection.End
 
                 Dim finalText As String = app.Selection.Text
                 If finalText Is Nothing Then finalText = String.Empty
 
-                ' Restore view FIRST (so position space returns to normal)
                 view.RevisionsView = origRevView
                 view.ShowRevisionsAndComments = origShowRevs
 
-                ' Re-select the original src range in the restored view to get
-                ' a valid range object for the caller to anchor comments on
                 src.Select()
                 capturedRange = docObj.Range(app.Selection.Start, app.Selection.End)
 
-                ' Restore the original selection
                 Try
                     If restoreRange IsNot Nothing Then
+                        Dim restoreWindow As Microsoft.Office.Interop.Word.Window = restoreRange.Document.ActiveWindow
+                        If restoreWindow IsNot Nothing AndAlso Not Object.ReferenceEquals(app.ActiveWindow, restoreWindow) Then
+                            restoreWindow.Activate()
+                        End If
                         restoreRange.Select()
-                    Else
+                    ElseIf haveOrigSelection Then
+                        If origActiveWindow IsNot Nothing AndAlso Not Object.ReferenceEquals(app.ActiveWindow, origActiveWindow) Then
+                            origActiveWindow.Activate()
+                        End If
                         app.Selection.SetRange(origSelStart, origSelEnd)
                     End If
                 Catch
@@ -156,20 +174,28 @@ Partial Public Class ThisAddIn
 
                 Return finalText
             Catch
-                ' If anything fails in the inner block, still try to restore view
                 Try
                     view.RevisionsView = origRevView
                     view.ShowRevisionsAndComments = origShowRevs
                 Catch
                 End Try
+
                 Try
                     If restoreRange IsNot Nothing Then
+                        Dim restoreWindow As Microsoft.Office.Interop.Word.Window = restoreRange.Document.ActiveWindow
+                        If restoreWindow IsNot Nothing AndAlso Not Object.ReferenceEquals(app.ActiveWindow, restoreWindow) Then
+                            restoreWindow.Activate()
+                        End If
                         restoreRange.Select()
-                    Else
+                    ElseIf haveOrigSelection Then
+                        If origActiveWindow IsNot Nothing AndAlso Not Object.ReferenceEquals(app.ActiveWindow, origActiveWindow) Then
+                            origActiveWindow.Activate()
+                        End If
                         app.Selection.SetRange(origSelStart, origSelEnd)
                     End If
                 Catch
                 End Try
+
                 capturedRange = src
                 Return raw
             End Try
@@ -178,7 +204,6 @@ Partial Public Class ThisAddIn
             Return raw
         End Try
     End Function
-
     ' ========================= Store Original =========================
 
     ''' <summary>
@@ -248,10 +273,9 @@ Partial Public Class ThisAddIn
     Public Async Sub JustifyMarkup()
         Try
             If INILoadFail() Then Return
-
             Dim app As Word.Application = Globals.ThisAddIn.Application
             Dim sel As Microsoft.Office.Interop.Word.Selection = app.Selection
-            Dim doc As Microsoft.Office.Interop.Word.Document = app.ActiveDocument
+            Dim doc As Microsoft.Office.Interop.Word.Document = sel.Range.Document
 
             If sel.Type = WdSelectionType.wdSelectionIP Then
                 ShowCustomMessageBox("Please select the marked-up clause text you want to justify.")
@@ -453,7 +477,7 @@ Partial Public Class ThisAddIn
 
         Dim app As Word.Application = Globals.ThisAddIn.Application
         Dim sel As Microsoft.Office.Interop.Word.Selection = app.Selection
-        Dim doc As Microsoft.Office.Interop.Word.Document = app.ActiveDocument
+        Dim doc As Microsoft.Office.Interop.Word.Document = sel.Range.Document
 
         Try
             ' Resolve the active comment and its target range (mirrors BalloonMerge logic)
@@ -506,6 +530,8 @@ Partial Public Class ThisAddIn
                 targetRange = anchorRange
             End If
 
+            targetRange = targetRange.Duplicate
+
             ' Capture original visible text BEFORE the merge (treats tracked changes as accepted).
             ' Pass the comment range as restoreRange so the selection returns to the
             ' comment balloon afterwards — BalloonMerge expects it there.
@@ -522,6 +548,21 @@ Partial Public Class ThisAddIn
             Await BalloonMerge(selectWholeParagraph, Silent)
 
             Await EnsureUIThread()
+
+            Try
+                Dim targetWindow As Word.Window = doc.ActiveWindow
+                If targetWindow IsNot Nothing Then
+                    targetWindow.Activate()
+                End If
+            Catch
+            End Try
+
+            If app.Selection Is Nothing OrElse
+               app.Selection.Range Is Nothing OrElse
+               app.Selection.Range.Document Is Nothing OrElse
+               Not Object.ReferenceEquals(app.Selection.Range.Document, doc) Then
+                Return
+            End If
 
             ' Reconstruct the revised range: premergeStart -> collapsed cursor position
             Dim postmergeEnd As Integer = app.Selection.Range.Start

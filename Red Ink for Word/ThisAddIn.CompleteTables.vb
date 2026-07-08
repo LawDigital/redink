@@ -359,7 +359,7 @@ Partial Public Class ThisAddIn
             "Describe how the tables should be completed:" & vbCrLf &
             "(e.g., 'Fill in the empty cells based on headings and row labels. " &
             "Add rows where the table appears incomplete.')",
-            AN & " Complete Tables", False, lastInstructions)
+            AN & " Complete Tables", False, lastInstructions, Context:=_context)
 
         If String.IsNullOrWhiteSpace(userInstructions) Then Exit Sub
         userInstructions = userInstructions.Trim()
@@ -458,7 +458,7 @@ Partial Public Class ThisAddIn
             "Describe how the tables should be completed:" & vbCrLf &
             "(e.g., 'Fill in the empty cells based on headings and row labels. " &
             "Add rows where the table appears incomplete.')",
-            AN & " Complete Tables", False, lastInstructions)
+            AN & " Complete Tables", False, lastInstructions, Context:=_context)
 
             If String.IsNullOrWhiteSpace(userInstructions) Then Exit Function
             userInstructions = userInstructions.Trim()

@@ -110,14 +110,14 @@
     <FriendlyName>Red Ink for Word %28Develop%29</FriendlyName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Preview'">
-    <ApplicationVersion>1.5.7.201</ApplicationVersion>
+    <ApplicationVersion>1.6.0.200</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\preview\word\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/preview/word/</InstallUrl>
     <ProductName>Red Ink for Word %28Preview%29</ProductName>
     <FriendlyName>Red Ink for Word %28Preview%29</FriendlyName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'GA'">
-    <ApplicationVersion>1.5.7.1</ApplicationVersion>
+    <ApplicationVersion>1.6.0.0</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\ga\word\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/ga/word/</InstallUrl>
     <ProductName>Red Ink for Word</ProductName>
@@ -241,25 +241,24 @@
     <Reference Include="Google.Api.Gax.Grpc, Version=4.14.0.0, Culture=neutral, PublicKeyToken=3ec5ea7f18953e47, processorArchitecture=MSIL">
       <HintPath>..\packages\Google.Api.Gax.Grpc.4.14.0\lib\net462\Google.Api.Gax.Grpc.dll</HintPath>
     </Reference>
-    <Reference Include="Google.Apis, Version=1.74.0.0, Culture=neutral, PublicKeyToken=4b01fa6e34db77ab, processorArchitecture=MSIL">
-      <HintPath>..\packages\Google.Apis.1.74.0\lib\net462\Google.Apis.dll</HintPath>
+    <Reference Include="Google.Apis, Version=1.75.0.0, Culture=neutral, PublicKeyToken=4b01fa6e34db77ab, processorArchitecture=MSIL">
+      <HintPath>..\packages\Google.Apis.1.75.0\lib\net462\Google.Apis.dll</HintPath>
     </Reference>
-    <Reference Include="Google.Apis.Auth, Version=1.74.0.0, Culture=neutral, PublicKeyToken=4b01fa6e34db77ab, processorArchitecture=MSIL">
-      <HintPath>..\packages\Google.Apis.Auth.1.74.0\lib\net462\Google.Apis.Auth.dll</HintPath>
+    <Reference Include="Google.Apis.Auth, Version=1.75.0.0, Culture=neutral, PublicKeyToken=4b01fa6e34db77ab, processorArchitecture=MSIL">
+      <HintPath>..\packages\Google.Apis.Auth.1.75.0\lib\net462\Google.Apis.Auth.dll</HintPath>
     </Reference>
-    <Reference Include="Google.Apis.Core, Version=1.74.0.0, Culture=neutral, PublicKeyToken=4b01fa6e34db77ab, processorArchitecture=MSIL">
-      <HintPath>..\packages\Google.Apis.Core.1.74.0\lib\net462\Google.Apis.Core.dll</HintPath>
+    <Reference Include="Google.Apis.Core, Version=1.75.0.0, Culture=neutral, PublicKeyToken=4b01fa6e34db77ab, processorArchitecture=MSIL">
+      <HintPath>..\packages\Google.Apis.Core.1.75.0\lib\net462\Google.Apis.Core.dll</HintPath>
     </Reference>
-    <Reference Include="Google.Cloud.Speech.V1, Version=3.9.0.0, Culture=neutral, PublicKeyToken=185c282632e132a0, processorArchitecture=MSIL">
-      <HintPath>..\packages\Google.Cloud.Speech.V1.3.9.0\lib\net462\Google.Cloud.Speech.V1.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="Google.Cloud.Location, Version=2.4.0.0, Culture=neutral, PublicKeyToken=185c282632e132a0, processorArchitecture=MSIL">
+      <HintPath>..\packages\Google.Cloud.Location.2.4.0\lib\net462\Google.Cloud.Location.dll</HintPath>
     </Reference>
     <Reference Include="Google.LongRunning, Version=3.5.0.0, Culture=neutral, PublicKeyToken=185c282632e132a0, processorArchitecture=MSIL">
       <HintPath>..\packages\Google.LongRunning.3.5.0\lib\net462\Google.LongRunning.dll</HintPath>
       <Private>True</Private>
     </Reference>
-    <Reference Include="Google.Protobuf, Version=3.35.0.0, Culture=neutral, PublicKeyToken=a7d26565bac4d604, processorArchitecture=MSIL">
-      <HintPath>..\packages\Google.Protobuf.3.35.0\lib\net45\Google.Protobuf.dll</HintPath>
+    <Reference Include="Google.Protobuf, Version=3.35.1.0, Culture=neutral, PublicKeyToken=a7d26565bac4d604, processorArchitecture=MSIL">
+      <HintPath>..\packages\Google.Protobuf.3.35.1\lib\net45\Google.Protobuf.dll</HintPath>
     </Reference>
     <Reference Include="Grpc.Auth, Version=2.0.0.0, Culture=neutral, PublicKeyToken=d754f35622e28bad, processorArchitecture=MSIL">
       <HintPath>..\packages\Grpc.Auth.2.80.0\lib\net462\Grpc.Auth.dll</HintPath>
@@ -279,53 +278,42 @@
     <Reference Include="HtmlAgilityPack, Version=1.12.4.0, Culture=neutral, PublicKeyToken=bd319b19eaf3b43a, processorArchitecture=MSIL">
       <HintPath>..\packages\HtmlAgilityPack.1.12.4\lib\Net45\HtmlAgilityPack.dll</HintPath>
     </Reference>
-    <Reference Include="Markdig, Version=1.2.0.0, Culture=neutral, processorArchitecture=MSIL">
-      <HintPath>..\packages\Markdig.1.2.0\lib\net462\Markdig.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="Markdig, Version=1.3.0.0, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>..\packages\Markdig.1.3.2\lib\net462\Markdig.dll</HintPath>
     </Reference>
-    <Reference Include="Microsoft.Bcl.AsyncInterfaces, Version=10.0.0.8, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Bcl.AsyncInterfaces.10.0.8\lib\net462\Microsoft.Bcl.AsyncInterfaces.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="Microsoft.Bcl.AsyncInterfaces, Version=10.0.0.9, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Bcl.AsyncInterfaces.10.0.9\lib\net462\Microsoft.Bcl.AsyncInterfaces.dll</HintPath>
     </Reference>
-    <Reference Include="Microsoft.Bcl.Cryptography, Version=10.0.0.8, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Bcl.Cryptography.10.0.8\lib\net462\Microsoft.Bcl.Cryptography.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="Microsoft.Bcl.Cryptography, Version=10.0.0.9, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Bcl.Cryptography.10.0.9\lib\net462\Microsoft.Bcl.Cryptography.dll</HintPath>
     </Reference>
     <Reference Include="Microsoft.Bcl.HashCode, Version=6.0.0.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
       <HintPath>..\packages\Microsoft.Bcl.HashCode.6.0.0\lib\net462\Microsoft.Bcl.HashCode.dll</HintPath>
     </Reference>
-    <Reference Include="Microsoft.Bcl.Memory, Version=10.0.0.8, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Bcl.Memory.10.0.8\lib\net462\Microsoft.Bcl.Memory.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="Microsoft.Bcl.Memory, Version=10.0.0.9, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Bcl.Memory.10.0.9\lib\net462\Microsoft.Bcl.Memory.dll</HintPath>
     </Reference>
     <Reference Include="Microsoft.CSharp" />
-    <Reference Include="Microsoft.Extensions.AI.Abstractions, Version=10.6.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Extensions.AI.Abstractions.10.6.0\lib\net462\Microsoft.Extensions.AI.Abstractions.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="Microsoft.Extensions.AI.Abstractions, Version=10.7.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Extensions.AI.Abstractions.10.7.0\lib\net462\Microsoft.Extensions.AI.Abstractions.dll</HintPath>
     </Reference>
-    <Reference Include="Microsoft.Extensions.DependencyInjection, Version=10.0.0.8, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Extensions.DependencyInjection.10.0.8\lib\net462\Microsoft.Extensions.DependencyInjection.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="Microsoft.Extensions.DependencyInjection, Version=10.0.0.9, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Extensions.DependencyInjection.10.0.9\lib\net462\Microsoft.Extensions.DependencyInjection.dll</HintPath>
     </Reference>
-    <Reference Include="Microsoft.Extensions.DependencyInjection.Abstractions, Version=10.0.0.8, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Extensions.DependencyInjection.Abstractions.10.0.8\lib\net462\Microsoft.Extensions.DependencyInjection.Abstractions.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="Microsoft.Extensions.DependencyInjection.Abstractions, Version=10.0.0.9, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Extensions.DependencyInjection.Abstractions.10.0.9\lib\net462\Microsoft.Extensions.DependencyInjection.Abstractions.dll</HintPath>
     </Reference>
-    <Reference Include="Microsoft.Extensions.Logging, Version=10.0.0.8, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Extensions.Logging.10.0.8\lib\net462\Microsoft.Extensions.Logging.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="Microsoft.Extensions.Logging, Version=10.0.0.9, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Extensions.Logging.10.0.9\lib\net462\Microsoft.Extensions.Logging.dll</HintPath>
     </Reference>
-    <Reference Include="Microsoft.Extensions.Logging.Abstractions, Version=10.0.0.8, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Extensions.Logging.Abstractions.10.0.8\lib\net462\Microsoft.Extensions.Logging.Abstractions.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="Microsoft.Extensions.Logging.Abstractions, Version=10.0.0.9, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Extensions.Logging.Abstractions.10.0.9\lib\net462\Microsoft.Extensions.Logging.Abstractions.dll</HintPath>
     </Reference>
-    <Reference Include="Microsoft.Extensions.Options, Version=10.0.0.8, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Extensions.Options.10.0.8\lib\net462\Microsoft.Extensions.Options.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="Microsoft.Extensions.Options, Version=10.0.0.9, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Extensions.Options.10.0.9\lib\net462\Microsoft.Extensions.Options.dll</HintPath>
     </Reference>
-    <Reference Include="Microsoft.Extensions.Primitives, Version=10.0.0.8, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Extensions.Primitives.10.0.8\lib\net462\Microsoft.Extensions.Primitives.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="Microsoft.Extensions.Primitives, Version=10.0.0.9, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Extensions.Primitives.10.0.9\lib\net462\Microsoft.Extensions.Primitives.dll</HintPath>
     </Reference>
     <Reference Include="Microsoft.ML.Tokenizers, Version=1.0.0.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
       <HintPath>..\packages\Microsoft.ML.Tokenizers.2.0.0\lib\netstandard2.0\Microsoft.ML.Tokenizers.dll</HintPath>
@@ -339,17 +327,14 @@
       <HintPath>..\packages\Microsoft.Office.Interop.PowerPoint.15.0.4420.1018\lib\net20\Microsoft.Office.Interop.PowerPoint.dll</HintPath>
       <EmbedInteropTypes>True</EmbedInteropTypes>
     </Reference>
-    <Reference Include="Microsoft.Web.WebView2.Core, Version=1.0.3967.48, Culture=neutral, PublicKeyToken=2a8ab48044d2601e, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Web.WebView2.1.0.3967.48\lib\net462\Microsoft.Web.WebView2.Core.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="Microsoft.Web.WebView2.Core, Version=1.0.4022.49, Culture=neutral, PublicKeyToken=2a8ab48044d2601e, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Web.WebView2.1.0.4022.49\lib\net462\Microsoft.Web.WebView2.Core.dll</HintPath>
     </Reference>
-    <Reference Include="Microsoft.Web.WebView2.WinForms, Version=1.0.3967.48, Culture=neutral, PublicKeyToken=2a8ab48044d2601e, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Web.WebView2.1.0.3967.48\lib\net462\Microsoft.Web.WebView2.WinForms.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="Microsoft.Web.WebView2.WinForms, Version=1.0.4022.49, Culture=neutral, PublicKeyToken=2a8ab48044d2601e, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Web.WebView2.1.0.4022.49\lib\net462\Microsoft.Web.WebView2.WinForms.dll</HintPath>
     </Reference>
-    <Reference Include="Microsoft.Web.WebView2.Wpf, Version=1.0.3967.48, Culture=neutral, PublicKeyToken=2a8ab48044d2601e, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Web.WebView2.1.0.3967.48\lib\net462\Microsoft.Web.WebView2.Wpf.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="Microsoft.Web.WebView2.Wpf, Version=1.0.4022.49, Culture=neutral, PublicKeyToken=2a8ab48044d2601e, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Web.WebView2.1.0.4022.49\lib\net462\Microsoft.Web.WebView2.Wpf.dll</HintPath>
     </Reference>
     <Reference Include="Microsoft.Win32.Registry, Version=5.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
       <HintPath>..\packages\Microsoft.Win32.Registry.5.0.0\lib\net461\Microsoft.Win32.Registry.dll</HintPath>
@@ -427,13 +412,11 @@
     <Reference Include="System.Buffers, Version=4.0.5.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
       <HintPath>..\packages\System.Buffers.4.6.1\lib\net462\System.Buffers.dll</HintPath>
     </Reference>
-    <Reference Include="System.CodeDom, Version=10.0.0.8, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>..\packages\System.CodeDom.10.0.8\lib\net462\System.CodeDom.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="System.CodeDom, Version=10.0.0.9, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.CodeDom.10.0.9\lib\net462\System.CodeDom.dll</HintPath>
     </Reference>
-    <Reference Include="System.Collections.Immutable, Version=10.0.0.8, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
-      <HintPath>..\packages\System.Collections.Immutable.10.0.8\lib\net462\System.Collections.Immutable.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="System.Collections.Immutable, Version=10.0.0.9, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.Collections.Immutable.10.0.9\lib\net462\System.Collections.Immutable.dll</HintPath>
     </Reference>
     <Reference Include="System.ComponentModel.Annotations, Version=4.2.1.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
       <HintPath>..\packages\System.ComponentModel.Annotations.5.0.0\lib\net461\System.ComponentModel.Annotations.dll</HintPath>
@@ -442,18 +425,15 @@
     <Reference Include="System.ComponentModel.DataAnnotations" />
     <Reference Include="System.Data" />
     <Reference Include="System.Design" />
-    <Reference Include="System.Diagnostics.DiagnosticSource, Version=10.0.0.8, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>..\packages\System.Diagnostics.DiagnosticSource.10.0.8\lib\net462\System.Diagnostics.DiagnosticSource.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="System.Diagnostics.DiagnosticSource, Version=10.0.0.9, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.Diagnostics.DiagnosticSource.10.0.9\lib\net462\System.Diagnostics.DiagnosticSource.dll</HintPath>
     </Reference>
     <Reference Include="System.Drawing" />
-    <Reference Include="System.Formats.Asn1, Version=10.0.0.8, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>..\packages\System.Formats.Asn1.10.0.8\lib\net462\System.Formats.Asn1.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="System.Formats.Asn1, Version=10.0.0.9, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.Formats.Asn1.10.0.9\lib\net462\System.Formats.Asn1.dll</HintPath>
     </Reference>
-    <Reference Include="System.Formats.Nrbf, Version=10.0.0.8, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>..\packages\System.Formats.Nrbf.10.0.8\lib\net462\System.Formats.Nrbf.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="System.Formats.Nrbf, Version=10.0.0.9, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.Formats.Nrbf.10.0.9\lib\net462\System.Formats.Nrbf.dll</HintPath>
     </Reference>
     <Reference Include="System.IO, Version=4.1.1.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
       <HintPath>..\packages\System.IO.4.3.0\lib\net462\System.IO.dll</HintPath>
@@ -466,9 +446,8 @@
       <Private>True</Private>
     </Reference>
     <Reference Include="System.IO.Compression.FileSystem" />
-    <Reference Include="System.IO.Pipelines, Version=10.0.0.8, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>..\packages\System.IO.Pipelines.10.0.8\lib\net462\System.IO.Pipelines.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="System.IO.Pipelines, Version=10.0.0.9, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.IO.Pipelines.10.0.9\lib\net462\System.IO.Pipelines.dll</HintPath>
     </Reference>
     <Reference Include="System.Management" />
     <Reference Include="System.Memory, Version=4.0.5.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
@@ -479,21 +458,18 @@
       <Private>True</Private>
       <Private>True</Private>
     </Reference>
-    <Reference Include="System.Net.Http.WinHttpHandler, Version=10.0.0.8, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
-      <HintPath>..\packages\System.Net.Http.WinHttpHandler.10.0.8\lib\net462\System.Net.Http.WinHttpHandler.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="System.Net.Http.WinHttpHandler, Version=10.0.0.9, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.Net.Http.WinHttpHandler.10.0.9\lib\net462\System.Net.Http.WinHttpHandler.dll</HintPath>
     </Reference>
     <Reference Include="System.Numerics" />
     <Reference Include="System.Numerics.Vectors, Version=4.1.6.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
       <HintPath>..\packages\System.Numerics.Vectors.4.6.1\lib\net462\System.Numerics.Vectors.dll</HintPath>
     </Reference>
-    <Reference Include="System.Reflection.Metadata, Version=10.0.0.8, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
-      <HintPath>..\packages\System.Reflection.Metadata.10.0.8\lib\net462\System.Reflection.Metadata.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="System.Reflection.Metadata, Version=10.0.0.9, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.Reflection.Metadata.10.0.9\lib\net462\System.Reflection.Metadata.dll</HintPath>
     </Reference>
-    <Reference Include="System.Resources.Extensions, Version=10.0.0.8, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>..\packages\System.Resources.Extensions.10.0.8\lib\net462\System.Resources.Extensions.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="System.Resources.Extensions, Version=10.0.0.9, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.Resources.Extensions.10.0.9\lib\net462\System.Resources.Extensions.dll</HintPath>
     </Reference>
     <Reference Include="System.Runtime, Version=4.1.1.1, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
       <HintPath>..\packages\System.Runtime.4.3.1\lib\net462\System.Runtime.dll</HintPath>
@@ -517,9 +493,8 @@
       <Private>True</Private>
       <Private>True</Private>
     </Reference>
-    <Reference Include="System.Security.Cryptography.Pkcs, Version=10.0.0.8, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
-      <HintPath>..\packages\System.Security.Cryptography.Pkcs.10.0.8\lib\net462\System.Security.Cryptography.Pkcs.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="System.Security.Cryptography.Pkcs, Version=10.0.0.9, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.Security.Cryptography.Pkcs.10.0.9\lib\net462\System.Security.Cryptography.Pkcs.dll</HintPath>
     </Reference>
     <Reference Include="System.Security.Cryptography.Primitives, Version=4.0.1.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
       <HintPath>..\packages\System.Security.Cryptography.Primitives.4.3.0\lib\net46\System.Security.Cryptography.Primitives.dll</HintPath>
@@ -535,13 +510,11 @@
       <HintPath>..\packages\System.Security.Principal.Windows.5.0.0\lib\net461\System.Security.Principal.Windows.dll</HintPath>
     </Reference>
     <Reference Include="System.Speech" />
-    <Reference Include="System.Text.Encodings.Web, Version=10.0.0.8, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>..\packages\System.Text.Encodings.Web.10.0.8\lib\net462\System.Text.Encodings.Web.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="System.Text.Encodings.Web, Version=10.0.0.9, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.Text.Encodings.Web.10.0.9\lib\net462\System.Text.Encodings.Web.dll</HintPath>
     </Reference>
-    <Reference Include="System.Text.Json, Version=10.0.0.8, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>..\packages\System.Text.Json.10.0.8\lib\net462\System.Text.Json.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="System.Text.Json, Version=10.0.0.9, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.Text.Json.10.0.9\lib\net462\System.Text.Json.dll</HintPath>
     </Reference>
     <Reference Include="System.Threading.Tasks.Extensions, Version=4.2.4.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
       <HintPath>..\packages\System.Threading.Tasks.Extensions.4.6.3\lib\net462\System.Threading.Tasks.Extensions.dll</HintPath>
@@ -554,36 +527,30 @@
     <Reference Include="System.Core" />
     <Reference Include="System.Xml.Linq" />
     <Reference Include="System.Data.DataSetExtensions" />
-    <Reference Include="UglyToad.PdfPig, Version=0.1.14.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
-      <HintPath>..\packages\PdfPig.0.1.14\lib\net471\UglyToad.PdfPig.dll</HintPath>
+    <Reference Include="UglyToad.PdfPig, Version=0.1.15.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
+      <HintPath>..\packages\PdfPig.0.1.15\lib\net471\UglyToad.PdfPig.dll</HintPath>
     </Reference>
-    <Reference Include="UglyToad.PdfPig.Core, Version=0.1.14.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
-      <HintPath>..\packages\PdfPig.0.1.14\lib\net471\UglyToad.PdfPig.Core.dll</HintPath>
+    <Reference Include="UglyToad.PdfPig.Core, Version=0.1.15.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
+      <HintPath>..\packages\PdfPig.0.1.15\lib\net471\UglyToad.PdfPig.Core.dll</HintPath>
     </Reference>
-    <Reference Include="UglyToad.PdfPig.DocumentLayoutAnalysis, Version=0.1.14.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
-      <HintPath>..\packages\PdfPig.0.1.14\lib\net471\UglyToad.PdfPig.DocumentLayoutAnalysis.dll</HintPath>
+    <Reference Include="UglyToad.PdfPig.DocumentLayoutAnalysis, Version=0.1.15.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
+      <HintPath>..\packages\PdfPig.0.1.15\lib\net471\UglyToad.PdfPig.DocumentLayoutAnalysis.dll</HintPath>
     </Reference>
-    <Reference Include="UglyToad.PdfPig.Fonts, Version=0.1.14.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
-      <HintPath>..\packages\PdfPig.0.1.14\lib\net471\UglyToad.PdfPig.Fonts.dll</HintPath>
+    <Reference Include="UglyToad.PdfPig.Fonts, Version=0.1.15.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
+      <HintPath>..\packages\PdfPig.0.1.15\lib\net471\UglyToad.PdfPig.Fonts.dll</HintPath>
     </Reference>
-    <Reference Include="UglyToad.PdfPig.Package, Version=0.1.14.0, Culture=neutral, processorArchitecture=MSIL">
-      <HintPath>..\packages\PdfPig.0.1.14\lib\net471\UglyToad.PdfPig.Package.dll</HintPath>
+    <Reference Include="UglyToad.PdfPig.Package, Version=0.1.15.0, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>..\packages\PdfPig.0.1.15\lib\net471\UglyToad.PdfPig.Package.dll</HintPath>
     </Reference>
-    <Reference Include="UglyToad.PdfPig.Tokenization, Version=0.1.14.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
-      <HintPath>..\packages\PdfPig.0.1.14\lib\net471\UglyToad.PdfPig.Tokenization.dll</HintPath>
+    <Reference Include="UglyToad.PdfPig.Tokenization, Version=0.1.15.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
+      <HintPath>..\packages\PdfPig.0.1.15\lib\net471\UglyToad.PdfPig.Tokenization.dll</HintPath>
     </Reference>
-    <Reference Include="UglyToad.PdfPig.Tokens, Version=0.1.14.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
-      <HintPath>..\packages\PdfPig.0.1.14\lib\net471\UglyToad.PdfPig.Tokens.dll</HintPath>
+    <Reference Include="UglyToad.PdfPig.Tokens, Version=0.1.15.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
+      <HintPath>..\packages\PdfPig.0.1.15\lib\net471\UglyToad.PdfPig.Tokens.dll</HintPath>
     </Reference>
     <Reference Include="VBIDEApi, Version=1.7.4.11, Culture=neutral, PublicKeyToken=7292cd2a8b1e0703, processorArchitecture=MSIL">
       <HintPath>..\packages\NetOffice.Core.1.7.4.11\lib\net45\VBIDEApi.dll</HintPath>
       <EmbedInteropTypes>False</EmbedInteropTypes>
-    </Reference>
-    <Reference Include="Vosk, Version=0.0.0.0, Culture=neutral, processorArchitecture=MSIL">
-      <HintPath>..\packages\Vosk.0.3.38\lib\netstandard2.0\Vosk.dll</HintPath>
-    </Reference>
-    <Reference Include="Whisper.net, Version=1.9.0.0, Culture=neutral, processorArchitecture=MSIL">
-      <HintPath>..\packages\Whisper.net.1.9.0\lib\netstandard2.0\Whisper.net.dll</HintPath>
     </Reference>
     <Reference Include="Windows" Condition="Exists('$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.26100.0\Windows.winmd')">
       <HintPath>$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.26100.0\Windows.winmd</HintPath>
@@ -737,6 +704,7 @@
     <Compile Include="ThisAddIn.Processing.FormatSaveAndRestore.vb" />
     <Compile Include="ThisAddIn.Processing.HTMLToWord.vb" />
     <Compile Include="ThisAddIn.Processing.KnowledgeRAG.vb" />
+    <Compile Include="ThisAddIn.Processing.SurgicalInsert.vb" />
     <Compile Include="ThisAddIn.Processing.Tooling.Logging.vb" />
     <Compile Include="ThisAddIn.Processing.Tooling.M365.vb" />
     <Compile Include="ThisAddIn.Processing.Tooling.Memory.vb" />
@@ -758,6 +726,7 @@
     <Compile Include="ThisAddIn.Slides.vb" />
     <Compile Include="ThisAddIn.SpecialServices.vb" />
     <Compile Include="ThisAddIn.TabularOverview.vb" />
+    <Compile Include="ThisAddIn.TalkToMe.vb" />
     <Compile Include="ThisAddIn.TextToSpeech.Commands.vb" />
     <Compile Include="ThisAddIn.TextToSpeech.Form.vb" />
     <Compile Include="ThisAddIn.TextToSpeech.vb" />
@@ -776,6 +745,9 @@
     <Compile Include="ThisAddIn.WordHelpers.Stamper.vb" />
     <Compile Include="ThisAddIn.WordHelpers.vb" />
     <Compile Include="ThisAddIn.WordSearchHelper.vb" />
+    <Compile Include="Transcription\TranscriptionOptionsDialog.vb">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="WordWorkspaceForm.vb">
       <SubType>Form</SubType>
     </Compile>
@@ -950,29 +922,21 @@
       </FlavorProperties>
     </VisualStudio>
   </ProjectExtensions>
-  <Import Project="..\packages\Vosk.0.3.38\build\Vosk.targets" Condition="Exists('..\packages\Vosk.0.3.38\build\Vosk.targets')" />
   <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
     <PropertyGroup>
       <ErrorText>This project references NuGet package(s) that are missing on this computer. Use NuGet Package Restore to download them.  For more information, see http://go.microsoft.com/fwlink/?LinkID=322105. The missing file is {0}.</ErrorText>
     </PropertyGroup>
-    <Error Condition="!Exists('..\packages\Vosk.0.3.38\build\Vosk.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Vosk.0.3.38\build\Vosk.targets'))" />
     <Error Condition="!Exists('..\packages\Grpc.Core.2.46.6\build\net45\Grpc.Core.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Grpc.Core.2.46.6\build\net45\Grpc.Core.targets'))" />
     <Error Condition="!Exists('..\packages\Google.Api.CommonProtos.2.17.0\build\Google.Api.CommonProtos.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Google.Api.CommonProtos.2.17.0\build\Google.Api.CommonProtos.targets'))" />
     <Error Condition="!Exists('..\packages\NAudio.Lame.2.1.0\build\NAudio.Lame.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\NAudio.Lame.2.1.0\build\NAudio.Lame.targets'))" />
     <Error Condition="!Exists('..\packages\PdfiumViewer.Native.x86_64.v8-xfa.2018.4.8.256\build\PdfiumViewer.Native.x86_64.v8-xfa.props')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\PdfiumViewer.Native.x86_64.v8-xfa.2018.4.8.256\build\PdfiumViewer.Native.x86_64.v8-xfa.props'))" />
     <Error Condition="!Exists('..\packages\PdfiumViewer.Native.x86.v8-xfa.2018.4.8.256\build\PdfiumViewer.Native.x86.v8-xfa.props')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\PdfiumViewer.Native.x86.v8-xfa.2018.4.8.256\build\PdfiumViewer.Native.x86.v8-xfa.props'))" />
-    <Error Condition="!Exists('..\packages\Whisper.net.Runtime.Cuda.Windows.1.9.0\build\Whisper.net.Runtime.Cuda.Windows.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Whisper.net.Runtime.Cuda.Windows.1.9.0\build\Whisper.net.Runtime.Cuda.Windows.targets'))" />
-    <Error Condition="!Exists('..\packages\Whisper.net.Runtime.Metal.1.9.0\build\Whisper.net.Runtime.Metal.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Whisper.net.Runtime.Metal.1.9.0\build\Whisper.net.Runtime.Metal.targets'))" />
-    <Error Condition="!Exists('..\packages\Whisper.net.Runtime.1.9.0\build\Whisper.net.Runtime.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Whisper.net.Runtime.1.9.0\build\Whisper.net.Runtime.targets'))" />
     <Error Condition="!Exists('..\packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets'))" />
-    <Error Condition="!Exists('..\packages\Microsoft.Web.WebView2.1.0.3967.48\build\Microsoft.Web.WebView2.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Microsoft.Web.WebView2.1.0.3967.48\build\Microsoft.Web.WebView2.targets'))" />
+    <Error Condition="!Exists('..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\Microsoft.Web.WebView2.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\Microsoft.Web.WebView2.targets'))" />
   </Target>
   <Import Project="..\packages\Grpc.Core.2.46.6\build\net45\Grpc.Core.targets" Condition="Exists('..\packages\Grpc.Core.2.46.6\build\net45\Grpc.Core.targets')" />
   <Import Project="..\packages\Google.Api.CommonProtos.2.17.0\build\Google.Api.CommonProtos.targets" Condition="Exists('..\packages\Google.Api.CommonProtos.2.17.0\build\Google.Api.CommonProtos.targets')" />
   <Import Project="..\packages\NAudio.Lame.2.1.0\build\NAudio.Lame.targets" Condition="Exists('..\packages\NAudio.Lame.2.1.0\build\NAudio.Lame.targets')" />
-  <Import Project="..\packages\Whisper.net.Runtime.Cuda.Windows.1.9.0\build\Whisper.net.Runtime.Cuda.Windows.targets" Condition="Exists('..\packages\Whisper.net.Runtime.Cuda.Windows.1.9.0\build\Whisper.net.Runtime.Cuda.Windows.targets')" />
-  <Import Project="..\packages\Whisper.net.Runtime.Metal.1.9.0\build\Whisper.net.Runtime.Metal.targets" Condition="Exists('..\packages\Whisper.net.Runtime.Metal.1.9.0\build\Whisper.net.Runtime.Metal.targets')" />
-  <Import Project="..\packages\Whisper.net.Runtime.1.9.0\build\Whisper.net.Runtime.targets" Condition="Exists('..\packages\Whisper.net.Runtime.1.9.0\build\Whisper.net.Runtime.targets')" />
   <Import Project="..\packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets" Condition="Exists('..\packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets')" />
-  <Import Project="..\packages\Microsoft.Web.WebView2.1.0.3967.48\build\Microsoft.Web.WebView2.targets" Condition="Exists('..\packages\Microsoft.Web.WebView2.1.0.3967.48\build\Microsoft.Web.WebView2.targets')" />
+  <Import Project="..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\Microsoft.Web.WebView2.targets" Condition="Exists('..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\Microsoft.Web.WebView2.targets')" />
 </Project>

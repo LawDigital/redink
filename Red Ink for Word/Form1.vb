@@ -253,7 +253,7 @@ Public Class frmAIChat
     ''' <summary>Abbreviated name prefixed to comment replies (e.g., "RI: Reply text").</summary>
     Const AN6 As String = "RI"
 
-    Const ToolTrigger As String = "(a)"
+    Const ToolTrigger As String = "(ag)"
 
     ''' <summary>
     ''' Special Unicode private-use character (U+E000) inserted during text replacement.
@@ -305,6 +305,7 @@ Public Class frmAIChat
     ''' Prevents the chat input box from immediately stealing focus back.
     ''' </summary>
     Private _keepFocusOnDocumentAfterCommands As Boolean = False
+    Private _dialogOwnerScope As System.IDisposable = Nothing
 
     ' =========================================================================
     ' Private Fields - Model Configuration
@@ -496,12 +497,12 @@ Public Class frmAIChat
     ''' When checked, silently includes all other open Word documents in prompt.
     ''' Calls GatherSelectedDocuments(IncludeName:=True, ExceptCurrent:=True, SilentAndGetAll:=True).
     ''' Each document wrapped in numbered DOCUMENTn tags with document name.
-    ''' Not persisted (defaults to unchecked on form load).
+    ''' Persisted to My.Settings.ChatIncludeOtherOpenWordDocs.
     ''' </summary>
     Private WithEvents chkIncludeOtherDocs As New System.Windows.Forms.CheckBox() With {
         .Text = "Include all other open Word docs",
         .AutoSize = True,
-        .Checked = False
+        .Checked = My.Settings.ChatIncludeOtherOpenWordDocs
     }
 
     ' =========================================================================
@@ -650,6 +651,28 @@ Public Class frmAIChat
     ' Form Load Event
     ' =========================================================================
 
+    Protected Overrides Sub OnHandleCreated(e As System.EventArgs)
+        MyBase.OnHandleCreated(e)
+
+        If _dialogOwnerScope Is Nothing Then
+            _dialogOwnerScope = SharedMethods.PushDialogOwner(Me)
+        End If
+    End Sub
+
+    Protected Overrides Sub OnHandleDestroyed(e As System.EventArgs)
+        Dim scope As System.IDisposable = _dialogOwnerScope
+        _dialogOwnerScope = Nothing
+
+        If scope IsNot Nothing Then
+            Try
+                scope.Dispose()
+            Catch
+            End Try
+        End If
+
+        MyBase.OnHandleDestroyed(e)
+    End Sub
+
     ''' <summary>
     ''' Handles form initialization after all controls are created.
     ''' Restores previous chat history (HTML preferred, plain text fallback),
@@ -783,6 +806,7 @@ Public Class frmAIChat
         AddHandler chkPermitCommands.Click, AddressOf chkPermitCommands_Click
         AddHandler chkStayOnTop.Click, AddressOf chkStayontop_Click
         AddHandler chkConvertMarkdown.Click, AddressOf chkConvertMarkdown_Click
+        AddHandler chkIncludeOtherDocs.Click, AddressOf chkIncludeOtherDocs_Click
         AddHandler chkInkyMemory.Click, AddressOf chkInkyMemory_Click
         AddHandler lnkEditMemory.LinkClicked, AddressOf lnkEditMemory_LinkClicked
 
@@ -970,9 +994,8 @@ Public Class frmAIChat
                         Replace("{Location}", ThisAddIn.Location) &
                         $" Your name is '{AN5}'. The current date and time is: {DateTime.Now.ToString("MMMM dd, yyyy hh:mm tt")}." &
                         If(chkIncludeDocText.Checked, vbLf & "You have access to the user's active document." & vbLf, "") &
-                        If(chkIncludeselection.Checked, vbLf & "You have access to a selection of the active document." & vbLf, "") &
-                        If(chkIncludeOtherDocs.Checked, vbLf & "You also have read-only access to all other open Word documents for context only. Commands must never target those other documents." & vbLf, "") &
-                        If(My.Settings.DoCommands And (chkIncludeDocText.Checked Or chkIncludeselection.Checked),
+                        If(chkIncludeselection.Checked Or chkIncludeDocText.Checked, vbLf & "You have access to the current selection or cursor context in the active document." & vbLf, "") &
+                        If(chkIncludeOtherDocs.Checked, vbLf & "You also have read-only access to all other open Word documents for context only. Commands must never target those other documents." & vbLf, "") & If(My.Settings.DoCommands And (chkIncludeDocText.Checked Or chkIncludeselection.Checked),
                            _context.SP_Add_ChatWord_Commands,
                            _context.SP_Add_Chat_NoCommands)
 
@@ -1034,14 +1057,16 @@ Public Class frmAIChat
             ' Extract active document text (if checkbox enabled)
             Dim docText As String = If(chkIncludeDocText.Checked, GetActiveDocumentText(), "")
 
-            ' Extract selection text or cursor context (if checkbox enabled)
-            Dim selectionText As String = If(chkIncludeselection.Checked Or chkIncludeDocText.Checked,
-                                             GetCurrentSelectionText(), "")
+            ' Extract selection text or cursor context when either selection or full document access is enabled
+            Dim selectionText As String = ""
 
-            ' If full document included but no selection, get cursor context instead
             Dim sel As Microsoft.Office.Interop.Word.Selection = Globals.ThisAddIn.Application.Selection
-            If sel IsNot Nothing AndAlso sel.Start = sel.End Then
-                selectionText = GetCursorContext(CursorPositionCount)
+            If chkIncludeselection.Checked Or chkIncludeDocText.Checked Then
+                selectionText = GetCurrentSelectionText()
+
+                If sel IsNot Nothing AndAlso sel.Start = sel.End Then
+                    selectionText = GetCursorContext(CursorPositionCount)
+                End If
             End If
 
             ' Gather other open Word documents (if checkbox enabled)
@@ -1066,7 +1091,7 @@ Public Class frmAIChat
 
             ' Add selection or cursor context if present
             If Not String.IsNullOrEmpty(selectionText) Then
-                If chkIncludeDocText.Checked AndAlso sel.Start = sel.End Then
+                If sel IsNot Nothing AndAlso sel.Start = sel.End Then
                     fullPrompt.AppendLine($"In the user's document '{Globals.ThisAddIn.Application.ActiveDocument.Name}' the cursor is currently positioned in the following context: '{selectionText}'")
                 Else
                     fullPrompt.AppendLine($"In the user's document '{Globals.ThisAddIn.Application.ActiveDocument.Name}' the user has selected the following text: '{selectionText}'")
@@ -1747,6 +1772,14 @@ Public Class frmAIChat
         My.Settings.ChatInkyMemory = chkInkyMemory.Checked
         My.Settings.Save()
         lnkEditMemory.Visible = chkInkyMemory.Checked
+    End Sub
+
+    ''' <summary>
+    ''' Handles chkIncludeOtherDocs checkbox click. Persists preference.
+    ''' </summary>
+    Private Sub chkIncludeOtherDocs_Click(sender As Object, e As EventArgs)
+        My.Settings.ChatIncludeOtherOpenWordDocs = chkIncludeOtherDocs.Checked
+        My.Settings.Save()
     End Sub
 
     ''' <summary>

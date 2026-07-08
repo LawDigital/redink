@@ -4299,14 +4299,17 @@ Partial Public Class ThisAddIn
             Dim hasReadableWorkspace As Boolean = IsChatAgentWorkspaceConnected()
             Dim hasTransientSessionWorkspace As Boolean =
                 _chatAgentActive AndAlso Not _apActive AndAlso HasChatAgentSessionWorkspace()
+            Dim hasScheduledTaskWorkspace As Boolean = HasActiveScheduledTaskWorkspace()
 
-            If Not hasReadableWorkspace AndAlso Not hasTransientSessionWorkspace Then
+            If Not hasReadableWorkspace AndAlso Not hasTransientSessionWorkspace AndAlso Not hasScheduledTaskWorkspace Then
                 wsResp.Success = False
                 wsResp.ErrorMessage = "No readable workspace is connected."
                 Return wsResp
             End If
 
-            If hasTransientSessionWorkspace Then
+            If hasScheduledTaskWorkspace Then
+                ActivateScheduledTaskWorkspace(_apScheduledWorkspaceTaskId)
+            ElseIf hasTransientSessionWorkspace Then
                 SyncWorkspaceToPathPolicy(includeSessionTempFallback:=True)
             End If
 
@@ -4901,30 +4904,6 @@ __AfterDispatch:
         Return DeduplicateToolsByName(result)
     End Function
 
-    Private Function NormalizeLocalChatAdvancedToolNames(selectedAdvancedToolNames As IEnumerable(Of String),
-                                                         Optional includeInteractiveM365Tools As Boolean = True) As List(Of String)
-        Dim result As New List(Of String)(
-            If(selectedAdvancedToolNames, Enumerable.Empty(Of String)()).
-                Where(Function(n) Not String.IsNullOrWhiteSpace(n)).
-                Select(Function(n) n.Trim()).
-                Distinct(StringComparer.OrdinalIgnoreCase))
-
-        result = result.
-            Where(Function(name) Not IsChatAgentWorkspaceTool(name)).
-            ToList()
-
-        If IsChatAgentWorkspaceConnected() Then
-            result.AddRange(
-                GetChatAgentWorkspaceTools().
-                    Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
-                    Select(Function(t) t.ToolName))
-        End If
-
-        Return result.
-            Distinct(StringComparer.OrdinalIgnoreCase).
-            ToList()
-    End Function
-
     Public Function GetLocalChatAdvancedSelectableTools(Optional includeInteractiveM365Tools As Boolean = True) As List(Of ModelConfig)
         Dim tools As New List(Of ModelConfig)()
 
@@ -4947,31 +4926,75 @@ __AfterDispatch:
         Catch
         End Try
 
+        If INI_WebServerBlock <> 4 Then
+            tools.Add(BuildManageScheduledTasksTool())
+        End If
+
         Return DeduplicateToolsByName(tools)
     End Function
 
+    ' ── Opt-out resolution helpers ──────────────────────────────────────────────
+    ' Effective selection = all tools available for the current workspace/connection
+    ' state MINUS the tools the user explicitly deselected. New tools are therefore on
+    ' automatically, and workspace tools turn on as soon as a workspace is connected
+    ' unless the user expressly deselected them earlier.
 
-
-    Private Function GetDefaultLocalChatAdvancedToolNames(Optional includeInteractiveM365Tools As Boolean = True) As List(Of String)
-        Return GetLocalChatAdvancedSelectableTools(includeInteractiveM365Tools).
-        Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
-        Select(Function(t) t.ToolName.Trim()).
-        Distinct(StringComparer.OrdinalIgnoreCase).
-        ToList()
+    Private Function GetLocalChatAvailableMainToolsForState(Optional includeInteractiveM365Tools As Boolean = True) As List(Of ModelConfig)
+        Return GetLocalChatMainSelectableTools(includeInteractiveM365Tools)
     End Function
 
-    Private Function ResolveLocalChatAdvancedToolNamesForEnabledState(selectedAdvancedToolNames As IEnumerable(Of String),
-                                                                 Optional includeInteractiveM365Tools As Boolean = True) As List(Of String)
-        Dim resolved As List(Of String) =
-        NormalizeLocalChatAdvancedToolNames(selectedAdvancedToolNames, includeInteractiveM365Tools)
+    Private Function GetLocalChatAvailableAdvancedToolsForState(Optional includeInteractiveM365Tools As Boolean = True) As List(Of ModelConfig)
+        ' GetLocalChatAdvancedSelectableTools already includes workspace tools only when a
+        ' workspace is connected, so it is the correct "available for current state" set.
+        Return GetLocalChatAdvancedSelectableTools(includeInteractiveM365Tools)
+    End Function
 
-        If resolved.Count = 0 Then
-            resolved = GetDefaultLocalChatAdvancedToolNames(includeInteractiveM365Tools)
-        End If
+    Private Function ResolveLocalChatSelectedMainToolNames(st As InkyState,
+                                                          Optional includeInteractiveM365Tools As Boolean = True) As List(Of String)
+        Dim deselected = BuildToolNameSet(If(st IsNot Nothing, st.DeselectedMainToolNames, Nothing))
+        Return GetLocalChatAvailableMainToolsForState(includeInteractiveM365Tools).
+            Where(Function(t) t IsNot Nothing AndAlso
+                              Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                              Not deselected.Contains(t.ToolName)).
+            Select(Function(t) t.ToolName).
+            Distinct(StringComparer.OrdinalIgnoreCase).
+            ToList()
+    End Function
 
-        Return resolved.
-        Distinct(StringComparer.OrdinalIgnoreCase).
-        ToList()
+    Private Function ResolveLocalChatSelectedAdvancedToolNames(st As InkyState,
+                                                              Optional includeInteractiveM365Tools As Boolean = True) As List(Of String)
+        Dim deselected = BuildToolNameSet(If(st IsNot Nothing, st.DeselectedAdvancedToolNames, Nothing))
+        Return GetLocalChatAvailableAdvancedToolsForState(includeInteractiveM365Tools).
+            Where(Function(t) t IsNot Nothing AndAlso
+                              Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                              Not deselected.Contains(t.ToolName)).
+            Select(Function(t) t.ToolName).
+            Distinct(StringComparer.OrdinalIgnoreCase).
+            ToList()
+    End Function
+
+    Public Function ComputeLocalChatDeselectedMainToolNames(checkedMainToolNames As IEnumerable(Of String),
+                                                            Optional includeInteractiveM365Tools As Boolean = True) As List(Of String)
+        Dim checkedSet = BuildToolNameSet(checkedMainToolNames)
+        Return GetLocalChatAvailableMainToolsForState(includeInteractiveM365Tools).
+            Where(Function(t) t IsNot Nothing AndAlso
+                              Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                              Not checkedSet.Contains(t.ToolName)).
+            Select(Function(t) t.ToolName).
+            Distinct(StringComparer.OrdinalIgnoreCase).
+            ToList()
+    End Function
+
+    Public Function ComputeLocalChatDeselectedAdvancedToolNames(checkedAdvancedToolNames As IEnumerable(Of String),
+                                                                Optional includeInteractiveM365Tools As Boolean = True) As List(Of String)
+        Dim checkedSet = BuildToolNameSet(checkedAdvancedToolNames)
+        Return GetLocalChatAvailableAdvancedToolsForState(includeInteractiveM365Tools).
+            Where(Function(t) t IsNot Nothing AndAlso
+                              Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                              Not checkedSet.Contains(t.ToolName)).
+            Select(Function(t) t.ToolName).
+            Distinct(StringComparer.OrdinalIgnoreCase).
+            ToList()
     End Function
 
     Public Function GetLocalChatEffectiveTools(selectedMainToolNames As IEnumerable(Of String),
@@ -4979,15 +5002,12 @@ __AfterDispatch:
                                            advancedToolsEnabled As Boolean,
                                            Optional includeInteractiveM365Tools As Boolean = True) As List(Of ModelConfig)
 
+        ' Opt-out model: callers pass already-resolved *selected* names. This is a pure
+        ' intersection with no implicit "select all advanced" fallback, so deselecting
+        ' every advanced tool genuinely yields none.
         Dim result As New List(Of ModelConfig)()
         Dim mainSet = BuildToolNameSet(selectedMainToolNames)
-
-        Dim advancedNames As List(Of String) =
-        If(advancedToolsEnabled,
-           ResolveLocalChatAdvancedToolNamesForEnabledState(selectedAdvancedToolNames, includeInteractiveM365Tools),
-           NormalizeLocalChatAdvancedToolNames(selectedAdvancedToolNames, includeInteractiveM365Tools))
-
-        Dim advancedSet = BuildToolNameSet(advancedNames)
+        Dim advancedSet = BuildToolNameSet(selectedAdvancedToolNames)
 
         For Each tool In GetLocalChatMainSelectableTools(includeInteractiveM365Tools)
             If mainSet.Contains(tool.ToolName) Then
@@ -5010,26 +5030,28 @@ __AfterDispatch:
                                                           Optional includeInteractiveM365Tools As Boolean = True) As List(Of String)
 
         Dim availableTools = GetLocalChatAdvancedSelectableTools(includeInteractiveM365Tools)
-        Dim preselected = ResolveLocalChatAdvancedToolNamesForEnabledState(
-        selectedAdvancedToolNames,
-        includeInteractiveM365Tools)
+        Dim preselected = If(selectedAdvancedToolNames, Enumerable.Empty(Of String)()).
+            Where(Function(n) Not String.IsNullOrWhiteSpace(n)).
+            Select(Function(n) n.Trim()).
+            Distinct(StringComparer.OrdinalIgnoreCase).
+            ToList()
 
         Using selector As New MultiModelSelectorForm(
         availableTools,
         "",
         $"{AN} - Select Advanced Tools",
-        resetChecked:=False,
+              resetChecked:=False,
         preselectMany:=preselected,
-        instruction:="Select the advanced tools that may be callable in Local Chat.")
+        instruction:="Select the advanced tools that may be callable in Local Chat. " &
+                     "All available tools are on by default; uncheck any you want to disable. " &
+                     "Workspace tools appear here only while a workspace is connected.")
 
             If selector.ShowDialog() = DialogResult.OK Then
-                Return NormalizeLocalChatAdvancedToolNames(
-                selector.SelectedModels.
+                Return selector.SelectedModels.
                     Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
                     Select(Function(t) t.ToolName).
                     Distinct(StringComparer.OrdinalIgnoreCase).
-                    ToList(),
-                includeInteractiveM365Tools)
+                    ToList()
             End If
         End Using
 
@@ -5044,7 +5066,10 @@ __AfterDispatch:
 
         Dim availableTools = GetLocalChatMainSelectableTools(includeInteractiveM365Tools)
         Dim workingAdvanced As New List(Of String)(
-            NormalizeLocalChatAdvancedToolNames(selectedAdvancedToolNames, includeInteractiveM365Tools))
+            If(selectedAdvancedToolNames, Enumerable.Empty(Of String)()).
+                Where(Function(n) Not String.IsNullOrWhiteSpace(n)).
+                Select(Function(n) n.Trim()).
+                Distinct(StringComparer.OrdinalIgnoreCase))
 
         Using selector As New MultiModelSelectorForm(
             availableTools,
@@ -5053,6 +5078,7 @@ __AfterDispatch:
             resetChecked:=False,
             preselectMany:=If(selectedMainToolNames, New List(Of String)()),
             instruction:="Select the agents, sources, skills, and connector-oriented tools you want to make available to the model. " &
+                         "Note: all available tools are on by default (including newly added ones); uncheck any you want to disable. " &
                          "Advanced tools are managed separately through the 'Advanced tools…' button.")
 
             selector.AddExtraButton("Advanced tools…",

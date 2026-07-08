@@ -430,7 +430,7 @@ Partial Public Class ThisAddIn
     ''' on the chat agent's files. Must be called before ExecuteToolingLoop.
     ''' Returns the combined tool list (internal agent tools + selected external tools).
     ''' </summary>
-    Private Function ChatAgentSetupToolContext() As List(Of ModelConfig)
+    Private Function ChatAgentSetupToolContext(Optional selectedTools As List(Of ModelConfig) = Nothing) As List(Of ModelConfig)
         If String.IsNullOrWhiteSpace(_chatAgentTempDir) OrElse Not Directory.Exists(_chatAgentTempDir) Then
             _chatAgentTempDir = Path.Combine(Path.GetTempPath(), CA_TempPrefix & Guid.NewGuid().ToString("N"))
             Directory.CreateDirectory(_chatAgentTempDir)
@@ -471,7 +471,9 @@ Partial Public Class ThisAddIn
 
         Dim tools As New List(Of ModelConfig)()
 
-        If _selectedToolsForChat IsNot Nothing Then
+        If selectedTools IsNot Nothing Then
+            tools.AddRange(selectedTools)
+        ElseIf _selectedToolsForChat IsNot Nothing Then
             tools.AddRange(_selectedToolsForChat)
         End If
 
@@ -510,15 +512,29 @@ Partial Public Class ThisAddIn
     ''' cited by the LLM, copies them to Desktop\Inky\yymmdd_hh-mm\, and
     ''' opens the folder in Explorer.
     ''' </summary>
-    Private Function ChatAgentCollectAndCopyOutputs() As List(Of String)
+    Private Function ChatAgentCollectAndCopyOutputs(Optional extraFilePaths As IEnumerable(Of String) = Nothing) As List(Of String)
         Dim copiedFiles As New List(Of String)()
+        Dim filesToCopy As New List(Of String)()
 
-        If String.IsNullOrWhiteSpace(_chatAgentTempDir) OrElse Not Directory.Exists(_chatAgentTempDir) Then
-            Return copiedFiles
+        If Not String.IsNullOrWhiteSpace(_chatAgentTempDir) AndAlso Directory.Exists(_chatAgentTempDir) Then
+            Dim resultFiles = CollectResultAttachments(_chatAgentTempDir, _chatAgentFiles)
+            If resultFiles IsNot Nothing AndAlso resultFiles.Count > 0 Then
+                filesToCopy.AddRange(resultFiles)
+            End If
         End If
 
-        Dim resultFiles = CollectResultAttachments(_chatAgentTempDir, _chatAgentFiles)
-        If resultFiles Is Nothing OrElse resultFiles.Count = 0 Then
+        If extraFilePaths IsNot Nothing Then
+            filesToCopy.AddRange(
+                extraFilePaths.
+                    Where(Function(p) Not String.IsNullOrWhiteSpace(p) AndAlso File.Exists(p)))
+        End If
+
+        filesToCopy = filesToCopy.
+            Select(Function(p) Path.GetFullPath(p)).
+            Distinct(StringComparer.OrdinalIgnoreCase).
+            ToList()
+
+        If filesToCopy.Count = 0 Then
             Return copiedFiles
         End If
 
@@ -534,7 +550,7 @@ Partial Public Class ThisAddIn
 
         Directory.CreateDirectory(outputDir)
 
-        For Each srcPath In resultFiles
+        For Each srcPath In filesToCopy
             Try
                 Dim destName = Path.GetFileName(srcPath)
                 Dim destPath = Path.Combine(outputDir, destName)
@@ -561,6 +577,28 @@ Partial Public Class ThisAddIn
         End If
 
         Return copiedFiles
+    End Function
+
+    Private Shared Function ExtractCitedLocalFilePaths(markdown As String) As List(Of String)
+        Dim results As New List(Of String)()
+        If String.IsNullOrWhiteSpace(markdown) Then Return results
+
+        Dim rx As New System.Text.RegularExpressions.Regex(
+            "file:///[^\s\)>\]""']+",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+
+        For Each m As System.Text.RegularExpressions.Match In rx.Matches(markdown)
+            Dim raw As String = m.Value.TrimEnd("."c, ","c, ";"c, ":"c)
+            Try
+                Dim localPath As String = New Uri(raw).LocalPath
+                If Not String.IsNullOrWhiteSpace(localPath) AndAlso File.Exists(localPath) Then
+                    results.Add(Path.GetFullPath(localPath))
+                End If
+            Catch
+            End Try
+        Next
+
+        Return results.Distinct(StringComparer.OrdinalIgnoreCase).ToList()
     End Function
 
     ''' <summary>
@@ -1008,23 +1046,21 @@ Partial Public Class ThisAddIn
         If Not IsChatAgentWorkspaceConnected() Then Return tools
 
         tools.Add(New ModelConfig() With {
-            .ToolOnly = True, .Tool = True, .ToolName = CA_Tool_WorkspaceWrite,
-            .ModelDescription = "Agent Workspace: Write File",
-            .ToolPriority = 123,
+            .ToolOnly = True, .Tool = True, .ToolName = CA_Tool_WorkspaceRead,
+            .ModelDescription = "Agent Workspace: Read File",
+            .ToolPriority = 122,
             .ToolErrorHandling = "skip",
             .ToolInstructionsPrompt =
-                CA_Tool_WorkspaceWrite & ": Creates a plain text/code file inside the workspace. " &
-                "When updating or replacing an existing workspace file, set overwrite=true. " &
-                "NEVER use this tool to create or overwrite PDF, Word, Excel, PowerPoint, image, archive, audio, video, or any other binary/document format. " &
-                "Use agent_workspace_save_session_file only after another tool has produced a real file.",
+                CA_Tool_WorkspaceRead & ": Read or extract text from one workspace file. " &
+                "For one local workspace PDF or Office document, prefer this tool over direct path-based extraction, because it stages the file into the current session and uses the existing attachment extraction stack. " &
+                "When the returned payload contains session_file_name, use that exact name with attachment-based tools such as read_attachment, process_word_document, complete_word_tables, excel_list_live_worksheets, excel_read_live_range, and excel_complete_live_workbook.",
             .ToolDefinition =
-                "{""name"":""" & CA_Tool_WorkspaceWrite & """," &
-                """description"":""Creates a UTF-8 text file inside the workspace. To replace an existing file, set overwrite=true. Never use this tool for binary/document formats such as PDF, DOCX, XLSX, PPTX, ZIP, images, audio, or video.""," &
+                "{""name"":""" & CA_Tool_WorkspaceRead & """," &
+                """description"":""Reads or extracts text from one workspace file and stages it into the current session when possible. When session_file_name is returned, use that exact name with attachment-based tools such as read_attachment, process_word_document, complete_word_tables, excel_list_live_worksheets, excel_read_live_range, and excel_complete_live_workbook.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
-                """path"":{""type"":""string"",""description"":""Relative target file path inside the workspace.""}," &
-                """content"":{""type"":""string"",""description"":""File content to write.""}," &
-                """overwrite"":{""type"":""boolean"",""description"":""Set to true only when the user wants to replace an existing file. Default false.""}" &
-                "},""required"":[""path"",""content""]}}"
+                """path"":{""type"":""string"",""description"":""Relative workspace file path.""}," &
+                """max_chars"":{""type"":""integer"",""description"":""Maximum characters to return. Default 12000, capped.""}" &
+                "},""required"":[""path""]}}"
         })
 
 
@@ -1355,10 +1391,9 @@ Partial Public Class ThisAddIn
         Try
             Select Case ext
                 Case ".txt", ".ini", ".csv", ".tsv", ".log", ".json", ".xml", ".html", ".htm",
-                     ".md", ".yaml", ".yml",
+                     ".md", ".yaml", ".yml", ".ics", ".vcf",
                      ".vb", ".cs", ".js", ".ts", ".py", ".java", ".cpp", ".c", ".h", ".sql"
                     Return SharedMethods.ReadTextFile(filePath, ReturnErrorInsteadOfEmpty:=False)
-
                 Case ".rtf"
                     Return SharedMethods.ReadRtfAsText(filePath, ReturnErrorInsteadOfEmpty:=False)
 
@@ -1366,16 +1401,16 @@ Partial Public Class ThisAddIn
                     If INI_AllowLegacyDocFiles Then Return SharedMethods.ReadWordDocument(filePath, ReturnErrorInsteadOfEmpty:=False)
                     Return ""
 
-                Case ".docx"
+                Case ".docx", ".docm"
                     Return SharedMethods.ReadDocxSandboxed(filePath)
-                Case ".xlsx"
+                Case ".xlsx", ".xlsm"
                     Return SharedMethods.ReadXlsxSandboxed(filePath, silent:=True, askWorksheetSelection:=False)
-                Case ".pptx"
+                Case ".pptx", ".pptm"
                     Return SharedMethods.ReadPptxSandboxed(filePath)
                 Case ".eml"
                     Return SharedMethods.ReadEmlSandboxed(filePath)
                 Case ".msg"
-                    Return SharedMethods.ReadMsgSandboxed(filePath)
+                    Return ReadMsgAttachmentText(filePath)
 
                 Case ".pdf"
                     Dim r = Await SharedMethods.ReadPdfAsTextEx(filePath, True, DoOCR:=True, AskUser:=False, context:=_context).ConfigureAwait(False)
@@ -1416,7 +1451,16 @@ Partial Public Class ThisAddIn
             Return "Error: Workspace file not found."
         End If
 
-        Dim fullText As String = Await ChatAgentExtractFileText(fullPath).ConfigureAwait(False)
+        Dim stagedAttachment As AutoPilotAttachmentInfo = StageWorkspaceFile(rel)
+
+        Dim readPath As String = fullPath
+        If stagedAttachment IsNot Nothing AndAlso
+           Not String.IsNullOrWhiteSpace(stagedAttachment.TempFilePath) AndAlso
+           File.Exists(stagedAttachment.TempFilePath) Then
+            readPath = stagedAttachment.TempFilePath
+        End If
+
+        Dim fullText As String = Await ChatAgentExtractFileText(readPath).ConfigureAwait(False)
         fullText = If(fullText, "")
 
         Dim totalChars As Integer = fullText.Length
@@ -1436,6 +1480,13 @@ Partial Public Class ThisAddIn
         New JProperty("returned_chars", takeChars),
         New JProperty("truncated", truncated),
         New JProperty("continuation", "If more content is needed, call the same tool again with start_char=next_offset and a suitable max_chars value."))
+
+        If stagedAttachment IsNot Nothing Then
+            payload("staged") = True
+            payload("session_file_name") = If(stagedAttachment.OriginalFileName, "")
+        Else
+            payload("staged") = False
+        End If
 
         If truncated Then
             payload("next_offset") = nextOffset

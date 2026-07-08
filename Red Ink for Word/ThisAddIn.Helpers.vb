@@ -415,6 +415,10 @@ Partial Public Class ThisAddIn
 
         Dim result As String = template
 
+        If Regex.IsMatch(template, "{Dictionary}", RegexOptions.IgnoreCase) Then
+            Dictionary = Global.SharedLibrary.SharedLibrary.SharedMethods.GetTranslationDictionaryText(_context)
+        End If
+
         Dim placeholderPattern As String = "\{([^}]+)\}"
         Dim matches As MatchCollection = Regex.Matches(template, placeholderPattern)
 
@@ -609,7 +613,7 @@ Partial Public Class ThisAddIn
     ''' </summary>
     ''' <param name="apiKey">The API key to encode.</param>
     ''' <returns>The encoded API key with prefix (if applicable), or "Error" on failure.</returns>
-    Private Function CodeAPIKey(ByVal apiKey As String) As String
+    Private Function CodeAPIKey(ByVal apiKey As String, Optional ByVal UseStrongAlgorithm As Boolean = True) As String
         Dim modifiedKey As String
         Dim resultKey As String
         Dim xcodebasis As String
@@ -643,7 +647,7 @@ Partial Public Class ThisAddIn
         End If
 
         ' Encrypt the modified key (without the prefix)
-        resultKey = CodeString(modifiedKey, xcodebasis)
+        resultKey = CodeString(modifiedKey, xcodebasis, UseStrongAlgorithm)
 
         ' Add the prefix back if it was present
         If HadPrefix Then

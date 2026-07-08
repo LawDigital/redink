@@ -380,15 +380,288 @@ Namespace SharedLibrary
             Select Case src
                 Case M365SearchSources.OneNote
                     Return Await SearchOneNoteAsync(token, query, options, ct).ConfigureAwait(False)
+
                 Case M365SearchSources.People
                     Return Await SearchPeopleAsync(token, query, options, ct).ConfigureAwait(False)
+
+                Case M365SearchSources.Calendar
+                    If ShouldUseCalendarView(options) Then
+                        Return Await SearchCalendarViewAsync(token, query, options, ct).ConfigureAwait(False)
+                    End If
+
+                    Return Await SearchViaQueryEndpointAsync(token, query, src, options, ct).ConfigureAwait(False)
+
                 Case Else
                     Return Await SearchViaQueryEndpointAsync(token, query, src, options, ct).ConfigureAwait(False)
             End Select
         End Function
 
-        Private Async Function SearchViaQueryEndpointAsync(token As String, query As String,
-                                                           src As M365SearchSources,
+        Private Function ShouldUseCalendarView(options As M365SearchOptions) As Boolean
+            If options Is Nothing Then Return False
+            Return options.From.HasValue OrElse options.To.HasValue
+        End Function
+
+        Private Async Function SearchCalendarViewAsync(token As String,
+                                                       query As String,
+                                                       options As M365SearchOptions,
+                                                       ct As CancellationToken) As Task(Of List(Of M365SearchHit))
+            Dim effectiveFromDate As Date =
+                If(options.From.HasValue,
+                   options.From.Value.Date,
+                   If(options.To.HasValue, options.To.Value.Date, Date.Today))
+
+            Dim effectiveToDate As Date =
+                If(options.To.HasValue,
+                   options.To.Value.Date,
+                   effectiveFromDate)
+
+            If effectiveToDate < effectiveFromDate Then
+                Dim swapDate As Date = effectiveFromDate
+                effectiveFromDate = effectiveToDate
+                effectiveToDate = swapDate
+            End If
+
+            Dim localTimeZone As System.TimeZoneInfo = System.TimeZoneInfo.Local
+            Dim startBoundary As DateTimeOffset = BuildDateBoundaryOffset(effectiveFromDate, localTimeZone)
+            Dim endBoundary As DateTimeOffset = BuildDateBoundaryOffset(effectiveToDate.AddDays(1), localTimeZone)
+
+            Dim neededMatches As Integer = Math.Max(1, options.FromIndex + options.MaxPerSource)
+            Dim pageSize As Integer = Math.Max(10, Math.Min(neededMatches, 100))
+
+            Dim url As String =
+                $"{GraphV1}/me/calendarView?" &
+                $"startDateTime={Uri.EscapeDataString(FormatGraphDateTimeOffset(startBoundary))}" &
+                $"&endDateTime={Uri.EscapeDataString(FormatGraphDateTimeOffset(endBoundary))}" &
+                $"&$top={pageSize}" &
+                $"&$select=id,subject,bodyPreview,organizer,start,end,isAllDay,location,attendees,webLink"
+
+            Dim matchedHits As New List(Of M365SearchHit)()
+
+            Do While Not String.IsNullOrWhiteSpace(url) AndAlso matchedHits.Count < neededMatches
+                ct.ThrowIfCancellationRequested()
+
+                Dim page As JObject
+
+                Using req As New HttpRequestMessage(HttpMethod.Get, url)
+                    req.Headers.Authorization = New AuthenticationHeaderValue("Bearer", token)
+                    req.Headers.Accept.Add(New MediaTypeWithQualityHeaderValue("application/json"))
+                    req.Headers.TryAddWithoutValidation("Prefer", $"outlook.timezone=""{localTimeZone.Id}""")
+
+                    Using resp = Await _http.SendAsync(req, ct).ConfigureAwait(False)
+                        Dim body = Await resp.Content.ReadAsStringAsync().ConfigureAwait(False)
+                        If Not resp.IsSuccessStatusCode Then
+                            Throw BuildGraphException(resp.StatusCode, body)
+                        End If
+
+                        page = If(String.IsNullOrWhiteSpace(body), New JObject(), JObject.Parse(body))
+                    End Using
+                End Using
+
+                Dim arr = TryCast(page("value"), JArray)
+                If arr IsNot Nothing Then
+                    For Each item As JToken In arr
+                        ct.ThrowIfCancellationRequested()
+
+                        Dim eventObject As JObject = TryCast(item, JObject)
+                        If eventObject Is Nothing Then Continue For
+                        If Not CalendarViewMatchesQuery(eventObject, query, options.KqlExtra) Then Continue For
+
+                        Dim wrapped As New JObject From {
+                            {"resource", eventObject.DeepClone()}
+                        }
+
+                        Dim bodyPreview As String = SafeStr(eventObject, "bodyPreview")
+                        If Not String.IsNullOrWhiteSpace(bodyPreview) Then
+                            wrapped("summary") = bodyPreview
+                        End If
+
+                        Dim hit = ParseSearchHit(wrapped, M365SearchSources.Calendar, options)
+                        If hit IsNot Nothing Then
+                            matchedHits.Add(hit)
+                            If matchedHits.Count >= neededMatches Then Exit For
+                        End If
+                    Next
+                End If
+
+                url = SafeStr(page, "@odata.nextLink")
+            Loop
+
+            Return matchedHits.
+                Skip(Math.Max(0, options.FromIndex)).
+                Take(Math.Max(1, options.MaxPerSource)).
+                ToList()
+        End Function
+
+        Private Function BuildDateBoundaryOffset(dateValue As Date,
+                                                 timeZone As System.TimeZoneInfo) As DateTimeOffset
+            Dim localMidnight As New DateTime(dateValue.Year, dateValue.Month, dateValue.Day, 0, 0, 0, DateTimeKind.Unspecified)
+            Dim offset As TimeSpan = timeZone.GetUtcOffset(localMidnight)
+            Return New DateTimeOffset(localMidnight, offset)
+        End Function
+
+        Private Function FormatGraphDateTimeOffset(value As DateTimeOffset) As String
+            Return value.ToString("yyyy-MM-dd'T'HH:mm:sszzz", Globalization.CultureInfo.InvariantCulture)
+        End Function
+
+        Private Function CalendarViewMatchesQuery(eventObject As JObject,
+                                                  query As String,
+                                                  kqlExtra As String) As Boolean
+            Dim combinedQuery As String = ""
+
+            If Not String.IsNullOrWhiteSpace(query) AndAlso query.Trim() <> "*" Then
+                combinedQuery = query.Trim()
+            End If
+
+            If Not String.IsNullOrWhiteSpace(kqlExtra) Then
+                combinedQuery =
+                    If(String.IsNullOrWhiteSpace(combinedQuery),
+                       kqlExtra.Trim(),
+                       combinedQuery & " " & kqlExtra.Trim())
+            End If
+
+            Dim terms As List(Of String) = ExtractCalendarQueryTerms(combinedQuery)
+            If terms.Count = 0 Then Return True
+
+            Dim searchableText As String = BuildCalendarSearchableText(eventObject)
+            If String.IsNullOrWhiteSpace(searchableText) Then Return False
+
+            For Each term As String In terms
+                If searchableText.IndexOf(term, StringComparison.OrdinalIgnoreCase) < 0 Then
+                    Return False
+                End If
+            Next
+
+            Return True
+        End Function
+
+        Private Function ExtractCalendarQueryTerms(rawQuery As String) As List(Of String)
+            Dim terms As New List(Of String)()
+            Dim q As String = If(rawQuery, "").Trim()
+            If String.IsNullOrWhiteSpace(q) OrElse q = "*" Then Return terms
+
+            For Each m As Match In Regex.Matches(q, """[^""]+""|\S+")
+                Dim term As String = m.Value.Trim().Trim(""""c, "'"c)
+                If String.IsNullOrWhiteSpace(term) Then Continue For
+
+                Dim colonIndex As Integer = term.IndexOf(":"c)
+                If colonIndex >= 0 AndAlso colonIndex < term.Length - 1 Then
+                    term = term.Substring(colonIndex + 1).Trim().Trim(""""c, "'"c)
+                End If
+
+                term = term.Trim("("c, ")"c, "["c, "]"c, "{"c, "}"c, ","c, ";"c)
+                If String.IsNullOrWhiteSpace(term) Then Continue For
+
+                Select Case term.ToLowerInvariant()
+                    Case "*", "and", "or", "not"
+                        Continue For
+                End Select
+
+                terms.Add(term)
+            Next
+
+            Return terms.
+                Where(Function(s) Not String.IsNullOrWhiteSpace(s)).
+                Distinct(StringComparer.OrdinalIgnoreCase).
+                ToList()
+        End Function
+
+        Private Function BuildCalendarSearchableText(eventObject As JObject) As String
+            If eventObject Is Nothing Then Return ""
+
+            Dim organizer As JObject = TryCast(TryCast(eventObject("organizer"), JObject)?("emailAddress"), JObject)
+            Dim location As JObject = TryCast(eventObject("location"), JObject)
+            Dim parts As New List(Of String) From {
+                SafeStr(eventObject, "subject"),
+                SafeStr(eventObject, "bodyPreview"),
+                SafeStr(organizer, "name"),
+                SafeStr(organizer, "address"),
+                SafeStr(location, "displayName"),
+                SafeStr(eventObject, "webLink")
+            }
+
+            Dim attendees = TryCast(eventObject("attendees"), JArray)
+            If attendees IsNot Nothing Then
+                For Each attendee As JToken In attendees
+                    Dim emailAddress As JObject = TryCast(attendee("emailAddress"), JObject)
+                    If emailAddress Is Nothing Then Continue For
+
+                    Dim displayName As String = SafeStr(emailAddress, "name")
+                    Dim address As String = SafeStr(emailAddress, "address")
+
+                    If Not String.IsNullOrWhiteSpace(displayName) Then parts.Add(displayName)
+                    If Not String.IsNullOrWhiteSpace(address) Then parts.Add(address)
+                Next
+            End If
+
+            Return String.Join(vbLf, parts.Where(Function(s) Not String.IsNullOrWhiteSpace(s)))
+        End Function
+
+        Private Function TryParseGraphDateTimeTimeZone(value As JObject) As DateTime?
+            If value Is Nothing Then Return Nothing
+
+            Dim rawDateTime As String = SafeStr(value, "dateTime").Trim()
+            If String.IsNullOrWhiteSpace(rawDateTime) Then Return Nothing
+
+            Dim dto As DateTimeOffset
+            If DateTimeOffset.TryParse(
+                rawDateTime,
+                Globalization.CultureInfo.InvariantCulture,
+                Globalization.DateTimeStyles.AssumeUniversal Or Globalization.DateTimeStyles.AdjustToUniversal,
+                dto) Then
+                Return dto.UtcDateTime
+            End If
+
+            Dim localDateTime As DateTime
+            Dim localFormats As String() = {
+                "yyyy-MM-dd'T'HH:mm:ss",
+                "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF",
+                "yyyy-MM-dd HH:mm:ss",
+                "yyyy-MM-dd HH:mm",
+                "yyyy-MM-dd"
+            }
+
+            If DateTime.TryParseExact(
+                rawDateTime,
+                localFormats,
+                Globalization.CultureInfo.InvariantCulture,
+                Globalization.DateTimeStyles.None,
+                localDateTime) OrElse
+               DateTime.TryParse(
+                rawDateTime,
+                Globalization.CultureInfo.InvariantCulture,
+                Globalization.DateTimeStyles.None,
+                localDateTime) Then
+
+                Dim tz As System.TimeZoneInfo = ResolveGraphTimeZone(SafeStr(value, "timeZone"))
+                If tz IsNot Nothing Then
+                    Try
+                        localDateTime = DateTime.SpecifyKind(localDateTime, DateTimeKind.Unspecified)
+                        Return System.TimeZoneInfo.ConvertTimeToUtc(localDateTime, tz)
+                    Catch
+                    End Try
+                End If
+            End If
+
+            Return TryDate(value, "dateTime")
+        End Function
+
+        Private Function ResolveGraphTimeZone(timeZoneId As String) As System.TimeZoneInfo
+            Dim tzId As String = If(timeZoneId, "").Trim()
+            If String.IsNullOrWhiteSpace(tzId) Then Return System.TimeZoneInfo.Utc
+
+            Select Case tzId.ToUpperInvariant()
+                Case "UTC", "ETC/UTC", "COORDINATED UNIVERSAL TIME"
+                    Return System.TimeZoneInfo.Utc
+            End Select
+
+            Try
+                Return System.TimeZoneInfo.FindSystemTimeZoneById(tzId)
+            Catch
+                Return Nothing
+            End Try
+        End Function
+
+        Private Async Function SearchViaQueryEndpointAsync(token As String, query As String, src As M365SearchSources,
                                                            options As M365SearchOptions,
                                                            ct As CancellationToken) As Task(Of List(Of M365SearchHit))
             Dim entityType = MapEntityType(src)
@@ -645,10 +918,12 @@ Namespace SharedLibrary
 
                 If ev.StartUtc.HasValue Then
                     startObj("dateTime") = FormatGraphIsoUtc(ev.StartUtc.Value)
+                    startObj("timeZone") = "UTC"
                 End If
 
                 If ev.EndUtc.HasValue Then
                     endObj("dateTime") = FormatGraphIsoUtc(ev.EndUtc.Value)
+                    endObj("timeZone") = "UTC"
                 End If
             Next
         End Function
@@ -799,7 +1074,7 @@ Namespace SharedLibrary
                     hit.Id = SafeStr(resource, "id")
                     hit.Title = SafeStr(resource, "subject")
                     hit.WebUrl = SafeStr(resource, "webLink")
-                    hit.LastModifiedUtc = TryDate(TryCast(resource("start"), JObject), "dateTime")
+                    hit.LastModifiedUtc = TryParseGraphDateTimeTimeZone(TryCast(resource("start"), JObject))
                     Dim org = TryCast(TryCast(resource("organizer"), JObject)?("emailAddress"), JObject)
                     hit.Author = SafeStr(org, "name")
             End Select
@@ -1258,8 +1533,8 @@ Namespace SharedLibrary
             ev.BodyPreview = SafeStr(j, "bodyPreview")
             ev.WebLink = SafeStr(j, "webLink")
             ev.IsAllDay = CBool(If(j("isAllDay"), False))
-            ev.StartUtc = TryDate(TryCast(j("start"), JObject), "dateTime")
-            ev.EndUtc = TryDate(TryCast(j("end"), JObject), "dateTime")
+            ev.StartUtc = TryParseGraphDateTimeTimeZone(TryCast(j("start"), JObject))
+            ev.EndUtc = TryParseGraphDateTimeTimeZone(TryCast(j("end"), JObject))
             Dim org = TryCast(TryCast(j("organizer"), JObject)?("emailAddress"), JObject)
             If org IsNot Nothing Then ev.Organizer = SafeStr(org, "name")
             Dim loc = TryCast(j("location"), JObject)

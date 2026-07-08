@@ -1139,8 +1139,6 @@ Partial Public Class ThisAddIn
             InsertDocs = ""
             MyStyleInsert = ""
 
-            CurrentDate = "(Current Date: " & DateTime.Now.ToString("dd-MMM-yyyy", CultureInfo.GetCultureInfo("en-US")) & ")"
-
             ' Initialize option flags for various processing modes
             Dim NoText As Boolean = False
             Dim DoMarkup As Boolean = False
@@ -1181,7 +1179,7 @@ Partial Public Class ThisAddIn
             Dim SlidesInstruct As String = $"with '{SlidesPrefix}' for adding to a Powerpoint file"
             Dim ChartInstruct As String = $"with '{ChartPrefix}'/'{ChartPrefix}' for creating a chart (normal or for webapps)"
             Dim ClipboardInstruct As String = $"with '{ClipboardPrefix}', '{NewdocPrefix}' or '{PanePrefix}' for separate output"
-            Dim PromptLibInstruct As String = If(INI_PromptLib, " or press 'OK' for the prompt library", "")
+            Dim PromptLibInstruct As String = If(INI_PromptLib, " or press 'OK' or '/' for the prompt library", "")
             Dim ExtInstruct As String = $"; include '{ExtTrigger}' or '{ExtTriggerFixed}' (multiple times) for including the text of (a) file(s) (txt, docx, pdf), {ExtDirTrigger} for a directory of text files, {ExtUrlTrigger} for URL content, or '{AddDocTrigger}' for an open Word doc"
             Dim TPMarkupInstruct As String = $"; add '{TPMarkupTriggerInstruct}' if revisions [of user] should be pointed out to the LLM"
             Dim NoFormatInstruct As String = $"; add '{NoFormatTrigger2}'/'{KFTrigger2}'/'{KPFTrigger2}/{SameAsReplaceTrigger}' for overriding formatting defaults"
@@ -1305,14 +1303,14 @@ Partial Public Class ThisAddIn
                         }
 
 
-                    OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute on the selected text ({MarkupInstruct}, {ClipboardInstruct}, {InplaceInstruct}, {BubblesInstruct}, {PushbackInstruct}, {ChartInstruct} or {SlidesInstruct}){PromptLibInstruct}{ExtInstruct}{AddOnInstruct}{PureInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle (using " & If(UseSecondAPI, INI_Model_2, INI_Model) & ")", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons).Trim()
+                    OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute on the selected text ({MarkupInstruct}, {ClipboardInstruct}, {InplaceInstruct}, {BubblesInstruct}, {PushbackInstruct}, {ChartInstruct} or {SlidesInstruct}){PromptLibInstruct}{ExtInstruct}{AddOnInstruct}{PureInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle (using " & If(UseSecondAPI, INI_Model_2, INI_Model) & ")", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons, Context:=_context).Trim()
                 Else
                     ' Offer limited optional buttons when no text is selected
                     Dim OptionalButtons As System.Tuple(Of String, String, String)() = {
                             System.Tuple.Create("OK, use window", $"Use this to automatically insert '{ClipboardPrefix}' as a prefix.", ClipboardPrefix),
                             System.Tuple.Create("OK, use pane", $"Use this to automatically insert '{PanePrefix}' as a prefix.", PanePrefix)
                         }
-                    OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute ({ClipboardInstruct}, {ChartInstruct} or {SlidesInstruct}){PromptLibInstruct}{ExtInstruct}{AddOnInstruct}{PureInstruct}{FileInstruct}{AssembleInstruct}{FormInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle (using " & If(UseSecondAPI, INI_Model_2, INI_Model) & ")", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons).Trim()
+                    OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute ({ClipboardInstruct}, {ChartInstruct} or {SlidesInstruct}){PromptLibInstruct}{ExtInstruct}{AddOnInstruct}{PureInstruct}{FileInstruct}{AssembleInstruct}{FormInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle (using " & If(UseSecondAPI, INI_Model_2, INI_Model) & ")", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons, Context:=_context).Trim()
                 End If
             Else
                 OtherPrompt = LastPrompt
@@ -1346,6 +1344,8 @@ Partial Public Class ThisAddIn
                 AddItem("switch", "Temporarily swap primary and secondary models.")
                 AddItem("clientname", "Copy and show this PC's client identifier (used for UpdateClients and CentralConfigClients).")
                 AddItem("license", "Show license information and access license manage dialog.")
+                AddItem("licensemanager", "Open organization bulk license manager.")
+                AddItem("licensecounter", "Open the offline license-counter evaluator/report tool.")
                 AddItem("offlinelicense", "Create an offline license key using a private key.")
 
                 ' CONFIG / MENU
@@ -1353,6 +1353,8 @@ Partial Public Class ThisAddIn
                 AddItem("reload", "Reload the configuration from disk and rebuild menus.")
                 AddItem("reset", "Reset local configuration to defaults and rebuild menus.")
                 AddItem("cleanmenu", "Remove old context menus and rebuild them.")
+                AddItem("simplemenu", "Toggle simple menu mode.")
+                AddItem("menunames", "Provide a list of menu names available for 'SimpleMenuHide' parameter (only Word).")
 
                 ' INI UPDATE / SIGNING
                 AddItem("iniupdate", "Check for and apply configuration updates.")
@@ -1407,6 +1409,7 @@ Partial Public Class ThisAddIn
                 AddItem("drawio", "Open a draw.io For editing chart files, optionally With Internet blocking.")
                 AddItem("drawioconverter", "Convert a draw.io flow chart To a HTML mini-web-app.")
                 AddItem("pptxconvert", "Convert a PowerPoint presentation To a different template format.")
+                AddItem("talktome", "Start a widget that allows you to control Red Ink via speech")
 
                 ' PRIVACY / TRANSFORMS
                 AddItem("anonymize", "Anonymize/redact the current selection (no LLM Call).")
@@ -1472,7 +1475,12 @@ Partial Public Class ThisAddIn
 
                 ' Encode selected text (e.g., API key) and copy to clipboard
                 If String.Equals(OtherPrompt.Trim(), "encode", StringComparison.OrdinalIgnoreCase) Then
-                    Dim Key As String = CodeAPIKey(RemoveCR(selection.Text))
+                    Dim encChoice As Integer = SLib.ShowCustomYesNoBox(
+                        "Which encryption do you want to use for this key?",
+                        "Strong (recommended)", "Standard (legacy XOR)",
+                        $"{AN} Freestyle - Encode")
+                    If encChoice <> 1 AndAlso encChoice <> 2 Then Return
+                    Dim Key As String = CodeAPIKey(RemoveCR(selection.Text), encChoice = 1)
                     SLib.PutInClipboard(Key)
                     selection.Range.Collapse(Direction:=Word.WdCollapseDirection.wdCollapseEnd)
                     selection.TypeText(vbCrLf & "Encoded key (also in clipboard):" & vbCrLf & Key)
@@ -1877,6 +1885,21 @@ Partial Public Class ThisAddIn
 
             If String.Equals(OtherPrompt.Trim(), "pptxconvert", StringComparison.OrdinalIgnoreCase) Then
                 RetemplatePresentation_UI()
+                Return
+            End If
+
+            If String.Equals(OtherPrompt.Trim(), "talktome", StringComparison.OrdinalIgnoreCase) Then
+                Globals.ThisAddIn.ShowTalkToMeWidget()
+                Return
+            End If
+
+            If String.Equals(OtherPrompt.Trim(), "licensemanager", StringComparison.OrdinalIgnoreCase) Then
+                SharedMethods.ShowOrganizationBulkLicenseManagementDialog()
+                Return
+            End If
+
+            If String.Equals(OtherPrompt.Trim(), "licensecounter", StringComparison.OrdinalIgnoreCase) Then
+                SharedMethods.ShowLicenseCounterEvaluatorDialog(_context)
                 Return
             End If
 
@@ -2379,6 +2402,40 @@ Partial Public Class ThisAddIn
                 RemoveVeryOldContextMenu()
                 MenusAdded = False
                 AddContextMenu()
+                Return
+            End If
+
+            ' Toggle simplemenu
+            If OtherPrompt.StartsWith("simplemenu", StringComparison.OrdinalIgnoreCase) Then
+                INI_SimpleMenuOverride = Not INI_SimpleMenuOverride
+
+                Try
+                    My.Settings.Item("SimpleMenuOverride") = INI_SimpleMenuOverride
+                    My.Settings.Item("SimpleMenuOverrideIsSet") = True
+                    My.Settings.Save()
+                Catch
+                    ' non-critical
+                End Try
+
+                RemoveMenu = True
+                MenusAdded = False
+                AddContextMenu()
+
+                Try
+                    If Globals.Ribbons.Ribbon1 IsNot Nothing Then
+                        Globals.Ribbons.Ribbon1.ApplyRibbonVisibilityConfiguration()
+                    End If
+                Catch
+                    ' non-critical
+                End Try
+
+                Return
+            End If
+
+            ' Menu names
+            If OtherPrompt.StartsWith("menunames", StringComparison.OrdinalIgnoreCase) Then
+                selection.Range.Collapse(Direction:=Word.WdCollapseDirection.wdCollapseEnd)
+                selection.TypeText(vbCrLf & "Menu Names:" & vbCrLf & Globals.Ribbons.Ribbon1.GetRibbonControlNamesAsString() & vbCrLf)
                 Return
             End If
 
@@ -3204,6 +3261,5 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
-
-
 End Class
+

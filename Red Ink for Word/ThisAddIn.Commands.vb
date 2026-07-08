@@ -92,7 +92,11 @@ Partial Public Class ThisAddIn
             Return
         End If
 
-        TranslateLanguage = SLib.ShowCustomInputBox("Enter your target language (e.g., English, German, French):", $"{AN} Translate", True)
+        TranslateLanguage = Global.SharedLibrary.SharedLibrary.SharedMethods.PromptForTargetLanguage(
+            "Enter your target language (e.g., English, German, French):",
+            $"{AN} Translate",
+            "",
+            _context)
         If Not String.IsNullOrEmpty(TranslateLanguage) Then
             Dim result As String = Await ProcessSelectedText(InterpolateAtRuntime(SP_Translate), True, INI_KeepFormat1, INI_KeepParaFormatInline, INI_ReplaceText1, False, 0, False, False, True, False, INI_KeepFormatCap, NoFormatAndFieldSaving:=Not INI_ReplaceText1)
         End If
@@ -424,8 +428,6 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
-            CurrentDate = "(Current Date: " & DateTime.Now.ToString("dd-MMM-yyyy", CultureInfo.GetCultureInfo("en-US")) & ")"
-
             Dim result As System.String = Await ProcessSelectedText(
             InterpolateAtRuntime(SP_Explain),
             True,
@@ -693,20 +695,6 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Public Sub Transcriptor()
         If INILoadFail() Then Return
-        If Not String.IsNullOrEmpty(INI_SpeechModelPath) Then
-            Dim SpeechPath As String = ExpandEnvironmentVariables(INI_SpeechModelPath)
-            If Not String.IsNullOrEmpty(SpeechPath) AndAlso Not SpeechPath.EndsWith("\") Then
-                SpeechPath = SpeechPath & "\"
-            End If
-            Dim currentPath As String = Environment.GetEnvironmentVariable("PATH")
-
-            If Not currentPath.Contains(SpeechPath) Then
-                Environment.SetEnvironmentVariable("PATH", currentPath & ";" & SpeechPath)
-            End If
-            RuntimeOptions.LibraryPath = SpeechPath
-            'RuntimeOptions.RuntimeLibraryOrder = New List(Of RuntimeLibrary) From {RuntimeLibrary.Cuda, RuntimeLibrary.Cpu}
-
-        End If
 
         Dim TranscriptionForm = New TranscriptionForm()
         TranscriptionForm.Show()
@@ -798,7 +786,7 @@ Partial Public Class ThisAddIn
         ' Get addition instructions
 
         OtherPrompt = ""
-        OtherPrompt = SLib.ShowCustomInputBox("You can provide additional instructions for the analysis (e.g., Internet links to check [if your model will understand so], aspects to focus on etc.). This is optional.", $"{AN} Define MyStyle", False).Trim()
+        OtherPrompt = SLib.ShowCustomInputBox("You can provide additional instructions for the analysis (e.g., Internet links to check [if your model will understand so], aspects to focus on etc.). This is optional.", $"{AN} Define MyStyle", False, Context:=_context).Trim()
 
         If OtherPrompt = "ESC" Then
             Return
@@ -1003,7 +991,10 @@ Partial Public Class ThisAddIn
                                 cancellationToken:=token,
                                 EnsureUI:=False)
             End Function,
-            INI_Language1)
+            INI_Language1,
+            Sub()
+                Global.SharedLibrary.SharedLibrary.SharedMethods.EditUserDictionaryFile(_context)
+            End Sub)
         End If
         _quickTranslateWidget.ShowWidget()
     End Sub
@@ -1018,7 +1009,7 @@ Partial Public Class ThisAddIn
         If INILoadFail() Then Return
 
         If _win Is Nothing OrElse _win.IsDisposed Then
-            _win = New HelpMeInky(_context, RDV)
+            _win = New HelpMeInky(_context, RDV, Globals.ThisAddIn.GetWordDefaultInterfaceLanguage())
         End If
         ' No owner needed
         _win.ShowRaised()
@@ -1113,6 +1104,7 @@ Partial Public Class ThisAddIn
         If INILoadFail() Then Return
 
         Dim Settings As New Dictionary(Of String, String) From {
+                {"SimpleMenuOverride", "Simple menu"},
                 {"Temperature", "Temperature of {model}"},
                 {"Timeout", "Timeout of {model}"},
                 {"Temperature_2", "Temperature of {model2}"},
@@ -1131,8 +1123,8 @@ Partial Public Class ThisAddIn
                 {"KeepFormatCap", "Maximum text for keeping format (chars)"},
                 {"DoMarkupWord", "Output as a markup (some functions)"},
                 {"MarkupMethodHelper", "Markup method helpers (1 = Word, 2 = Diff, 3 = DiffW)"},
-                {"MarkupMethodWord", "Markup method (1 = Word, 2 = Diff, 3 = DiffW, 4 = Regex)"},
-                {"MarkupMethodWordOverride", "Markup method (1 = Word, 2 = Diff, 3 = DiffW, 4 = Regex) [override]"},
+                {"MarkupMethodWord", "Markup method (1 = Word, 2 = Diff, 3 = DiffW, 4 = Regex, etc.)"},
+                {"MarkupMethodWordOverride", "Markup method (1 = Word, 2 = Diff, 3 = DiffW, 4 = Regex, etc.) [override]"},
                 {"MarkupDiffCap", "Maximum characters for Diff Markup"},
                 {"MarkupRegexCap", "Maximum characters for Regex Markup"},
                 {"MarkdownBubbles", "Use Markdown in Word bubbles"},
@@ -1146,6 +1138,7 @@ Partial Public Class ThisAddIn
                 {"PromptLibPath_Transcript", "Transcript prompt library file"},
                 {"ShortcutsWordExcel", "Key shortcuts (for direct access)"},
                 {"ChatCap", "Chat conversation memory (chars)"},
+                {"ChunkOCR", "Chunk size for OCR processing (pages; 0 = no chunking)"},
                 {"MyStylePath", "Path to the MyStyle prompt file"},
                 {"DefaultPrefix", "Default prefix to use in 'Freestyle'"},
                 {"Location", "Location information to use, e.g., in 'Freestyle'"},
@@ -1160,6 +1153,7 @@ Partial Public Class ThisAddIn
                 {"KnowledgeStoreBackgroundIndexingWindow", "Knowledge store: Background processing window"}
             }
         Dim SettingsTips As New Dictionary(Of String, String) From {
+                {"SimpleMenuOverride", "Only show the simple menu features in this add-in (can be defined)"},
                 {"Temperature", "The higher, the more creative the LLM will be (0.0-2.0)"},
                 {"Timeout", "In milliseconds"},
                 {"Temperature_2", "The higher, the more creative the LLM will be (0.0-2.0)"},
@@ -1178,7 +1172,7 @@ Partial Public Class ThisAddIn
                 {"KeepFormatCap", "If a text has more characters, then the format will not be retained (to prevent having to wait too long)"},
                 {"DoMarkupWord", "Whether a markup should be done for functions that change only parts of a text"},
                 {"MarkupMethodHelper", "Which markup method to use: 1 = Word compare, 2 = Simple Differ, 3 = Diff shown in a window"},
-                {"MarkupMethodWord", "Which markup method to use: 1 = Word compare, 2 = Simple Differ, 3 = Diff shown in a window, 4 = LLM-based Regex Markup"},
+                {"MarkupMethodWord", "Which markup method to use: 1 = Word compare, 2 = Simple Differ, 3 = Diff shown in a window, 4 = LLM-based Regex Markup, 5 = Simple Differ without sentence collapsing, 6 = Diff Legacy"},
                 {"MarkupMethodWordOverride", "Leave empty to not override the above value; otherwise enter the personal override value for 'markup method'"},
                 {"MarkupDiffCap", "The maximum size of the text that should be processed using the Diff method (to avoid you having to wait too long)"},
                 {"MarkupRegexCap", "The maximum size of the text that should be processed using the Regex method (to avoid you having to wait too long)"},
@@ -1193,6 +1187,7 @@ Partial Public Class ThisAddIn
                 {"PromptLibPath_Transcript", "The filename (including path, support environmental variables) for your transcript prompt library (if any)"},
                 {"ShortcutsWordExcel", "You can add key shortcuts by giving the name of the context menu, e.g., 'Correct=Ctrl-Shift-C', separated by ';' (only works if context menus are enabled and the Word helper is installed)"},
                 {"ChatCap", "Use this to limit how many characters of your past chat discussion the chatbot will memorize (for saving costs and time)"},
+                {"ChunkOCR", "If OCR is done through a model you have configured, you can have Red Ink send the PDF to the model only in chunks of the number of pages stated"},
                 {"MyStylePath", "This is the path where the prompts are stored that convey your writing style (if defined, see 'Analyze')."},
                 {"DefaultPrefix", "You can define here the default prefix to use within 'Freestyle' if no other prefix is used (will be added automatically)."},
                 {"Location", "Provide location information (e.g., 'We are in Zurich, Switzerland') to be used in 'Freestyle', chatbot and some other prompts that contain {Location} to get more location specific results."},
@@ -1209,11 +1204,21 @@ Partial Public Class ThisAddIn
 
         ShowSettingsWindow(Settings, SettingsTips)
 
-        Dim splash As New Slib.Splashscreen("Updating menu following your changes ...")
+        Dim splash As New SLib.SplashScreen("Updating menu following your changes ...")
         splash.Show()
         splash.Refresh()
 
+        RemoveMenu = True
+        MenusAdded = False
         AddContextMenu()
+
+        Try
+            If Globals.Ribbons.Ribbon1 IsNot Nothing Then
+                Globals.Ribbons.Ribbon1.ApplyRibbonVisibilityConfiguration()
+            End If
+        Catch
+            ' non-critical
+        End Try
 
         splash.Close()
 

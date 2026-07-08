@@ -149,6 +149,13 @@ Partial Public Class ThisAddIn
         ''' </summary>
         Public Property EnablePrivacyProtection As Boolean = False
 
+        ''' <summary>
+        ''' Full path to the optional per-sender tool policy file. When set, the file hard-limits
+        ''' (in code, not via the LLM) which tools/skills/agents/sources individual senders may use.
+        ''' Empty = no per-sender policy (all senders may use every selected tool).
+        ''' </summary>
+        Public Property SenderToolPolicyPath As String = ""
+
 
     End Class
 
@@ -510,6 +517,18 @@ Partial Public Class ThisAddIn
             End If
         End If
 
+        ' ── Step 6b: Per-sender tool policy file (optional) ──
+        Dim defaultPolicyPath As String = If(saved.SenderToolPolicyPath, "")
+        Dim policyInput = ShowCustomInputBox(
+            "Enter the full path to a per-sender tool policy file (optional):" & vbCrLf & vbCrLf &
+            "If set, this file hard-limits (in code, not via the AI) which tools, skills, " &
+            "agents, and sources individual senders may use. It does NOT affect your mail " &
+            "filters or the auto-send whitelist." & vbCrLf & vbCrLf &
+            "Leave empty to let every sender use all selected tools.",
+            $"{AN6} AutoPilot — Sender Tool Policy", True, defaultPolicyPath)
+        If policyInput Is Nothing Then Return Nothing
+        config.SenderToolPolicyPath = If(String.IsNullOrWhiteSpace(policyInput), "", policyInput.Trim())
+
         ' ── Step 7: Confirmation ──
         Dim confirmModelLabel As String
         If Not String.IsNullOrWhiteSpace(config.SelectedModelKey) Then
@@ -537,6 +556,7 @@ Partial Public Class ThisAddIn
         summaryBuilder.AppendLine($"User memory: {If(config.EnableUserMemory, "enabled", "disabled")}")
         summaryBuilder.AppendLine($"User file storage: {If(config.EnableUserFiles, "enabled", "disabled")}")
         summaryBuilder.AppendLine($"Privacy protection: {If(config.EnablePrivacyProtection, "enabled (queries sanitized)", "disabled (unrestricted)")}")
+        summaryBuilder.AppendLine($"Sender tool policy: {If(String.IsNullOrWhiteSpace(config.SenderToolPolicyPath), "disabled", config.SenderToolPolicyPath)}")
         If config.EnableVoicemailProcessing Then
             summaryBuilder.AppendLine($"Voicemail processing: enabled (from {config.VoicemailSenderAddress})")
         End If
@@ -626,6 +646,7 @@ Partial Public Class ThisAddIn
         My.Settings.AP_EnableUserFiles = config.EnableUserFiles
         My.Settings.AP_EnablePrivacyProtection = config.EnablePrivacyProtection
         My.Settings.AP_AutoDeleteAfterHours = config.AutoDeleteAfterHours
+        My.Settings.AP_SenderToolPolicyPath = If(config.SenderToolPolicyPath, "")
 
         ' Persist external tool selection by ToolName/ModelDescription
         If config.SelectedExternalTools IsNot Nothing AndAlso config.SelectedExternalTools.Count > 0 Then
@@ -664,6 +685,7 @@ Partial Public Class ThisAddIn
         config.EnableUserFiles = My.Settings.AP_EnableUserFiles
         config.EnablePrivacyProtection = My.Settings.AP_EnablePrivacyProtection
         config.AutoDeleteAfterHours = If(My.Settings.AP_AutoDeleteAfterHours >= 0, My.Settings.AP_AutoDeleteAfterHours, 0)
+        config.SenderToolPolicyPath = If(My.Settings.AP_SenderToolPolicyPath, "")
 
         ' Restore filter rules using the shared parser
         If Not String.IsNullOrWhiteSpace(My.Settings.AP_FilterRules) Then

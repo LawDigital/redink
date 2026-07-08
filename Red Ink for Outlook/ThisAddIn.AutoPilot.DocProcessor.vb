@@ -557,6 +557,13 @@ Partial Public Class ThisAddIn
             "you MAY return multi-line text for a single [n] paragraph. Use actual line breaks between the lines — " &
             "each line will become a separate paragraph in the output document."
 
+        Dim translationDictionary As String = Global.SharedLibrary.SharedLibrary.SharedMethods.GetTranslationDictionaryText(_context)
+        If Not String.IsNullOrWhiteSpace(translationDictionary) Then
+            systemPrompt &= vbCrLf & vbCrLf &
+                "If the INSTRUCTION requires translation, apply the following translation dictionaries: " &
+                translationDictionary
+        End If
+
         Dim ruleNum As Integer = 11
 
         systemPrompt &= vbCrLf &

@@ -114,7 +114,7 @@ Partial Public Class ThisAddIn
             ShowCustomMessageBox("Please select the text in your document with which your selection in the pane shall be merged.")
             Return
         End If
-        OtherPrompt = SLib.ShowCustomInputBox("If you want, you can amend the prompt that will be used to intelligently merge your selection into your document:", $"{AN} Intelligent Merge", False, SP_MergePrompt_Cached).Trim()
+        OtherPrompt = SLib.ShowCustomInputBox("If you want, you can amend the prompt that will be used to intelligently merge your selection into your document:", $"{AN} Intelligent Merge", False, SP_MergePrompt_Cached, Context:=_context).Trim()
         If String.IsNullOrEmpty(OtherPrompt) Or OtherPrompt = "ESC" Then Return
         Dim result As String = Await ProcessSelectedText(OtherPrompt & " " & SP_Add_MergePrompt & " <INSERT>" & newtext & "</INSERT> ", True, INI_KeepFormat2, INI_KeepParaFormatInline, Override(INI_ReplaceText2, INI_ReplaceText2Override), INI_DoMarkupWord, Override(INI_MarkupMethodWord, INI_MarkupMethodWordOverride), False, False, True, False, INI_KeepFormatCap)
     End Sub
@@ -130,7 +130,7 @@ Partial Public Class ThisAddIn
 
         Dim app As Word.Application = Globals.ThisAddIn.Application
         Dim sel As Microsoft.Office.Interop.Word.Selection = app.Selection
-        Dim doc As Microsoft.Office.Interop.Word.Document = app.ActiveDocument
+        Dim doc As Microsoft.Office.Interop.Word.Document = sel.Range.Document
 
         Dim activeComment As Microsoft.Office.Interop.Word.Comment = Nothing
         Dim newtext As String = String.Empty
@@ -202,15 +202,19 @@ Partial Public Class ThisAddIn
                 targetRange = anchorRange.Duplicate
             End If
 
+            targetRange = targetRange.Duplicate
+
             Await EnsureUIThread()
-            ActivateProcessingContext(targetRange)
+            ActivateDocumentRangeContext(targetRange)
 
             ' Get merge prompt from user or cached value
+            ActivateDocumentRangeContext(targetRange)
+
             If Not Silent Or String.IsNullOrWhiteSpace(SP_MergePrompt2) Then
                 OtherPrompt = SLib.ShowCustomInputBox(
                     "If you want, you can amend the prompt that will be used to " &
                     "intelligently merge your comment into your document:",
-                    $"{AN} Intelligent Merge", False, SP_MergePrompt2).Trim()
+                    $"{AN} Intelligent Merge", False, SP_MergePrompt2, Context:=_context).Trim()
 
                 If String.IsNullOrEmpty(OtherPrompt) OrElse OtherPrompt = "ESC" Then Return
             Else
@@ -223,11 +227,12 @@ Partial Public Class ThisAddIn
                 New SelectionItem("Diff", 2),
                 New SelectionItem("Diff Window", 3),
                 New SelectionItem("Regex", 4),
-                New SelectionItem("Diff Classic", 5),
-                New SelectionItem("None", 6)
+                New SelectionItem("Diff (words only)", 5),
+                New SelectionItem("Diff Classic", 6),
+                New SelectionItem("None", 7)
             }
 
-            Dim DefaultItem As Integer = 6
+            Dim DefaultItem As Integer = 7
             If INI_DoMarkupWord Then
                 DefaultItem = Override(INI_MarkupMethodWord, INI_MarkupMethodWordOverride)
             End If
@@ -237,6 +242,8 @@ Partial Public Class ThisAddIn
 
             ' Process merge with LLM against the main document selection.
             ' Call TrueProcessSelectedText directly to avoid the comment-bubble reroute in ProcessSelectedText.
+            ActivateDocumentRangeContext(targetRange)
+
             Dim result As String = Await TrueProcessSelectedText(
                 OtherPrompt & " " & SP_Add_MergePrompt & " <INSERT>" &
                 newtext & "</INSERT> ",
@@ -244,8 +251,8 @@ Partial Public Class ThisAddIn
                 INI_KeepFormat2,
                 INI_KeepParaFormatInline,
                 Override(INI_ReplaceText2, INI_ReplaceText2Override),
-                If(picked < 6, True, False),
-                If(picked < 6, picked, Override(INI_MarkupMethodWord, INI_MarkupMethodWordOverride)),
+                If(picked < 7, True, False),
+                If(picked < 7, picked, Override(INI_MarkupMethodWord, INI_MarkupMethodWordOverride)),
                 False,
                 False,
                 True,
@@ -288,7 +295,7 @@ Partial Public Class ThisAddIn
             ShowCustomMessageBox("Please select the text in your document with which your selection in the pane shall be merged.")
             Return
         End If
-        OtherPrompt = SLib.ShowCustomInputBox("If you want, you can amend the prompt that will be used to intelligently merge your selection into your document:", $"{AN} Intelligent Merge", False, SP_MergePrompt_Cached).Trim()
+        OtherPrompt = SLib.ShowCustomInputBox("If you want, you can amend the prompt that will be used to intelligently merge your selection into your document:", $"{AN} Intelligent Merge", False, SP_MergePrompt_Cached, Context:=_context).Trim()
         If String.IsNullOrEmpty(OtherPrompt) Or OtherPrompt = "ESC" Then Return
         Dim result As String = Await ProcessSelectedText(OtherPrompt & " " & SP_Add_MergePrompt & " <INSERT>" & newtext & "</INSERT> ", True, INI_KeepFormat2, INI_KeepParaFormatInline, Override(INI_ReplaceText2, INI_ReplaceText2Override), INI_DoMarkupWord, Override(INI_MarkupMethodWord, INI_MarkupMethodWordOverride), False, False, True, False, INI_KeepFormatCap)
     End Sub
@@ -323,5 +330,27 @@ Partial Public Class ThisAddIn
             Return ONNX_initialized
         End If
     End Function
+
+
+    Private Sub ActivateDocumentRangeContext(ByVal targetRange As Word.Range)
+        Try
+            If targetRange Is Nothing Then Return
+
+            Dim targetWindow As Word.Window = Nothing
+            Try
+                targetWindow = targetRange.Document.ActiveWindow
+            Catch
+                targetWindow = Nothing
+            End Try
+
+            If targetWindow IsNot Nothing Then
+                targetWindow.Activate()
+            End If
+
+            targetRange.Select()
+        Catch ex As Exception
+            Debug.WriteLine($"ActivateDocumentRangeContext failed: {ex.Message}")
+        End Try
+    End Sub
 
 End Class

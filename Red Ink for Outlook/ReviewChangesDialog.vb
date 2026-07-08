@@ -48,6 +48,7 @@ Public Class ReviewChangesDialog
     Private _previewBox As System.Windows.Forms.RichTextBox
     Private _statusLabel As System.Windows.Forms.Label
     Private _previewTimer As System.Windows.Forms.Timer
+    Private _sentenceToggle As System.Windows.Forms.CheckBox
 
     ' Theme colors (kept in sync with RTF color table indices below)
     Private Shared ReadOnly ClrText As Color = Color.Black
@@ -263,6 +264,16 @@ Public Class ReviewChangesDialog
         row.Controls.Add(MakeLegendItem(BgDeleteReject, ClrText, "Kept (deletion rejected)"))
         row.Controls.Add(MakeLegendItem(BgInsertReject, ClrInsertReject, "Skipped (addition rejected)", strikeout:=True))
 
+        _sentenceToggle = New CheckBox() With {
+            .AutoSize = True,
+            .Text = "Toggle whole sentence",
+            .Checked = False,
+            .Font = New Font("Segoe UI", 9.0F),
+            .Margin = New Padding(24, 4, 0, 0),
+            .TextAlign = ContentAlignment.MiddleLeft
+        }
+        row.Controls.Add(_sentenceToggle)
+
         _statusLabel = New Label() With {
             .AutoSize = True,
             .ForeColor = Color.FromArgb(50, 50, 50),
@@ -370,11 +381,11 @@ Public Class ReviewChangesDialog
 
         Dim builder As New InlineDiffBuilder(New Differ())
 
-        Dim a As String = NormalizeForDiff(originalText)
-        Dim b As String = NormalizeForDiff(suggestedText)
+        Dim aTokens As List(Of String) = TokenizePreservingWhitespace(originalText)
+        Dim bTokens As List(Of String) = TokenizePreservingWhitespace(suggestedText)
 
-        Dim aWords As String = String.Join(Environment.NewLine, a.Split(" "c))
-        Dim bWords As String = String.Join(Environment.NewLine, b.Split(" "c))
+        Dim aWords As String = String.Join(Environment.NewLine, aTokens)
+        Dim bWords As String = String.Join(Environment.NewLine, bTokens)
 
         Dim model As DiffPaneModel = builder.BuildDiffModel(aWords, bWords)
 
@@ -392,7 +403,6 @@ Public Class ReviewChangesDialog
             If restored.Length = 0 Then Continue For
 
             Dim displayText As String = restored
-            If Not displayText.EndsWith(vbCrLf) Then displayText &= " "
 
             Dim kind As SegmentKind
             Select Case line.Type
@@ -414,18 +424,46 @@ Public Class ReviewChangesDialog
         ConsolidateEquivalentLineBreakChanges()
     End Sub
 
-    Private Shared Function NormalizeForDiff(s As String) As String
-        If s Is Nothing Then Return ""
+    Private Shared Function TokenizePreservingWhitespace(s As String) As List(Of String)
+        Dim tokens As New List(Of String)()
+        If s Is Nothing Then Return tokens
 
-        s = s.Replace(vbCrLf, " {br} ") _
-         .Replace(vbCr, " {br} ") _
-         .Replace(vbLf, " {br} ")
+        s = s.Replace(vbCrLf, vbLf) _
+         .Replace(vbCr, vbLf)
 
-        Do While s.Contains("  ")
-            s = s.Replace("  ", " ")
-        Loop
+        Dim i As Integer = 0
 
-        Return s.Trim()
+        While i < s.Length
+            Dim ch As Char = s(i)
+
+            If ch = ControlChars.Lf Then
+                tokens.Add("{br}")
+                i += 1
+
+            ElseIf ch = ControlChars.Tab Then
+                tokens.Add(ControlChars.Tab)
+                i += 1
+
+            ElseIf ch = " "c Then
+                Dim start As Integer = i
+                While i < s.Length AndAlso s(i) = " "c
+                    i += 1
+                End While
+                tokens.Add(s.Substring(start, i - start))
+
+            Else
+                Dim start As Integer = i
+                While i < s.Length AndAlso
+                      s(i) <> " "c AndAlso
+                      s(i) <> ControlChars.Tab AndAlso
+                      s(i) <> ControlChars.Lf
+                    i += 1
+                End While
+                tokens.Add(s.Substring(start, i - start))
+            End If
+        End While
+
+        Return tokens
     End Function
 
     Private Sub ConsolidateEquivalentLineBreakChanges()
@@ -697,7 +735,13 @@ Public Class ReviewChangesDialog
         Dim seg As Segment = FindSegmentAt(idx)
         If seg Is Nothing OrElse seg.Kind = SegmentKind.Equal Then Return
 
-        seg.Accepted = Not seg.Accepted
+        Dim newState As Boolean = Not seg.Accepted
+
+        If _sentenceToggle IsNot Nothing AndAlso _sentenceToggle.Checked Then
+            ApplyStateToSentence(seg, newState)
+        Else
+            seg.Accepted = newState
+        End If
 
         ' Re-render: this is a single Rtf assignment, very fast even for large diffs
         Dim caret As Integer = idx
@@ -731,6 +775,52 @@ Public Class ReviewChangesDialog
         Return Nothing
     End Function
 
+    ' Toggles every change segment (insertion/deletion) that belongs to the same
+    ' sentence as the clicked segment to a single, uniform accept/reject state, so
+    ' a series of consecutive changes can be handled with one click.
+    Private Sub ApplyStateToSentence(clicked As Segment, newState As Boolean)
+        Dim center As Integer = _segments.IndexOf(clicked)
+        If center < 0 Then
+            clicked.Accepted = newState
+            Return
+        End If
+
+        ' Walk left: the sentence starts right after the previous terminator.
+        Dim first As Integer = center
+        While first > 0 AndAlso Not IsSentenceTerminator(_segments(first - 1))
+            first -= 1
+        End While
+
+        ' Walk right: the sentence ends at (and includes) the next terminator.
+        Dim last As Integer = center
+        While last < _segments.Count - 1 AndAlso Not IsSentenceTerminator(_segments(last))
+            last += 1
+        End While
+
+        For i As Integer = first To last
+            If _segments(i).Kind <> SegmentKind.Equal Then
+                _segments(i).Accepted = newState
+            End If
+        Next
+    End Sub
+
+    ' A segment terminates a sentence when its visible text ends with sentence
+    ' punctuation or contains a line break.
+    Private Shared Function IsSentenceTerminator(seg As Segment) As Boolean
+        If seg Is Nothing Then Return False
+        If CountLineBreaks(seg.Text) > 0 Then Return True
+
+        Dim trimmed As String = If(seg.Text, "").TrimEnd(" "c, ControlChars.Tab)
+        If trimmed.Length = 0 Then Return False
+
+        Select Case trimmed(trimmed.Length - 1)
+            Case "."c, "!"c, "?"c, "…"c
+                Return True
+            Case Else
+                Return False
+        End Select
+    End Function
+
     Private Sub SetAll(accept As Boolean)
         For Each seg In _segments
             If seg.Kind <> SegmentKind.Equal Then seg.Accepted = accept
@@ -756,7 +846,7 @@ Public Class ReviewChangesDialog
         For Each seg In _segments
             If IsIncludedInResult(seg) Then sb.Append(seg.Text)
         Next
-        Return sb.ToString().TrimEnd(" "c, ControlChars.Cr, ControlChars.Lf)
+        Return sb.ToString()
     End Function
 
     Private Sub UpdateStatus()

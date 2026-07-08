@@ -46,8 +46,9 @@ Namespace Agents
         Private btnClose As Button
         Private pnlButtons As FlowLayoutPanel
         Private outer As TableLayoutPanel
+        Private _dialogOwnerScope As System.IDisposable = Nothing
 
-        Private entries As New List(Of SessionMemoryEntry)
+        Private entries As New List(Of SessionMemoryEntry)()
 
         Public Sub New(Optional title As String = Nothing)
             InitializeComponent(title)
@@ -159,6 +160,28 @@ Namespace Agents
                 End Sub
 
             Me.ResumeLayout(False)
+        End Sub
+
+        Protected Overrides Sub OnHandleCreated(e As System.EventArgs)
+            MyBase.OnHandleCreated(e)
+
+            If _dialogOwnerScope Is Nothing Then
+                _dialogOwnerScope = SharedLibrary.SharedMethods.PushDialogOwner(Me)
+            End If
+        End Sub
+
+        Protected Overrides Sub OnHandleDestroyed(e As System.EventArgs)
+            Dim scope As System.IDisposable = _dialogOwnerScope
+            _dialogOwnerScope = Nothing
+
+            If scope IsNot Nothing Then
+                Try
+                    scope.Dispose()
+                Catch
+                End Try
+            End If
+
+            MyBase.OnHandleDestroyed(e)
         End Sub
 
         Private Shared Sub ConfigureStandardButton(button As Button)

@@ -401,9 +401,9 @@ Namespace SharedLibrary
 
             ' Booleans
             context.INI_APIEncrypted = GetBoolValue(model, "APIKeyEncrypted", False)
-            context.INI_DoubleS = GetBoolValue(model, "DoubleS", False)
-            context.INI_Clean = GetBoolValue(model, "Clean", False)
-            context.INI_NoDash = GetBoolValue(model, "NoEmDash", False)
+            context.INI_DoubleS = GetBoolValue(model, "DoubleS", context.INI_DoubleS)
+            context.INI_Clean = GetBoolValue(model, "Clean", context.INI_Clean)
+            context.INI_NoDash = GetBoolValue(model, "NoEmDash", context.INI_NoDash)
             context.INI_OAuth2 = GetBoolValue(model, "OAuth2", False)
         End Sub
 

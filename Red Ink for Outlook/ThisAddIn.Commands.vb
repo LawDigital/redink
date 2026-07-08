@@ -222,7 +222,11 @@ Partial Public Class ThisAddIn
 
                 Case "Translate"
                     TranslateLanguage = ""
-                    TranslateLanguage = SLib.ShowCustomInputBox("Enter your target language:", $"{AN} Translate", True, INI_Language2)
+                    TranslateLanguage = Global.SharedLibrary.SharedLibrary.SharedMethods.PromptForTargetLanguage(
+                        "Enter your target language:",
+                        $"{AN} Translate",
+                        INI_Language2,
+                        _context)
                     If String.IsNullOrEmpty(TranslateLanguage) Then Return
                     Command_InsertAfter(InterpolateAtRuntime(SP_Translate), False, INI_KeepFormat1, INI_ReplaceText1)
                 Case "PrimLang"
@@ -491,7 +495,11 @@ Partial Public Class ThisAddIn
 
                             If Command = "Translate" Then
                                 TranslateLanguage = ""
-                                TranslateLanguage = SLib.ShowCustomInputBox("Enter your target language:", $"{AN} Translate", True, INI_Language2)
+                                TranslateLanguage = Global.SharedLibrary.SharedLibrary.SharedMethods.PromptForTargetLanguage(
+                                    "Enter your target language:",
+                                    $"{AN} Translate",
+                                    INI_Language2,
+                                    _context)
                                 If String.IsNullOrEmpty(TranslateLanguage) Then Return
                             Else
                                 TranslateLanguage = INI_Language1
@@ -1146,9 +1154,24 @@ Partial Public Class ThisAddIn
                 Dim StylePath As String = ExpandEnvironmentVariables(INI_MyStylePath)
                 If Not String.IsNullOrWhiteSpace(StylePath) And IO.File.Exists(StylePath) Then DoMyStyle = True
 
+                Dim lastPromptHint As String =
+                    If(String.IsNullOrWhiteSpace(My.Settings.LastPromptReply),
+                       "",
+                       " Ctrl+P inserts your last reply prompt.")
+
                 ' Prompt for additional instructions
-                OtherPrompt = SLib.ShowCustomInputBox("Please provide additional instructions for drafting an answer (or leave it empty for the most likely substantive response):", $"{AN} Answers", False)
+                OtherPrompt = SLib.ShowCustomInputBox(
+                    "Please provide additional instructions for drafting an answer (or leave it empty for the most likely substantive response)." & lastPromptHint,
+                    $"{AN} Answers",
+                    False,
+                    "",
+                    My.Settings.LastPromptReply, Context:=_context).Trim()
                 If OtherPrompt = "ESC" Then Return
+
+                If Not String.IsNullOrWhiteSpace(OtherPrompt) Then
+                    My.Settings.LastPromptReply = OtherPrompt
+                    My.Settings.Save()
+                End If
 
                 If DoMyStyle Then
                     MyStyleInsert = MyStyleHelpers.SelectPromptFromMyStyle(StylePath, "Outlook", 0, "Choose the style prompt to apply …", $"{AN} MyStyle", True)
@@ -1161,8 +1184,14 @@ Partial Public Class ThisAddIn
             Else
                 LLMResult = Await LLM(InterpolateAtRuntime(SP_MailSumup), "<MAILCHAIN>" & selectedText & "</MAILCHAIN>", "", "", 0)
             End If
+
             If INI_PostCorrection <> "" Then
                 LLMResult = Await PostCorrection(LLMResult)
+            End If
+
+            If String.IsNullOrWhiteSpace(LLMResult) Then
+                SLib.ShowCustomMessageBox("No reply text was returned.")
+                Return
             End If
 
             'LLMResult = LLMResult.Replace("**", "")  ' Remove bold markers
@@ -1198,7 +1227,7 @@ Partial Public Class ThisAddIn
                 editorSel.HomeKey(Microsoft.Office.Interop.Word.WdUnits.wdStory)
 
                 ' Insert the raw LLM result (Markdown), not the pre-converted HTML
-                SLib.InsertTextWithMarkdown(editorSel, LLMResult & vbCrLf & vbCrLf, True)
+                SLib.InsertTextWithMarkdown(editorSel, LLMResult & vbCrLf & vbCrLf, True, INI_UseHostColorOutlook)
             Else
                 ' Convert HTML to plain text for non-HTML formats (optional)
                 Dim doc As New HtmlAgilityPack.HtmlDocument()
@@ -1318,8 +1347,17 @@ Partial Public Class ThisAddIn
 
             Dim trailingCR As Boolean = SelectedText.EndsWith(vbCrLf) Or SelectedText.EndsWith(vbCr) Or SelectedText.EndsWith(vbLf)
 
+            Dim selectedTextForProcessing As String = SelectedText
+            Dim ignoredSelectedSpaces As String = ""
+            Dim reviewTrailingSpaces As String = ""
+            Dim restoreReviewTrailingSpaces As Boolean = False
+
+            If Not KeepFormat Then
+                StripTrailingSpaces(SelectedText, selectedTextForProcessing, ignoredSelectedSpaces)
+            End If
+
             ' Call LLM function with selected text
-            Dim LLMResult As String = Await LLM(SysCommand & If(KeepFormat, " " & SP_Add_KeepHTMLIntact, SP_Add_KeepInlineIntact), "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>", "", "", 0)
+            Dim LLMResult As String = Await LLM(SysCommand & If(KeepFormat, " " & SP_Add_KeepHTMLIntact, SP_Add_KeepInlineIntact), "<TEXTTOPROCESS>" & selectedTextForProcessing & "</TEXTTOPROCESS>", "", "", 0)
 
             LLMResult = LLMResult.Replace("<TEXTTOPROCESS>", "").Replace("</TEXTTOPROCESS>", "")
 
@@ -1329,9 +1367,6 @@ Partial Public Class ThisAddIn
 
             ' Remove horizontal whitespace (incl. NBSP) between real newline tokens (CRLF/CR/LF)
             LLMResult = System.Text.RegularExpressions.Regex.Replace(LLMResult, "(\r\n|\r|\n)[^\S\r\n]+(\r\n|\r|\n)", "$1$2")
-
-            Debug.WriteLine("TrailingCR=" & trailingCR)
-            Debug.WriteLine($"Selection='{selection.Text}'")
 
             ' Replace the selected text with the processed result
             If Not String.IsNullOrWhiteSpace(LLMResult) Then
@@ -1344,8 +1379,17 @@ Partial Public Class ThisAddIn
                     Dim suggestedForReview As String =
                         If(KeepFormat, SLib.RemoveHTML(LLMResult), LLMResult)
 
+                    Dim strippedOriginalForReview As String = originalForReview
+                    Dim strippedSuggestedForReview As String = suggestedForReview
+                    Dim ignoredSuggestedSpaces As String = ""
+
+                    StripTrailingSpaces(originalForReview, strippedOriginalForReview, reviewTrailingSpaces)
+                    StripTrailingSpaces(suggestedForReview, strippedSuggestedForReview, ignoredSuggestedSpaces)
+
+                    restoreReviewTrailingSpaces = reviewTrailingSpaces.Length > 0
+
                     Dim reviewed As String = Nothing
-                    Using dlg As New ReviewChangesDialog(originalForReview, suggestedForReview)
+                    Using dlg As New ReviewChangesDialog(strippedOriginalForReview, strippedSuggestedForReview)
                         If dlg.ShowDialog() <> System.Windows.Forms.DialogResult.OK Then
                             ' Cancel = do absolutely nothing
                             Return
@@ -1366,7 +1410,12 @@ Partial Public Class ThisAddIn
                     Dim Plaintext As String = ""
 
                     SelectedText = selection.Text
-                    SLib.InsertTextWithFormat(LLMResult, range, Inplace, Not trailingCR)
+                    SLib.InsertTextWithFormat(LLMResult, range, Inplace, Not trailingCR, INI_UseHostColorOutlook)
+
+                    If Inplace AndAlso restoreReviewTrailingSpaces Then
+                        RestoreTrailingSpacesAtSelectionEnd(selection, reviewTrailingSpaces, trailingCR)
+                    End If
+
                     If DoMarkup Then
                         Dim markupCompareText As String = SLib.RemoveHTML(LLMResult)
 
@@ -1391,9 +1440,13 @@ Partial Public Class ThisAddIn
                         If Not trailingCR And LLMResult.EndsWith(ControlChars.Lf) Then LLMResult = LLMResult.TrimEnd(ControlChars.Lf)
                         If Not trailingCR And LLMResult.EndsWith(ControlChars.Cr) Then LLMResult = LLMResult.TrimEnd(ControlChars.Cr)
                         If DoMarkup AndAlso MarkupMethod <> 3 AndAlso MarkupMethod <> 4 Then
-                            SLib.InsertTextWithMarkdown(selection, LLMResult & "<p>MARKUP:<br></p>", trailingCR)
+                            SLib.InsertTextWithMarkdown(selection, LLMResult & "<p>MARKUP:<br></p>", trailingCR, INI_UseHostColorOutlook)
                         Else
-                            SLib.InsertTextWithMarkdown(selection, LLMResult, trailingCR)
+                            SLib.InsertTextWithMarkdown(selection, LLMResult, trailingCR, INI_UseHostColorOutlook)
+                        End If
+
+                        If restoreReviewTrailingSpaces Then
+                            RestoreTrailingSpacesAtSelectionEnd(selection, reviewTrailingSpaces, trailingCR)
                         End If
                     Else
                         ' Insert two new line breaks and select final position while preserving formatting.
@@ -1408,9 +1461,9 @@ Partial Public Class ThisAddIn
                         selection.SetRange(newStart, newEnd)
 
                         If DoMarkup AndAlso MarkupMethod <> 3 AndAlso MarkupMethod <> 4 Then
-                            SLib.InsertTextWithMarkdown(selection, LLMResult & "<p>MARKUP:<br></p>" & vbCrLf, trailingCR)
+                            SLib.InsertTextWithMarkdown(selection, LLMResult & "<p>MARKUP:<br></p>" & vbCrLf, trailingCR, INI_UseHostColorOutlook)
                         Else
-                            SLib.InsertTextWithMarkdown(selection, LLMResult, trailingCR)
+                            SLib.InsertTextWithMarkdown(selection, LLMResult, trailingCR, INI_UseHostColorOutlook)
                         End If
 
                         Dim insertedRange As Microsoft.Office.Interop.Word.Range =
@@ -1598,14 +1651,14 @@ Partial Public Class ThisAddIn
                             System.Tuple.Create("OK, do a new doc", $"Use this to automatically insert '{NewDocPrefix}' as a prefix.", NewDocPrefix),
                             System.Tuple.Create("OK, do a markup", $"Use this to automatically insert '{MarkupPrefix}' as a prefix.", MarkupPrefix)
                         }
-                OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute on the selected text ({MarkupInstruct}, {InplaceInstruct}, {ClipboardInstruct}){PromptLibInstruct}{AddOnInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons)
+                OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute on the selected text ({MarkupInstruct}, {InplaceInstruct}, {ClipboardInstruct}){PromptLibInstruct}{AddOnInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons, Context:=_context)
             Else
                 Dim OptionalButtons As System.Tuple(Of String, String, String)() = {
                             System.Tuple.Create("OK, use window", $"Use this to automatically insert '{ClipboardPrefix}' as a prefix.", ClipboardPrefix),
                             System.Tuple.Create("OK, do a new doc", $"Use this to automatically insert '{NewDocPrefix}' as a prefix.", NewDocPrefix)
                         }
 
-                OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute ({ClipboardInstruct}){PromptLibInstruct}{AddOnInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons)
+                OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute ({ClipboardInstruct}){PromptLibInstruct}{AddOnInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons, Context:=_context)
             End If
 
             If String.IsNullOrEmpty(OtherPrompt) AndAlso OtherPrompt <> "ESC" AndAlso INI_PromptLib Then
@@ -1789,6 +1842,22 @@ Partial Public Class ThisAddIn
 
             Dim trailingCR As Boolean = selectedText.EndsWith(vbCrLf)
 
+            ' Word returns a paragraph mark as a single vbCr (not vbCrLf) in Selection.Text,
+            ' so a plain EndsWith(vbCrLf) check misses selections that end at a paragraph break.
+            ' Detect that case explicitly so an in-place replacement keeps the closing paragraph
+            ' mark instead of swallowing it (which would merge the paragraph with the next one).
+            Dim selectionEndsWithPara As Boolean =
+                selectedText.EndsWith(vbCrLf) OrElse
+                selectedText.EndsWith(vbCr) OrElse
+                selectedText.EndsWith(vbLf)
+
+            Dim textToProcess As String = selectedText
+            Dim trailingSpaces As String = ""
+
+            StripTrailingSpaces(textToProcess, textToProcess, trailingSpaces)
+
+            Dim hasTrailingSpaces As Boolean = trailingSpaces.Length > 0
+
             ' Call LLM function with selected text
 
             Dim LLMResult As String
@@ -1802,7 +1871,7 @@ Partial Public Class ThisAddIn
             Dim UserPrompt As String = ""
 
             If Not NoText Then
-                UserPrompt = "<TEXTTOPROCESS>" & selectedText & "</TEXTTOPROCESS>"
+                UserPrompt = "<TEXTTOPROCESS>" & textToProcess & "</TEXTTOPROCESS>"
             End If
 
             If DoAddMail Then
@@ -1823,8 +1892,13 @@ Partial Public Class ThisAddIn
 
             If DoMarkup AndAlso MarkupMethod = 4 AndAlso Not NoText Then
 
+                Dim reviewSuggested As String = LLMResult
+                Dim ignoredSuggestedSpaces As String = ""
+
+                StripTrailingSpaces(reviewSuggested, reviewSuggested, ignoredSuggestedSpaces)
+
                 Dim reviewed As String = Nothing
-                Using dlg As New ReviewChangesDialog(selectedText, LLMResult)
+                Using dlg As New ReviewChangesDialog(textToProcess, reviewSuggested)
                     If dlg.ShowDialog() <> System.Windows.Forms.DialogResult.OK Then
                         Return
                     End If
@@ -1873,18 +1947,27 @@ Partial Public Class ThisAddIn
                 If Not DoInplace Then
                     selection.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
                 Else
-                    If Not trailingCR And LLMResult.EndsWith(ControlChars.Lf) Then LLMResult = LLMResult.TrimEnd(ControlChars.Lf)
-                    If Not trailingCR And LLMResult.EndsWith(ControlChars.Cr) Then LLMResult = LLMResult.TrimEnd(ControlChars.Cr)
+                    If Not selectionEndsWithPara And LLMResult.EndsWith(ControlChars.Lf) Then LLMResult = LLMResult.TrimEnd(ControlChars.Lf)
+                    If Not selectionEndsWithPara And LLMResult.EndsWith(ControlChars.Cr) Then LLMResult = LLMResult.TrimEnd(ControlChars.Cr)
                 End If
 
                 ' Insert result
                 If DoMarkup AndAlso MarkupMethod <> 3 AndAlso MarkupMethod <> 4 Then
-                    SLib.InsertTextWithMarkdown(selection, vbCrLf & LLMResult & vbCrLf & "<p>MARKUP:<br></p>", trailingCR)
+                    SLib.InsertTextWithMarkdown(selection, vbCrLf & LLMResult & vbCrLf & "<p>MARKUP:<br></p>", trailingCR, INI_UseHostColorOutlook)
                 Else
                     If DoInplace Then
-                        SLib.InsertTextWithMarkdown(selection, LLMResult, trailingCR)
+                        Dim insertText As String = LLMResult
+                        Dim ignoredInsertSpaces As String = ""
+
+                        StripTrailingSpaces(insertText, insertText, ignoredInsertSpaces)
+
+                        SLib.InsertTextWithMarkdown(selection, insertText, selectionEndsWithPara, INI_UseHostColorOutlook)
+
+                        If hasTrailingSpaces Then
+                            RestoreTrailingSpacesAtSelectionEnd(selection, trailingSpaces, selectionEndsWithPara)
+                        End If
                     Else
-                        SLib.InsertTextWithMarkdown(selection, vbCrLf & LLMResult & vbCrLf, trailingCR)
+                        SLib.InsertTextWithMarkdown(selection, vbCrLf & LLMResult & vbCrLf, trailingCR, INI_UseHostColorOutlook)
                     End If
                 End If
 
@@ -1930,6 +2013,71 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
+    Private Shared Sub StripTrailingSpaces(source As String, ByRef strippedText As String, ByRef trailingSpaces As String)
+        strippedText = If(source, "")
+        trailingSpaces = ""
+
+        If String.IsNullOrEmpty(source) Then Return
+
+        Dim contentEnd As Integer = source.Length
+        While contentEnd > 0 AndAlso (source(contentEnd - 1) = ControlChars.Cr OrElse source(contentEnd - 1) = ControlChars.Lf)
+            contentEnd -= 1
+        End While
+
+        Dim spaceStart As Integer = contentEnd
+        While spaceStart > 0 AndAlso source(spaceStart - 1) = " "c
+            spaceStart -= 1
+        End While
+
+        trailingSpaces = source.Substring(spaceStart, contentEnd - spaceStart)
+
+        If trailingSpaces.Length > 0 Then
+            strippedText = source.Substring(0, spaceStart) & source.Substring(contentEnd)
+        End If
+    End Sub
+
+    Private Shared Function ReapplyTrailingSpaces(text As String, trailingSpaces As String) As String
+        Dim result As String = If(text, "")
+        If String.IsNullOrEmpty(trailingSpaces) Then Return result
+
+        Dim contentEnd As Integer = result.Length
+        While contentEnd > 0 AndAlso (result(contentEnd - 1) = ControlChars.Cr OrElse result(contentEnd - 1) = ControlChars.Lf)
+            contentEnd -= 1
+        End While
+
+        Return result.Substring(0, contentEnd) & trailingSpaces & result.Substring(contentEnd)
+    End Function
+
+    Private Shared Sub RestoreTrailingSpacesAtSelectionEnd(selection As Microsoft.Office.Interop.Word.Selection,
+                                                           trailingSpaces As String,
+                                                           selectionEndsWithPara As Boolean)
+        If selection Is Nothing OrElse String.IsNullOrEmpty(trailingSpaces) Then Return
+
+        Dim tailRange As Microsoft.Office.Interop.Word.Range = Nothing
+        Dim markerRange As Microsoft.Office.Interop.Word.Range = Nothing
+
+        Try
+            tailRange = selection.Range.Duplicate()
+            tailRange.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
+
+            If selectionEndsWithPara AndAlso tailRange.Start > 0 Then
+                markerRange = tailRange.Duplicate()
+                markerRange.MoveStart(Microsoft.Office.Interop.Word.WdUnits.wdCharacter, -1)
+
+                Dim markerText As String = markerRange.Text
+                If markerText = ControlChars.Cr OrElse markerText = ControlChars.Lf Then
+                    markerRange.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseStart)
+                    markerRange.InsertAfter(trailingSpaces)
+                    Exit Sub
+                End If
+            End If
+
+            tailRange.InsertAfter(trailingSpaces)
+        Finally
+            If markerRange IsNot Nothing Then Marshal.ReleaseComObject(markerRange) : markerRange = Nothing
+            If tailRange IsNot Nothing Then Marshal.ReleaseComObject(tailRange) : tailRange = Nothing
+        End Try
+    End Sub
 
     Private Async Function InsertClipboard() As System.Threading.Tasks.Task
         Try
@@ -1968,60 +2116,7 @@ Partial Public Class ThisAddIn
                 TypeOf curr Is Microsoft.Office.Interop.Outlook.MailItem
 
             If Not haveMail Then
-                ' Explorer context: copy to clipboard (with UI switch only for message box)
-                Dim displayText As String = If(result.Length > 11000, result.Substring(0, 11000) & "…", result)
-
-                ' Build DataObject outside UI (RTF conversion may be expensive)
-                Dim dataObj As New System.Windows.Forms.DataObject()
-                Dim includeRtf As Boolean = result.Length < 350000 ' Skip massive RTF
-                If includeRtf Then
-                    Try
-                        Dim rtfText = MarkdownToRtfConverter.Convert(result)
-                        If Not String.IsNullOrEmpty(rtfText) Then
-                            dataObj.SetData(System.Windows.Forms.DataFormats.Rtf, rtfText)
-                        End If
-                    Catch
-                        ' Ignore RTF failure
-                    End Try
-                End If
-                dataObj.SetData(System.Windows.Forms.DataFormats.UnicodeText, result)
-                dataObj.SetData(System.Windows.Forms.DataFormats.Text, result)
-
-                ' Explorer path: ConfigureAwait(False) is OK here because we
-                ' marshal back explicitly via SwitchToUi below.
-                Dim clipOk = Await SetClipboardRobustAsync(dataObj).ConfigureAwait(False)
-
-                Await SwitchToUi(
-                    Sub()
-                        If clipOk Then
-                            SLib.ShowCustomMessageBox($"The content has been copied to the clipboard:{Environment.NewLine}{Environment.NewLine}{displayText}")
-                        Else
-                            ' Fallback window
-                            Dim edited As String = SLib.ShowCustomWindow(
-                                "Clipboard is busy. You can copy the result below manually (Ctrl+A, Ctrl+C) or edit it and click OK:",
-                                result,
-                                "If copying still fails, the text will be saved to a temporary file.",
-                                AN, False)
-
-                            If Not String.IsNullOrWhiteSpace(edited) Then
-                                Dim editedObj As New DataObject()
-                                editedObj.SetData(DataFormats.UnicodeText, edited)
-                                editedObj.SetData(DataFormats.Text, edited)
-                                Dim editedOk = SetClipboardRobustAsync(editedObj).GetAwaiter().GetResult()
-                                If Not editedOk Then
-                                    Dim tmp = SaveTextToTempFile(edited)
-                                    If Not String.IsNullOrWhiteSpace(tmp) Then
-                                        SLib.ShowCustomMessageBox($"Clipboard is locked. The result was saved to: {tmp}")
-                                    Else
-                                        SLib.ShowCustomMessageBox("Clipboard is locked and saving failed.")
-                                    End If
-                                Else
-                                    SLib.ShowCustomMessageBox("Your edited text has been copied to the clipboard.")
-                                End If
-                            End If
-                        End If
-                    End Sub).ConfigureAwait(False)
-
+                Await HandleNoInsertableMailAsync(result).ConfigureAwait(False)
                 Return
             End If
 
@@ -2081,7 +2176,7 @@ Partial Public Class ThisAddIn
                                      Return 0
                                  End Function)
 
-                        InsertTextWithMarkdown(selection, result, True)
+                        InsertTextWithMarkdown(selection, result, True, INI_UseHostColorOutlook)
                         inserted = True
                         Exit For
 
@@ -2102,17 +2197,10 @@ Partial Public Class ThisAddIn
                 If inserted Then
                     Try : inspector.Display() : Catch : End Try
                 Else
-                    ' Body refused the edit – fall back to clipboard so the user
-                    ' can paste manually rather than losing the AI result.
-                    Await FallbackToClipboardAsync(result,
-                        "The mail body is currently locked for editing. " &
-                        "The result has been copied to the clipboard instead.")
+                    Await HandleNoInsertableMailAsync(result).ConfigureAwait(False)
                 End If
             Else
-                ' No usable editor (mail sent, read-only, switched to reading pane, …)
-                Await FallbackToClipboardAsync(result,
-                    "The mail editor is not available for editing. " &
-                    "The result has been copied to the clipboard instead.")
+                Await HandleNoInsertableMailAsync(result).ConfigureAwait(False)
             End If
 
             If wordEditor IsNot Nothing Then Marshal.ReleaseComObject(wordEditor) : wordEditor = Nothing
@@ -2134,39 +2222,62 @@ Partial Public Class ThisAddIn
     End Function
 
     ''' <summary>
-    ''' Copies the given text to the clipboard (RTF + Unicode) and shows a message.
-    ''' Used as a fallback when the Outlook body cannot be edited.
+    ''' Uses the same clipboard/window flow as the original Not haveMail path.
+    ''' This is used whenever there is no mail editor that can actually accept insertion.
     ''' </summary>
-    Private Async Function FallbackToClipboardAsync(text As String, message As String) As System.Threading.Tasks.Task
-        Try
-            Dim dataObj As New System.Windows.Forms.DataObject()
-            If text.Length < 350000 Then
-                Try
-                    Dim rtf = MarkdownToRtfConverter.Convert(text)
-                    If Not String.IsNullOrEmpty(rtf) Then
-                        dataObj.SetData(System.Windows.Forms.DataFormats.Rtf, rtf)
-                    End If
-                Catch
-                End Try
-            End If
-            dataObj.SetData(System.Windows.Forms.DataFormats.UnicodeText, text)
-            dataObj.SetData(System.Windows.Forms.DataFormats.Text, text)
+    Private Async Function HandleNoInsertableMailAsync(result As String) As System.Threading.Tasks.Task
+        Dim displayText As String = If(result.Length > 11000, result.Substring(0, 11000) & "…", result)
 
-            Dim ok = Await SetClipboardRobustAsync(dataObj)
-            If ok Then
-                SLib.ShowCustomMessageBox(message)
-            Else
-                Dim tmp = SaveTextToTempFile(text)
-                If Not String.IsNullOrWhiteSpace(tmp) Then
-                    SLib.ShowCustomMessageBox($"Clipboard is locked. The result was saved to: {tmp}")
-                Else
-                    SLib.ShowCustomMessageBox("Clipboard and editor are both unavailable; the result could not be saved.")
+        Dim dataObj As New System.Windows.Forms.DataObject()
+        Dim includeRtf As Boolean = result.Length < 350000
+
+        If includeRtf Then
+            Try
+                Dim rtfText As String = MarkdownToRtfConverter.Convert(result)
+                If Not String.IsNullOrEmpty(rtfText) Then
+                    dataObj.SetData(System.Windows.Forms.DataFormats.Rtf, rtfText)
                 End If
-            End If
-        Catch ex As System.Exception
-            SLib.ShowCustomMessageBox($"Fallback failed: {ex.Message}")
-        End Try
+            Catch
+            End Try
+        End If
+
+        dataObj.SetData(System.Windows.Forms.DataFormats.UnicodeText, result)
+        dataObj.SetData(System.Windows.Forms.DataFormats.Text, result)
+
+        Dim clipOk As Boolean = Await SetClipboardRobustAsync(dataObj).ConfigureAwait(False)
+
+        Await SwitchToUi(
+            Sub()
+                If clipOk Then
+                    SLib.ShowCustomMessageBox($"The content has been copied to the clipboard:{Environment.NewLine}{Environment.NewLine}{displayText}")
+                Else
+                    Dim edited As String = SLib.ShowCustomWindow(
+                        "Clipboard is busy. You can copy the result below manually (Ctrl+A, Ctrl+C) or edit it and click OK:",
+                        result,
+                        "If copying still fails, the text will be saved to a temporary file.",
+                        AN, False)
+
+                    If Not String.IsNullOrWhiteSpace(edited) Then
+                        Dim editedObj As New System.Windows.Forms.DataObject()
+                        editedObj.SetData(System.Windows.Forms.DataFormats.UnicodeText, edited)
+                        editedObj.SetData(System.Windows.Forms.DataFormats.Text, edited)
+
+                        Dim editedOk As Boolean = SetClipboardRobustAsync(editedObj).GetAwaiter().GetResult()
+                        If Not editedOk Then
+                            Dim tmp As String = SaveTextToTempFile(edited)
+                            If Not String.IsNullOrWhiteSpace(tmp) Then
+                                SLib.ShowCustomMessageBox($"Clipboard is locked. The result was saved to: {tmp}")
+                            Else
+                                SLib.ShowCustomMessageBox("Clipboard is locked and saving failed.")
+                            End If
+                        Else
+                            SLib.ShowCustomMessageBox("Your edited text has been copied to the clipboard.")
+                        End If
+                    End If
+                End If
+            End Sub).ConfigureAwait(False)
     End Function
+
 
     ''' <summary>
     ''' Attempts to set clipboard persistently with retries on UI and dedicated STA thread. Returns True if set and verified.
@@ -2297,7 +2408,11 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Public Sub HelpMeInky()
         If _win Is Nothing OrElse _win.IsDisposed Then
-            _win = New HelpMeInky(_context, RDV)
+            _win = New HelpMeInky(
+                _context,
+                RDV,
+                New System.Globalization.CultureInfo(
+                    Globals.ThisAddIn.Application.LanguageSettings.LanguageID(Microsoft.Office.Core.MsoAppLanguageID.msoLanguageIDUI)).DisplayName)
         End If
         ' No owner needed
         _win.ShowRaised()
@@ -2309,6 +2424,7 @@ Partial Public Class ThisAddIn
     Public Sub ShowSettings()
 
         Dim Settings As New Dictionary(Of String, String) From {
+                        {"SimpleMenuOverride", "Simple menu"},
                         {"Temperature", "Temperature of {model}"},
                         {"Timeout", "Timeout of {model}"},
                         {"Temperature_2", "Temperature of {model2}"},
@@ -2346,6 +2462,7 @@ Partial Public Class ThisAddIn
                     }
 
         Dim SettingsTips As New Dictionary(Of String, String) From {
+                        {"SimpleMenuOverride", "Only show the simple menu features in this add-in (can be defined)"},
                         {"Temperature", "The higher, the more creative the LLM will be (0.0-2.0)"},
                         {"Timeout", "In milliseconds"},
                         {"Temperature_2", "The higher, the more creative the LLM will be (0.0-2.0)"},
@@ -2361,7 +2478,7 @@ Partial Public Class ThisAddIn
                         {"ReplaceText2", "If selected, the response of the LLM for other commands (than translate) will replace the original text"},
                         {"ReplaceText2Override", "Leave empty to not override the above value; use 0 or 'false' to disable and 1 or 'true' to enable 'Replace text' as a personal override"},
                         {"DoMarkupOutlook", "Whether a markup should be done for functions that change only parts of a text"},
-                                                {"MarkupMethodOutlook", "Markup method to use: 1 = Compare using the Word compare function, 2 = Simple Differ, 3 = Simple Diff shown in a window, 4 = Interactive review (accept/reject each change)"},
+                        {"MarkupMethodOutlook", "Markup method to use: 1 = Compare using the Word compare function, 2 = Simple Differ, 3 = Simple Diff shown in a window, 4 = Interactive review (accept/reject each change)"},
                         {"MarkupMethodOutlookOverride", "Leave empty to not override the above value; otherwise enter the personal override value for 'markup method'"},
                         {"MarkupDiffCap", "The maximum size of the text that should be processed using the Diff method (to avoid you having to wait too long)"},
                         {"PreCorrection", "Add prompting text that will be added to all basic requests (e.g., for special language tasks)"},
@@ -2385,7 +2502,9 @@ Partial Public Class ThisAddIn
         ShowSettingsWindow(Settings, SettingsTips)
 
         Globals.Ribbons.Ribbon1.UpdateRibbon()
+        Globals.Ribbons.Ribbon1.ApplyRibbonVisibilityConfiguration()
         Globals.Ribbons.Ribbon2.UpdateRibbon()
+        Globals.Ribbons.Ribbon2.ApplyRibbonVisibilityConfiguration()
 
     End Sub
 

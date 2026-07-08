@@ -604,7 +604,13 @@ Namespace SharedLibrary
                 modifiedKey = apiKey
             End If
 
-            Dim resultKey As String = CodeString(modifiedKey, secretKey)
+            Dim encChoice As Integer = ShowCustomYesNoBox(
+                "Which encryption do you want to use for this key?",
+                "Strong (recommended)", "Standard (legacy XOR)",
+                "API Key Encryptor")
+            If encChoice <> 1 AndAlso encChoice <> 2 Then Return
+
+            Dim resultKey As String = CodeString(modifiedKey, secretKey, encChoice = 1)
 
             If hadPrefix Then
                 resultKey = prefixValue & resultKey

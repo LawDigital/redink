@@ -244,11 +244,162 @@ Namespace SharedLibrary
             Return builder.ToString()
         End Function
 
+        Public Shared Function NormalizeRegexOptionFlags(optionChars As System.String) As System.String
+            Dim input As System.String = If(optionChars, System.String.Empty).Trim().ToLowerInvariant()
+            Dim sb As New System.Text.StringBuilder()
 
+            If input.Contains("i"c) Then sb.Append("i")
+            If input.Contains("m"c) Then sb.Append("m")
+            If input.Contains("s"c) Then sb.Append("s")
+            If input.Contains("c"c) Then sb.Append("c")
+            If input.Contains("r"c) Then sb.Append("r")
+            If input.Contains("e"c) Then sb.Append("e")
+
+            Return sb.ToString()
+        End Function
+
+        Public Shared Function ParseRegexOptionFlags(optionChars As System.String) As System.Text.RegularExpressions.RegexOptions
+            Dim normalized As System.String = NormalizeRegexOptionFlags(optionChars)
+            Dim regexOptions As System.Text.RegularExpressions.RegexOptions = System.Text.RegularExpressions.RegexOptions.None
+
+            If normalized.Contains("i"c) Then regexOptions = regexOptions Or System.Text.RegularExpressions.RegexOptions.IgnoreCase
+            If normalized.Contains("m"c) Then regexOptions = regexOptions Or System.Text.RegularExpressions.RegexOptions.Multiline
+            If normalized.Contains("s"c) Then regexOptions = regexOptions Or System.Text.RegularExpressions.RegexOptions.Singleline
+            If normalized.Contains("c"c) Then regexOptions = regexOptions Or System.Text.RegularExpressions.RegexOptions.Compiled
+            If normalized.Contains("r"c) Then regexOptions = regexOptions Or System.Text.RegularExpressions.RegexOptions.RightToLeft
+            If normalized.Contains("e"c) Then regexOptions = regexOptions Or System.Text.RegularExpressions.RegexOptions.ExplicitCapture
+
+            Return regexOptions
+        End Function
+
+        Public Shared Function BuildSafeTextSample(sourceText As System.String,
+                                                   maxLength As System.Int32,
+                                                   ByRef wasTruncated As System.Boolean) As System.String
+            Dim text As System.String = If(sourceText, System.String.Empty)
+            wasTruncated = False
+
+            If text.Length <= maxLength Then
+                Return text
+            End If
+
+            wasTruncated = True
+            Return text.Substring(0, maxLength)
+        End Function
+
+        Public Shared Function PreviewDisplayText(value As System.String, maxLength As System.Int32) As System.String
+            Dim text As System.String = If(value, System.String.Empty)
+            text = text.Replace(vbCr, "\r").Replace(vbLf, "\n")
+
+            If text.Length <= maxLength Then
+                Return text
+            End If
+
+            Return text.Substring(0, maxLength) & "..."
+        End Function
+
+        Public Shared Function DescribeRegexReplacement(replacement As System.String, searchOnly As System.Boolean) As System.String
+            If searchOnly Then
+                Return "(search only)"
+            End If
+
+            If replacement Is Nothing Then
+                Return "(none)"
+            End If
+
+            If replacement.Length = 0 Then
+                Return "(empty - matches will be deleted)"
+            End If
+
+            Return PreviewDisplayText(replacement, 120)
+        End Function
+
+        Public Shared Function BuildRegexLlmRequestPrompt(nlInstruction As System.String,
+                                                          hostApplicationName As System.String,
+                                                          scopeForLlm As System.String,
+                                                          sampleText As System.String,
+                                                          sampleWasTruncated As System.Boolean,
+                                                          lastPattern As System.String,
+                                                          lastOptions As System.String,
+                                                          lastReplace As System.String,
+                                                          Optional hostCapabilities As System.String = "") As System.String
+            Dim prompt As New System.Text.StringBuilder()
+            prompt.AppendLine("Create a regex suggestion for the following Office add-in request.")
+            prompt.AppendLine()
+            prompt.AppendLine("User instruction:")
+            prompt.AppendLine(If(nlInstruction, System.String.Empty).Trim())
+            prompt.AppendLine()
+            prompt.AppendLine("Host application: " & If(hostApplicationName, System.String.Empty))
+            prompt.AppendLine("Current scope: " & If(scopeForLlm, System.String.Empty))
+
+            If Not System.String.IsNullOrWhiteSpace(hostCapabilities) Then
+                prompt.AppendLine("Host capabilities/limitations: " & hostCapabilities)
+            End If
+
+            prompt.AppendLine("Sample truncated: " & sampleWasTruncated.ToString())
+            prompt.AppendLine("Cached LastRegexPattern: " & If(lastPattern, System.String.Empty))
+            prompt.AppendLine("Cached LastRegexOptions: " & If(lastOptions, System.String.Empty))
+            prompt.AppendLine("Cached LastRegexReplace: " & If(lastReplace, System.String.Empty))
+            prompt.AppendLine()
+            prompt.AppendLine("<TEXTSAMPLE>")
+            prompt.AppendLine(If(sampleText, System.String.Empty))
+            prompt.AppendLine("</TEXTSAMPLE>")
+
+            Return prompt.ToString()
+        End Function
+
+        Public Shared Function GetJsonBooleanValue(token As Newtonsoft.Json.Linq.JToken,
+                                                   defaultValue As System.Boolean) As System.Boolean
+            If token Is Nothing OrElse token.Type = Newtonsoft.Json.Linq.JTokenType.Null Then
+                Return defaultValue
+            End If
+
+            Try
+                If token.Type = Newtonsoft.Json.Linq.JTokenType.Boolean Then
+                    Return token.ToObject(Of System.Boolean)()
+                End If
+            Catch
+            End Try
+
+            Dim parsed As System.Boolean
+            If System.Boolean.TryParse(token.ToString(), parsed) Then
+                Return parsed
+            End If
+
+            Return defaultValue
+        End Function
+
+        Public Shared Function GetConflictingRegexStepMessage(patterns() As System.String,
+                                                              replacements() As System.String) As System.String
+            If patterns Is Nothing OrElse replacements Is Nothing Then
+                Return System.String.Empty
+            End If
+
+            Dim stepCount As System.Int32 = System.Math.Min(patterns.Length, replacements.Length)
+
+            For i As System.Int32 = 0 To stepCount - 1
+                For j As System.Int32 = i + 1 To stepCount - 1
+                    If System.String.Equals(patterns(i), patterns(j), System.StringComparison.Ordinal) AndAlso
+                       Not System.String.Equals(replacements(i), replacements(j), System.StringComparison.Ordinal) Then
+                        Return "The same regex pattern appears more than once with different replacements." &
+                               System.Environment.NewLine &
+                               System.Environment.NewLine &
+                               "Pattern: " & patterns(i) &
+                               System.Environment.NewLine &
+                               "Step " & (i + 1).ToString() & " replacement: " & If(replacements(i), System.String.Empty) &
+                               System.Environment.NewLine &
+                               "Step " & (j + 1).ToString() & " replacement: " & If(replacements(j), System.String.Empty) &
+                               System.Environment.NewLine &
+                               System.Environment.NewLine &
+                               "This cannot run deterministically in sequential mode. Use more specific patterns instead."
+                    End If
+                Next
+            Next
+
+            Return System.String.Empty
+        End Function
 
         ''' <summary>
-        ''' Writes a string value to the Windows registry at <paramref name="regPath"/> using the default (unnamed) value.
-        ''' </summary>
+        ''' Writes a string value to the Windows registry at <paramref name="regPath"/> using the default (unnamed) value.     ''' </summary>
         ''' <param name="regPath">Registry path including hive name (e.g., <c>HKEY_CURRENT_USER\...</c>).</param>
         ''' <param name="regValue">Value to write; CR/LF is removed via <see cref="RemoveCR"/>.</param>
         Public Shared Sub WriteToRegistry(ByVal regPath As String, ByVal regValue As String)
@@ -375,6 +526,128 @@ Namespace SharedLibrary
             Return String.IsNullOrWhiteSpace(str)
         End Function
 
+
+
+        Public Shared Function GetDictionaryFilePath(ByVal context As ISharedContext,
+                                                     Optional ByVal localDictionary As Boolean = False) As String
+            If context Is Nothing Then Return ""
+
+            Dim configuredPath As String = If(localDictionary, context.INI_DictionaryPathLocal, context.INI_DictionaryPath)
+            Return ExpandEnvironmentVariables(configuredPath)
+        End Function
+
+        Public Shared Function GetTranslationDictionaryText(ByVal context As ISharedContext) As String
+            If context Is Nothing Then Return ""
+
+            Dim globalDictionary As String = ReadTranslationDictionaryFile(GetDictionaryFilePath(context, False))
+            Dim userDictionary As String = ReadTranslationDictionaryFile(GetDictionaryFilePath(context, True))
+
+            Dim parts As New System.Collections.Generic.List(Of String)
+
+            If Not String.IsNullOrWhiteSpace(globalDictionary) Then
+                parts.Add("<globaldictionary>" & globalDictionary & "</globaldictionary>")
+            End If
+
+            If Not String.IsNullOrWhiteSpace(userDictionary) Then
+                Dim userPrefix As String = If(parts.Count > 0, "(the userdictionary takes precedence) ", "")
+                parts.Add("<userdictionary>" & userPrefix & userDictionary & "</userdictionary>")
+            End If
+
+            Return String.Join(" ", parts)
+        End Function
+
+        Public Shared Function PromptForTargetLanguage(ByVal prompt As String,
+                                                       ByVal header As String,
+                                                       ByVal defaultLanguage As String,
+                                                       ByVal context As ISharedContext) As String
+            Dim inputParams() As InputParameter = {
+                New InputParameter("", If(defaultLanguage, ""))
+            }
+
+            Dim confirmed As Boolean = ShowCustomVariableInputForm(
+                prompt,
+                header,
+                inputParams,
+                "Edit User Dictionary",
+                Sub()
+                    EditUserDictionaryFile(context)
+                End Sub,
+                False)
+
+            If Not confirmed Then Return ""
+
+            Return If(System.Convert.ToString(inputParams(0).Value), "").Trim()
+        End Function
+
+        Public Shared Sub EditUserDictionaryFile(ByVal context As ISharedContext)
+            Dim filePath As String = EnsureUserDictionaryFileExists(context)
+            If String.IsNullOrWhiteSpace(filePath) Then Return
+
+            ShowTextFileEditor(filePath, "Edit user dictionary: " & filePath, False, context)
+        End Sub
+
+        Private Shared Function EnsureUserDictionaryFileExists(ByVal context As ISharedContext) As String
+            Dim filePath As String = GetDictionaryFilePath(context, True)
+
+            If String.IsNullOrWhiteSpace(filePath) Then
+                ShowCustomMessageBox("No user dictionary file is configured.")
+                Return ""
+            End If
+
+            Try
+                filePath = Path.GetFullPath(filePath)
+
+                Dim directoryPath As String = Path.GetDirectoryName(filePath)
+                If String.IsNullOrWhiteSpace(directoryPath) Then
+                    ShowCustomMessageBox("Invalid user dictionary file path:" & vbCrLf & filePath)
+                    Return ""
+                End If
+
+                If Not Directory.Exists(directoryPath) Then
+                    Directory.CreateDirectory(directoryPath)
+                End If
+
+                If Not File.Exists(filePath) Then
+                    Dim initialContent As String =
+                        "; This is the user dictionary." & vbCrLf &
+                        "; It can contain instructions on how to translate certain words or expressions." & vbCrLf &
+                        "; Example: Translate ""share purchase agreement"" as ""Aktienkaufvertrag""." & vbCrLf
+
+                    File.WriteAllText(filePath, initialContent, New System.Text.UTF8Encoding(True))
+                End If
+
+                Return filePath
+            Catch ex As Exception
+                ShowCustomMessageBox("Could not create the user dictionary file:" & vbCrLf & ex.Message)
+                Return ""
+            End Try
+        End Function
+
+        Private Shared Function ReadTranslationDictionaryFile(ByVal filePath As String) As String
+            If String.IsNullOrWhiteSpace(filePath) OrElse Not File.Exists(filePath) Then Return ""
+
+            Dim content As String = ReadTextFile(filePath, False)
+            If String.IsNullOrWhiteSpace(content) Then Return ""
+
+            Dim normalized As String = content.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf)
+            Dim sb As New System.Text.StringBuilder()
+
+            For Each line As String In normalized.Split(New String() {vbLf}, StringSplitOptions.None)
+                If line.TrimStart().StartsWith(";", StringComparison.Ordinal) Then
+                    Continue For
+                End If
+
+                If sb.Length > 0 Then
+                    sb.Append(vbCrLf)
+                End If
+
+                sb.Append(line)
+            Next
+
+            Return sb.ToString().Trim()
+        End Function
+
+
         ''' <summary>
         ''' Expands environment variables and selected placeholder tokens in <paramref name="filePath"/>,
         ''' normalizes the resulting path, and returns its full path.
@@ -472,6 +745,12 @@ Namespace SharedLibrary
             encodedText = encodedText.Replace(vbCr, "").Replace(vbLf, "")
             encodedText = encodedText.Replace(" ", "")
 
+            ' Auto-detect a strong (AES-256) value by its marker prefix and decrypt accordingly.
+            ' Legacy XOR values are pure Base64 and can never start with this marker.
+            If encodedText.StartsWith(StrongApiKeyMarker, StringComparison.Ordinal) Then
+                Return DecodeStringStrong(encodedText.Substring(StrongApiKeyMarker.Length), pTerm)
+            End If
+
             Dim encryptedBytes As Byte() = DecodeBase64(encodedText)
             If encryptedBytes Is Nothing Then
                 Return "Error: Invalid Base64 input"
@@ -498,12 +777,29 @@ Namespace SharedLibrary
 
 
         ''' <summary>
-        ''' XOR-encodes <paramref name="inputText"/> using <paramref name="pTerm"/> and returns the result as Base64.
+        ''' Marker prefix that identifies a strong (AES-256) encrypted API key. Legacy XOR values are pure
+        ''' Base64 and can never begin with this marker, so it enables transparent auto-detection on decode.
+        ''' </summary>
+        Private Shared ReadOnly StrongApiKeyMarker As String = "$RIK1$"
+
+        ''' <summary>
+        ''' Encodes <paramref name="inputText"/> using <paramref name="pTerm"/>. By default uses the legacy XOR scheme
+        ''' (Base64). When <paramref name="useStrong"/> is True, uses AES-256 (marker-prefixed). The return value is a
+        ''' single string that is stored in the configuration file the same way for both schemes.
         ''' </summary>
         ''' <param name="inputText">Plain text to encode.</param>
-        ''' <param name="pTerm">XOR key term used for encoding.</param>
-        ''' <returns>Base64-encoded XOR output.</returns>
-        Public Shared Function CodeString(ByVal inputText As String, ByVal pTerm As String) As String
+        ''' <param name="pTerm">Key term used for encoding (XOR term or strong-encryption CodeBasis).</param>
+        ''' <param name="useStrong">When True, produces a strong AES-256 token instead of legacy XOR.</param>
+        ''' <returns>Encoded output, or a string starting with "Error: " on strong-encryption failure.</returns>
+        Public Shared Function CodeString(ByVal inputText As String, ByVal pTerm As String, Optional ByVal useStrong As Boolean = True) As String
+            If useStrong Then
+                Dim strongBody As String = CodeStringStrong(inputText, pTerm)
+                If strongBody.StartsWith("Error:", StringComparison.Ordinal) Then
+                    Return strongBody
+                End If
+                Return StrongApiKeyMarker & strongBody
+            End If
+
             Dim inputBytes() As Byte = System.Text.Encoding.UTF8.GetBytes(inputText)
             Dim pTermBytes() As Byte = System.Text.Encoding.UTF8.GetBytes(pTerm)
             Dim encryptedBytes(inputBytes.Length - 1) As Byte
@@ -521,9 +817,148 @@ Namespace SharedLibrary
         End Function
 
         ''' <summary>
+        ''' Strong encryptor: AES-256-CBC with a PBKDF2(SHA-256)-derived key, authenticated with HMAC-SHA256
+        ''' (Encrypt-then-MAC). Returns the Base64 body (without marker), or "Error: ..." on failure (never throws).
+        ''' </summary>
+        Private Shared Function CodeStringStrong(ByVal inputText As String, ByVal pTerm As String) As String
+            If inputText Is Nothing Then inputText = ""
+            If String.IsNullOrEmpty(pTerm) Then Return "Error: Missing CodeBasis"
+
+            Try
+                Const iterations As Integer = 100000
+                Dim salt(15) As Byte
+                Dim iv(15) As Byte
+                Using rng As System.Security.Cryptography.RandomNumberGenerator = System.Security.Cryptography.RandomNumberGenerator.Create()
+                    rng.GetBytes(salt)
+                    rng.GetBytes(iv)
+                End Using
+
+                Dim aesKey() As Byte
+                Dim macKey() As Byte
+                Using kdf As New System.Security.Cryptography.Rfc2898DeriveBytes(pTerm, salt, iterations, System.Security.Cryptography.HashAlgorithmName.SHA256)
+                    aesKey = kdf.GetBytes(32)
+                    macKey = kdf.GetBytes(32)
+                End Using
+
+                Dim cipher() As Byte
+                Using aes As System.Security.Cryptography.Aes = System.Security.Cryptography.Aes.Create()
+                    aes.KeySize = 256
+                    aes.Mode = System.Security.Cryptography.CipherMode.CBC
+                    aes.Padding = System.Security.Cryptography.PaddingMode.PKCS7
+                    aes.Key = aesKey
+                    aes.IV = iv
+                    Dim plain() As Byte = System.Text.Encoding.UTF8.GetBytes(inputText)
+                    Using enc As System.Security.Cryptography.ICryptoTransform = aes.CreateEncryptor()
+                        cipher = enc.TransformFinalBlock(plain, 0, plain.Length)
+                    End Using
+                End Using
+
+                Dim authData() As Byte = StrongConcatBytes(salt, iv, cipher)
+                Dim tag() As Byte
+                Using hmac As New System.Security.Cryptography.HMACSHA256(macKey)
+                    tag = hmac.ComputeHash(authData)
+                End Using
+
+                Return System.Convert.ToBase64String(StrongConcatBytes(authData, tag))
+            Catch
+                Return "Error: Strong encryption failed"
+            End Try
+        End Function
+
+        ''' <summary>
+        ''' Strong decryptor: verifies HMAC-SHA256 and decrypts a body produced by <see cref="CodeStringStrong"/>.
+        ''' Receives the Base64 body with the marker already stripped. Returns plaintext, or "Error: ..." (never throws).
+        ''' </summary>
+        Private Shared Function DecodeStringStrong(ByVal body As String, ByVal pTerm As String) As String
+            If String.IsNullOrEmpty(pTerm) Then Return "Error: Missing CodeBasis"
+
+            Dim blob() As Byte = DecodeBase64(body)
+            If blob Is Nothing Then Return "Error: Invalid Base64 input"
+
+            Const iterations As Integer = 100000
+            Const saltLen As Integer = 16
+            Const ivLen As Integer = 16
+            Const tagLen As Integer = 32
+
+            If blob.Length < saltLen + ivLen + 16 + tagLen Then Return "Error: Invalid strong-encrypted input"
+
+            Dim salt(saltLen - 1) As Byte
+            Dim iv(ivLen - 1) As Byte
+            System.Array.Copy(blob, 0, salt, 0, saltLen)
+            System.Array.Copy(blob, saltLen, iv, 0, ivLen)
+
+            Dim cipherLen As Integer = blob.Length - saltLen - ivLen - tagLen
+            Dim cipher(cipherLen - 1) As Byte
+            System.Array.Copy(blob, saltLen + ivLen, cipher, 0, cipherLen)
+
+            Dim tag(tagLen - 1) As Byte
+            System.Array.Copy(blob, blob.Length - tagLen, tag, 0, tagLen)
+
+            Dim aesKey() As Byte
+            Dim macKey() As Byte
+            Using kdf As New System.Security.Cryptography.Rfc2898DeriveBytes(pTerm, salt, iterations, System.Security.Cryptography.HashAlgorithmName.SHA256)
+                aesKey = kdf.GetBytes(32)
+                macKey = kdf.GetBytes(32)
+            End Using
+
+            Dim authLen As Integer = blob.Length - tagLen
+            Dim authData(authLen - 1) As Byte
+            System.Array.Copy(blob, 0, authData, 0, authLen)
+
+            Dim expected() As Byte
+            Using hmac As New System.Security.Cryptography.HMACSHA256(macKey)
+                expected = hmac.ComputeHash(authData)
+            End Using
+
+            If Not StrongFixedTimeEquals(expected, tag) Then
+                Return "Error: Authentication failed (wrong CodeBasis or tampered key)"
+            End If
+
+            Try
+                Using aes As System.Security.Cryptography.Aes = System.Security.Cryptography.Aes.Create()
+                    aes.KeySize = 256
+                    aes.Mode = System.Security.Cryptography.CipherMode.CBC
+                    aes.Padding = System.Security.Cryptography.PaddingMode.PKCS7
+                    aes.Key = aesKey
+                    aes.IV = iv
+                    Using dec As System.Security.Cryptography.ICryptoTransform = aes.CreateDecryptor()
+                        Dim plain() As Byte = dec.TransformFinalBlock(cipher, 0, cipher.Length)
+                        Return System.Text.Encoding.UTF8.GetString(plain)
+                    End Using
+                End Using
+            Catch
+                Return "Error: Decryption failed"
+            End Try
+        End Function
+
+        ''' <summary>Concatenates the supplied byte arrays into a single array.</summary>
+        Private Shared Function StrongConcatBytes(ParamArray arrays As Byte()()) As Byte()
+            Dim total As Integer = 0
+            For Each a As Byte() In arrays
+                total += a.Length
+            Next
+            Dim result(total - 1) As Byte
+            Dim offset As Integer = 0
+            For Each a As Byte() In arrays
+                System.Array.Copy(a, 0, result, offset, a.Length)
+                offset += a.Length
+            Next
+            Return result
+        End Function
+
+        ''' <summary>Constant-time comparison of two byte arrays to avoid timing side-channels on the HMAC tag.</summary>
+        Private Shared Function StrongFixedTimeEquals(a As Byte(), b As Byte()) As Boolean
+            If a Is Nothing OrElse b Is Nothing OrElse a.Length <> b.Length Then Return False
+            Dim diff As Integer = 0
+            For i As Integer = 0 To a.Length - 1
+                diff = diff Or (a(i) Xor b(i))
+            Next
+            Return diff = 0
+        End Function
+
+        ''' <summary>
         ''' Retrieves the computer's domain/workgroup name via WMI (<c>Win32_ComputerSystem.Domain</c>).
         ''' </summary>
-        ''' <returns>The domain/workgroup name, or an empty string on failure.</returns>
         Public Shared Function GetDomain() As String
             Try
                 ' Initialize a WMI query to get the Domain property from Win32_ComputerSystem

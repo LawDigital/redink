@@ -298,16 +298,6 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
-    Public Shared Property INI_OpenSSLPath As String
-        Get
-            Return _context.INI_OpenSSLPath
-        End Get
-        Set(value As String)
-            _context.INI_OpenSSLPath = value
-        End Set
-    End Property
-
-
     Public Shared Property INI_OAuth2 As Boolean
         Get
             Return _context.INI_OAuth2
@@ -860,6 +850,16 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_Compact As String
+        Get
+            Return _context.SP_Compact
+        End Get
+        Set(value As String)
+            _context.SP_Compact = value
+        End Set
+    End Property
+
+
     Public Shared Property SP_Podcast As String
         Get
             Return _context.SP_Podcast
@@ -1090,6 +1090,16 @@ Partial Public Class ThisAddIn
             _context.SP_Rename = value
         End Set
     End Property
+
+    Public Shared Property SP_Regex As String
+        Get
+            Return _context.SP_Regex
+        End Get
+        Set(value As String)
+            _context.SP_Regex = value
+        End Set
+    End Property
+
 
     Public Shared Property SP_RemoveClutter As String
         Get
@@ -1558,6 +1568,50 @@ Partial Public Class ThisAddIn
     End Property
 
 
+    Public Shared Property INI_SimpleMenuHide As String
+        Get
+            Return _context.INI_SimpleMenuHide
+        End Get
+        Set(value As String)
+            _context.INI_SimpleMenuHide = value
+        End Set
+    End Property
+
+    Public Shared Property INI_SimpleMenuDefault As Boolean
+        Get
+            Return _context.INI_SimpleMenuDefault
+        End Get
+        Set(value As Boolean)
+            _context.INI_SimpleMenuDefault = value
+        End Set
+    End Property
+
+    Public Shared Property INI_SimpleMenuOverride As Boolean
+        Get
+            Return _context.INI_SimpleMenuOverride
+        End Get
+        Set(value As Boolean)
+            _context.INI_SimpleMenuOverride = value
+        End Set
+    End Property
+
+    Public Shared Property INI_MenuBlock As String
+        Get
+            Return _context.INI_MenuBlock
+        End Get
+        Set(value As String)
+            _context.INI_MenuBlock = value
+        End Set
+    End Property
+
+    Public Shared Property INI_WebServerBlock As Integer
+        Get
+            Return _context.INI_WebServerBlock
+        End Get
+        Set(value As Integer)
+            _context.INI_WebServerBlock = value
+        End Set
+    End Property
 
     Public Shared Property INI_ISearch As Boolean
         Get
@@ -1851,6 +1905,24 @@ Partial Public Class ThisAddIn
         End Get
         Set(value As String)
             _context.INI_DiscussInkyPathLocal = value
+        End Set
+    End Property
+
+    Public Shared Property INI_DictionaryPath As String
+        Get
+            Return _context.INI_DictionaryPath
+        End Get
+        Set(value As String)
+            _context.INI_DictionaryPath = value
+        End Set
+    End Property
+
+    Public Shared Property INI_DictionaryPathLocal As String
+        Get
+            Return _context.INI_DictionaryPathLocal
+        End Get
+        Set(value As String)
+            _context.INI_DictionaryPathLocal = value
         End Set
     End Property
 
@@ -2250,6 +2322,33 @@ Partial Public Class ThisAddIn
         End Get
         Set(value As Boolean)
             _context.INI_NoHelperDownload = value
+        End Set
+    End Property
+
+    Public Shared Property INI_LicenseCounterPath As String
+        Get
+            Return _context.INI_LicenseCounterPath
+        End Get
+        Set(value As String)
+            _context.INI_LicenseCounterPath = value
+        End Set
+    End Property
+
+    Public Shared Property INI_LicenseCounterMethod As String
+        Get
+            Return _context.INI_LicenseCounterMethod
+        End Get
+        Set(value As String)
+            _context.INI_LicenseCounterMethod = value
+        End Set
+    End Property
+
+    Public Shared Property INI_LicenseCounterAnon As Boolean
+        Get
+            Return _context.INI_LicenseCounterAnon
+        End Get
+        Set(value As Boolean)
+            _context.INI_LicenseCounterAnon = value
         End Set
     End Property
 

@@ -618,7 +618,8 @@ Namespace SharedLibrary
                                                     {"MarkupAuthor", "MarkupAuthor"},
                                                     {"KnowledgeStoreBackgroundIndexing", "EnableKBBackgroundIndexing"},
                                                     {"KnowledgeStoreBackgroundIndexingWindow", "KnowledgeStoreBackgroundIndexingWindow"},
-                                                    {"FormulaInstruction", "FormulaInstruction"}
+                                                    {"FormulaInstruction", "FormulaInstruction"},
+                                                    {"SimpleMenuOverride", "SimpleMenuOverride"}
                                                 }
 
                                            For Each settingKey In settingControls.Keys
@@ -667,6 +668,14 @@ Namespace SharedLibrary
                                                        ' Ignore if the My.Settings entry does not exist
                                                    End Try
                                                Next
+                                               Try
+                                                   If settingControls.ContainsKey("SimpleMenuOverride") Then
+                                                       My.Settings.Item("SimpleMenuOverrideIsSet") = True
+                                                   End If
+                                               Catch
+                                                   ' Ignore if the My.Settings entry does not exist
+                                               End Try
+
                                                Try
                                                    My.Settings.Save()
                                                Catch
@@ -813,11 +822,11 @@ Namespace SharedLibrary
         Public Shared Function IsBooleanSetting(settingKey As String) As Boolean
             ' Determine if a setting is a Boolean based on its key
             Dim booleanSettings As New List(Of String) From {
-        "DoubleS", "NoEmDash", "Clean", "MarkdownBubbles", "KeepFormat1", "MarkdownConvert", "ReplaceText1",
-        "KeepFormat2", "KeepParaFormatInline", "ReplaceText2", "DoMarkupOutlook", "DoMarkupWord",
+        "DoubleS", "NoEmDash", "Clean", "MarkdownBubbles", "KeepFormat1", "MarkdownConvert", "ReplaceText1", "SimpleMenuOverride",
+        "KeepFormat2", "KeepParaFormatInline", "ReplaceText2", "DoMarkupOutlook", "DoMarkupWord", "SimpleMenuDefault", "UseHostColorOutlook",
         "APIDebug", "AutoPilotAutoStart", "AutoPilotSchedulerLocalChat", "ISearch_Approve", "ISearch", "Lib", "ContextMenu", "NoLocalConfig", "SecondAPI", "APIEncrypted", "APIEncrypted_2",
         "OAuth2", "OAuth2_2", "PromptLib", "Ignore", "ToolingLogWindow", "ToolingDryRun", "ForceDrawioLocal", "AllowLegacyDocFiles", "EnablePrivacyForSearch",
-        "UpdateIni", "UpdateIniAllowRemote", "UpdateIniNoSignature", "UpdateIniSilentLog", "NoHelperDownload", "KnowledgeStoreUseLLMIndex", "KnowledgeStoreBackgroundIndexing"
+        "UpdateIni", "UpdateIniAllowRemote", "UpdateIniNoSignature", "UpdateIniSilentLog", "NoHelperDownload", "LicenseCounterAnon", "KnowledgeStoreUseLLMIndex", "KnowledgeStoreBackgroundIndexing"
             }
             Return booleanSettings.Contains(settingKey)
         End Function
@@ -940,6 +949,8 @@ Namespace SharedLibrary
                     Return context.INI_DoMarkupOutlook.ToString()
                 Case "DoMarkupWord"
                     Return context.INI_DoMarkupWord.ToString()
+                Case "ChunkOCR"
+                    Return context.INI_ChunkOCR.ToString()
                 Case "MarkupMethodHelper"
                     Return context.INI_MarkupMethodHelper.ToString()
                 Case "MarkupMethodWord"
@@ -956,6 +967,16 @@ Namespace SharedLibrary
                     Return context.INI_MarkupRegexCap.ToString()
                 Case "MarkupAuthor"
                     Return context.INI_MarkupAuthor
+                Case "SimpleMenuOverride"
+                    Return context.INI_SimpleMenuOverride.ToString()
+                Case "SimpleMenuHide"
+                    Return context.INI_SimpleMenuHide
+                Case "MenuBlock"
+                    Return context.INI_MenuBlock
+                Case "WebServerBlock"
+                    Return context.INI_WebServerBlock.ToString()
+                Case "SimpleMenuDefault"
+                    Return context.INI_SimpleMenuDefault.ToString()
                 Case "ChatCap"
                     Return context.INI_ChatCap.ToString()
                 Case "PreCorrection"
@@ -968,9 +989,9 @@ Namespace SharedLibrary
                     Return context.INI_Language2.ToString()
                 Case "ShortcutsWordExcel"
                     Return context.INI_ShortcutsWordExcel
-                Case "PromptLibPath"
+                Case "PromptLibPath", "Promptlib"
                     Return context.INI_PromptLibPath
-                Case "PromptLibPathLocal"
+                Case "PromptLibPathLocal", "PromptLibLocal"
                     Return context.INI_PromptLibPathLocal
                 Case "MyStylePath"
                     Return context.INI_MyStylePath
@@ -1002,14 +1023,30 @@ Namespace SharedLibrary
                     Return context.INI_DocStylePath
                 Case "DocStylePathLocal"
                     Return context.INI_DocStylePathLocal
-                Case "PromptLibPath_Transcript"
+                Case "PromptLibPath_Transcript", "PromptLib_Transcript"
                     Return context.INI_PromptLibPath_Transcript
                 Case "SpeechModelPath"
                     Return context.INI_SpeechModelPath
                 Case "LocalModelPath"
                     Return context.INI_LocalModelPath
+                Case "DictionaryPath"
+                    Return context.INI_DictionaryPath
+                Case "DictionaryPathLocal"
+                    Return context.INI_DictionaryPathLocal
+                Case "STT_Google"
+                    Return context.INI_STT_Google
+                Case "STT_Google_ProjectID"
+                    Return context.INI_STT_Google_ProjectID
+                Case "STT_OpenAI"
+                    Return context.INI_STT_OpenAI
+                Case "STT_Azure"
+                    Return context.INI_STT_Azure
+                Case "STT_Azure_SpeechKey"
+                    Return context.INI_STT_Azure_SpeechKey
                 Case "BrandingName"
                     Return context.INI_BrandingName
+                Case "HttpStack"
+                    Return context.INI_HttpStack
                 Case "LogoPath"
                     Return context.INI_LogoPath
                 Case "LogoPathMedium"
@@ -1018,6 +1055,8 @@ Namespace SharedLibrary
                     Return context.INI_LogoPathLarge
                 Case "APIDebug"
                     Return context.INI_APIDebug.ToString()
+                Case "UseHostColorOutlook"
+                    Return context.INI_UseHostColorOutlook.ToString()
                 Case "AutoPilotAutoStart"
                     Return context.INI_AutoPilotAutoStart.ToString()
                 Case "AutoPilotSchedulerLocalChat"
@@ -1116,6 +1155,8 @@ Namespace SharedLibrary
                     Return context.INI_MailMoverPath
                 Case "MailMoverPathLocal"
                     Return context.INI_MailMoverPathLocal
+                Case "DataCollectorPath"
+                    Return context.INI_DataCollectorPath
                 Case "TTSEndpoint"
                     Return context.INI_TTSEndpoint
                 Case "OAuth2"
@@ -1124,6 +1165,13 @@ Namespace SharedLibrary
                     Return context.INI_OAuth2_2.ToString()
                 Case "NoHelperDownload"
                     Return context.INI_NoHelperDownload.ToString()
+                Case "LicenseCounterPath"
+                    Return context.INI_LicenseCounterPath
+                Case "LicenseCounterMethod"
+                    Return context.INI_LicenseCounterMethod
+                Case "LicenseCounterAnon"
+                    Return context.INI_LicenseCounterAnon.ToString()
+                Case "AutoPilot"
                 Case "AutoPilot"
                     Return context.INI_AutoPilot
                 Case "ToolingLogWindow"
@@ -1316,6 +1364,18 @@ Namespace SharedLibrary
                     context.INI_MarkupRegexCap = Integer.Parse(value)
                 Case "MarkupAuthor"
                     context.INI_MarkupAuthor = value
+                Case "ChunkOCR"
+                    context.INI_ChunkOCR = Integer.Parse(value)
+                Case "SimpleMenuOverride"
+                    context.INI_SimpleMenuOverride = Boolean.Parse(value)
+                Case "SimpleMenuHide"
+                    context.INI_SimpleMenuHide = value
+                Case "MenuBlock"
+                    context.INI_MenuBlock = value
+                Case "WebServerBlock"
+                    context.INI_WebServerBlock = Integer.Parse(value)
+                Case "SimpleMenuDefault"
+                    context.INI_SimpleMenuDefault = Boolean.Parse(value)
                 Case "ChatCap"
                     context.INI_ChatCap = Integer.Parse(value)
                 Case "PreCorrection"
@@ -1328,13 +1388,13 @@ Namespace SharedLibrary
                     context.INI_Language2 = value
                 Case "ShortcutsWordExcel"
                     context.INI_ShortcutsWordExcel = value
-                Case "PromptLibPath"
+                Case "PromptLibPath", "Promptlib"
                     context.INI_PromptLibPath = value
-                Case "PromptLibPathLocal"
+                Case "PromptLibPathLocal", "PromptLibLocal"
                     context.INI_PromptLibPathLocal = value
                 Case "MyStylePath"
                     context.INI_MyStylePath = value
-                Case "PromptLibPath_Transcript"
+                Case "PromptLibPath_Transcript", "PromptLib_Transcript"
                     context.INI_PromptLibPath_Transcript = value
                 Case "AlternateModelPath"
                     context.INI_AlternateModelPath = value
@@ -1368,8 +1428,24 @@ Namespace SharedLibrary
                     context.INI_SpeechModelPath = value
                 Case "LocalModelPath"
                     context.INI_LocalModelPath = value
+                Case "DictionaryPath"
+                    context.INI_DictionaryPath = value
+                Case "DictionaryPathLocal"
+                    context.INI_DictionaryPathLocal = value
+                Case "STT_Google"
+                    context.INI_STT_Google = value
+                Case "STT_Google_ProjectID"
+                    context.INI_STT_Google_ProjectID = value
+                Case "STT_OpenAI"
+                    context.INI_STT_OpenAI = value
+                Case "STT_Azure"
+                    context.INI_STT_Azure = value
+                Case "STT_Azure_SpeechKey"
+                    context.INI_STT_Azure_SpeechKey = value
                 Case "BrandingName"
                     context.INI_BrandingName = value
+                Case "HttpStack"
+                    context.INI_HttpStack = value
                 Case "LogoPath"
                     context.INI_LogoPath = value
                 Case "LogoPathMedium"
@@ -1378,6 +1454,8 @@ Namespace SharedLibrary
                     context.INI_LogoPathLarge = value
                 Case "APIDebug"
                     context.INI_APIDebug = Boolean.Parse(value)
+                Case "UseHostColorOutlook"
+                    context.INI_UseHostColorOutlook = Boolean.Parse(value)
                 Case "AutoPilotAutoStart"
                     context.INI_AutoPilotAutoStart = Boolean.Parse(value)
                 Case "AutoPilotSchedulerLocalChat"
@@ -1472,8 +1550,16 @@ Namespace SharedLibrary
                     context.INI_MailMoverPath = value
                 Case "MailMoverPathLocal"
                     context.INI_MailMoverPathLocal = value
+                Case "DataCollectorPath"
+                    context.INI_DataCollectorPath = value
                 Case "NoHelperDownload"
                     context.INI_NoHelperDownload = Boolean.Parse(value)
+                Case "LicenseCounterPath"
+                    context.INI_LicenseCounterPath = value
+                Case "LicenseCounterMethod"
+                    context.INI_LicenseCounterMethod = value
+                Case "LicenseCounterAnon"
+                    context.INI_LicenseCounterAnon = Boolean.Parse(value)
                 Case "AutoPilot"
                     context.INI_AutoPilot = value
                 Case "ToolingLogWindow"
@@ -1737,8 +1823,10 @@ Namespace SharedLibrary
                     {"MarkupMethodOutlook", context.INI_MarkupMethodOutlook.ToString()},
                     {"MarkupDiffCap", context.INI_MarkupDiffCap.ToString()},
                     {"MarkupRegexCap", context.INI_MarkupRegexCap.ToString()},
+                    {"ChunkOCR", context.INI_ChunkOCR.ToString()},
                     {"ChatCap", context.INI_ChatCap.ToString()},
                     {"APIDebug", context.INI_APIDebug.ToString()},
+                    {"UseHostColorOutlook", context.INI_UseHostColorOutlook.ToString()},
                     {"AutoPilotAutoStart", context.INI_AutoPilotAutoStart.ToString()},
                     {"AutoPilotSchedulerLocalChat", context.INI_AutoPilotSchedulerLocalChat.ToString()},
                     {"APIKeyEncrypted", context.INI_APIEncrypted.ToString()},
@@ -1796,6 +1884,11 @@ Namespace SharedLibrary
                     {"MarkupMethodWordOverride", context.INI_MarkupMethodWordOverride},
                     {"MarkupMethodOutlookOverride", context.INI_MarkupMethodOutlookOverride},
                     {"MarkupAuthor", context.INI_MarkupAuthor},
+                    {"SimpleMenuOverride", context.INI_SimpleMenuOverride.ToString()},
+                    {"SimpleMenuHide", context.INI_SimpleMenuHide},
+                    {"SimpleMenuDefault", context.INI_SimpleMenuDefault.ToString()},
+                    {"MenuBlock", context.INI_MenuBlock},
+                    {"WebServerBlock", context.INI_WebServerBlock.ToString()},
                     {"ShortcutsWordExcel", context.INI_ShortcutsWordExcel},
                     {"ContextMenu", context.INI_ContextMenu.ToString()},
                     {"NoLocalConfig", context.INI_NoLocalConfig.ToString()},
@@ -1816,8 +1909,16 @@ Namespace SharedLibrary
                     {"RenameLibPathLocal", context.INI_RenameLibPathLocal},
                     {"MailMoverPath", context.INI_MailMoverPath},
                     {"MailMoverPathLocal", context.INI_MailMoverPathLocal},
+                    {"DataCollectorPath", context.INI_DataCollectorPath},
                     {"SpeechModelPath", context.INI_SpeechModelPath},
                     {"LocalModelPath", context.INI_LocalModelPath},
+                    {"DictionaryPath", context.INI_DictionaryPath},
+                    {"DictionaryPathLocal", context.INI_DictionaryPathLocal},
+                    {"STT_Google", context.INI_STT_Google},
+                    {"STT_Google_ProjectID", context.INI_STT_Google_ProjectID},
+                    {"STT_OpenAI", context.INI_STT_OpenAI},
+                    {"STT_Azure", context.INI_STT_Azure},
+                    {"STT_Azure_SpeechKey", context.INI_STT_Azure_SpeechKey},
                     {"TTSEndpoint", context.INI_TTSEndpoint},
                     {"PromptLib", context.INI_PromptLibPath},
                     {"PromptLibLocal", context.INI_PromptLibPathLocal},
@@ -1837,6 +1938,7 @@ Namespace SharedLibrary
                     {"DocCheckPathLocal", context.INI_DocCheckPathLocal},
                     {"DocStylePath", context.INI_DocStylePath},
                     {"DocStylePathLocal", context.INI_DocStylePathLocal},
+                    {"HttpStack", context.INI_HttpStack},
                     {"BrandingName", context.INI_BrandingName},
                     {"LogoPath", context.INI_LogoPath},
                     {"LogoPathMedium", context.INI_LogoPathMedium},
@@ -1861,6 +1963,7 @@ Namespace SharedLibrary
                     {"SP_Friendly", context.SP_Friendly},
                     {"SP_Convincing", context.SP_Convincing},
                     {"SP_NoFillers", context.SP_NoFillers},
+                    {"SP_Compact", context.SP_Compact},
                     {"SP_Podcast", context.SP_Podcast},
                     {"SP_MyStyle_Word", context.SP_MyStyle_Word},
                     {"SP_MyStyle_Outlook", context.SP_MyStyle_Outlook},
@@ -1886,6 +1989,7 @@ Namespace SharedLibrary
                     {"SP_SwitchParty_Document", context.SP_SwitchParty_Document},
                     {"SP_Anonymize_Document", context.SP_Anonymize_Document},
                     {"SP_Rename", context.SP_Rename},
+                    {"SP_Regex", context.SP_Regex},
                     {"SP_RemoveClutter", context.SP_RemoveClutter},
                     {"SP_Redact", context.SP_Redact},
                     {"SP_CheckforII", context.SP_CheckforII},
@@ -1953,6 +2057,9 @@ Namespace SharedLibrary
                     {"UpdateIniIgnoreOverride", context.INI_UpdateIniIgnoreOverride},
                     {"UpdateIniSilentMode", context.INI_UpdateIniSilentMode.ToString()},
                     {"UpdateIniSilentLog", context.INI_UpdateIniSilentLog.ToString()},
+                    {"LicenseCounterPath", context.INI_LicenseCounterPath},
+                    {"LicenseCounterMethod", context.INI_LicenseCounterMethod},
+                    {"LicenseCounterAnon", context.INI_LicenseCounterAnon.ToString()},
                     {"AssemblePath", context.INI_AssemblePath},
                     {"AssemblePathLocal", context.INI_AssemblePathLocal},
                     {"KnowledgeStorePath", context.INI_KnowledgeStorePath},
@@ -1979,7 +2086,8 @@ Namespace SharedLibrary
                     {"MarkupAuthor", "MarkupAuthor"},
                     {"KnowledgeStoreBackgroundIndexing", "EnableKBBackgroundIndexing"},
                     {"KnowledgeStoreBackgroundIndexingWindow", "KnowledgeStoreBackgroundIndexingWindow"},
-                    {"FormulaInstruction", "FormulaInstruction"}
+                    {"FormulaInstruction", "FormulaInstruction"},
+                    {"SimpleMenuOverride", "SimpleMenuOverride"}
                 }
 
                 ' Accumulate settings to persist to My.Settings at the end
@@ -2136,6 +2244,7 @@ Namespace SharedLibrary
                 {"SP_Friendly", Default_SP_Friendly},
                 {"SP_Convincing", Default_SP_Convincing},
                 {"SP_NoFillers", Default_SP_NoFillers},
+                {"SP_Compact", Default_SP_Compact},
                 {"SP_Podcast", Default_SP_Podcast},
                 {"SP_MyStyle_Word", Default_SP_MyStyle_Word},
                 {"SP_MyStyle_Outlook", Default_SP_MyStyle_Outlook},
@@ -2161,6 +2270,7 @@ Namespace SharedLibrary
                 {"SP_SwitchParty_Document", Default_SP_SwitchParty_Document},
                 {"SP_Anonymize_Document", Default_SP_Anonymize_Document},
                 {"SP_Rename", Default_SP_Rename},
+                {"SP_Regex", Default_SP_Regex},
                 {"SP_RemoveClutter", Default_SP_RemoveClutter},
                 {"SP_Redact", Default_SP_Redact},
                 {"SP_CheckforII", Default_SP_CheckforII},
@@ -2227,6 +2337,7 @@ Namespace SharedLibrary
                 {"MarkupMethodOutlook", DEFAULT_MARKUP_METHOD_OUTLOOK},
                 {"MarkupDiffCap", DEFAULT_MARKUP_DIFF_CAP},
                 {"MarkupRegexCap", DEFAULT_MARKUP_REGEX_CAP},
+                {"ChunkOCR", DEFAULT_CHUNK_OCR_PAGES},
                 {"ChatCap", DEFAULT_CHAT_CAP},
                 {"Lib_Timeout", DEFAULT_TIMEOUT_LIB},
                 {"UpdateIniSilentMode", DEFAULT_UPDATE_INI_SILENT_MODE},
@@ -2254,9 +2365,13 @@ Namespace SharedLibrary
                 {"UpdateCheckInterval", DefaultUpdateIntervalDays},
                 {"AssembleExecMaxChars", DEFAULT_ASSEMBLE_EXEC_MAX_CHARS},
                 {"AssembleMaxContextSummaryChars", DEFAULT_ASSEMBLE_MAX_CONTEXT_SUMMARY_CHARS},
+                {"SimpleMenuDefault", DEFAULT_SIMPLEMENUDEFAULT},
+                {"SimpleMenuHide", DEFAULT_SIMPLEMENUHIDE},
                 {"SP_Assemble_Plan", Default_SP_Assemble_Plan},
                 {"SP_Assemble_Execute", Default_SP_Assemble_Execute},
-                {"SP_Assemble_Summarize", Default_SP_Assemble_Summarize}
+                {"SP_Assemble_Summarize", Default_SP_Assemble_Summarize},
+                {"LicenseCounterMethod", DEFAULT_LICENSECOUNTERMETHOD},
+                {"LicenseCounterAnon", DEFAULT_LICENSECOUNTERANON}
             }
         End Function
 
@@ -2428,6 +2543,13 @@ Namespace SharedLibrary
                     {"OAuth2ATExpiry_2", context.INI_OAuth2ATExpiry_2.ToString()},
                     {"SpeechModelPath", context.INI_SpeechModelPath},
                     {"LocalModelPath", context.INI_LocalModelPath},
+                    {"DictionaryPath", context.INI_DictionaryPath},
+                    {"DictionaryPathLocal", context.INI_DictionaryPathLocal},
+                    {"STT_Google", context.INI_STT_Google},
+                    {"STT_Google_ProjectID", context.INI_STT_Google_ProjectID},
+                    {"STT_OpenAI", context.INI_STT_OpenAI},
+                    {"STT_Azure", context.INI_STT_Azure},
+                    {"STT_Azure_SpeechKey", context.INI_STT_Azure_SpeechKey},
                     {"TTSEndpoint", context.INI_TTSEndpoint},
                     {"PromptLib", context.INI_PromptLibPath},
                     {"PromptLibLocal", context.INI_PromptLibPathLocal},
@@ -2455,6 +2577,7 @@ Namespace SharedLibrary
                     {"RenameLibPathLocal", context.INI_RenameLibPathLocal},
                     {"MailMoverPath", context.INI_MailMoverPath},
                     {"MailMoverPathLocal", context.INI_MailMoverPathLocal},
+                    {"DataCollectorPath", context.INI_DataCollectorPath},
                     {"HelpMeInkyPath", context.INI_HelpMeInkyPath},
                     {"DiscussInkyPath", context.INI_DiscussInkyPath},
                     {"DiscussInkyPathLocal", context.INI_DiscussInkyPathLocal},
@@ -2468,6 +2591,10 @@ Namespace SharedLibrary
                     {"AssembleMaxContextSummaryChars", context.INI_AssembleMaxContextSummaryChars.ToString()},
                     {"UpdateCheckInterval", context.INI_UpdateCheckInterval.ToString()},
                     {"UpdatePath", context.INI_UpdatePath},
+                    {"HttpStack", context.INI_HttpStack},
+                    {"M365ClientID", context.INI_M365ClientId},
+                    {"M365TenantID", context.INI_M365TenantId},
+                    {"M365Scopes", context.INI_M365Scopes},
                     {"BrandingName", context.INI_BrandingName},
                     {"LogoPath", context.INI_LogoPath},
                     {"LogoPathMedium", context.INI_LogoPathMedium},
@@ -2484,7 +2611,12 @@ Namespace SharedLibrary
                     {"UpdateIniClients", context.INI_UpdateIniClients},
                     {"UpdateIniIgnoreOverride", context.INI_UpdateIniIgnoreOverride},
                     {"UpdateIniSilentMode", context.INI_UpdateIniSilentMode.ToString()},
-                    {"UpdateIniSilentLog", context.INI_UpdateIniSilentLog.ToString()}
+                    {"UpdateIniSilentLog", context.INI_UpdateIniSilentLog.ToString()},
+                    {"LicenseCounterMethod", context.INI_LicenseCounterMethod},
+                    {"LicenseCounterPath", context.INI_LicenseCounterPath},
+                    {"LicenseCounterAnon", context.INI_LicenseCounterAnon.ToString()},
+                    {"KnowledgeStoreBackgroundIndexing", context.INI_KnowledgeStoreBackgroundIndexing.ToString()},
+                    {"KnowledgeStoreBackgroundIndexingWindow", context.INI_KnowledgeStoreBackgroundIndexingWindow}
                 }
 
                 ' Read the original ini file content
@@ -2969,8 +3101,10 @@ Namespace SharedLibrary
                                     Tuple.Create("Prompt Library (Local)", context.INI_PromptLibPathLocal, True, "", ""),
                                     Tuple.Create("Prompt Library (Transcript)", context.INI_PromptLibPath_Transcript, True, "", ""),
                                     Tuple.Create("My Style", context.INI_MyStylePath, True, "", ""),
-                                    Tuple.Create("Discuss Personas", context.INI_DiscussInkyPath, True, "", ""),
+                                   Tuple.Create("Discuss Personas", context.INI_DiscussInkyPath, True, "", ""),
                                     Tuple.Create("Discuss Personas (Local)", context.INI_DiscussInkyPathLocal, True, "", ""),
+                                    Tuple.Create("Global Dictionary", context.INI_DictionaryPath, True, "", ""),
+                                    Tuple.Create("User Dictionary", context.INI_DictionaryPathLocal, True, "", ""),
                                     Tuple.Create("Extractor Library", context.INI_ExtractorPath, True, "", ""),
                                     Tuple.Create("Extractor Library (Local)", context.INI_ExtractorPathLocal, True, "", ""),
                                     Tuple.Create("Rename Library", context.INI_RenameLibPath, True, "", ""),
@@ -2992,7 +3126,8 @@ Namespace SharedLibrary
                                     Tuple.Create("DocStyle", context.INI_DocStylePath, False, AN2 & "-ds-", ".json"),
                                     Tuple.Create("DocStyle (Local)", context.INI_DocStylePathLocal, False, AN2 & "-ds-", ".json"),
                                     Tuple.Create("WebAgent", context.INI_WebAgentPath, False, AN2 & "-ag-", ".json"),
-                                    Tuple.Create("WebAgent (Local)", context.INI_WebAgentPathLocal, False, AN2 & "-ag-", ".json")
+                                    Tuple.Create("WebAgent (Local)", context.INI_WebAgentPathLocal, False, AN2 & "-ag-", ".json"),
+                                    Tuple.Create("Data Collector (Autopilot)", context.INI_DataCollectorPath, True, "", "")
                                 }
 
                                 Dim fileMap As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
@@ -3197,6 +3332,7 @@ Namespace SharedLibrary
             variableValues.Add("OAuth2Endpoint_2", context.INI_OAuth2Endpoint_2)
             variableValues.Add("OAuth2ATExpiry_2", context.INI_OAuth2ATExpiry_2)
             variableValues.Add("APIDebug", context.INI_APIDebug)
+            variableValues.Add("UseHostColorOutlook", context.INI_UseHostColorOutlook)
             variableValues.Add("AutoPilotAutoStart", context.INI_AutoPilotAutoStart)
             variableValues.Add("AutoPilotSchedulerLocalChat", context.INI_AutoPilotSchedulerLocalChat)
             variableValues.Add("UsageRestrictions", context.INI_UsageRestrictions)
@@ -3213,9 +3349,15 @@ Namespace SharedLibrary
             variableValues.Add("ReplaceText2Override", context.INI_ReplaceText2Override)
             variableValues.Add("DoMarkupOutlook", context.INI_DoMarkupOutlook)
             variableValues.Add("DoMarkupWord", context.INI_DoMarkupWord)
+            variableValues.Add("ChunkOCR", context.INI_ChunkOCR)
             variableValues.Add("M365ClientID", context.INI_M365ClientId)
             variableValues.Add("M365TenantID", context.INI_M365TenantId)
             variableValues.Add("M365Scopes", context.INI_M365Scopes)
+            variableValues.Add("SimpleMenuOverride", context.INI_SimpleMenuOverride)
+            variableValues.Add("SimpleMenuHide", context.INI_SimpleMenuHide)
+            variableValues.Add("SimpleMenuDefault", context.INI_SimpleMenuDefault)
+            variableValues.Add("MenuBlock", context.INI_MenuBlock)
+            variableValues.Add("WebServerBlock", context.INI_WebServerBlock)
             variableValues.Add("ISearch", context.INI_ISearch)
             variableValues.Add("ISearch_Approve", context.INI_ISearch_Approve)
             variableValues.Add("ISearch_URL", context.INI_ISearch_URL)
@@ -3260,9 +3402,18 @@ Namespace SharedLibrary
             variableValues.Add("RenameLibPathLocal", context.INI_RenameLibPathLocal)
             variableValues.Add("MailMoverPath", context.INI_MailMoverPath)
             variableValues.Add("MailMoverPathLocal", context.INI_MailMoverPathLocal)
+            variableValues.Add("DataCollectorPath", context.INI_DataCollectorPath)
             variableValues.Add("SpeechModelPath", context.INI_SpeechModelPath)
             variableValues.Add("LocalModelPath", context.INI_LocalModelPath)
+            variableValues.Add("DictionaryPath", context.INI_DictionaryPath)
+            variableValues.Add("DictionaryPathLocal", context.INI_DictionaryPathLocal)
+            variableValues.Add("STT_Google", context.INI_STT_Google)
+            variableValues.Add("STT_Google_ProjectID", context.INI_STT_Google_ProjectID)
+            variableValues.Add("STT_OpenAI", context.INI_STT_OpenAI)
+            variableValues.Add("STT_Azure", context.INI_STT_Azure)
+            variableValues.Add("STT_Azure_SpeechKey", context.INI_STT_Azure_SpeechKey)
             variableValues.Add("TTSEndpoint", context.INI_TTSEndpoint)
+            variableValues.Add("HttpStack", context.INI_HttpStack)
             variableValues.Add("BrandingName", context.INI_BrandingName)
             variableValues.Add("LogoPath", context.INI_LogoPath)
             variableValues.Add("LogoPathMedium", context.INI_LogoPathMedium)
@@ -3314,6 +3465,7 @@ Namespace SharedLibrary
             variableValues.Add("SP_Friendly", context.SP_Friendly)
             variableValues.Add("SP_Convincing", context.SP_Convincing)
             variableValues.Add("SP_NoFillers", context.SP_NoFillers)
+            variableValues.Add("SP_Compact", context.SP_Compact)
             variableValues.Add("SP_Podcast", context.SP_Podcast)
             variableValues.Add("SP_MyStyle_Word", context.SP_MyStyle_Word)
             variableValues.Add("SP_MyStyle_Outlook", context.SP_MyStyle_Outlook)
@@ -3339,6 +3491,7 @@ Namespace SharedLibrary
             variableValues.Add("SP_SwitchParty_Document", context.SP_SwitchParty_Document)
             variableValues.Add("SP_Anonymize_Document", context.SP_Anonymize_Document)
             variableValues.Add("SP_Rename", context.SP_Rename)
+            variableValues.Add("SP_Regex", context.SP_Regex)
             variableValues.Add("SP_RemoveClutter", context.SP_RemoveClutter)
             variableValues.Add("SP_Redact", context.SP_Redact)
             variableValues.Add("SP_CheckforII", context.SP_CheckforII)
@@ -3397,6 +3550,9 @@ Namespace SharedLibrary
             variableValues.Add("SP_Assemble_Summarize", context.SP_Assemble_Summarize)
             variableValues.Add("InkyMemoryCap", context.INI_InkyMemoryCap)
             variableValues.Add("NoHelperDownload", context.INI_NoHelperDownload)
+            variableValues.Add("LicenseCounterPath", context.INI_LicenseCounterPath)
+            variableValues.Add("LicenseCounterMethod", context.INI_LicenseCounterMethod)
+            variableValues.Add("LicenseCounterAnon", context.INI_LicenseCounterAnon)
             variableValues.Add("AutoPilot", context.INI_AutoPilot)
             variableValues.Add("ToolingLogWindow", context.INI_ToolingLogWindow)
             variableValues.Add("ToolingDryRun", context.INI_ToolingDryRun)
@@ -3475,6 +3631,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("OAuth2Endpoint_2") Then context.INI_OAuth2Endpoint_2 = CStr(updatedValues("OAuth2Endpoint_2"))
                 If updatedValues.ContainsKey("OAuth2ATExpiry_2") Then context.INI_OAuth2ATExpiry_2 = CLng(updatedValues("OAuth2ATExpiry_2"))
                 If updatedValues.ContainsKey("APIDebug") Then context.INI_APIDebug = CBool(updatedValues("APIDebug"))
+                If updatedValues.ContainsKey("UseHostColorOutlook") Then context.INI_UseHostColorOutlook = CBool(updatedValues("UseHostColorOutlook"))
                 If updatedValues.ContainsKey("AutoPilotAutoStart") Then context.INI_AutoPilotAutoStart = CBool(updatedValues("AutoPilotAutoStart"))
                 If updatedValues.ContainsKey("AutoPilotSchedulerLocalChat") Then context.INI_AutoPilotSchedulerLocalChat = CBool(updatedValues("AutoPilotSchedulerLocalChat"))
                 If updatedValues.ContainsKey("UsageRestrictions") Then context.INI_UsageRestrictions = CStr(updatedValues("UsageRestrictions"))
@@ -3491,6 +3648,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("ReplaceText2Override") Then context.INI_ReplaceText2Override = CStr(updatedValues("ReplaceText2Override"))
                 If updatedValues.ContainsKey("DoMarkupOutlook") Then context.INI_DoMarkupOutlook = CBool(updatedValues("DoMarkupOutlook"))
                 If updatedValues.ContainsKey("DoMarkupWord") Then context.INI_DoMarkupWord = CBool(updatedValues("DoMarkupWord"))
+                If updatedValues.ContainsKey("ChunkOCR") Then context.INI_ChunkOCR = CInt(updatedValues("ChunkOCR"))
                 If updatedValues.ContainsKey("SP_Translate") Then context.SP_Translate = CStr(updatedValues("SP_Translate"))
                 If updatedValues.ContainsKey("SP_Translate_Multi") Then context.SP_Translate_Multi = CStr(updatedValues("SP_Translate_Multi"))
                 If updatedValues.ContainsKey("SP_Translate_Multi_Source") Then context.SP_Translate_Multi_Source = CStr(updatedValues("SP_Translate_Multi_Source"))
@@ -3511,6 +3669,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_Friendly") Then context.SP_Friendly = CStr(updatedValues("SP_Friendly"))
                 If updatedValues.ContainsKey("SP_Convincing") Then context.SP_Convincing = CStr(updatedValues("SP_Convincing"))
                 If updatedValues.ContainsKey("SP_NoFillers") Then context.SP_NoFillers = CStr(updatedValues("SP_NoFillers"))
+                If updatedValues.ContainsKey("SP_Compact") Then context.SP_Compact = CStr(updatedValues("SP_Compact"))
                 If updatedValues.ContainsKey("SP_Podcast") Then context.SP_Podcast = CStr(updatedValues("SP_Podcast"))
                 If updatedValues.ContainsKey("SP_MyStyle_Word") Then context.SP_MyStyle_Word = CStr(updatedValues("SP_MyStyle_Word"))
                 If updatedValues.ContainsKey("SP_MyStyle_Outlook") Then context.SP_MyStyle_Outlook = CStr(updatedValues("SP_MyStyle_Outlook"))
@@ -3536,6 +3695,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_SwitchParty_Document") Then context.SP_SwitchParty_Document = CStr(updatedValues("SP_SwitchParty_Document"))
                 If updatedValues.ContainsKey("SP_Anonymize_Document") Then context.SP_Anonymize_Document = CStr(updatedValues("SP_Anonymize_Document"))
                 If updatedValues.ContainsKey("SP_Rename") Then context.SP_Rename = CStr(updatedValues("SP_Rename"))
+                If updatedValues.ContainsKey("SP_Regex") Then context.SP_Regex = CStr(updatedValues("SP_Regex"))
                 If updatedValues.ContainsKey("SP_RemoveClutter") Then context.SP_RemoveClutter = CStr(updatedValues("SP_RemoveClutter"))
                 If updatedValues.ContainsKey("SP_Redact") Then context.SP_Redact = CStr(updatedValues("SP_Redact"))
                 If updatedValues.ContainsKey("SP_CheckforII") Then context.SP_CheckforII = CStr(updatedValues("SP_CheckforII"))
@@ -3616,6 +3776,11 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("MarkupMethodWordOverride") Then context.INI_MarkupMethodWordOverride = CStr(updatedValues("MarkupMethodWordOverride"))
                 If updatedValues.ContainsKey("MarkupMethodOutlookOverride") Then context.INI_MarkupMethodOutlookOverride = CStr(updatedValues("MarkupMethodOutlookOverride"))
                 If updatedValues.ContainsKey("MarkupAuthor") Then context.INI_MarkupAuthor = CStr(updatedValues("MarkupAuthor"))
+                If updatedValues.ContainsKey("SimpleMenuOverride") Then context.INI_SimpleMenuOverride = CBool(updatedValues("SimpleMenuOverride"))
+                If updatedValues.ContainsKey("SimpleMenuHide") Then context.INI_SimpleMenuHide = CStr(updatedValues("SimpleMenuHide"))
+                If updatedValues.ContainsKey("SimpleMenuDefault") Then context.INI_SimpleMenuDefault = CBool(updatedValues("SimpleMenuDefault"))
+                If updatedValues.ContainsKey("MenuBlock") Then context.INI_MenuBlock = CStr(updatedValues("MenuBlock"))
+                If updatedValues.ContainsKey("WebServerBlock") Then context.INI_WebServerBlock = CInt(updatedValues("WebServerBlock"))
                 If updatedValues.ContainsKey("ShortcutsWordExcel") Then context.INI_ShortcutsWordExcel = CStr(updatedValues("ShortcutsWordExcel"))
                 If updatedValues.ContainsKey("ContextMenu") Then context.INI_ContextMenu = CBool(updatedValues("ContextMenu"))
                 If updatedValues.ContainsKey("NoLocalConfig") Then context.INI_NoLocalConfig = CBool(updatedValues("NoLocalConfig"))
@@ -3636,8 +3801,16 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("RenameLibPathLocal") Then context.INI_RenameLibPathLocal = CStr(updatedValues("RenameLibPathLocal"))
                 If updatedValues.ContainsKey("MailMoverPath") Then context.INI_MailMoverPath = CStr(updatedValues("MailMoverPath"))
                 If updatedValues.ContainsKey("MailMoverPathLocal") Then context.INI_MailMoverPathLocal = CStr(updatedValues("MailMoverPathLocal"))
+                If updatedValues.ContainsKey("DataCollectorPath") Then context.INI_DataCollectorPath = CStr(updatedValues("DataCollectorPath"))
                 If updatedValues.ContainsKey("SpeechModelPath") Then context.INI_SpeechModelPath = CStr(updatedValues("SpeechModelPath"))
                 If updatedValues.ContainsKey("LocalModelPath") Then context.INI_LocalModelPath = CStr(updatedValues("LocalModelPath"))
+                If updatedValues.ContainsKey("DictionaryPath") Then context.INI_DictionaryPath = CStr(updatedValues("DictionaryPath"))
+                If updatedValues.ContainsKey("DictionaryPathLocal") Then context.INI_DictionaryPathLocal = CStr(updatedValues("DictionaryPathLocal"))
+                If updatedValues.ContainsKey("STT_Google") Then context.INI_STT_Google = CStr(updatedValues("STT_Google"))
+                If updatedValues.ContainsKey("STT_Google_ProjectID") Then context.INI_STT_Google_ProjectID = CStr(updatedValues("STT_Google_ProjectID"))
+                If updatedValues.ContainsKey("STT_OpenAI") Then context.INI_STT_OpenAI = CStr(updatedValues("STT_OpenAI"))
+                If updatedValues.ContainsKey("STT_Azure") Then context.INI_STT_Azure = CStr(updatedValues("STT_Azure"))
+                If updatedValues.ContainsKey("STT_Azure_SpeechKey") Then context.INI_STT_Azure_SpeechKey = CStr(updatedValues("STT_Azure_SpeechKey"))
                 If updatedValues.ContainsKey("TTSEndpoint") Then context.INI_TTSEndpoint = CStr(updatedValues("TTSEndpoint"))
                 If updatedValues.ContainsKey("PromptLib") Then context.INI_PromptLibPath = CStr(updatedValues("PromptLib"))
                 If updatedValues.ContainsKey("PromptLibLocal") Then context.INI_PromptLibPathLocal = CStr(updatedValues("PromptLibLocal"))
@@ -3657,11 +3830,15 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("DocStylePath") Then context.INI_DocStylePath = CStr(updatedValues("DocStylePath"))
                 If updatedValues.ContainsKey("DocStylePathLocal") Then context.INI_DocStylePathLocal = CStr(updatedValues("DocStylePathLocal"))
                 If updatedValues.ContainsKey("PromptLib_Transcript") Then context.INI_PromptLibPath_Transcript = CStr(updatedValues("PromptLib_Transcript"))
+                If updatedValues.ContainsKey("HttpStack") Then context.INI_HttpStack = CStr(updatedValues("HttpStack"))
                 If updatedValues.ContainsKey("BrandingName") Then context.INI_BrandingName = CStr(updatedValues("BrandingName"))
                 If updatedValues.ContainsKey("LogoPath") Then context.INI_LogoPath = CStr(updatedValues("LogoPath"))
                 If updatedValues.ContainsKey("LogoPathMedium") Then context.INI_LogoPathMedium = CStr(updatedValues("LogoPathMedium"))
                 If updatedValues.ContainsKey("LogoPathLarge") Then context.INI_LogoPathLarge = CStr(updatedValues("LogoPathLarge"))
                 If updatedValues.ContainsKey("NoHelperDownload") Then context.INI_NoHelperDownload = CBool(updatedValues("NoHelperDownload"))
+                If updatedValues.ContainsKey("LicenseCounterPath") Then context.INI_LicenseCounterPath = CStr(updatedValues("LicenseCounterPath"))
+                If updatedValues.ContainsKey("LicenseCounterMethod") Then context.INI_LicenseCounterMethod = CStr(updatedValues("LicenseCounterMethod"))
+                If updatedValues.ContainsKey("LicenseCounterAnon") Then context.INI_LicenseCounterAnon = CBool(updatedValues("LicenseCounterAnon"))
                 If updatedValues.ContainsKey("InkyMemoryCap") Then context.INI_InkyMemoryCap = CInt(updatedValues("InkyMemoryCap"))
                 If updatedValues.ContainsKey("AutoPilot") Then context.INI_AutoPilot = CStr(updatedValues("AutoPilot"))
                 If updatedValues.ContainsKey("ToolingLogWindow") Then context.INI_ToolingLogWindow = CBool(updatedValues("ToolingLogWindow"))

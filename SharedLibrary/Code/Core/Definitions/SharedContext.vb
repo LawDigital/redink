@@ -70,7 +70,6 @@ Namespace SharedLibrary
             Property INI_MarkupMethodOutlook As Integer
             Property INI_MarkupDiffCap As Integer
             Property INI_MarkupRegexCap As Integer
-            Property INI_OpenSSLPath As String
             Property INI_OAuth2 As Boolean
             Property INI_OAuth2ClientMail As String
             Property INI_OAuth2Scopes As String
@@ -99,6 +98,7 @@ Namespace SharedLibrary
             Property INI_OAuth2Endpoint_2 As String
             Property INI_OAuth2ATExpiry_2 As Long
             Property INI_APIDebug As Boolean
+            Property INI_UseHostColorOutlook As Boolean
             Property INI_UsageRestrictions As String
             Property INI_LogPath As String
             Property INI_AllowLegacyDocFiles As Boolean
@@ -118,7 +118,13 @@ Namespace SharedLibrary
             Property INI_ReplaceText2Override As String
             Property INI_DoMarkupOutlook As Boolean
             Property INI_DoMarkupWord As Boolean
+            Property INI_ChunkOCR As Integer
             Property INI_RoastMe As Boolean
+            Property INI_SimpleMenuOverride As Boolean
+            Property INI_SimpleMenuDefault As Boolean
+            Property INI_SimpleMenuHide As String
+            Property INI_MenuBlock As String
+            Property INI_WebServerBlock As Integer
             Property DecodedAPI As String
             Property DecodedAPI_2 As String
             Property TokenExpiry As DateTime
@@ -141,6 +147,8 @@ Namespace SharedLibrary
             Property INI_ExtractorPathLocal As String
             Property INI_RenameLibPath As String
             Property INI_RenameLibPathLocal As String
+
+            Property INI_DataCollectorPath As String
             Property INI_MailMoverPath As String
             Property INI_MailMoverPathLocal As String
 
@@ -148,7 +156,16 @@ Namespace SharedLibrary
             Property INI_RedactionInstructionsPathLocal As String
             Property INI_SpeechModelPath As String
             Property INI_LocalModelPath As String
+            Property INI_DictionaryPath As String
+            Property INI_DictionaryPathLocal As String
             Property INI_TTSEndpoint As String
+
+            Property INI_STT_Google As String
+            Property INI_STT_OpenAI As String
+            Property INI_STT_Azure As String
+            Property INI_STT_Google_ProjectID As String
+            Property INI_STT_Azure_SpeechKey As String
+
             Property SP_Translate As String
             Property SP_Translate_Multi As String
 
@@ -172,6 +189,7 @@ Namespace SharedLibrary
             Property SP_Convincing As String
             Property SP_NoFillers As String
             Property SP_Podcast As String
+            Property SP_Compact As String
             Property SP_MyStyle_Word As String
             Property SP_MyStyle_Outlook As String
             Property SP_MyStyle_Apply As String
@@ -200,6 +218,7 @@ Namespace SharedLibrary
             Property SP_ExtractSchema As String
             Property SP_MergeDateRows As String
             Property SP_Rename As String
+            Property SP_Regex As String
             Property SP_RemoveClutter As String
             Property SP_Redact As String
             Property SP_CheckforII As String
@@ -316,6 +335,9 @@ Namespace SharedLibrary
             Property Location As String
 
             Property INI_NoHelperDownload As Boolean
+            Property INI_LicenseCounterPath As String
+            Property INI_LicenseCounterMethod As String
+            Property INI_LicenseCounterAnon As Boolean
 
             ' Master switch for INI update mechanism
             Property INI_UpdateIni As Boolean
@@ -358,6 +380,8 @@ Namespace SharedLibrary
             Property INI_LogoPathMedium As String
             Property INI_LogoPath As String
             Property INI_BrandingName As String
+
+            Property INI_HttpStack As String
 
             ' InkyMemory settings
             Property INI_InkyMemoryCap As Integer
@@ -413,7 +437,6 @@ Namespace SharedLibrary
         Public Property INI_MarkupMethodOutlook As Integer Implements ISharedContext.INI_MarkupMethodOutlook
         Public Property INI_MarkupDiffCap As Integer Implements ISharedContext.INI_MarkupDiffCap
         Public Property INI_MarkupRegexCap As Integer Implements ISharedContext.INI_MarkupRegexCap
-        Public Property INI_OpenSSLPath As String Implements ISharedContext.INI_OpenSSLPath
         Public Property INI_OAuth2 As Boolean Implements ISharedContext.INI_OAuth2
         Public Property INI_OAuth2ClientMail As String Implements ISharedContext.INI_OAuth2ClientMail
         Public Property INI_OAuth2Scopes As String Implements ISharedContext.INI_OAuth2Scopes
@@ -442,6 +465,7 @@ Namespace SharedLibrary
         Public Property INI_OAuth2Endpoint_2 As String Implements ISharedContext.INI_OAuth2Endpoint_2
         Public Property INI_OAuth2ATExpiry_2 As Long Implements ISharedContext.INI_OAuth2ATExpiry_2
         Public Property INI_APIDebug As Boolean Implements ISharedContext.INI_APIDebug
+        Public Property INI_UseHostColorOutlook As Boolean Implements ISharedContext.INI_UseHostColorOutlook
         Public Property INI_AutoPilotAutoStart As Boolean Implements ISharedContext.INI_AutoPilotAutoStart
         Public Property INI_AutoPilotSchedulerLocalChat As Boolean Implements ISharedContext.INI_AutoPilotSchedulerLocalChat
         Public Property INI_UsageRestrictions As String Implements ISharedContext.INI_UsageRestrictions
@@ -460,7 +484,13 @@ Namespace SharedLibrary
         Public Property INI_ReplaceText2Override As String Implements ISharedContext.INI_ReplaceText2Override
         Public Property INI_DoMarkupOutlook As Boolean Implements ISharedContext.INI_DoMarkupOutlook
         Public Property INI_DoMarkupWord As Boolean Implements ISharedContext.INI_DoMarkupWord
+        Public Property INI_ChunkOCR As Integer Implements ISharedContext.INI_ChunkOCR
         Public Property INI_RoastMe As Boolean Implements ISharedContext.INI_RoastMe
+        Public Property INI_SimpleMenuOverride As Boolean Implements ISharedContext.INI_SimpleMenuOverride
+        Public Property INI_SimpleMenuDefault As Boolean Implements ISharedContext.INI_SimpleMenuDefault
+        Public Property INI_SimpleMenuHide As String Implements ISharedContext.INI_SimpleMenuHide
+        Public Property INI_MenuBlock As String Implements ISharedContext.INI_MenuBlock
+        Public Property INI_WebServerBlock As Integer Implements ISharedContext.INI_WebServerBlock
         Public Property DecodedAPI As String Implements ISharedContext.DecodedAPI
         Public Property DecodedAPI_2 As String Implements ISharedContext.DecodedAPI_2
         Public Property TokenExpiry As DateTime Implements ISharedContext.TokenExpiry
@@ -483,13 +513,24 @@ Namespace SharedLibrary
         Public Property INI_ExtractorPathLocal As String Implements ISharedContext.INI_ExtractorPathLocal
         Public Property INI_RenameLibPath As String Implements ISharedContext.INI_RenameLibPath
         Public Property INI_RenameLibPathLocal As String Implements ISharedContext.INI_RenameLibPathLocal
+        Public Property INI_DataCollectorPath As String Implements ISharedContext.INI_DataCollectorPath
         Public Property INI_MailMoverPath As String Implements ISharedContext.INI_MailMoverPath
         Public Property INI_MailMoverPathLocal As String Implements ISharedContext.INI_MailMoverPathLocal
         Public Property INI_RedactionInstructionsPath As String Implements ISharedContext.INI_RedactionInstructionsPath
         Public Property INI_RedactionInstructionsPathLocal As String Implements ISharedContext.INI_RedactionInstructionsPathLocal
         Public Property INI_SpeechModelPath As String Implements ISharedContext.INI_SpeechModelPath
         Public Property INI_LocalModelPath As String Implements ISharedContext.INI_LocalModelPath
+        Public Property INI_DictionaryPath As String Implements ISharedContext.INI_DictionaryPath
+        Public Property INI_DictionaryPathLocal As String Implements ISharedContext.INI_DictionaryPathLocal
         Public Property INI_TTSEndpoint As String Implements ISharedContext.INI_TTSEndpoint
+
+        Public Property INI_STT_Google As String Implements ISharedContext.INI_STT_Google
+        Public Property INI_STT_OpenAI As String Implements ISharedContext.INI_STT_OpenAI
+        Public Property INI_STT_Azure As String Implements ISharedContext.INI_STT_Azure
+        Public Property INI_STT_Google_ProjectID As String Implements ISharedContext.INI_STT_Google_ProjectID
+        Public Property INI_STT_Azure_SpeechKey As String Implements ISharedContext.INI_STT_Azure_SpeechKey
+
+
         Public Property SP_Translate As String Implements ISharedContext.SP_Translate
         Public Property SP_Translate_Multi As String Implements ISharedContext.SP_Translate_Multi
         Public Property SP_Translate_Multi_Source As String Implements ISharedContext.SP_Translate_Multi_Source
@@ -511,6 +552,7 @@ Namespace SharedLibrary
         Public Property SP_Convincing As String Implements ISharedContext.SP_Convincing
         Public Property SP_NoFillers As String Implements ISharedContext.SP_NoFillers
         Public Property SP_Podcast As String Implements ISharedContext.SP_Podcast
+        Public Property SP_Compact As String Implements ISharedContext.SP_Compact
         Public Property SP_MyStyle_Word As String Implements ISharedContext.SP_MyStyle_Word
         Public Property SP_MyStyle_Outlook As String Implements ISharedContext.SP_MyStyle_Outlook
         Public Property SP_MyStyle_Apply As String Implements ISharedContext.SP_MyStyle_Apply
@@ -542,6 +584,7 @@ Namespace SharedLibrary
 
         Public Property SP_MergeDateRows As String Implements ISharedContext.SP_MergeDateRows
         Public Property SP_Rename As String Implements ISharedContext.SP_Rename
+        Public Property SP_Regex As String Implements ISharedContext.SP_Regex
         Public Property SP_RemoveClutter As String Implements ISharedContext.SP_RemoveClutter
         Public Property SP_Redact As String Implements ISharedContext.SP_Redact
         Public Property SP_CheckforII As String Implements ISharedContext.SP_CheckforII
@@ -656,6 +699,9 @@ Namespace SharedLibrary
         Public Property SP_Add_MergePrompt As String Implements ISharedContext.SP_Add_MergePrompt
 
         Public Property INI_NoHelperDownload As Boolean Implements ISharedContext.INI_NoHelperDownload
+        Public Property INI_LicenseCounterPath As String Implements ISharedContext.INI_LicenseCounterPath
+        Public Property INI_LicenseCounterMethod As String Implements ISharedContext.INI_LicenseCounterMethod
+        Public Property INI_LicenseCounterAnon As Boolean Implements ISharedContext.INI_LicenseCounterAnon
         Public Property INI_UpdateIni As Boolean Implements ISharedContext.INI_UpdateIni
         Public Property INI_UpdateIniClients As String Implements ISharedContext.INI_UpdateIniClients
         Public Property INI_UpdateIniAllowRemote As Boolean Implements ISharedContext.INI_UpdateIniAllowRemote
@@ -689,6 +735,8 @@ Namespace SharedLibrary
         Public Property INI_LogoPathMedium As String Implements ISharedContext.INI_LogoPathMedium
         Public Property INI_LogoPath As String Implements ISharedContext.INI_LogoPath
         Public Property INI_BrandingName As String Implements ISharedContext.INI_BrandingName
+
+        Public Property INI_HttpStack As String Implements ISharedContext.INI_HttpStack
 
         Public Property INI_InkyMemoryCap As Integer Implements ISharedContext.INI_InkyMemoryCap
         Public Property SP_Add_InkyMemory As String Implements ISharedContext.SP_Add_InkyMemory

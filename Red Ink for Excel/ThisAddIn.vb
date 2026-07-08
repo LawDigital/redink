@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Excel"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 4.6.2026
+' 8.7.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -15,7 +15,7 @@
 ' Includes Vosk in unchanged form; Copyright (c) 2022 Alpha Cephei Inc.; licensed under the Apache 2.0 license (https://licenses.nuget.org/Apache-2.0) at https://alphacephei.com/vosk/
 ' Includes Whisper.net in unchanged form; Copyright (c) 2024 Sandro Hanea; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://github.com/sandrohanea/whisper.net
 ' Includes Grpc.core/Grpc.net in unchanged form; Copyright (c) 2023/2025 The gRPC Authors; licensed under the Apache 2.0 license (https://licenses.nuget.org/Apache-2.0) at https://github.com/grpc/grpc
-' Includes Google Speech V1 library and related API libraries in unchanged form; Copyright (c) 2024 Google LLC; licensed under the Apache 2.0 license (https://licenses.nuget.org/Apache-2.0) at https://github.com/googleapis/google-cloud-dotnet
+' Includes Google Speech V1/V2 library and related API libraries in unchanged form; Copyright (c) 2024 Google LLC; licensed under the Apache 2.0 license (https://licenses.nuget.org/Apache-2.0) at https://github.com/googleapis/google-cloud-dotnet
 ' Includes Google Protobuf in unchanged form; Copyright (c) 2025 Google Inc.; licensed under the BSD-3-Clause license (https://licenses.nuget.org/BSD-3-Clause) at https://github.com/protocolbuffers/protobuf
 ' Includes Google.Api in unchanged form; Copyright (c) 2025 Google LLC; licensed under the BSD-3-Clause license (https://licenses.nuget.org/BSD-3-Clause) at https://github.com/googleapis/gax-dotnet
 ' Includes Google.Apis in unchanged form; Copyright (c) 2025 Google LLC; licensed under the Apache 2.0 license (https://licenses.nuget.org/Apache-2.0) at https://github.com/googleapis/google-api-dotnet-client
@@ -56,7 +56,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.040626" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.080726" & SharedMethods.VersionQualifier
 
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
@@ -91,6 +91,7 @@ Partial Public Class ThisAddIn
     Public TranslateLanguage As String
     Public OutputLanguage As String
     Public FormulaInstruction As String
+    Public Dictionary As String = ""
     Public FileNameBody As String
     Public FileDate As String
     Public CurrentDate As String = "(Current Date: " & DateTime.Now.ToString("dd-MMM-yyyy", CultureInfo.GetCultureInfo("en-US")) & ")"
@@ -195,6 +196,24 @@ Partial Public Class ThisAddIn
         ' Other startup tasks
 
         SharedMethods.Initialize(Me.CustomTaskPanes)
+
+        Try
+            If System.Threading.SynchronizationContext.Current Is Nothing Then
+                System.Threading.SynchronizationContext.SetSynchronizationContext(
+                    New System.Windows.Forms.WindowsFormsSynchronizationContext())
+            End If
+
+            Using anchor As New System.Windows.Forms.Control()
+                Dim h = anchor.Handle
+            End Using
+
+            SharedLibrary.Agents.WebView2JsSandbox.Initialize(
+                System.Threading.SynchronizationContext.Current,
+                System.IO.Path.Combine(System.IO.Path.GetTempPath(), "RedInk_JsSandbox"))
+        Catch
+            ' URL import will report "sandbox_uninitialized" if this failed.
+        End Try
+
         InitializeAddInFeatures()
     End Sub
 
@@ -221,12 +240,18 @@ Partial Public Class ThisAddIn
         End If
 
         AddContextMenu()
+
+        If _context IsNot Nothing AndAlso _context.INIloaded Then
+            SharedMethods.RegisterLicenseCounterUsageAndReport(_context, "EX")
+        End If
+
         UpdateHandler.PeriodicCheckForUpdates(INI_UpdateCheckInterval, RDV, INI_UpdatePath, _context)
 
         ' Initialize model menu buttons on the ribbon
         Try
             If Globals.Ribbons.Ribbon1 IsNot Nothing Then
                 Globals.Ribbons.Ribbon1.UpdateModelsMenu()
+                Globals.Ribbons.Ribbon1.ApplyRibbonVisibilityConfiguration()
             End If
         Catch
             ' non-critical

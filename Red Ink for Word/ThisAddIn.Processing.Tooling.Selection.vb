@@ -115,8 +115,8 @@ Partial Public Class ThisAddIn
     ''' <param name="preselectAll">Unused parameter in this method body (caller passes a value).</param>
     ''' <returns>Selected tools when the dialog result is OK; otherwise Nothing.</returns>
     Public Function ShowToolSelectionDialog(availableTools As List(Of ModelConfig), Optional preselectAll As Boolean = True, Optional FriendlyName As String = "Tools") As List(Of ModelConfig)
-        Dim selectedMainToolNames = SplitPersistedToolNames(GetWordSettingString(SelectedMainToolNamesSettingName))
-        Dim selectedAdvancedToolNames = SplitPersistedToolNames(GetWordSettingString(SelectedAdvancedToolNamesSettingName))
+        Dim selectedMainToolNames = GetDiscussInkyEffectiveMainToolNames()
+        Dim selectedAdvancedToolNames = GetDiscussInkyEffectiveAdvancedToolNames()
         Dim updatedAdvancedToolNames As List(Of String) = Nothing
 
         Dim updatedMainToolNames = ShowDiscussInkyToolSelectionDialog(
@@ -229,22 +229,17 @@ Partial Public Class ThisAddIn
         Return ShowToolSelectionDialog(GetAvailableTools(), preselectAll:=selected.Count = 0, FriendlyName:=FriendlyName)
     End Function
 
-    Private Const SelectedMainToolNamesSettingName As String = "SelectedMainToolNames"
-    Private Const SelectedAdvancedToolNamesSettingName As String = "SelectedAdvancedToolNames"
     Private Const AdvancedToolsEnabledSettingName As String = "AdvancedToolsEnabled"
 
+    ' Opt-out persistence: we store only the tools the user has *explicitly deselected*.
+    ' Anything not listed is on by default (including newly added tools), so the agentic
+    ' platform works with as few clicks as possible while still allowing the user to
+    ' deselect some or all tools. New keys (vs. the legacy "Selected..." keys) ensure old
+    ' opt-in selections are ignored rather than mis-read as deselections.
+    Private Const DeselectedMainToolNamesSettingName As String = "DeselectedMainToolNames"
+    Private Const DeselectedAdvancedToolNamesSettingName As String = "DeselectedAdvancedToolNames"
 
-    Public Function GetPersistedSelectedMainToolNames() As List(Of String)
-        Return SplitPersistedToolNames(GetWordSettingString(SelectedMainToolNamesSettingName))
-    End Function
 
-    Public Function GetPersistedSelectedAdvancedToolNames() As List(Of String)
-        Return SplitPersistedToolNames(GetWordSettingString(SelectedAdvancedToolNamesSettingName))
-    End Function
-
-    Public Function GetPersistedAdvancedToolsEnabled() As Boolean
-        Return GetWordSettingBoolean(AdvancedToolsEnabledSettingName, False)
-    End Function
 
 
 
@@ -333,33 +328,108 @@ Partial Public Class ThisAddIn
         Return GetWordSettingBoolean(AdvancedToolsEnabledSettingName, False)
     End Function
 
+    Private Function GetDiscussInkyDeselectedMainToolNames() As List(Of String)
+        Return SplitPersistedToolNames(GetWordSettingString(DeselectedMainToolNamesSettingName))
+    End Function
+
+    Private Function GetDiscussInkyDeselectedAdvancedToolNames() As List(Of String)
+        Return SplitPersistedToolNames(GetWordSettingString(DeselectedAdvancedToolNamesSettingName))
+    End Function
+
+    ''' <summary>
+    ''' Advanced tools available for the current workspace state. Workspace tools are only
+    ''' available (and therefore default-on) while a workspace is connected.
+    ''' </summary>
+    Private Function GetDiscussInkyAvailableAdvancedToolsForState() As List(Of ModelConfig)
+        Dim workspaceConnected As Boolean = IsDiscussInkyWorkspaceConnected()
+
+        Return DeduplicateToolsByName(
+            GetDiscussInkyAdvancedSelectableTools().
+                Where(Function(t) t IsNot Nothing AndAlso
+                                  Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                                  (workspaceConnected OrElse
+                                   Not SharedLibrary.Agents.WorkspaceTools.IsWorkspaceTool(t.ToolName))))
+    End Function
+
+    ''' <summary>
+    ''' Effective main tool names: every available main tool except those the user deselected.
+    ''' </summary>
+    Public Function GetDiscussInkyEffectiveMainToolNames() As List(Of String)
+        Dim deselected = BuildToolNameSet(GetDiscussInkyDeselectedMainToolNames())
+
+        Return GetDiscussInkyMainSelectableTools().
+            Where(Function(t) Not deselected.Contains(t.ToolName)).
+            Select(Function(t) t.ToolName).
+            Distinct(StringComparer.OrdinalIgnoreCase).
+            ToList()
+    End Function
+
+    ''' <summary>
+    ''' Effective advanced tool names: every state-available advanced tool except those deselected.
+    ''' </summary>
+    Public Function GetDiscussInkyEffectiveAdvancedToolNames() As List(Of String)
+        Dim deselected = BuildToolNameSet(GetDiscussInkyDeselectedAdvancedToolNames())
+
+        Return GetDiscussInkyAvailableAdvancedToolsForState().
+            Where(Function(t) Not deselected.Contains(t.ToolName)).
+            Select(Function(t) t.ToolName).
+            Distinct(StringComparer.OrdinalIgnoreCase).
+            ToList()
+    End Function
+
+    Private Function GetDiscussInkySelectedSkillAllowedToolNames(selectedToolNames As IEnumerable(Of String)) As List(Of String)
+        Dim result As New List(Of String)()
+
+        Try
+            Dim selectedSet As New HashSet(Of String)(
+                If(selectedToolNames, Enumerable.Empty(Of String)()).
+                    Where(Function(n) Not String.IsNullOrWhiteSpace(n)).
+                    Select(Function(n) n.Trim()),
+                StringComparer.OrdinalIgnoreCase)
+
+            If selectedSet.Count = 0 Then
+                Return result
+            End If
+
+            SharedLibrary.Agents.AgentResources.Refresh()
+
+            For Each skill As SharedLibrary.Agents.SkillDescriptor In SharedLibrary.Agents.AgentResources.Skills
+                If skill Is Nothing OrElse String.IsNullOrWhiteSpace(skill.Name) Then
+                    Continue For
+                End If
+
+                Dim skillToolName As String = "skill_" & skill.Name.Trim()
+
+                If Not selectedSet.Contains(skillToolName) Then
+                    Continue For
+                End If
+
+                If skill.AllowedTools Is Nothing Then
+                    Continue For
+                End If
+
+                For Each rawName As String In skill.AllowedTools
+                    Dim toolName As String = If(rawName, "").Trim()
+                    If toolName <> "" Then
+                        result.Add(toolName)
+                    End If
+                Next
+            Next
+        Catch ex As Exception
+            ToolingFileLogger.LogWarn("Failed to expand selected skill allowed-tools for Discuss Inky.", ex:=ex)
+        End Try
+
+        Return result.
+            Distinct(StringComparer.OrdinalIgnoreCase).
+            ToList()
+    End Function
     Public Function GetDiscussInkyEffectiveTools(Optional includeImplicitWorkspaceTools As Boolean = True) As List(Of ModelConfig)
-        Dim mainNames = SplitPersistedToolNames(GetWordSettingString(SelectedMainToolNamesSettingName))
-        Dim advancedNames = SplitPersistedToolNames(GetWordSettingString(SelectedAdvancedToolNamesSettingName))
         Dim advancedEnabled = GetDiscussInkyAdvancedToolsEnabled()
 
-        If mainNames.Count = 0 AndAlso advancedNames.Count = 0 Then
-            Dim legacy = SplitPersistedToolNames(My.Settings.SelectedToolNames)
-            If legacy.Count > 0 Then
-                Dim legacySet As New HashSet(Of String)(legacy, StringComparer.OrdinalIgnoreCase)
-
-                mainNames =
-                    GetDiscussInkyMainSelectableTools().
-                        Where(Function(t) legacySet.Contains(t.ToolName)).
-                        Select(Function(t) t.ToolName).
-                        Distinct(StringComparer.OrdinalIgnoreCase).
-                        ToList()
-
-                advancedNames =
-                    GetDiscussInkyAdvancedSelectableTools().
-                        Where(Function(t) legacySet.Contains(t.ToolName)).
-                        Select(Function(t) t.ToolName).
-                        Distinct(StringComparer.OrdinalIgnoreCase).
-                        ToList()
-            End If
-        End If
-
-        advancedNames = NormalizeDiscussInkyAdvancedToolNames(advancedNames)
+        ' Opt-out defaults: every available tool is on unless the user deselected it.
+        Dim mainNames = GetDiscussInkyEffectiveMainToolNames()
+        Dim advancedNames As List(Of String) =
+            If(advancedEnabled, GetDiscussInkyEffectiveAdvancedToolNames(), New List(Of String)())
 
         Dim result As New List(Of ModelConfig)()
         Dim mainSet = BuildToolNameSet(mainNames)
@@ -372,8 +442,27 @@ Partial Public Class ThisAddIn
         Next
 
         If advancedEnabled Then
-            For Each tool In GetDiscussInkyAdvancedSelectableTools()
+            For Each tool In GetDiscussInkyAvailableAdvancedToolsForState()
                 If advancedSet.Contains(tool.ToolName) Then
+                    result.Add(tool)
+                End If
+            Next
+        End If
+
+        Dim explicitlySelectedToolNames As New List(Of String)()
+        explicitlySelectedToolNames.AddRange(mainNames)
+        explicitlySelectedToolNames.AddRange(advancedNames)
+
+        Dim skillRequiredToolNames As List(Of String) =
+        GetDiscussInkySelectedSkillAllowedToolNames(explicitlySelectedToolNames)
+
+        If skillRequiredToolNames.Count > 0 Then
+            Dim requiredSet = BuildToolNameSet(skillRequiredToolNames)
+
+            For Each tool In GetAvailableTools()
+                If tool Is Nothing OrElse String.IsNullOrWhiteSpace(tool.ToolName) Then Continue For
+
+                If requiredSet.Contains(tool.ToolName) Then
                     result.Add(tool)
                 End If
             Next
@@ -388,16 +477,23 @@ Partial Public Class ThisAddIn
     Public Sub PersistDiscussInkyToolSelection(selectedMainToolNames As IEnumerable(Of String),
                                                selectedAdvancedToolNames As IEnumerable(Of String),
                                                advancedToolsEnabled As Boolean)
-        Dim mainNames = If(selectedMainToolNames, Enumerable.Empty(Of String)()).
-            Where(Function(s) Not String.IsNullOrWhiteSpace(s)).
-            Select(Function(s) s.Trim()).
+        ' Persist the *deselected* tools (opt-out): available-minus-checked, per category.
+        Dim mainChecked = BuildToolNameSet(selectedMainToolNames)
+        Dim deselectedMain = GetDiscussInkyMainSelectableTools().
+            Where(Function(t) Not mainChecked.Contains(t.ToolName)).
+            Select(Function(t) t.ToolName).
             Distinct(StringComparer.OrdinalIgnoreCase).
             ToList()
 
-        Dim advancedNames = NormalizeDiscussInkyAdvancedToolNames(selectedAdvancedToolNames)
+        Dim advancedChecked = BuildToolNameSet(selectedAdvancedToolNames)
+        Dim deselectedAdvanced = GetDiscussInkyAvailableAdvancedToolsForState().
+            Where(Function(t) Not advancedChecked.Contains(t.ToolName)).
+            Select(Function(t) t.ToolName).
+            Distinct(StringComparer.OrdinalIgnoreCase).
+            ToList()
 
-        SetWordSettingValue(SelectedMainToolNamesSettingName, JoinPersistedToolNames(mainNames))
-        SetWordSettingValue(SelectedAdvancedToolNamesSettingName, JoinPersistedToolNames(advancedNames))
+        SetWordSettingValue(DeselectedMainToolNamesSettingName, JoinPersistedToolNames(deselectedMain))
+        SetWordSettingValue(DeselectedAdvancedToolNamesSettingName, JoinPersistedToolNames(deselectedAdvanced))
         SetWordSettingValue(AdvancedToolsEnabledSettingName, advancedToolsEnabled)
 
         Dim effective = GetDiscussInkyEffectiveTools(includeImplicitWorkspaceTools:=False)
@@ -406,8 +502,12 @@ Partial Public Class ThisAddIn
     End Sub
 
     Private Function ShowDiscussInkyAdvancedToolSelectionDialog(selectedAdvancedToolNames As IEnumerable(Of String)) As List(Of String)
-        Dim availableTools = GetDiscussInkyAdvancedSelectableTools()
-        Dim preselected = NormalizeDiscussInkyAdvancedToolNames(selectedAdvancedToolNames)
+        Dim availableTools = GetDiscussInkyAvailableAdvancedToolsForState()
+        Dim preselected = If(selectedAdvancedToolNames, Enumerable.Empty(Of String)()).
+            Where(Function(n) Not String.IsNullOrWhiteSpace(n)).
+            Select(Function(n) n.Trim()).
+            Distinct(StringComparer.OrdinalIgnoreCase).
+            ToList()
 
         Using selector As New MultiModelSelectorForm(
             availableTools,
@@ -415,16 +515,15 @@ Partial Public Class ThisAddIn
             $"{AN} - Select Advanced Tools",
             resetChecked:=False,
             preselectMany:=preselected,
-            instruction:="Select the advanced tools that may be callable. " &
-                         "Workspace tools are shown here and are auto-selected while a workspace is connected; otherwise they remain off.")
+            instruction:="Select the advanced tools that may be callable. All available tools are on by default; " &
+                         "uncheck any you want to disable. Workspace tools appear here only while a workspace is connected.")
 
             If selector.ShowDialog() = DialogResult.OK Then
-                Return NormalizeDiscussInkyAdvancedToolNames(
-                    selector.SelectedModels.
-                        Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
-                        Select(Function(t) t.ToolName).
-                        Distinct(StringComparer.OrdinalIgnoreCase).
-                        ToList())
+                Return selector.SelectedModels.
+                    Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
+                    Select(Function(t) t.ToolName).
+                    Distinct(StringComparer.OrdinalIgnoreCase).
+                    ToList()
             End If
         End Using
 
@@ -437,7 +536,10 @@ Partial Public Class ThisAddIn
 
         Dim availableTools = GetDiscussInkyMainSelectableTools()
         Dim workingAdvanced As New List(Of String)(
-            NormalizeDiscussInkyAdvancedToolNames(selectedAdvancedToolNames))
+            If(selectedAdvancedToolNames, Enumerable.Empty(Of String)()).
+                Where(Function(n) Not String.IsNullOrWhiteSpace(n)).
+                Select(Function(n) n.Trim()).
+                Distinct(StringComparer.OrdinalIgnoreCase))
 
         Using selector As New MultiModelSelectorForm(
             availableTools,
@@ -446,6 +548,7 @@ Partial Public Class ThisAddIn
             resetChecked:=False,
             preselectMany:=If(selectedMainToolNames, New List(Of String)()),
             instruction:="Select the agents, sources, skills, and connector-oriented tools you want to make available to the model. " &
+                         "Note: all available tools are on by default (including newly added ones); uncheck any you want to disable. " &
                          "Advanced tools are managed separately through the 'Advanced tools…' button.")
 
             selector.AddExtraButton("Advanced tools…",
@@ -496,8 +599,8 @@ Partial Public Class ThisAddIn
     End Function
 
     Public Function SelectDiscussInkyToolsForSession(Optional forceDialog As Boolean = False) As List(Of ModelConfig)
-        Dim selectedMain = SplitPersistedToolNames(GetWordSettingString(SelectedMainToolNamesSettingName))
-        Dim selectedAdvanced = SplitPersistedToolNames(GetWordSettingString(SelectedAdvancedToolNamesSettingName))
+        Dim selectedMain = GetDiscussInkyEffectiveMainToolNames()
+        Dim selectedAdvanced = GetDiscussInkyEffectiveAdvancedToolNames()
 
         If Not forceDialog Then
             Dim effective = GetDiscussInkyEffectiveTools()

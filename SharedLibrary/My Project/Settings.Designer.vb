@@ -843,6 +843,102 @@ Namespace My
                 Me("MarkupAuthor") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("-2147483648")>  _
+        Public Property TalkToMeWidgetX() As Integer
+            Get
+                Return CType(Me("TalkToMeWidgetX"),Integer)
+            End Get
+            Set
+                Me("TalkToMeWidgetX") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("-2147483648")>  _
+        Public Property TalkToMeWidgetY() As Integer
+            Get
+                Return CType(Me("TalkToMeWidgetY"),Integer)
+            End Get
+            Set
+                Me("TalkToMeWidgetY") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("420")>  _
+        Public Property TalkToMeWidgetWidth() As Integer
+            Get
+                Return CType(Me("TalkToMeWidgetWidth"),Integer)
+            End Get
+            Set
+                Me("TalkToMeWidgetWidth") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("44")>  _
+        Public Property TalkToMeWidgetHeight() As Integer
+            Get
+                Return CType(Me("TalkToMeWidgetHeight"),Integer)
+            End Get
+            Set
+                Me("TalkToMeWidgetHeight") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property TalkToMeIncludeFullDocument() As Boolean
+            Get
+                Return CType(Me("TalkToMeIncludeFullDocument"),Boolean)
+            End Get
+            Set
+                Me("TalkToMeIncludeFullDocument") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property SimpleMenuOverride() As Boolean
+            Get
+                Return CType(Me("SimpleMenuOverride"),Boolean)
+            End Get
+            Set
+                Me("SimpleMenuOverride") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property SimpleMenuOverrideIsSet() As Boolean
+            Get
+                Return CType(Me("SimpleMenuOverrideIsSet"),Boolean)
+            End Get
+            Set
+                Me("SimpleMenuOverrideIsSet") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property License_AdminUserIdMappingJson() As String
+            Get
+                Return CType(Me("License_AdminUserIdMappingJson"),String)
+            End Get
+            Set
+                Me("License_AdminUserIdMappingJson") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

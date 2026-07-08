@@ -1,1015 +1,1142 @@
-{
+﻿{
   "version": "1.0",
   "title": "Configuration Wizard",
-  "groups": [
-    {
-      "id": "licensing",
-      "title": "Licensing",
-      "description": "License activation settings for centrally managed or expert installations. Configure only if your organisation uses Red Ink Pro licensing through redink.ini.",
-      "fields": [
-        {
-          "key": "LicenseKey",
-          "label": "License Key",
-          "type": "string",
-          "validation": "NotEmpty",
-          "description": "Enter the Red Ink license key provided by your administrator or reseller. Use the real key exactly as supplied, without extra spaces. Example: 71bd20fxd4c7ebc447bf94s1bd46235ab27ce282. [LicenseKey]"
-        },
-        {
-          "key": "LicenseProductID",
-          "label": "Product ID",
-          "type": "integer",
-          "validation": ">0",
-          "default": "",
-          "description": "Enter the product ID that belongs to the license key. This must match the product configured for your organisation. Example: 1560. [LicenseProductID]"
-        },
-        {
-          "key": "LicenseUserID",
-          "label": "User ID",
-          "type": "string",
-          "default": "%USERNAME%",
-          "description": "Enter the formula that resolves to the user or device identifier used for activation (it should be unique per user). Environment variables are allowed and are expanded automatically. Example: %USERNAME% or %USERDOMAIN%\\%USERNAME%. [LicenseUserID]"
-        },
-        {
-          "key": "LicenseAutoMode",
-          "label": "Automatic Activation",
-          "type": "boolean",
-          "default": "True",
-          "description": "Enable this to let Red Ink activate the license automatically at startup instead of asking the user to do it manually. Use True only when LicenseKey, LicenseProductID and LicenseUserID are already set correctly. Example: True. [LicenseAutoMode]"
-        },
-        {
-          "key": "LicenseClearAll",
-          "label": "Clear Previous Licenses",
-          "type": "boolean",
-          "default": "True",
-          "description": "Enable this when older trial or mismatching licenses should be removed before the automatic activation runs. This is useful during a rollout from trial to paid licences. Example: True. [LicenseClearAll]"
-        },
-        {
-          "key": "LicenseContact",
-          "label": "Support Contact",
-          "type": "string",
-          "default": "",
-          "description": "Optional support contact shown in license warnings and management messages so users know whom to contact internally. Example: IT Support at int. 312. [LicenseContact]"
-        },
-        {
-          "key": "LicenseAutoModeSilent",
-          "label": "Silent Activation",
-          "type": "boolean",
-          "default": "False",
-          "description": "Enable this if successful automatic activation or registration should happen without informing the user. Use this mainly in centrally managed deployments. Example: True. [LicenseAutoModeSilent]",
-          "condition": "LicenseAutoMode == True"
-        },
-        {
-          "key": "LicenseDoNotTouchProductID",
-          "label": "Protected Product IDs",
-          "type": "string",
-          "default": "",
-          "description": "Optional comma-separated list of product IDs that Red Ink must never delete or overwrite during automatic license cleanup. Example: 1332,1560. [LicenseDoNotTouchProductID]"
-        },
-        {
-          "key": "LicenseDoNotTouchUserID",
-          "label": "Protected User IDs",
-          "type": "string",
-          "default": "",
-          "description": "Optional comma-separated list of user IDs that Red Ink must never delete or overwrite during automatic license cleanup. Example: peter.parker,john.doe. [LicenseDoNotTouchUserID]"
-        }
-      ]
-    },
-    {
-      "id": "primary_model",
-      "title": "Primary Model",
-      "description": "Main model connection. Start with provider defaults, then verify authentication, endpoint, response extraction and advanced request templates only if your provider requires them.",
-      "branchField": "_provider",
-      "branches": [
-        {
-          "label": "OpenAI",
-          "defaults": {
-            "APIKeyEncrypted": "False",
-            "APIKeyPrefix": "sk-proj-",
-            "Endpoint": "https://api.openai.com/v1/responses",
-            "HeaderA": "Authorization",
-            "HeaderB": "Bearer {apikey}",
-            "Response": "text (rkmode_first)",
-            "Model": "gpt-5.4",
-            "Timeout": "300000",
-            "APICall": "{\"model\": \"{model}\", \"input\": [{\"role\": \"developer\", \"content\": [{\"type\": \"input_text\",\"text\": \"{promptsystem}\"}]},{\"role\": \"user\",\"content\": [{\"type\": \"input_text\",\"text\": \"{promptuser}\"}{objectcall}]}],\"reasoning\": {\"effort\": \"low\"}}",
-            "APICall_Object": "[application/pdf],{\"type\": \"input_file\",\"filename\": \"userfile.pdf\", \"file_data\": \"data:{mimetype};base64,{encodeddata}\"}¦[image/png,image/jpeg,image/webp, image/gif],{\"type\": \"input_image\",\"image_url\": \"data:{mimetype};base64,{encodeddata}\"}"
-          }
-        },
-        {
-          "label": "Microsoft Azure OpenAI Services",
-          "defaults": {
-            "APIKeyEncrypted": "False",
-            "APIKeyPrefix": "",
-            "Endpoint": "https://[[Your Azure OpenAI Services Deployment]].cognitiveservices.azure.com/openai/responses?api-version=2025-04-01-preview",
-            "HeaderA": "Authorization",
-            "HeaderB": "Bearer {apikey}",
-            "Response": "text (rkmode_first)",
-            "Model": "gpt-5.4",
-            "Timeout": "300000",
-            "APICall": "{\"model\": \"{model}\", \"input\": [{\"role\": \"developer\", \"content\": [{\"type\": \"input_text\",\"text\": \"{promptsystem}\"}]},{\"role\": \"user\",\"content\": [{\"type\": \"input_text\",\"text\": \"{promptuser}\"}{objectcall}]}]}",
-            "APICall_Object": "[application/pdf],{\"type\": \"input_file\",\"filename\": \"userfile.pdf\", \"file_data\": \"data:{mimetype};base64,{encodeddata}\"}¦[image/png,image/jpeg,image/webp, image/gif],{\"type\": \"input_image\",\"image_url\": \"data:{mimetype};base64,{encodeddata}\"}"
-          }
-        },
-        {
-          "label": "Google Gemini",
-          "defaults": {
-            "APIKeyEncrypted": "False",
-            "APIKeyPrefix": "",
-            "Endpoint": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={apikey}",
-            "HeaderA": "X-Goog-Api-Key",
-            "HeaderB": "{apikey}",
-            "Response": "text",
-            "Model": "gemini-2.5-pro",
-            "Temperature": "0.2",
-            "Timeout": "300000",
-            "APICall": "{\"contents\": [{\"role\": \"user\",\"parts\": [{ \"text\": \"{promptsystem} {promptuser}\" }]}], \"generationConfig\": {\"temperature\": {temperature}}}"
-          }
-        },
-        {
-          "label": "Anthropic",
-          "defaults": {
-            "APIKeyEncrypted": "False",
-            "APIKeyPrefix": "[[Your Anthropic API Key Prefix]]",
-            "Endpoint": "https://api.anthropic.com/v1/messages",
-            "HeaderA": "x-api-key¦anthropic-version",
-            "HeaderB": "{apikey}¦2023-06-01",
-            "Response": "text (rkmode_first)",
-            "Model": "claude-sonnet-4-6",
-            "Temperature": "1.0",
-            "Timeout": "200000",
-            "APICall": "{\"model\": \"{model}\",\"max_tokens\": 64000, \"messages\": [{\"role\": \"user\", \"content\": \"{promptsystem} {promptuser}\"}]}",
-            "APICall_Object": ""
-          }
-        },
-        {
-          "label": "Google Vertex (OAuth2)",
-          "defaults": {
-            "APIKeyEncrypted": "False",
-            "APIKeyPrefix": "",
-            "Endpoint": "https://europe-west4-aiplatform.googleapis.com/v1/projects/[[Your Google project_id]]/locations/europe-west4/publishers/google/models/{model}:generateContent",
-            "HeaderA": "Authorization",
-            "HeaderB": "Bearer {apikey}",
-            "Response": "text",
-            "Model": "gemini-2.5-pro",
-            "Temperature": "0.2",
-            "Timeout": "300000",
-            "OAuth2": "True",
-            "OAuth2Scopes": "https://www.googleapis.com/auth/cloud-platform",
-            "OAuth2Endpoint": "https://oauth2.googleapis.com/token",
-            "OAuth2ATExpiry": "3600",
-            "APICall": "{\"contents\": [{\"role\": \"user\", \"parts\":[{\"text\": \"{promptsystem} {promptuser}\"}{objectcall}]}], \"generationConfig\": {\"temperature\": {temperature},  \"thinking_config\": {\"thinking_budget\": 128}}}",
-            "APICall_Object": ", {\"inlineData\": {\"mimeType\": \"{mimetype}\",\"data\": \"{encodeddata}\"}}"
-          },
-          "showExtra": [
-            "OAuth2",
-            "OAuth2ClientMail",
-            "OAuth2Scopes",
-            "OAuth2Endpoint",
-            "OAuth2ATExpiry"
-          ]
-        },
-        {
-          "label": "MTF",
-          "defaults": {
-            "APIKeyEncrypted": "False",
-            "APIKeyPrefix": "",
-            "Endpoint": "https://api.ai.mtf.cloud/v1/chat/completions",
-            "HeaderA": "Authorization",
-            "HeaderB": "Bearer {apikey}",
-            "Response": "content",
-            "Model": "openai-gpt-oss-20b",
-            "Temperature": "0.2",
-            "Timeout": "200000",
-            "APICall": "{\"model\":\"{model}\",\"messages\":[{\"role\":\"system\",\"content\":\"{promptsystem}\"},{\"role\":\"user\",\"content\":\"{promptuser}\"}],\"temperature\":{temperature}}"
-          }
-        },
-        {
-          "label": "SafeSwissCloud",
-          "defaults": {
-            "APIKeyEncrypted": "False",
-            "APIKeyPrefix": "",
-            "Endpoint": "https://llm01.safeswisscloud.ch/engines/{model}/chat/completions",
-            "HeaderA": "Authorization",
-            "HeaderB": "Bearer {apikey}",
-            "Response": "content",
-            "Model": "gpt-oss-120b",
-            "Temperature": "0.2",
-            "Timeout": "200000",
-            "APICall": "{\"model\":\"{model}\",\"messages\":[{\"role\":\"system\",\"content\":\"{promptsystem}\"},{\"role\":\"user\",\"content\":\"{promptuser}\"}],\"temperature\":{temperature}}"
-          }
-        },
-        {
-          "label": "llama.cpp (local)",
-          "defaults": {
-            "APIKeyEncrypted": "False",
-            "APIKeyPrefix": "",
-            "APIKey": "dummy",
-            "Endpoint": "http://localhost:8080/v1/chat/completions",
-            "Response": "content",
-            "APICall": "{\"messages\":[{\"role\":\"system\",\"content\":\"{promptsystem}\"},{\"role\":\"user\",\"content\":\"{promptuser}\"} ], \"temperature\": {temperature}}",
-            "Timeout": "200000",
-            "Temperature": "0.2",
-            "Model": "AnyModel"
-          }
-        },
-        {
-          "label": "Ollama (local)",
-          "defaults": {
-            "APIKeyEncrypted": "False",
-            "APIKeyPrefix": "",
-            "APIKey": "dummy",
-            "Endpoint": "http://[[Your Domain Or IP Address]:[[Your Port]]/api/chat",
-            "HeaderA": "Authorization",
-            "HeaderB": "Bearer {apikey}",
-            "Response": "content",
-            "APICall": "{\"model\":\"{model}\",\"messages\":[   {\"role\":\"system\",\"content\":\"{promptsystem}\"},   {\"role\":\"user\",\"content\":\"{promptuser}\"{objectcall}} ], \"stream\": false, \"think\": false, \"options\":{\"temperature\": {temperature}}}",
-            "Timeout": "200000",
-            "Temperature": "0.2",
-            "Model": "[[Your Model]]"
-          }
-        },
-        {
-          "label": "OpenWebUI (local)",
-          "defaults": {
-            "APIKeyEncrypted": "False",
-            "APIKeyPrefix": "",
-            "APIKey": "dummy",
-            "Endpoint": "http://[[Your Domain Or IP Address]:[[Your Port]]/api/chat/completions",
-            "HeaderA": "Authorization",
-            "HeaderB": "Bearer {apikey}",
-            "Response": "content",
-            "APICall": "{\"model\":\"{model}\",\"messages\": [{\"role\":\"system\",\"content\":\"{promptsystem}\"}, {\"role\":\"user\",\"content\":\"{promptuser}\"{objectcall}}],\"stream\":false,\"temperature\":{temperature}}",
-            "Timeout": "200000",
-            "Temperature": "0.2",
-            "Model": "[[Your Model]]"
-          }
-        },
-        {
-          "label": "Custom / Other",
-          "defaults": {
-            "APIKeyEncrypted": "False",
-            "APIKeyPrefix": ""
-          }
-        }
-      ],
-      "fields": [
-        {
-          "key": "APIKey",
-          "label": "API Key",
-          "type": "password",
-          "validation": "NotEmpty",
-          "description": "Enter the API key for the primary model. If OAuth2 is enabled, this field normally contains the service-account private key instead of a classic API key. Example: sk-proj-XXXXXXXXXXXXXXXX or an encrypted private key string. Use the button below or consult the manual for instructions on how to encrypt your API key using Red Ink. [APIKey]"
-        },
-        {
-          "key": "APIKeyEncrypted",
-          "label": "Key Encrypted",
-          "type": "boolean",
-          "default": "False",
-          "description": "Set this to True if the value stored in APIKey is already encrypted for Red Ink and should be decrypted by the add-in before use. Example: False. [APIKeyEncrypted]"
-        },
-        {
-          "key": "APIKeyPrefix",
-          "label": "Key Prefix",
-          "type": "string",
-          "default": "",
-          "description": "Optional fixed prefix expected for the API key. Some providers use a visible prefix for validation or convenience. Use this if you encrypt your key, but not your prefix for better security. Example: sk-proj-. [APIKeyPrefix]"
-        },
-        {
-          "key": "Model",
-          "label": "Model Name",
-          "type": "string",
-          "validation": "NotEmpty",
-          "description": "Enter the provider's exact model identifier. Use the name required by the endpoint and API call template. Example: gpt-5.4 or gemini-2.5-pro. [Model]"
-        },
-        {
-          "key": "Endpoint",
-          "label": "Endpoint URL",
-          "type": "string",
-          "validation": "Hyperlink",
-          "description": "Enter the full API endpoint URL that Red Ink should call. For advanced setups this may also contain placeholders or even two endpoints separated by ¦. Example: https://api.openai.com/v1/responses. [Endpoint]"
-        },
-        {
-          "key": "HeaderA",
-          "label": "Header Name",
-          "type": "string",
-          "description": "Enter the HTTP header name used for authentication. Leave it empty only if the provider does not require a custom auth header. Example: Authorization. If you want to use two headers, separate their values with '¦'. [HeaderA]"
-        },
-        {
-          "key": "HeaderB",
-          "label": "Header Value",
-          "type": "string",
-          "description": "Enter the HTTP header value template. Use {apikey} where Red Ink should insert the value from APIKey. Example: Bearer {apikey}. If you want to use two headers, separate their values with '¦'. [HeaderB]"
-        },
-        {
-          "key": "Response",
-          "label": "Response Field",
-          "type": "string",
-          "description": "Enter the JSON field or response template from which Red Ink should extract the model answer. Advanced modifiers such as (rkmode_longest) or (nothink) are supported. Example: content or text (rkmode_first). [Response]"
-        },
-        {
-          "key": "APICall",
-          "label": "API Call Template",
-          "type": "multiline",
-          "description": "Enter the request body template sent to the model. Use placeholders such as {model}, {promptsystem}, {promptuser}, {userinstruction}, {temperature} and {objectcall} where needed. Example: {\"model\":\"{model}\",\"messages\":[{\"role\":\"system\",\"content\":\"{promptsystem}\"},{\"role\":\"user\",\"content\":\"{promptuser}\"}],\"temperature\":{temperature}}. [APICall]"
-        },
-        {
-          "key": "APICall_Object",
-          "label": "Object Call Template",
-          "type": "multiline",
-          "description": "Enter the object or file payload template used when Red Ink sends images or other files to the model. This also enables the Freestyle file trigger for compatible endpoints. Example: , {\"type\":\"image_url\",\"image_url\":{\"url\":\"data:{mimetype};base64,{encodeddata}\"}}. [APICall_Object]"
-        },
-        {
-          "key": "Temperature",
-          "label": "Temperature",
-          "type": "string",
-          "validation": "0.0-2.0",
-          "default": "1.0",
-          "description": "Set the model temperature, if supported. Lower values are better for stable tasks such as translation or correction, while higher values allow more creativity. Example: 0.2 for translation or 0.8 for freer drafting. [Temperature]"
-        },
-        {
-          "key": "Timeout",
-          "label": "Timeout (ms)",
-          "type": "integer",
-          "validation": ">0",
-          "default": "200000",
-          "description": "Set the maximum wait time for one API call in milliseconds. Increase this if complex requests time out. Example: 200000. [Timeout]"
-        },
-        {
-          "key": "MaxOutputToken",
-          "label": "Max Output Tokens",
-          "type": "integer",
-          "default": "128000",
-          "description": "Optional output-length safeguard. Red Ink uses this to warn when a task is likely to exceed the model's maximum output size; use 0 to disable the check. Example: 8192. [MaxOutputToken]"
-        },
-        {
-          "key": "Anon",
-          "label": "Anonymization Config",
-          "type": "string",
-          "default": "",
-          "description": "Optional anonymization configuration for this model in the format mode; type. Leave it empty to disable model-side anonymization. Example: askshow; 4. [Anon]"
-        },
-        {
-          "key": "TokenCount",
-          "label": "Token Counting",
-          "type": "string",
-          "default": "",
-          "description": "Optional token accounting setup used by Freestyle cost logging. Enter one or more response fields, then optionally a multiplier and a label. Example: candidatesTokenCount; thoughtsTokenCount; 5; CHF. [TokenCount]"
-        },
-        {
-          "key": "OAuth2",
-          "label": "Use OAuth2",
-          "type": "boolean",
-          "default": "False",
-          "description": "Set this to True when the provider requires OAuth 2.0 instead of a classic API key, such as Google Vertex AI. In that case APIKey normally stores the service-account private key. Example: True. [OAuth2]",
-          "condition": "_provider == Google Vertex (OAuth2)"
-        },
-        {
-          "key": "OAuth2ClientMail",
-          "label": "OAuth2 Client Mail",
-          "type": "string",
-          "description": "Enter the service account client email used to request OAuth 2.0 access tokens. Example: red-ink@my-project.iam.gserviceaccount.com. [OAuth2ClientMail]",
-          "condition": "OAuth2 == True"
-        },
-        {
-          "key": "OAuth2Scopes",
-          "label": "OAuth2 Scopes",
-          "type": "string",
-          "description": "Enter the OAuth 2.0 scopes required by the provider. For Vertex AI this is usually the cloud-platform scope. Example: https://www.googleapis.com/auth/cloud-platform. [OAuth2Scopes]",
-          "condition": "OAuth2 == True"
-        },
-        {
-          "key": "OAuth2Endpoint",
-          "label": "OAuth2 Token Endpoint",
-          "type": "string",
-          "validation": "Hyperlink",
-          "description": "Enter the OAuth 2.0 token endpoint that issues the access token. Example: https://oauth2.googleapis.com/token. [OAuth2Endpoint]",
-          "condition": "OAuth2 == True"
-        },
-        {
-          "key": "OAuth2ATExpiry",
-          "label": "OAuth2 Token Expiry (s)",
-          "type": "integer",
-          "validation": ">0",
-          "default": "3600",
-          "description": "Enter the lifetime of the access token in seconds. Red Ink renews the token shortly before expiry. Example: 3600. [OAuth2ATExpiry]",
-          "condition": "OAuth2 == True"
-        }
-      ]
-    },
-    {
-      "id": "secondary_model",
-      "title": "Secondary Model",
-      "description": "Optional secondary model used for Freestyle (2nd) or model switching. Configure it only if you want a second permanent model profile.",
-      "keySuffix": "_2",
-      "branchField": "_provider_2",
-      "branches": [
-        {
-          "label": "OpenAI",
-          "defaults": {
-            "APIKeyEncrypted_2": "False",
-            "APIKeyPrefix_2": "sk-proj-",
-            "Endpoint_2": "https://api.openai.com/v1/responses",
-            "HeaderA_2": "Authorization",
-            "HeaderB_2": "Bearer {apikey}",
-            "Response_2": "text (rkmode_first)",
-            "Model_2": "gpt-5.4",
-            "Timeout_2": "300000",
-            "APICall_2": "{\"model\": \"{model}\", \"input\": [{\"role\": \"developer\", \"content\": [{\"type\": \"input_text\",\"text\": \"{promptsystem}\"}]},{\"role\": \"user\",\"content\": [{\"type\": \"input_text\",\"text\": \"{promptuser}\"}{objectcall}]}],\"reasoning\": {\"effort\": \"low\"}}",
-            "APICall_Object_2": "[application/pdf],{\"type\": \"input_file\",\"filename\": \"userfile.pdf\", \"file_data\": \"data:{mimetype};base64,{encodeddata}\"}¦[image/png,image/jpeg,image/webp, image/gif],{\"type\": \"input_image\",\"image_url\": \"data:{mimetype};base64,{encodeddata}\"}"
-          }
-        },
-        {
-          "label": "Microsoft Azure OpenAI Services",
-          "defaults": {
-            "APIKeyEncrypted_2": "False",
-            "APIKeyPrefix_2": "",
-            "Endpoint_2": "https://[[Your Azure OpenAI Services Deployment]].cognitiveservices.azure.com/openai/responses?api-version=2025-04-01-preview",
-            "HeaderA_2": "Authorization",
-            "HeaderB_2": "Bearer {apikey}",
-            "Response_2": "text (rkmode_first)",
-            "Model_2": "gpt-5.4",
-            "Timeout_2": "300000",
-            "APICall_2": "{\"model\": \"{model}\", \"input\": [{\"role\": \"developer\", \"content\": [{\"type\": \"input_text\",\"text\": \"{promptsystem}\"}]},{\"role\": \"user\",\"content\": [{\"type\": \"input_text\",\"text\": \"{promptuser}\"}{objectcall}]}]}",
-            "APICall_Object_2": "[application/pdf],{\"type\": \"input_file\",\"filename\": \"userfile.pdf\", \"file_data\": \"data:{mimetype};base64,{encodeddata}\"}¦[image/png,image/jpeg,image/webp, image/gif],{\"type\": \"input_image\",\"image_url\": \"data:{mimetype};base64,{encodeddata}\"}"
-          }
-        },
-        {
-          "label": "Google Gemini",
-          "defaults": {
-            "APIKeyEncrypted_2": "False",
-            "APIKeyPrefix_2": "",
-            "Endpoint_2": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={apikey}",
-            "HeaderA_2": "X-Goog-Api-Key",
-            "HeaderB_2": "{apikey}",
-            "Response_2": "text",
-            "Model_2": "gemini-2.5-pro",
-            "Temperature_2": "0.2",
-            "Timeout_2": "300000",
-            "APICall_2": "{\"contents\": [{\"role\": \"user\",\"parts\": [{ \"text\": \"{promptsystem} {promptuser}\" }]}], \"generationConfig\": {\"temperature\": {temperature}}}"
-          }
-        },
-        {
-          "label": "Anthropic",
-          "defaults": {
-            "APIKeyEncrypted_2": "False",
-            "APIKeyPrefix_2": "[[Your Anthropic API Key Prefix]]",
-            "Endpoint_2": "https://api.anthropic.com/v1/messages",
-            "HeaderA_2": "x-api-key¦anthropic-version",
-            "HeaderB_2": "{apikey}¦2023-06-01",
-            "Response_2": "text (rkmode_first)",
-            "Model_2": "claude-sonnet-4-6",
-            "Temperature_2": "1.0",
-            "Timeout_2": "200000",
-            "APICall_2": "{\"model\": \"{model}\",\"max_tokens\": 64000, \"messages\": [{\"role\": \"user\", \"content\": \"{promptsystem} {promptuser}\"}]}",
-            "APICall_Object_2": ""
-          }
-        },
-        {
-          "label": "Google Vertex (OAuth2)",
-          "defaults": {
-            "APIKeyEncrypted_2": "False",
-            "APIKeyPrefix_2": "",
-            "Endpoint_2": "https://europe-west4-aiplatform.googleapis.com/v1/projects/[[Your Google project_id]]/locations/europe-west4/publishers/google/models/{model}:generateContent",
-            "HeaderA_2": "Authorization",
-            "HeaderB_2": "Bearer {apikey}",
-            "Response_2": "text",
-            "Model_2": "gemini-2.5-pro",
-            "Temperature_2": "0.2",
-            "Timeout_2": "300000",
-            "OAuth2_2": "True",
-            "OAuth2Scopes_2": "https://www.googleapis.com/auth/cloud-platform",
-            "OAuth2Endpoint_2": "https://oauth2.googleapis.com/token",
-            "OAuth2ATExpiry_2": "3600",
-            "APICall_2": "{\"contents\": [{\"role\": \"user\", \"parts\":[{\"text\": \"{promptsystem} {promptuser}\"}{objectcall}]}], \"generationConfig\": {\"temperature\": {temperature},  \"thinking_config\": {\"thinking_budget\": 128}}}",
-            "APICall_Object_2": ", {\"inlineData\": {\"mimeType\": \"{mimetype}\",\"data\": \"{encodeddata}\"}}"
-          },
-          "showExtra": [
-            "OAuth2_2",
-            "OAuth2ClientMail_2",
-            "OAuth2Scopes_2",
-            "OAuth2Endpoint_2",
-            "OAuth2ATExpiry_2"
-          ]
-        },
-        {
-          "label": "MTF",
-          "defaults": {
-            "APIKeyEncrypted_2": "False",
-            "APIKeyPrefix_2": "",
-            "Endpoint_2": "https://api.ai.mtf.cloud/v1/chat/completions",
-            "HeaderA_2": "Authorization",
-            "HeaderB_2": "Bearer {apikey}",
-            "Response_2": "content",
-            "Model_2": "openai-gpt-oss-20b",
-            "Temperature_2": "0.2",
-            "Timeout_2": "200000",
-            "APICall_2": "{\"model\":\"{model}\",\"messages\":[{\"role\":\"system\",\"content\":\"{promptsystem}\"},{\"role\":\"user\",\"content\":\"{promptuser}\"}],\"temperature\":{temperature}}"
-          }
-        },
-        {
-          "label": "SafeSwissCloud",
-          "defaults": {
-            "APIKeyEncrypted_2": "False",
-            "APIKeyPrefix_2": "",
-            "Endpoint_2": "https://llm01.safeswisscloud.ch/engines/{model}/chat/completions",
-            "HeaderA_2": "Authorization",
-            "HeaderB_2": "Bearer {apikey}",
-            "Response_2": "content",
-            "Model_2": "gpt-oss-120b",
-            "Temperature_2": "0.2",
-            "Timeout_2": "200000",
-            "APICall_2": "{\"model\":\"{model}\",\"messages\":[{\"role\":\"system\",\"content\":\"{promptsystem}\"},{\"role\":\"user\",\"content\":\"{promptuser}\"}],\"temperature\":{temperature}}"
-          }
-        },
-        {
-          "label": "llama.cpp (local)",
-          "defaults": {
-            "APIKeyEncrypted_2": "False",
-            "APIKeyPrefix_2": "",
-            "APIKey_2": "dummy",
-            "Endpoint_2": "http://localhost:8080/v1/chat/completions",
-            "Response_2": "content",
-            "APICall_2": "{\"messages\":[{\"role\":\"system\",\"content\":\"{promptsystem}\"},{\"role\":\"user\",\"content\":\"{promptuser}\"} ], \"temperature\": {temperature}}",
-            "Timeout_2": "200000",
-            "Temperature_2": "0.2",
-            "Model_2": "AnyModel"
-          }
-        },
-        {
-          "label": "Ollama (local)",
-          "defaults": {
-            "APIKeyEncrypted_2": "False",
-            "APIKeyPrefix_2": "",
-            "APIKey_2": "dummy",
-            "Endpoint_2": "http://[[Your Domain Or IP Address]:[[Your Port]]/api/chat",
-            "HeaderA_2": "Authorization",
-            "HeaderB_2": "Bearer {apikey}",
-            "Response_2": "content",
-            "APICall_2": "{\"model\":\"{model}\",\"messages\":[   {\"role\":\"system\",\"content\":\"{promptsystem}\"},   {\"role\":\"user\",\"content\":\"{promptuser}\"{objectcall}} ], \"stream\": false, \"think\": false, \"options\":{\"temperature\": {temperature}}}",
-            "Timeout_2": "200000",
-            "Temperature_2": "0.2",
-            "Model_2": "[[Your Model]]"
-          }
-        },
-        {
-          "label": "OpenWebUI (local)",
-          "defaults": {
-            "APIKeyEncrypted_2": "False",
-            "APIKeyPrefix_2": "",
-            "APIKey_2": "dummy",
-            "Endpoint_2": "http://[[Your Domain Or IP Address]:[[Your Port]]/api/chat/completions",
-            "HeaderA_2": "Authorization",
-            "HeaderB_2": "Bearer {apikey}",
-            "Response_2": "content",
-            "APICall_2": "{\"model\":\"{model}\",\"messages\": [{\"role\":\"system\",\"content\":\"{promptsystem}\"}, {\"role\":\"user\",\"content\":\"{promptuser}\"{objectcall}}],\"stream\":false,\"temperature\":{temperature}}",
-            "Timeout_2": "200000",
-            "Temperature_2": "0.2",
-            "Model_2": "[[Your Model]]"
-          }
-        },
-        {
-          "label": "Custom / Other",
-          "defaults": {
-            "APIKeyEncrypted_2": "False",
-            "APIKeyPrefix_2": ""
-          }
-        }
-      ],
-      "fields": [
-        {
-          "key": "SecondAPI",
-          "label": "Enable Secondary Model",
-          "type": "boolean",
-          "default": "False",
-          "description": "Enable this if Red Ink should expose a second model via Freestyle (2nd) or model switching. Keep it disabled if you use only one main model. Example: True. [SecondAPI]"
-        },
-        {
-          "key": "APIKey_2",
-          "label": "API Key (2nd)",
-          "type": "password",
-          "description": "Enter the API key for the secondary model. If OAuth2 is enabled, this field normally contains the service-account private key instead of a classic API key. Example: sk-proj-XXXXXXXXXXXXXXXX or an encrypted private key string. Use the button below or consult the manual for instructions on how to encrypt your API key using Red Ink. [APIKey_2]",
-          "condition": "SecondAPI == True"
-        },
-        {
-          "key": "APIKeyEncrypted_2",
-          "label": "Key Encrypted (2nd)",
-          "type": "boolean",
-          "default": "False",
-          "condition": "SecondAPI == True",
-          "description": "Set this to True if the value stored in APIKey is already encrypted for Red Ink and should be decrypted by the add-in before use. Example: False. [APIKeyEncrypted_2]"
-        },
-        {
-          "key": "APIKeyPrefix_2",
-          "label": "Key Prefix (2nd)",
-          "type": "string",
-          "default": "",
-          "condition": "SecondAPI == True",
-          "description": "Optional fixed prefix expected for the API key. Some providers use a visible prefix for validation or convenience. Use this if you encrypt your key, but not your prefix for better security. Example: sk-proj-. [APIKeyPrefix_2]"
-        },
-        {
-          "key": "Model_2",
-          "label": "Model Name (2nd)",
-          "type": "string",
-          "condition": "SecondAPI == True",
-          "description": "Enter the provider's exact model identifier. Use the name required by the endpoint and API call template. Example: gpt-5.4 or gemini-2.5-pro. [Model_2]"
-        },
-        {
-          "key": "Endpoint_2",
-          "label": "Endpoint URL (2nd)",
-          "type": "string",
-          "validation": "Hyperlink",
-          "condition": "SecondAPI == True",
-          "description": "Enter the full API endpoint URL that Red Ink should call. For advanced setups this may also contain placeholders or even two endpoints separated by ¦. Example: https://api.openai.com/v1/responses. [Endpoint_2]"
-        },
-        {
-          "key": "HeaderA_2",
-          "label": "Header Name (2nd)",
-          "type": "string",
-          "condition": "SecondAPI == True",
-          "description": "Enter the HTTP header name used for authentication. Leave it empty only if the provider does not require a custom auth header. Example: Authorization. [HeaderA_2]"
-        },
-        {
-          "key": "HeaderB_2",
-          "label": "Header Value (2nd)",
-          "type": "string",
-          "condition": "SecondAPI == True",
-          "description": "Enter the HTTP header value template. Use {apikey} where Red Ink should insert the value from APIKey. Example: Bearer {apikey}. [HeaderB_2]"
-        },
-        {
-          "key": "Response_2",
-          "label": "Response Field (2nd)",
-          "type": "string",
-          "condition": "SecondAPI == True",
-          "description": "Enter the JSON field or response template from which Red Ink should extract the model answer. Advanced modifiers such as (rkmode_longest) or (nothink) are supported. Example: content or text. [Response_2]"
-        },
-        {
-          "key": "APICall_2",
-          "label": "API Call Template (2nd)",
-          "type": "multiline",
-          "condition": "SecondAPI == True",
-          "description": "Enter the request body template sent to the model. Use placeholders such as {model}, {promptsystem}, {promptuser}, {userinstruction}, {temperature} and {objectcall} where needed. Example: {\"model\":\"{model}\",\"messages\":[{\"role\":\"system\",\"content\":\"{promptsystem}\"},{\"role\":\"user\",\"content\":\"{promptuser}\"}],\"temperature\":{temperature}}. [APICall_2]"
-        },
-        {
-          "key": "APICall_Object_2",
-          "label": "Object Call Template (2nd)",
-          "type": "multiline",
-          "condition": "SecondAPI == True",
-          "description": "Enter the object or file payload template used when Red Ink sends images or other files to the model. This also enables the Freestyle file trigger for compatible endpoints. Example: , {\"type\":\"image_url\",\"image_url\":{\"url\":\"data:{mimetype};base64,{encodeddata}\"}}. [APICall_Object_2]"
-        },
-        {
-          "key": "Temperature_2",
-          "label": "Temperature (2nd)",
-          "type": "string",
-          "validation": "0.0-2.0",
-          "condition": "SecondAPI == True",
-          "description": "Set the model temperature, if supported. Lower values are better for stable tasks such as translation or correction, while higher values allow more creativity. Example: 0.2 for translation or 0.8 for freer drafting. [Temperature_2]"
-        },
-        {
-          "key": "Timeout_2",
-          "label": "Timeout (2nd, ms)",
-          "type": "integer",
-          "validation": ">0",
-          "condition": "SecondAPI == True",
-          "description": "Set the maximum wait time for one API call in milliseconds. Increase this if complex requests time out. Example: 200000. [Timeout_2]"
-        },
-        {
-          "key": "MaxOutputToken_2",
-          "label": "Max Output Tokens (2nd)",
-          "type": "integer",
-          "condition": "SecondAPI == True",
-          "description": "Optional output-length safeguard. Red Ink uses this to warn when a task is likely to exceed the model's maximum output size; use 0 to disable the check. Example: 8192. [MaxOutputToken_2]"
-        },
-        {
-          "key": "Anon_2",
-          "label": "Anonymization (2nd)",
-          "type": "string",
-          "condition": "SecondAPI == True",
-          "description": "Optional anonymization configuration for this model in the format mode; type. Leave it empty to disable model-side anonymization. Example: askshow; 4. [Anon_2]"
-        },
-        {
-          "key": "TokenCount_2",
-          "label": "Token Counting (2nd)",
-          "type": "string",
-          "condition": "SecondAPI == True",
-          "description": "Optional token accounting setup used by Freestyle cost logging. Enter one or more response fields, then optionally a multiplier and a label. Example: candidatesTokenCount; thoughtsTokenCount; 5; CHF. [TokenCount_2]"
-        },
-        {
-          "key": "OAuth2_2",
-          "label": "Use OAuth2 (2nd)",
-          "type": "boolean",
-          "default": "False",
-          "condition": "SecondAPI == True",
-          "description": "Set this to True when the provider requires OAuth 2.0 instead of a classic API key, such as Google Vertex AI. In that case APIKey normally stores the service-account private key. Example: True. [OAuth2_2]"
-        },
-        {
-          "key": "OAuth2ClientMail_2",
-          "label": "OAuth2 Client Mail (2nd)",
-          "type": "string",
-          "condition": "OAuth2_2 == True",
-          "description": "Enter the service account client email used to request OAuth 2.0 access tokens. Example: red-ink@my-project.iam.gserviceaccount.com. [OAuth2ClientMail_2]"
-        },
-        {
-          "key": "OAuth2Scopes_2",
-          "label": "OAuth2 Scopes (2nd)",
-          "type": "string",
-          "condition": "OAuth2_2 == True",
-          "description": "Enter the OAuth 2.0 scopes required by the provider. For Vertex AI this is usually the cloud-platform scope. Example: https://www.googleapis.com/auth/cloud-platform. [OAuth2Scopes_2]"
-        },
-        {
-          "key": "OAuth2Endpoint_2",
-          "label": "OAuth2 Token Endpoint (2nd)",
-          "type": "string",
-          "condition": "OAuth2_2 == True",
-          "description": "Enter the OAuth 2.0 token endpoint that issues the access token. Example: https://oauth2.googleapis.com/token. [OAuth2Endpoint_2]"
-        },
-        {
-          "key": "OAuth2ATExpiry_2",
-          "label": "OAuth2 Token Expiry (2nd, s)",
-          "type": "integer",
-          "condition": "OAuth2_2 == True",
-          "description": "Enter the lifetime of the access token in seconds. Red Ink renews the token shortly before expiry. Example: 3600. [OAuth2ATExpiry_2]"
-        }
-      ]
-    },
-    {
-      "id": "additional_models",
-      "title": "Additional Models & Service Endpoints",
-      "description": "Paths to optional model and service configuration files plus local speech, embedding and text-to-speech resources.",
-      "fields": [
-        {
-          "key": "AlternateModelPath",
-          "label": "Alternate Models INI",
-          "type": "path",
-          "default": "%APPDATA%\\microsoft\\word\\allmodels.ini",
-          "description": "Path including file name for the INI file that contains additional model definitions beyond the primary and secondary model. Users can select these models in Freestyle (2nd). This is also where you need to set up the models you use for tooling. Example: X:\\Configuration\\allmodels.ini. [AlternateModelPath]"
-        },
-        {
-          "key": "SpecialServicePath",
-          "label": "Special Services INI",
-          "type": "path",
-          "default": "%APPDATA%\\microsoft\\word\\specialservices.ini",
-          "description": "Path including file name for the INI file that contains Special Services, such as legal data sources, specialised APIs, MCP servers or internal database services. Example: X:\\Configuration\\specialservices.ini. They will also be used for tooling. [SpecialServicePath]"
-        },
-        {
-          "key": "SpeechModelPath",
-          "label": "Speech Model Directory",
-          "type": "path",
-          "default": "",
-          "description": "Directory that stores local speech-to-text models and related runtime files for the Transcriptor. Red Ink expects model subfolders such as vosk-model* or ggml*. Example: X:\\Speech\\. [SpeechModelPath]"
-        },
-        {
-          "key": "TTSEndpoint",
-          "label": "TTS Endpoints",
-          "type": "string",
-          "default": "",
-          "description": "One or more text-to-speech API endpoints used for podcast or audio generation. Separate multiple providers with ¦ when both are available. Currently only Google and OpenAI are supported. Example: https://texttospeech.googleapis.com/v1/¦https://api.openai.com/v1/audio/speech. [TTSEndpoint]"
-        },
-        {
-          "key": "LocalModelPath",
-          "label": "Local AI Models",
-          "type": "path",
-          "default": "",
-          "description": "Directory that stores locally hosted models or related runtime data used by Red Ink features that work with local models (such as the integrated vector search in 'Context Search'). Example: X:\\Models\\. [LocalModelPath]"
-        }
-      ]
-    },
-    {
-      "id": "input",
-      "title": "Prompt Input & Protection",
-      "description": "Refine prompts before they are sent, including global instructions, prompt-injection protection and optional location context.",
-      "fields": [
-        {
-          "key": "PreCorrection",
-          "label": "Pre-Correction Prompt",
-          "type": "multiline",
-          "default": "",
-          "description": "Optional instruction appended to most built-in prompts before the main request is sent. Use it for organisation-wide or user-specific wording rules that should always apply. Example: Always write company name as VISCHER and use Swiss spelling. [PreCorrection]"
-        },
-        {
-          "key": "Ignore",
-          "label": "Injection Protection",
-          "type": "boolean",
-          "default": "True",
-          "description": "Enable the built-in prompt-injection protection placeholder so prompts that contain {Ignore} can tell the model to disregard malicious instructions hidden inside user content. Example: True. [Ignore]"
-        },
-        {
-          "key": "Location",
-          "label": "Location Context",
-          "type": "string",
-          "default": "",
-          "description": "Optional location context inserted into selected prompts so answers can be tailored to the correct jurisdiction or local environment. Example: We are in Zurich, Switzerland. [Location]"
-        }
-      ]
-    },
-    {
-      "id": "processing",
-      "title": "Output Cleanup & Post-Processing",
-      "description": "Post-process model output globally. These settings affect punctuation cleanup, invisible markers and optional second-pass prompting.",
-      "fields": [
-        {
-          "key": "DoubleS",
-          "label": "Convert Sharp S to ss",
-          "type": "boolean",
-          "default": "True",
-          "description": "Enable this if German sharp S (ß) should automatically be converted to ss in the model output. This is especially common for Swiss usage. Example: True. [DoubleS]"
-        },
-        {
-          "key": "Clean",
-          "label": "Clean Output",
-          "type": "boolean",
-          "default": "True",
-          "description": "Enable this to remove double spaces and certain invisible markers from LLM output. This can improve readability, but in a few advanced workflows it may make text matching harder. Example: True. [Clean]"
-        },
-        {
-          "key": "NoEmDash",
-          "label": "No Em Dashes",
-          "type": "boolean",
-          "default": "False",
-          "description": "Enable this to replace unusually long em dashes produced by some models with a more conventional dash style. This helps avoid a visibly AI-typical punctuation style. Example: True. [NoEmDash]"
-        },
-        {
-          "key": "PostCorrection",
-          "label": "Post-Correction Prompt",
-          "type": "multiline",
-          "default": "",
-          "description": "Optional prompt that is applied to every result after the main query, which means each answer is sent to the model again for post-processing. Use this only for special global rules because it slows processing noticeably. Example: Replace straight quotes with Swiss-style quotes. [PostCorrection]"
-        }
-      ]
-    },
-    {
-      "id": "markup",
-      "title": "Markup & Formatting",
-      "description": "Control text replacement, markup generation and formatting preservation for Word and Outlook. Use the lighter options first and increase fidelity only where needed.",
-      "fields": [
-        {
-          "key": "DoMarkupOutlook",
-          "label": "Markup in Outlook",
-          "type": "boolean",
-          "default": "True",
-          "description": "Enable this if Outlook should automatically show a markup for predefined text-changing functions such as corrections or abbreviations. Example: True. [DoMarkupOutlook]"
-        },
-        {
-          "key": "DoMarkupWord",
-          "label": "Markup in Word",
-          "type": "boolean",
-          "default": "True",
-          "description": "Enable this if Word should automatically show a markup for predefined text-changing functions such as corrections or abbreviations. Example: True. [DoMarkupWord]"
-        },
-        {
-          "key": "MarkupMethodHelper",
-          "label": "Helper Method (1-3)",
-          "type": "integer",
-          "default": "2",
-          "description": "Choose the markup method used by the Word Helper (self-compare) function(s). 1 = Word Compare, 2 = Diff, 3 = DiffW window (will preserve formatting). Example: 3. [MarkupMethodHelper]"
-        },
-        {
-          "key": "MarkupMethodWord",
-          "label": "Word Method (1-5)",
-          "type": "integer",
-          "default": "2",
-          "description": "Choose the default markup method for Word commands. 1 = Word Compare, 2 = Diff, 3 = DiffW window (will preserve formatting), 4 = Regex/LLM-assisted markup, 5 = Diff Classic. Example: 3. [MarkupMethodWord]"
-        },
-        {
-          "key": "MarkupMethodOutlook",
-          "label": "Outlook Method (1-4)",
-          "type": "integer",
-          "default": "4",
-          "description": "Choose the default markup method for Outlook commands. 1 = Word Compare, 2 = Diff, 3 = DiffW window (will preserve formatting), 4 = Review Changes. Example: 3. [MarkupMethodOutlook]"
-        },
-        {
-          "key": "MarkupDiffCap",
-          "label": "Diff Character Cap",
-          "type": "integer",
-          "default": "30000",
-          "description": "Maximum text length in characters for the Diff-based markup method and for Markdown conversion of selected text before Red Ink asks or switches to a safer alternative. Example: 20000. [MarkupDiffCap]"
-        },
-        {
-          "key": "MarkupRegexCap",
-          "label": "Regex Character Cap",
-          "type": "integer",
-          "default": "40000",
-          "description": "Maximum text length in characters for the Regex/LLM-assisted markup method before Red Ink falls back or asks for confirmation. Use a larger value only with capable models. Example: 30000. [MarkupRegexCap]"
-        },
-        {
-          "key": "MarkdownConvert",
-          "label": "Markdown Conversion",
-          "type": "boolean",
-          "default": "True",
-          "description": "Enable this to convert visible character formatting such as bold, italic or underline into Markdown before the text is sent to the LLM, so formatting can be restored afterwards. Example: True. [MarkdownConvert]"
-        },
-        {
-          "key": "KeepParaFormatInline",
-          "label": "Keep Paragraph Formatting",
-          "type": "boolean",
-          "default": "False",
-          "description": "Enable this if Word should encode paragraph formatting hints into the text so paragraph styles can be restored more reliably after editing. It is lighter than full Keep Format, but still adds some overhead. Example: True. [KeepParaFormatInline]"
-        },
-        {
-          "key": "KeepFormat1",
-          "label": "Keep Format (Translation)",
-          "type": "boolean",
-          "default": "False",
-          "description": "Enable this if translations in Word and Outlook should preserve basic formatting such as character style and lists by encoding it for the model. This improves fidelity but is slower. Example: False. [KeepFormat1]"
-        },
-        {
-          "key": "KeepFormat2",
-          "label": "Keep Format (Other)",
-          "type": "boolean",
-          "default": "False",
-          "description": "Enable this if non-translation commands such as correction, improvement or shortening should preserve basic formatting in Word and Outlook. This improves fidelity but is slower. Example: True. [KeepFormat2]"
-        },
-        {
-          "key": "ReplaceText1",
-          "label": "Replace Text (Translation)",
-          "type": "boolean",
-          "default": "True",
-          "description": "Enable this if translated text should replace the selected original text instead of being inserted after it. Example: True. [ReplaceText1]"
-        },
-        {
-          "key": "ReplaceText2",
-          "label": "Replace Text (Other)",
-          "type": "boolean",
-          "default": "True",
-          "description": "Enable this if results from other predefined commands such as Correct or Improve should replace the selected text instead of being appended after it. Example: True. [ReplaceText2]"
-        },
-        {
-          "key": "KeepFormatCap",
-          "label": "KeepFormat Character Cap",
-          "type": "integer",
-          "default": "30000",
-          "description": "Character limit above which KeepFormat and KeepParaFormatInline are turned off automatically to avoid very slow processing. Use 0 to disable the safeguard or 1 to always skip embedded format saving. Example: 5000. [KeepFormatCap]"
-        },
-        {
-          "key": "MarkdownBubbles",
-          "label": "Formatted Bubbles",
-          "type": "boolean",
-          "default": "False",
-          "description": "Enable this if AI-generated Word comments should render Markdown formatting such as bold text inside the comment bubble. This looks better but takes a little longer. Example: False. [MarkdownBubbles]"
-        }
-      ]
-    },
-    {
-      "id": "app_config",
-      "title": "Application Behaviour",
-      "description": "General behaviour for the add-ins, including chat memory, shortcut handling, debugging and help/manual integration.",
-      "fields": [
-        {
-          "key": "ChatCap",
-          "label": "Chat Character Cap",
-          "type": "integer",
-          "default": "80000",
-          "description": "Maximum number of characters from earlier chatbot conversation that Red Ink should keep in memory. Lower values reduce cost and help preserve space for the active document. Example: 50000. [ChatCap]"
-        },
-        {
-          "key": "ContextMenu",
-          "label": "Context Menu",
-          "type": "boolean",
-          "default": "True",
-          "description": "Enable this if the Red Ink context menu should appear in Word and Excel when the helper add-ins are installed. Example: True. [ContextMenu]"
-        },
-        {
-          "key": "ShortcutsWordExcel",
-          "label": "Keyboard Shortcuts",
-          "type": "string",
-          "default": "",
-          "description": "Define keyboard shortcuts in the format Menu item=Key combination, separated by semicolons. The menu text must match the visible command name exactly. This only works if the Word and/or Excel helper is installed. Example: To English=Ctrl-Shift-E;Freestyle=Ctrl-Shift-P. [ShortcutsWordExcel]"
-        },
-        {
-          "key": "APIDebug",
-          "label": "API Debug Mode",
-          "type": "boolean",
-          "default": "False",
-          "description": "Enable this to write the full request and response payloads for troubleshooting to debug files on the desktop. Avoid enabling it in production unless you really need diagnostics. Example: False. [APIDebug]"
-        },
-        {
-          "key": "Language1",
-          "label": "Language 1",
-          "type": "string",
-          "default": "English",
-          "description": "Enter the first quick-translation language name in English. This controls the first direct translation button in the ribbon. Example: English. [Language1]"
-        },
-        {
-          "key": "Language2",
-          "label": "Language 2",
-          "type": "string",
-          "default": "German",
-          "description": "Enter the second quick-translation language name in English. This controls the second direct translation button in the ribbon. Example: German. [Language2]"
-        },
-        {
-          "key": "UsageRestrictions",
-          "label": "Usage Restrictions Tooltip",
-          "type": "multiline",
-          "default": "",
-          "description": "Optional policy text shown when users hover over the Red Ink logo. Use this to communicate internal usage rules or confidentiality guidance. Example: You may use Red Ink for all kinds of data, including professional secrecy data. [UsageRestrictions]"
-        },
-        {
-          "key": "HelpMeInkyPath",
-          "label": "Help Me Inky Source",
-          "type": "string",
-          "default": "",
-          "description": "Optional path or URL to the manual file used as the knowledge base for the Help me, Inky chatbot (can be .txt, .docx or .pdf). If left empty, Red Ink uses the standard manual from the Red Ink server. Example: https://intranet.example.com/red_ink_guide.txt. [HelpMeInkyPath]"
-        }
-      ]
+    "groups": [
+        {
+            "id": "licensing",
+            "title": "Licensing",
+            "description": "License activation settings for centrally managed or expert installations. Configure only if your organisation uses Red Ink Pro licensing through redink.ini.",
+            "fields": [
+                {
+                    "key": "LicenseKey",
+                    "label": "License Key",
+                    "type": "string",
+                    "validation": "NotEmpty",
+                    "description": "Enter the Red Ink license key provided by your administrator or reseller. Use the real key exactly as supplied, without extra spaces. Example: 71bd20fxd4c7ebc447bf94s1bd46235ab27ce282. [LicenseKey]"
+                },
+                {
+                    "key": "LicenseProductID",
+                    "label": "Product ID",
+                    "type": "integer",
+                    "validation": ">0",
+                    "default": "",
+                    "description": "Enter the product ID that belongs to the license key. This must match the product configured for your organisation. Example: 1560. [LicenseProductID]"
+                },
+                {
+                    "key": "LicenseUserID",
+                    "label": "User ID",
+                    "type": "string",
+                    "default": "%USERNAME%",
+                    "description": "Enter the formula that resolves to the user or device identifier used for activation (it should be unique per user). Environment variables are allowed and are expanded automatically. Example: %USERNAME% or %USERDOMAIN%\\%USERNAME%. [LicenseUserID]"
+                },
+                {
+                    "key": "LicenseAutoMode",
+                    "label": "Automatic Activation",
+                    "type": "boolean",
+                    "default": "True",
+                    "description": "Enable this to let Red Ink activate the license automatically at startup instead of asking the user to do it manually. Use True only when LicenseKey, LicenseProductID and LicenseUserID are already set correctly. Example: True. [LicenseAutoMode]"
+                },
+                {
+                    "key": "LicenseClearAll",
+                    "label": "Clear Previous Licenses",
+                    "type": "boolean",
+                    "default": "True",
+                    "description": "Enable this when older trial or mismatching licenses should be removed before the automatic activation runs. This is useful during a rollout from trial to paid licences. Example: True. [LicenseClearAll]"
+                },
+                {
+                    "key": "LicenseContact",
+                    "label": "Support Contact",
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional support contact shown in license warnings and management messages so users know whom to contact internally. Example: IT Support at int. 312. [LicenseContact]"
+                },
+                {
+                    "key": "LicenseCounterPath",
+                    "label": "License Counter Targets",
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional offline license-counter targets. Leave empty to disable counting completely. You may enter one or more targets separated by line breaks or by |. Supported targets include local folders, UNC shares, and http/https URLs. Example: \\\\server\\share\\redink-licensecounter|https://intranet.example.local/licensecounter. [LicenseCounterPath]"
+                },
+                {
+                    "key": "LicenseCounterMethod",
+                    "label": "License Counter Method",
+                    "type": "string",
+                    "default": "Auto",
+                    "description": "Transport mode for the offline license counter. Recommended values: Auto, File, WebBasic, WebExtended, LocalOnly, AppendFile. Example: Auto. [LicenseCounterMethod]"
+                },
+                {
+                    "key": "LicenseCounterAnon",
+                    "label": "Anonymous License Counter",
+                    "type": "boolean",
+                    "default": "True",
+                    "description": "If True, the offline license counter does not include reversible user data in marker/report payloads. If False, a reversible obfuscated user value may be stored for reporting purposes. Example: True. [LicenseCounterAnon]"
+                },
+                {
+                    "key": "LicenseAutoModeSilent",
+                    "label": "Silent Activation",
+                    "type": "boolean",
+                    "default": "False",
+                    "description": "Enable this if successful automatic activation or registration should happen without informing the user. Use this mainly in centrally managed deployments. Example: True. [LicenseAutoModeSilent]",
+                    "condition": "LicenseAutoMode == True"
+                },
+                {
+                    "key": "LicenseDoNotTouchProductID",
+                    "label": "Protected Product IDs",
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional comma-separated list of product IDs that Red Ink must never delete or overwrite during automatic license cleanup. Example: 1332,1560. [LicenseDoNotTouchProductID]"
+                },
+                {
+                    "key": "LicenseDoNotTouchUserID",
+                    "label": "Protected User IDs",
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional comma-separated list of user IDs that Red Ink must never delete or overwrite during automatic license cleanup. Example: peter.parker,john.doe. [LicenseDoNotTouchUserID]"
+                }
+            ]
+        },
+        {
+            "id": "primary_model",
+            "title": "Primary Model",
+            "description": "Main model connection. Start with provider defaults, then verify authentication, endpoint, response extraction and advanced request templates only if your provider requires them.",
+            "branchField": "_provider",
+            "branches": [
+                {
+                    "label": "OpenAI",
+                    "defaults": {
+                        "APIKeyEncrypted": "False",
+                        "APIKeyPrefix": "sk-proj-",
+                        "Endpoint": "https://api.openai.com/v1/responses",
+                        "HeaderA": "Authorization",
+                        "HeaderB": "Bearer {apikey}",
+                        "Response": "text (rkmode_first)",
+                        "Model": "gpt-5.4",
+                        "Timeout": "300000",
+                        "APICall": "{\"model\": \"{model}\", \"input\": [{\"role\": \"developer\", \"content\": [{\"type\": \"input_text\",\"text\": \"{promptsystem}\"}]},{\"role\": \"user\",\"content\": [{\"type\": \"input_text\",\"text\": \"{promptuser}\"}{objectcall}]}],\"reasoning\": {\"effort\": \"low\"}}",
+                        "APICall_Object": "[application/pdf],{\"type\": \"input_file\",\"filename\": \"userfile.pdf\", \"file_data\": \"data:{mimetype};base64,{encodeddata}\"}¦[image/png,image/jpeg,image/webp, image/gif],{\"type\": \"input_image\",\"image_url\": \"data:{mimetype};base64,{encodeddata}\"}"
+                    }
+                },
+                {
+                    "label": "Microsoft Azure OpenAI Services",
+                    "defaults": {
+                        "APIKeyEncrypted": "False",
+                        "APIKeyPrefix": "",
+                        "Endpoint": "https://[[Your Azure OpenAI Services Deployment]].cognitiveservices.azure.com/openai/responses?api-version=2025-04-01-preview",
+                        "HeaderA": "Authorization",
+                        "HeaderB": "Bearer {apikey}",
+                        "Response": "text (rkmode_first)",
+                        "Model": "gpt-5.4",
+                        "Timeout": "300000",
+                        "APICall": "{\"model\": \"{model}\", \"input\": [{\"role\": \"developer\", \"content\": [{\"type\": \"input_text\",\"text\": \"{promptsystem}\"}]},{\"role\": \"user\",\"content\": [{\"type\": \"input_text\",\"text\": \"{promptuser}\"}{objectcall}]}]}",
+                        "APICall_Object": "[application/pdf],{\"type\": \"input_file\",\"filename\": \"userfile.pdf\", \"file_data\": \"data:{mimetype};base64,{encodeddata}\"}¦[image/png,image/jpeg,image/webp, image/gif],{\"type\": \"input_image\",\"image_url\": \"data:{mimetype};base64,{encodeddata}\"}"
+                    }
+                },
+                {
+                    "label": "Google Gemini",
+                    "defaults": {
+                        "APIKeyEncrypted": "False",
+                        "APIKeyPrefix": "",
+                        "Endpoint": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={apikey}",
+                        "HeaderA": "X-Goog-Api-Key",
+                        "HeaderB": "{apikey}",
+                        "Response": "text",
+                        "Model": "gemini-2.5-pro",
+                        "Temperature": "0.2",
+                        "Timeout": "300000",
+                        "APICall": "{\"contents\": [{\"role\": \"user\",\"parts\": [{ \"text\": \"{promptsystem} {promptuser}\" }]}], \"generationConfig\": {\"temperature\": {temperature}}}"
+                    }
+                },
+                {
+                    "label": "Anthropic",
+                    "defaults": {
+                        "APIKeyEncrypted": "False",
+                        "APIKeyPrefix": "[[Your Anthropic API Key Prefix]]",
+                        "Endpoint": "https://api.anthropic.com/v1/messages",
+                        "HeaderA": "x-api-key¦anthropic-version",
+                        "HeaderB": "{apikey}¦2023-06-01",
+                        "Response": "text (rkmode_first)",
+                        "Model": "claude-sonnet-4-6",
+                        "Temperature": "1.0",
+                        "Timeout": "200000",
+                        "APICall": "{\"model\": \"{model}\",\"max_tokens\": 64000, \"messages\": [{\"role\": \"user\", \"content\": \"{promptsystem} {promptuser}\"}]}",
+                        "APICall_Object": ""
+                    }
+                },
+                {
+                    "label": "Google Vertex (OAuth2)",
+                    "defaults": {
+                        "APIKeyEncrypted": "False",
+                        "APIKeyPrefix": "",
+                        "Endpoint": "https://europe-west4-aiplatform.googleapis.com/v1/projects/[[Your Google project_id]]/locations/europe-west4/publishers/google/models/{model}:generateContent",
+                        "HeaderA": "Authorization",
+                        "HeaderB": "Bearer {apikey}",
+                        "Response": "text",
+                        "Model": "gemini-2.5-pro",
+                        "Temperature": "0.2",
+                        "Timeout": "300000",
+                        "OAuth2": "True",
+                        "OAuth2Scopes": "https://www.googleapis.com/auth/cloud-platform",
+                        "OAuth2Endpoint": "https://oauth2.googleapis.com/token",
+                        "OAuth2ATExpiry": "3600",
+                        "APICall": "{\"contents\": [{\"role\": \"user\", \"parts\":[{\"text\": \"{promptsystem} {promptuser}\"}{objectcall}]}], \"generationConfig\": {\"temperature\": {temperature},  \"thinking_config\": {\"thinking_budget\": 128}}}",
+                        "APICall_Object": ", {\"inlineData\": {\"mimeType\": \"{mimetype}\",\"data\": \"{encodeddata}\"}}"
+                    },
+                    "showExtra": [
+                        "OAuth2",
+                        "OAuth2ClientMail",
+                        "OAuth2Scopes",
+                        "OAuth2Endpoint",
+                        "OAuth2ATExpiry"
+                    ]
+                },
+                {
+                    "label": "MTF",
+                    "defaults": {
+                        "APIKeyEncrypted": "False",
+                        "APIKeyPrefix": "",
+                        "Endpoint": "https://api.ai.mtf.cloud/v1/chat/completions",
+                        "HeaderA": "Authorization",
+                        "HeaderB": "Bearer {apikey}",
+                        "Response": "content",
+                        "Model": "openai-gpt-oss-20b",
+                        "Temperature": "0.2",
+                        "Timeout": "200000",
+                        "APICall": "{\"model\":\"{model}\",\"messages\":[{\"role\":\"system\",\"content\":\"{promptsystem}\"},{\"role\":\"user\",\"content\":\"{promptuser}\"}],\"temperature\":{temperature}}"
+                    }
+                },
+                {
+                    "label": "SafeSwissCloud",
+                    "defaults": {
+                        "APIKeyEncrypted": "False",
+                        "APIKeyPrefix": "",
+                        "Endpoint": "https://llm01.safeswisscloud.ch/engines/{model}/chat/completions",
+                        "HeaderA": "Authorization",
+                        "HeaderB": "Bearer {apikey}",
+                        "Response": "content",
+                        "Model": "gpt-oss-120b",
+                        "Temperature": "0.2",
+                        "Timeout": "200000",
+                        "APICall": "{\"model\":\"{model}\",\"messages\":[{\"role\":\"system\",\"content\":\"{promptsystem}\"},{\"role\":\"user\",\"content\":\"{promptuser}\"}],\"temperature\":{temperature}}"
+                    }
+                },
+                {
+                    "label": "llama.cpp (local)",
+                    "defaults": {
+                        "APIKeyEncrypted": "False",
+                        "APIKeyPrefix": "",
+                        "APIKey": "dummy",
+                        "Endpoint": "http://localhost:8080/v1/chat/completions",
+                        "Response": "content",
+                        "APICall": "{\"messages\":[{\"role\":\"system\",\"content\":\"{promptsystem}\"},{\"role\":\"user\",\"content\":\"{promptuser}\"} ], \"temperature\": {temperature}}",
+                        "Timeout": "200000",
+                        "Temperature": "0.2",
+                        "Model": "AnyModel"
+                    }
+                },
+                {
+                    "label": "Ollama (local)",
+                    "defaults": {
+                        "APIKeyEncrypted": "False",
+                        "APIKeyPrefix": "",
+                        "APIKey": "dummy",
+                        "Endpoint": "http://[[Your Domain Or IP Address]:[[Your Port]]/api/chat",
+                        "HeaderA": "Authorization",
+                        "HeaderB": "Bearer {apikey}",
+                        "Response": "content",
+                        "APICall": "{\"model\":\"{model}\",\"messages\":[   {\"role\":\"system\",\"content\":\"{promptsystem}\"},   {\"role\":\"user\",\"content\":\"{promptuser}\"{objectcall}} ], \"stream\": false, \"think\": false, \"options\":{\"temperature\": {temperature}}}",
+                        "Timeout": "200000",
+                        "Temperature": "0.2",
+                        "Model": "[[Your Model]]"
+                    }
+                },
+                {
+                    "label": "OpenWebUI (local)",
+                    "defaults": {
+                        "APIKeyEncrypted": "False",
+                        "APIKeyPrefix": "",
+                        "APIKey": "dummy",
+                        "Endpoint": "http://[[Your Domain Or IP Address]:[[Your Port]]/api/chat/completions",
+                        "HeaderA": "Authorization",
+                        "HeaderB": "Bearer {apikey}",
+                        "Response": "content",
+                        "APICall": "{\"model\":\"{model}\",\"messages\": [{\"role\":\"system\",\"content\":\"{promptsystem}\"}, {\"role\":\"user\",\"content\":\"{promptuser}\"{objectcall}}],\"stream\":false,\"temperature\":{temperature}}",
+                        "Timeout": "200000",
+                        "Temperature": "0.2",
+                        "Model": "[[Your Model]]"
+                    }
+                },
+                {
+                    "label": "Custom / Other",
+                    "defaults": {
+                        "APIKeyEncrypted": "False",
+                        "APIKeyPrefix": ""
+                    }
+                }
+            ],
+            "fields": [
+                {
+                    "key": "APIKey",
+                    "label": "API Key",
+                    "type": "password",
+                    "validation": "NotEmpty",
+                    "description": "Enter the API key for the primary model. If OAuth2 is enabled, this field normally contains the service-account private key instead of a classic API key. Example: sk-proj-XXXXXXXXXXXXXXXX or an encrypted private key string. Use the button below or consult the manual for instructions on how to encrypt your API key using Red Ink. [APIKey]"
+                },
+                {
+                    "key": "APIKeyEncrypted",
+                    "label": "Key Encrypted",
+                    "type": "boolean",
+                    "default": "False",
+                    "description": "Set this to True if the value stored in APIKey is already encrypted for Red Ink and should be decrypted by the add-in before use. Example: False. [APIKeyEncrypted]"
+                },
+                {
+                    "key": "APIKeyPrefix",
+                    "label": "Key Prefix",
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional fixed prefix expected for the API key. Some providers use a visible prefix for validation or convenience. Use this if you encrypt your key, but not your prefix for better security. Example: sk-proj-. [APIKeyPrefix]"
+                },
+                {
+                    "key": "Model",
+                    "label": "Model Name",
+                    "type": "string",
+                    "validation": "NotEmpty",
+                    "description": "Enter the provider's exact model identifier. Use the name required by the endpoint and API call template. Example: gpt-5.4 or gemini-2.5-pro. [Model]"
+                },
+                {
+                    "key": "Endpoint",
+                    "label": "Endpoint URL",
+                    "type": "string",
+                    "validation": "Hyperlink",
+                    "description": "Enter the full API endpoint URL that Red Ink should call. For advanced setups this may also contain placeholders or even two endpoints separated by ¦. Example: https://api.openai.com/v1/responses. [Endpoint]"
+                },
+                {
+                    "key": "HeaderA",
+                    "label": "Header Name",
+                    "type": "string",
+                    "description": "Enter the HTTP header name used for authentication. Leave it empty only if the provider does not require a custom auth header. Example: Authorization. If you want to use two headers, separate their values with '¦'. [HeaderA]"
+                },
+                {
+                    "key": "HeaderB",
+                    "label": "Header Value",
+                    "type": "string",
+                    "description": "Enter the HTTP header value template. Use {apikey} where Red Ink should insert the value from APIKey. Example: Bearer {apikey}. If you want to use two headers, separate their values with '¦'. [HeaderB]"
+                },
+                {
+                    "key": "Response",
+                    "label": "Response Field",
+                    "type": "string",
+                    "description": "Enter the JSON field or response template from which Red Ink should extract the model answer. Advanced modifiers such as (rkmode_longest) or (nothink) are supported. Example: content or text (rkmode_first). [Response]"
+                },
+                {
+                    "key": "APICall",
+                    "label": "API Call Template",
+                    "type": "multiline",
+                    "description": "Enter the request body template sent to the model. Use placeholders such as {model}, {promptsystem}, {promptuser}, {userinstruction}, {temperature} and {objectcall} where needed. Example: {\"model\":\"{model}\",\"messages\":[{\"role\":\"system\",\"content\":\"{promptsystem}\"},{\"role\":\"user\",\"content\":\"{promptuser}\"}],\"temperature\":{temperature}}. [APICall]"
+                },
+                {
+                    "key": "APICall_Object",
+                    "label": "Object Call Template",
+                    "type": "multiline",
+                    "description": "Enter the object or file payload template used when Red Ink sends images or other files to the model. This also enables the Freestyle file trigger for compatible endpoints. Example: , {\"type\":\"image_url\",\"image_url\":{\"url\":\"data:{mimetype};base64,{encodeddata}\"}}. [APICall_Object]"
+                },
+                {
+                    "key": "Temperature",
+                    "label": "Temperature",
+                    "type": "string",
+                    "validation": "0.0-2.0",
+                    "default": "1.0",
+                    "description": "Set the model temperature, if supported. Lower values are better for stable tasks such as translation or correction, while higher values allow more creativity. Example: 0.2 for translation or 0.8 for freer drafting. [Temperature]"
+                },
+                {
+                    "key": "Timeout",
+                    "label": "Timeout (ms)",
+                    "type": "integer",
+                    "validation": ">0",
+                    "default": "200000",
+                    "description": "Set the maximum wait time for one API call in milliseconds. Increase this if complex requests time out. Example: 200000. [Timeout]"
+                },
+                {
+                    "key": "MaxOutputToken",
+                    "label": "Max Output Tokens",
+                    "type": "integer",
+                    "default": "128000",
+                    "description": "Optional output-length safeguard. Red Ink uses this to warn when a task is likely to exceed the model's maximum output size; use 0 to disable the check. Example: 8192. [MaxOutputToken]"
+                },
+                {
+                    "key": "Anon",
+                    "label": "Anonymization Config",
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional anonymization configuration for this model in the format mode; type. Leave it empty to disable model-side anonymization. Example: askshow; 4. [Anon]"
+                },
+                {
+                    "key": "TokenCount",
+                    "label": "Token Counting",
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional token accounting setup used by Freestyle cost logging. Enter one or more response fields, then optionally a multiplier and a label. Example: candidatesTokenCount; thoughtsTokenCount; 5; CHF. [TokenCount]"
+                },
+                {
+                    "key": "OAuth2",
+                    "label": "Use OAuth2",
+                    "type": "boolean",
+                    "default": "False",
+                    "description": "Set this to True when the provider requires OAuth 2.0 instead of a classic API key, such as Google Vertex AI. In that case APIKey normally stores the service-account private key. Example: True. [OAuth2]",
+                    "condition": "_provider == Google Vertex (OAuth2)"
+                },
+                {
+                    "key": "OAuth2ClientMail",
+                    "label": "OAuth2 Client Mail",
+                    "type": "string",
+                    "description": "Enter the service account client email used to request OAuth 2.0 access tokens. Example: red-ink@my-project.iam.gserviceaccount.com. [OAuth2ClientMail]",
+                    "condition": "OAuth2 == True"
+                },
+                {
+                    "key": "OAuth2Scopes",
+                    "label": "OAuth2 Scopes",
+                    "type": "string",
+                    "description": "Enter the OAuth 2.0 scopes required by the provider. For Vertex AI this is usually the cloud-platform scope. Example: https://www.googleapis.com/auth/cloud-platform. [OAuth2Scopes]",
+                    "condition": "OAuth2 == True"
+                },
+                {
+                    "key": "OAuth2Endpoint",
+                    "label": "OAuth2 Token Endpoint",
+                    "type": "string",
+                    "validation": "Hyperlink",
+                    "description": "Enter the OAuth 2.0 token endpoint that issues the access token. Example: https://oauth2.googleapis.com/token. [OAuth2Endpoint]",
+                    "condition": "OAuth2 == True"
+                },
+                {
+                    "key": "OAuth2ATExpiry",
+                    "label": "OAuth2 Token Expiry (s)",
+                    "type": "integer",
+                    "validation": ">0",
+                    "default": "3600",
+                    "description": "Enter the lifetime of the access token in seconds. Red Ink renews the token shortly before expiry. Example: 3600. [OAuth2ATExpiry]",
+                    "condition": "OAuth2 == True"
+                }
+            ]
+        },
+        {
+            "id": "secondary_model",
+            "title": "Secondary Model",
+            "description": "Optional secondary model used for Freestyle (2nd) or model switching. Configure it only if you want a second permanent model profile.",
+            "keySuffix": "_2",
+            "branchField": "_provider_2",
+            "branches": [
+                {
+                    "label": "OpenAI",
+                    "defaults": {
+                        "APIKeyEncrypted_2": "False",
+                        "APIKeyPrefix_2": "sk-proj-",
+                        "Endpoint_2": "https://api.openai.com/v1/responses",
+                        "HeaderA_2": "Authorization",
+                        "HeaderB_2": "Bearer {apikey}",
+                        "Response_2": "text (rkmode_first)",
+                        "Model_2": "gpt-5.4",
+                        "Timeout_2": "300000",
+                        "APICall_2": "{\"model\": \"{model}\", \"input\": [{\"role\": \"developer\", \"content\": [{\"type\": \"input_text\",\"text\": \"{promptsystem}\"}]},{\"role\": \"user\",\"content\": [{\"type\": \"input_text\",\"text\": \"{promptuser}\"}{objectcall}]}],\"reasoning\": {\"effort\": \"low\"}}",
+                        "APICall_Object_2": "[application/pdf],{\"type\": \"input_file\",\"filename\": \"userfile.pdf\", \"file_data\": \"data:{mimetype};base64,{encodeddata}\"}¦[image/png,image/jpeg,image/webp, image/gif],{\"type\": \"input_image\",\"image_url\": \"data:{mimetype};base64,{encodeddata}\"}"
+                    }
+                },
+                {
+                    "label": "Microsoft Azure OpenAI Services",
+                    "defaults": {
+                        "APIKeyEncrypted_2": "False",
+                        "APIKeyPrefix_2": "",
+                        "Endpoint_2": "https://[[Your Azure OpenAI Services Deployment]].cognitiveservices.azure.com/openai/responses?api-version=2025-04-01-preview",
+                        "HeaderA_2": "Authorization",
+                        "HeaderB_2": "Bearer {apikey}",
+                        "Response_2": "text (rkmode_first)",
+                        "Model_2": "gpt-5.4",
+                        "Timeout_2": "300000",
+                        "APICall_2": "{\"model\": \"{model}\", \"input\": [{\"role\": \"developer\", \"content\": [{\"type\": \"input_text\",\"text\": \"{promptsystem}\"}]},{\"role\": \"user\",\"content\": [{\"type\": \"input_text\",\"text\": \"{promptuser}\"}{objectcall}]}]}",
+                        "APICall_Object_2": "[application/pdf],{\"type\": \"input_file\",\"filename\": \"userfile.pdf\", \"file_data\": \"data:{mimetype};base64,{encodeddata}\"}¦[image/png,image/jpeg,image/webp, image/gif],{\"type\": \"input_image\",\"image_url\": \"data:{mimetype};base64,{encodeddata}\"}"
+                    }
+                },
+                {
+                    "label": "Google Gemini",
+                    "defaults": {
+                        "APIKeyEncrypted_2": "False",
+                        "APIKeyPrefix_2": "",
+                        "Endpoint_2": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={apikey}",
+                        "HeaderA_2": "X-Goog-Api-Key",
+                        "HeaderB_2": "{apikey}",
+                        "Response_2": "text",
+                        "Model_2": "gemini-2.5-pro",
+                        "Temperature_2": "0.2",
+                        "Timeout_2": "300000",
+                        "APICall_2": "{\"contents\": [{\"role\": \"user\",\"parts\": [{ \"text\": \"{promptsystem} {promptuser}\" }]}], \"generationConfig\": {\"temperature\": {temperature}}}"
+                    }
+                },
+                {
+                    "label": "Anthropic",
+                    "defaults": {
+                        "APIKeyEncrypted_2": "False",
+                        "APIKeyPrefix_2": "[[Your Anthropic API Key Prefix]]",
+                        "Endpoint_2": "https://api.anthropic.com/v1/messages",
+                        "HeaderA_2": "x-api-key¦anthropic-version",
+                        "HeaderB_2": "{apikey}¦2023-06-01",
+                        "Response_2": "text (rkmode_first)",
+                        "Model_2": "claude-sonnet-4-6",
+                        "Temperature_2": "1.0",
+                        "Timeout_2": "200000",
+                        "APICall_2": "{\"model\": \"{model}\",\"max_tokens\": 64000, \"messages\": [{\"role\": \"user\", \"content\": \"{promptsystem} {promptuser}\"}]}",
+                        "APICall_Object_2": ""
+                    }
+                },
+                {
+                    "label": "Google Vertex (OAuth2)",
+                    "defaults": {
+                        "APIKeyEncrypted_2": "False",
+                        "APIKeyPrefix_2": "",
+                        "Endpoint_2": "https://europe-west4-aiplatform.googleapis.com/v1/projects/[[Your Google project_id]]/locations/europe-west4/publishers/google/models/{model}:generateContent",
+                        "HeaderA_2": "Authorization",
+                        "HeaderB_2": "Bearer {apikey}",
+                        "Response_2": "text",
+                        "Model_2": "gemini-2.5-pro",
+                        "Temperature_2": "0.2",
+                        "Timeout_2": "300000",
+                        "OAuth2_2": "True",
+                        "OAuth2Scopes_2": "https://www.googleapis.com/auth/cloud-platform",
+                        "OAuth2Endpoint_2": "https://oauth2.googleapis.com/token",
+                        "OAuth2ATExpiry_2": "3600",
+                        "APICall_2": "{\"contents\": [{\"role\": \"user\", \"parts\":[{\"text\": \"{promptsystem} {promptuser}\"}{objectcall}]}], \"generationConfig\": {\"temperature\": {temperature},  \"thinking_config\": {\"thinking_budget\": 128}}}",
+                        "APICall_Object_2": ", {\"inlineData\": {\"mimeType\": \"{mimetype}\",\"data\": \"{encodeddata}\"}}"
+                    },
+                    "showExtra": [
+                        "OAuth2_2",
+                        "OAuth2ClientMail_2",
+                        "OAuth2Scopes_2",
+                        "OAuth2Endpoint_2",
+                        "OAuth2ATExpiry_2"
+                    ]
+                },
+                {
+                    "label": "MTF",
+                    "defaults": {
+                        "APIKeyEncrypted_2": "False",
+                        "APIKeyPrefix_2": "",
+                        "Endpoint_2": "https://api.ai.mtf.cloud/v1/chat/completions",
+                        "HeaderA_2": "Authorization",
+                        "HeaderB_2": "Bearer {apikey}",
+                        "Response_2": "content",
+                        "Model_2": "openai-gpt-oss-20b",
+                        "Temperature_2": "0.2",
+                        "Timeout_2": "200000",
+                        "APICall_2": "{\"model\":\"{model}\",\"messages\":[{\"role\":\"system\",\"content\":\"{promptsystem}\"},{\"role\":\"user\",\"content\":\"{promptuser}\"}],\"temperature\":{temperature}}"
+                    }
+                },
+                {
+                    "label": "SafeSwissCloud",
+                    "defaults": {
+                        "APIKeyEncrypted_2": "False",
+                        "APIKeyPrefix_2": "",
+                        "Endpoint_2": "https://llm01.safeswisscloud.ch/engines/{model}/chat/completions",
+                        "HeaderA_2": "Authorization",
+                        "HeaderB_2": "Bearer {apikey}",
+                        "Response_2": "content",
+                        "Model_2": "gpt-oss-120b",
+                        "Temperature_2": "0.2",
+                        "Timeout_2": "200000",
+                        "APICall_2": "{\"model\":\"{model}\",\"messages\":[{\"role\":\"system\",\"content\":\"{promptsystem}\"},{\"role\":\"user\",\"content\":\"{promptuser}\"}],\"temperature\":{temperature}}"
+                    }
+                },
+                {
+                    "label": "llama.cpp (local)",
+                    "defaults": {
+                        "APIKeyEncrypted_2": "False",
+                        "APIKeyPrefix_2": "",
+                        "APIKey_2": "dummy",
+                        "Endpoint_2": "http://localhost:8080/v1/chat/completions",
+                        "Response_2": "content",
+                        "APICall_2": "{\"messages\":[{\"role\":\"system\",\"content\":\"{promptsystem}\"},{\"role\":\"user\",\"content\":\"{promptuser}\"} ], \"temperature\": {temperature}}",
+                        "Timeout_2": "200000",
+                        "Temperature_2": "0.2",
+                        "Model_2": "AnyModel"
+                    }
+                },
+                {
+                    "label": "Ollama (local)",
+                    "defaults": {
+                        "APIKeyEncrypted_2": "False",
+                        "APIKeyPrefix_2": "",
+                        "APIKey_2": "dummy",
+                        "Endpoint_2": "http://[[Your Domain Or IP Address]:[[Your Port]]/api/chat",
+                        "HeaderA_2": "Authorization",
+                        "HeaderB_2": "Bearer {apikey}",
+                        "Response_2": "content",
+                        "APICall_2": "{\"model\":\"{model}\",\"messages\":[   {\"role\":\"system\",\"content\":\"{promptsystem}\"},   {\"role\":\"user\",\"content\":\"{promptuser}\"{objectcall}} ], \"stream\": false, \"think\": false, \"options\":{\"temperature\": {temperature}}}",
+                        "Timeout_2": "200000",
+                        "Temperature_2": "0.2",
+                        "Model_2": "[[Your Model]]"
+                    }
+                },
+                {
+                    "label": "OpenWebUI (local)",
+                    "defaults": {
+                        "APIKeyEncrypted_2": "False",
+                        "APIKeyPrefix_2": "",
+                        "APIKey_2": "dummy",
+                        "Endpoint_2": "http://[[Your Domain Or IP Address]:[[Your Port]]/api/chat/completions",
+                        "HeaderA_2": "Authorization",
+                        "HeaderB_2": "Bearer {apikey}",
+                        "Response_2": "content",
+                        "APICall_2": "{\"model\":\"{model}\",\"messages\": [{\"role\":\"system\",\"content\":\"{promptsystem}\"}, {\"role\":\"user\",\"content\":\"{promptuser}\"{objectcall}}],\"stream\":false,\"temperature\":{temperature}}",
+                        "Timeout_2": "200000",
+                        "Temperature_2": "0.2",
+                        "Model_2": "[[Your Model]]"
+                    }
+                },
+                {
+                    "label": "Custom / Other",
+                    "defaults": {
+                        "APIKeyEncrypted_2": "False",
+                        "APIKeyPrefix_2": ""
+                    }
+                }
+            ],
+            "fields": [
+                {
+                    "key": "SecondAPI",
+                    "label": "Enable Secondary Model",
+                    "type": "boolean",
+                    "default": "False",
+                    "description": "Enable this if Red Ink should expose a second model via Freestyle (2nd) or model switching. Keep it disabled if you use only one main model. Example: True. [SecondAPI]"
+                },
+                {
+                    "key": "APIKey_2",
+                    "label": "API Key (2nd)",
+                    "type": "password",
+                    "description": "Enter the API key for the secondary model. If OAuth2 is enabled, this field normally contains the service-account private key instead of a classic API key. Example: sk-proj-XXXXXXXXXXXXXXXX or an encrypted private key string. Use the button below or consult the manual for instructions on how to encrypt your API key using Red Ink. [APIKey_2]",
+                    "condition": "SecondAPI == True"
+                },
+                {
+                    "key": "APIKeyEncrypted_2",
+                    "label": "Key Encrypted (2nd)",
+                    "type": "boolean",
+                    "default": "False",
+                    "condition": "SecondAPI == True",
+                    "description": "Set this to True if the value stored in APIKey is already encrypted for Red Ink and should be decrypted by the add-in before use. Example: False. [APIKeyEncrypted_2]"
+                },
+                {
+                    "key": "APIKeyPrefix_2",
+                    "label": "Key Prefix (2nd)",
+                    "type": "string",
+                    "default": "",
+                    "condition": "SecondAPI == True",
+                    "description": "Optional fixed prefix expected for the API key. Some providers use a visible prefix for validation or convenience. Use this if you encrypt your key, but not your prefix for better security. Example: sk-proj-. [APIKeyPrefix_2]"
+                },
+                {
+                    "key": "Model_2",
+                    "label": "Model Name (2nd)",
+                    "type": "string",
+                    "condition": "SecondAPI == True",
+                    "description": "Enter the provider's exact model identifier. Use the name required by the endpoint and API call template. Example: gpt-5.4 or gemini-2.5-pro. [Model_2]"
+                },
+                {
+                    "key": "Endpoint_2",
+                    "label": "Endpoint URL (2nd)",
+                    "type": "string",
+                    "validation": "Hyperlink",
+                    "condition": "SecondAPI == True",
+                    "description": "Enter the full API endpoint URL that Red Ink should call. For advanced setups this may also contain placeholders or even two endpoints separated by ¦. Example: https://api.openai.com/v1/responses. [Endpoint_2]"
+                },
+                {
+                    "key": "HeaderA_2",
+                    "label": "Header Name (2nd)",
+                    "type": "string",
+                    "condition": "SecondAPI == True",
+                    "description": "Enter the HTTP header name used for authentication. Leave it empty only if the provider does not require a custom auth header. Example: Authorization. [HeaderA_2]"
+                },
+                {
+                    "key": "HeaderB_2",
+                    "label": "Header Value (2nd)",
+                    "type": "string",
+                    "condition": "SecondAPI == True",
+                    "description": "Enter the HTTP header value template. Use {apikey} where Red Ink should insert the value from APIKey. Example: Bearer {apikey}. [HeaderB_2]"
+                },
+                {
+                    "key": "Response_2",
+                    "label": "Response Field (2nd)",
+                    "type": "string",
+                    "condition": "SecondAPI == True",
+                    "description": "Enter the JSON field or response template from which Red Ink should extract the model answer. Advanced modifiers such as (rkmode_longest) or (nothink) are supported. Example: content or text. [Response_2]"
+                },
+                {
+                    "key": "APICall_2",
+                    "label": "API Call Template (2nd)",
+                    "type": "multiline",
+                    "condition": "SecondAPI == True",
+                    "description": "Enter the request body template sent to the model. Use placeholders such as {model}, {promptsystem}, {promptuser}, {userinstruction}, {temperature} and {objectcall} where needed. Example: {\"model\":\"{model}\",\"messages\":[{\"role\":\"system\",\"content\":\"{promptsystem}\"},{\"role\":\"user\",\"content\":\"{promptuser}\"}],\"temperature\":{temperature}}. [APICall_2]"
+                },
+                {
+                    "key": "APICall_Object_2",
+                    "label": "Object Call Template (2nd)",
+                    "type": "multiline",
+                    "condition": "SecondAPI == True",
+                    "description": "Enter the object or file payload template used when Red Ink sends images or other files to the model. This also enables the Freestyle file trigger for compatible endpoints. Example: , {\"type\":\"image_url\",\"image_url\":{\"url\":\"data:{mimetype};base64,{encodeddata}\"}}. [APICall_Object_2]"
+                },
+                {
+                    "key": "Temperature_2",
+                    "label": "Temperature (2nd)",
+                    "type": "string",
+                    "validation": "0.0-2.0",
+                    "condition": "SecondAPI == True",
+                    "description": "Set the model temperature, if supported. Lower values are better for stable tasks such as translation or correction, while higher values allow more creativity. Example: 0.2 for translation or 0.8 for freer drafting. [Temperature_2]"
+                },
+                {
+                    "key": "Timeout_2",
+                    "label": "Timeout (2nd, ms)",
+                    "type": "integer",
+                    "validation": ">0",
+                    "condition": "SecondAPI == True",
+                    "description": "Set the maximum wait time for one API call in milliseconds. Increase this if complex requests time out. Example: 200000. [Timeout_2]"
+                },
+                {
+                    "key": "MaxOutputToken_2",
+                    "label": "Max Output Tokens (2nd)",
+                    "type": "integer",
+                    "condition": "SecondAPI == True",
+                    "description": "Optional output-length safeguard. Red Ink uses this to warn when a task is likely to exceed the model's maximum output size; use 0 to disable the check. Example: 8192. [MaxOutputToken_2]"
+                },
+                {
+                    "key": "Anon_2",
+                    "label": "Anonymization (2nd)",
+                    "type": "string",
+                    "condition": "SecondAPI == True",
+                    "description": "Optional anonymization configuration for this model in the format mode; type. Leave it empty to disable model-side anonymization. Example: askshow; 4. [Anon_2]"
+                },
+                {
+                    "key": "TokenCount_2",
+                    "label": "Token Counting (2nd)",
+                    "type": "string",
+                    "condition": "SecondAPI == True",
+                    "description": "Optional token accounting setup used by Freestyle cost logging. Enter one or more response fields, then optionally a multiplier and a label. Example: candidatesTokenCount; thoughtsTokenCount; 5; CHF. [TokenCount_2]"
+                },
+                {
+                    "key": "OAuth2_2",
+                    "label": "Use OAuth2 (2nd)",
+                    "type": "boolean",
+                    "default": "False",
+                    "condition": "SecondAPI == True",
+                    "description": "Set this to True when the provider requires OAuth 2.0 instead of a classic API key, such as Google Vertex AI. In that case APIKey normally stores the service-account private key. Example: True. [OAuth2_2]"
+                },
+                {
+                    "key": "OAuth2ClientMail_2",
+                    "label": "OAuth2 Client Mail (2nd)",
+                    "type": "string",
+                    "condition": "OAuth2_2 == True",
+                    "description": "Enter the service account client email used to request OAuth 2.0 access tokens. Example: red-ink@my-project.iam.gserviceaccount.com. [OAuth2ClientMail_2]"
+                },
+                {
+                    "key": "OAuth2Scopes_2",
+                    "label": "OAuth2 Scopes (2nd)",
+                    "type": "string",
+                    "condition": "OAuth2_2 == True",
+                    "description": "Enter the OAuth 2.0 scopes required by the provider. For Vertex AI this is usually the cloud-platform scope. Example: https://www.googleapis.com/auth/cloud-platform. [OAuth2Scopes_2]"
+                },
+                {
+                    "key": "OAuth2Endpoint_2",
+                    "label": "OAuth2 Token Endpoint (2nd)",
+                    "type": "string",
+                    "condition": "OAuth2_2 == True",
+                    "description": "Enter the OAuth 2.0 token endpoint that issues the access token. Example: https://oauth2.googleapis.com/token. [OAuth2Endpoint_2]"
+                },
+                {
+                    "key": "OAuth2ATExpiry_2",
+                    "label": "OAuth2 Token Expiry (2nd, s)",
+                    "type": "integer",
+                    "condition": "OAuth2_2 == True",
+                    "description": "Enter the lifetime of the access token in seconds. Red Ink renews the token shortly before expiry. Example: 3600. [OAuth2ATExpiry_2]"
+                }
+            ]
+        },
+        {
+            "id": "additional_models",
+            "title": "Additional Models & Service Endpoints",
+            "description": "Paths to optional model and service configuration files plus local speech, embedding and text-to-speech resources.",
+            "fields": [
+                {
+                    "key": "AlternateModelPath",
+                    "label": "Alternate Models INI",
+                    "type": "path",
+                    "default": "%APPDATA%\\microsoft\\word\\allmodels.ini",
+                    "description": "Path including file name for the INI file that contains additional model definitions beyond the primary and secondary model. Users can select these models in Freestyle (2nd). This is also where you need to set up the models you use for tooling. Example: X:\\Configuration\\allmodels.ini. [AlternateModelPath]"
+                },
+                {
+                    "key": "SpecialServicePath",
+                    "label": "Special Services INI",
+                    "type": "path",
+                    "default": "%APPDATA%\\microsoft\\word\\specialservices.ini",
+                    "description": "Path including file name for the INI file that contains Special Services, such as legal data sources, specialised APIs, MCP servers or internal database services. Example: X:\\Configuration\\specialservices.ini. They will also be used for tooling. [SpecialServicePath]"
+                },
+                {
+                    "key": "SpeechModelPath",
+                    "label": "Speech Model Directory",
+                    "type": "path",
+                    "default": "",
+                    "description": "Directory that stores local speech-to-text models and related runtime files for the Transcriptor. Red Ink expects model subfolders such as vosk-model* or ggml*. Example: X:\\Speech\\. [SpeechModelPath]"
+                },
+                {
+                    "key": "TTSEndpoint",
+                    "label": "TTS Endpoints",
+                    "type": "string",
+                    "default": "",
+                    "description": "One or more text-to-speech API endpoints used for podcast or audio generation. Separate multiple providers with ¦ when both are available. Currently only Google and OpenAI are supported. Example: https://texttospeech.googleapis.com/v1/¦https://api.openai.com/v1/audio/speech. [TTSEndpoint]"
+                },
+                {
+                    "key": "LocalModelPath",
+                    "label": "Local AI Models",
+                    "type": "path",
+                    "default": "",
+                    "description": "Directory that stores locally hosted models or related runtime data used by Red Ink features that work with local models (such as the integrated vector search in 'Context Search'). Example: X:\\Models\\. [LocalModelPath]"
+                },
+                {
+                    "key": "STT_Google",
+                    "label": "Google STT Settings",
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional advanced settings for Google Speech-to-Text engines, in 'key=value;key=value' format. [STT_Google]"
+                },
+                {
+                    "key": "STT_Google_ProjectID",
+                    "label": "Google STT Project ID",
+                    "type": "string",
+                    "default": "",
+                    "description": "Google Cloud project ID used for Google Speech-to-Text. Required to enable Google transcription engines. [STT_Google_ProjectID]"
+                },
+                {
+                    "key": "STT_OpenAI",
+                    "label": "OpenAI STT Settings",
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional advanced settings for OpenAI speech-to-text engines, in 'key=value;key=value' format. [STT_OpenAI]"
+                },
+                {
+                    "key": "STT_Azure",
+                    "label": "Azure STT Settings",
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional advanced settings for Azure Speech-to-Text engines, in 'key=value;key=value' format. [STT_Azure]"
+                },
+                {
+                    "key": "STT_Azure_SpeechKey",
+                    "label": "Azure Speech Subscription Key",
+                    "type": "password",
+                    "default": "",
+                    "description": "Azure Speech subscription key. Required to enable Azure transcription engines. [STT_Azure_SpeechKey]"
+                }
+            ]
+        },
+        {
+            "id": "input",
+            "title": "Prompt Input & Protection",
+            "description": "Refine prompts before they are sent, including global instructions, prompt-injection protection and optional location context.",
+            "fields": [
+                {
+                    "key": "PreCorrection",
+                    "label": "Pre-Correction Prompt",
+                    "type": "multiline",
+                    "default": "",
+                    "description": "Optional instruction appended to most built-in prompts before the main request is sent. Use it for organisation-wide or user-specific wording rules that should always apply. Example: Always write company name as VISCHER and use Swiss spelling. [PreCorrection]"
+                },
+                {
+                    "key": "Ignore",
+                    "label": "Injection Protection",
+                    "type": "boolean",
+                    "default": "True",
+                    "description": "Enable the built-in prompt-injection protection placeholder so prompts that contain {Ignore} can tell the model to disregard malicious instructions hidden inside user content. Example: True. [Ignore]"
+                },
+                {
+                    "key": "Location",
+                    "label": "Location Context",
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional location context inserted into selected prompts so answers can be tailored to the correct jurisdiction or local environment. Example: We are in Zurich, Switzerland. [Location]"
+                }
+            ]
+        },
+        {
+            "id": "processing",
+            "title": "Output Cleanup & Post-Processing",
+            "description": "Post-process model output globally. These settings affect punctuation cleanup, invisible markers and optional second-pass prompting.",
+            "fields": [
+                {
+                    "key": "DoubleS",
+                    "label": "Convert Sharp S to ss",
+                    "type": "boolean",
+                    "default": "True",
+                    "description": "Enable this if German sharp S (ß) should automatically be converted to ss in the model output. This is especially common for Swiss usage. Example: True. [DoubleS]"
+                },
+                {
+                    "key": "Clean",
+                    "label": "Clean Output",
+                    "type": "boolean",
+                    "default": "True",
+                    "description": "Enable this to remove double spaces and certain invisible markers from LLM output. This can improve readability, but in a few advanced workflows it may make text matching harder. Example: True. [Clean]"
+                },
+                {
+                    "key": "NoEmDash",
+                    "label": "No Em Dashes",
+                    "type": "boolean",
+                    "default": "False",
+                    "description": "Enable this to replace unusually long em dashes produced by some models with a more conventional dash style. This helps avoid a visibly AI-typical punctuation style. Example: True. [NoEmDash]"
+                },
+                {
+                    "key": "PostCorrection",
+                    "label": "Post-Correction Prompt",
+                    "type": "multiline",
+                    "default": "",
+                    "description": "Optional prompt that is applied to every result after the main query, which means each answer is sent to the model again for post-processing. Use this only for special global rules because it slows processing noticeably. Example: Replace straight quotes with Swiss-style quotes. [PostCorrection]"
+                }
+            ]
+        },
+        {
+            "id": "markup",
+            "title": "Markup & Formatting",
+            "description": "Control text replacement, markup generation and formatting preservation for Word and Outlook. Use the lighter options first and increase fidelity only where needed.",
+            "fields": [
+                {
+                    "key": "DoMarkupOutlook",
+                    "label": "Markup in Outlook",
+                    "type": "boolean",
+                    "default": "True",
+                    "description": "Enable this if Outlook should automatically show a markup for predefined text-changing functions such as corrections or abbreviations. Example: True. [DoMarkupOutlook]"
+                },
+                {
+                    "key": "DoMarkupWord",
+                    "label": "Markup in Word",
+                    "type": "boolean",
+                    "default": "True",
+                    "description": "Enable this if Word should automatically show a markup for predefined text-changing functions such as corrections or abbreviations. Example: True. [DoMarkupWord]"
+                },
+                {
+                    "key": "MarkupMethodHelper",
+                    "label": "Helper Method (1-3)",
+                    "type": "integer",
+                    "default": "2",
+                    "description": "Choose the markup method used by the Word Helper (self-compare) function(s). 1 = Word Compare, 2 = Diff, 3 = DiffW window (will preserve formatting). Example: 3. [MarkupMethodHelper]"
+                },
+                {
+                    "key": "MarkupMethodWord",
+                    "label": "Word Method (1-5)",
+                    "type": "integer",
+                    "default": "2",
+                    "description": "Choose the default markup method for Word commands. 1 = Word Compare, 2 = Diff, 3 = DiffW window (will preserve formatting), 4 = Regex/LLM-assisted markup, 5 = Diff Classic. Example: 3. [MarkupMethodWord]"
+                },
+                {
+                    "key": "MarkupMethodOutlook",
+                    "label": "Outlook Method (1-4)",
+                    "type": "integer",
+                    "default": "4",
+                    "description": "Choose the default markup method for Outlook commands. 1 = Word Compare, 2 = Diff, 3 = DiffW window (will preserve formatting), 4 = Review Changes. Example: 3. [MarkupMethodOutlook]"
+                },
+                {
+                    "key": "MarkupDiffCap",
+                    "label": "Diff Character Cap",
+                    "type": "integer",
+                    "default": "30000",
+                    "description": "Maximum text length in characters for the Diff-based markup method and for Markdown conversion of selected text before Red Ink asks or switches to a safer alternative. Example: 20000. [MarkupDiffCap]"
+                },
+                {
+                    "key": "MarkupRegexCap",
+                    "label": "Regex Character Cap",
+                    "type": "integer",
+                    "default": "40000",
+                    "description": "Maximum text length in characters for the Regex/LLM-assisted markup method before Red Ink falls back or asks for confirmation. Use a larger value only with capable models. Example: 30000. [MarkupRegexCap]"
+                },
+                {
+                    "key": "MarkdownConvert",
+                    "label": "Markdown Conversion",
+                    "type": "boolean",
+                    "default": "True",
+                    "description": "Enable this to convert visible character formatting such as bold, italic or underline into Markdown before the text is sent to the LLM, so formatting can be restored afterwards. Example: True. [MarkdownConvert]"
+                },
+                {
+                    "key": "KeepParaFormatInline",
+                    "label": "Keep Paragraph Formatting",
+                    "type": "boolean",
+                    "default": "False",
+                    "description": "Enable this if Word should encode paragraph formatting hints into the text so paragraph styles can be restored more reliably after editing. It is lighter than full Keep Format, but still adds some overhead. Example: True. [KeepParaFormatInline]"
+                },
+                {
+                    "key": "KeepFormat1",
+                    "label": "Keep Format (Translation)",
+                    "type": "boolean",
+                    "default": "False",
+                    "description": "Enable this if translations in Word and Outlook should preserve basic formatting such as character style and lists by encoding it for the model. This improves fidelity but is slower. Example: False. [KeepFormat1]"
+                },
+                {
+                    "key": "KeepFormat2",
+                    "label": "Keep Format (Other)",
+                    "type": "boolean",
+                    "default": "False",
+                    "description": "Enable this if non-translation commands such as correction, improvement or shortening should preserve basic formatting in Word and Outlook. This improves fidelity but is slower. Example: True. [KeepFormat2]"
+                },
+                {
+                    "key": "UseHostColorOutlook",
+                    "label": "Use Outlook Host Font Color",
+                    "type": "boolean",
+                    "default": "False",
+                    "description": "Enable this if inserted text in Outlook should use the compose window's default host font color instead of inheriting the color at the insertion point. This affects Outlook insertion behavior only if the runtime supports this setting. Example: True. [UseHostColorOutlook]"
+                },
+                {
+                    "key": "ReplaceText1",
+                    "label": "Replace Text (Translation)",
+                    "type": "boolean",
+                    "default": "True",
+                    "description": "Enable this if translated text should replace the selected original text instead of being inserted after it. Example: True. [ReplaceText1]"
+                },
+                {
+                    "key": "ReplaceText2",
+                    "label": "Replace Text (Other)",
+                    "type": "boolean",
+                    "default": "True",
+                    "description": "Enable this if results from other predefined commands such as Correct or Improve should replace the selected text instead of being appended after it. Example: True. [ReplaceText2]"
+                },
+                {
+                    "key": "KeepFormatCap",
+                    "label": "KeepFormat Character Cap",
+                    "type": "integer",
+                    "default": "30000",
+                    "description": "Character limit above which KeepFormat and KeepParaFormatInline are turned off automatically to avoid very slow processing. Use 0 to disable the safeguard or 1 to always skip embedded format saving. Example: 5000. [KeepFormatCap]"
+                },
+                {
+                    "key": "MarkdownBubbles",
+                    "label": "Formatted Bubbles",
+                    "type": "boolean",
+                    "default": "False",
+                    "description": "Enable this if AI-generated Word comments should render Markdown formatting such as bold text inside the comment bubble. This looks better but takes a little longer. Example: False. [MarkdownBubbles]"
+                }
+            ]
+        },
+        {
+            "id": "app_config",
+            "title": "Application Behaviour",
+            "description": "General behaviour for the add-ins, including standard translation languages, menu and shortcut handling, user info, help file source, chat memory, and debugging.",
+            "fields": [
+                {
+                    "key": "Language1",
+                    "label": "Language 1",
+                    "type": "string",
+                    "default": "English",
+                    "description": "Enter the first quick-translation language name in English. This controls the first direct translation button in the ribbon. Example: English. [Language1]"
+                },
+                {
+                    "key": "Language2",
+                    "label": "Language 2",
+                    "type": "string",
+                    "default": "German",
+                    "description": "Enter the second quick-translation language name in English. This controls the second direct translation button in the ribbon. Example: German. [Language2]"
+                },
+                {
+                    "key": "UsageRestrictions",
+                    "label": "Usage Restrictions Tooltip",
+                    "type": "multiline",
+                    "default": "",
+                    "description": "Optional policy text shown when users hover over the Red Ink logo. Use this to communicate internal usage rules or confidentiality guidance. Example: You may use Red Ink for all kinds of data, including professional secrecy data. [UsageRestrictions]"
+                },
+                {
+                    "key": "HelpMeInkyPath",
+                    "label": "Help Me Inky Source",
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional path or URL to the manual file used as the knowledge base for the Help me, Inky chatbot (can be .txt, .docx or .pdf). If left empty, Red Ink uses the standard manual from the Red Ink server. Example: https://intranet.example.com/red_ink_guide.txt. [HelpMeInkyPath]"
+                },
+                {
+                    "key": "SimpleMenuDefault",
+                    "label": "Simple Menu Default",
+                    "type": "boolean",
+                    "default": "True",
+                    "description": "Enable this if Red Ink should start in simple-menu mode by default, meaning the menu items listed in SimpleMenuHide are hidden unless the user turns off the simple mode in 'Settings'. Example: True. [SimpleMenuDefault]"
+                },
+                {
+                    "key": "SimpleMenuHide",
+                    "label": "Simple Menu Hide List",
+                    "type": "multiline",
+                    "default": "Markup Time Span; Regex Search && Replace; Context Search; Talk to me!; Create Podcast; Apply Comment (Edit);  Apply Comment To Para (Edit); Freestyle (redo); Apply MyStyle; Define MyStyle; Document Check; Find Clause; Add Clause; Run WebAgent; Edit WebAgent; Convert Markdown; Remove Content Controls; Propose PDF Redactions; Finalize PDF Redactions; Anonymize Text (terms); Edit Instructions; Filibuster (Expand Text); Apply MyDocStyle; Learn MyDocStyle; Edit/Create Diagrams (draw.io); Snapshot && Compare; Remove RI: Reference; Flowchart to Webapp; Store Clause for Justification; Justify Markup; Stamp PDF Exhibits; Switch Model; Flatten PDFs To Images; Create Audio; Transcriptor; Switch Party; Tabular Overview; Mail Mover; Expert Tools; Microsoft 365 Mail Search; Excel Helpers; Analyze Tools",
+                    "description": "List of menu items to hide when Simple Menu mode is active. You may use exact internal control names such as RI_Correct (in Word, you can retrieve them with the Freestyle short command 'menunames') or exact visible labels such as Correct Text/Files. Separate entries with commas or semicolons. This works across all add-ins. Example: RI_Correct;RI_Translate;Task. [SimpleMenuHide]"
+                },
+                {
+                    "key": "MenuBlock",
+                    "label": "Always Hidden Menu Items",
+                    "type": "multiline",
+                    "default": "",
+                    "description": "List of menu items that must always stay hidden, regardless of Simple Menu mode or later ribbon updates. You may use exact internal control names (in Word, you can retrieve them with the Freestyle short command 'menunames') or exact visible labels. Separate entries with commas or semicolons. This works across all add-ins. Example: RI_Primlang;RI_Improve;Help me, Inky. [MenuBlock]"
+                },
+                {
+                    "key": "ContextMenu",
+                    "label": "Context Menu",
+                    "type": "boolean",
+                    "default": "True",
+                    "description": "Enable this if the Red Ink context menu should appear in Word and Excel when the helper add-ins are installed. Example: True. [ContextMenu]"
+                },
+                {
+                    "key": "WebServerBlock",
+                    "label": "Web Server Block Level",
+                    "type": "integer",
+                    "default": "0",
+                    "description": "Controls whether and how Red Ink's integrated local web server in Outlook and Word should be blocked or restricted. 0 = all turned on, 1 = all turned off, 2 = Local Chat/InkyPlay turned off, 3 = Edge/Chrome extension back-end turned off, 4 = Local Chat Scheduler turned off. Example: 0. [WebServerBlock]"
+                },
+                {
+                    "key": "ChatCap",
+                    "label": "Chat Character Cap",
+                    "type": "integer",
+                    "default": "80000",
+                    "description": "Maximum number of characters from earlier chatbot conversation that Red Ink should keep in memory. Lower values reduce cost and help preserve space for the active document. Example: 50000. [ChatCap]"
+                },
+                {
+                    "key": "ChunkOCR",
+                    "label": "Chunk OCR Pages",
+                    "type": "integer",
+                    "default": "0",
+                    "description": "Number of pages to process in each chunk when doing OCR (in order not to overwhelm the model). Set to 0 to turn off chunking during OCR. Example: 25. [ChunkOCR]"
+                },
+                {
+                    "key": "ShortcutsWordExcel",
+                    "label": "Keyboard Shortcuts",
+                    "type": "multiline",
+                    "default": "",
+                    "description": "Define keyboard shortcuts in the format Menu item=Key combination, separated by semicolons. The menu text must match the visible command name exactly. This only works if the Word and/or Excel helper is installed. Example: To English=Ctrl-Shift-E;Freestyle=Ctrl-Shift-P. [ShortcutsWordExcel]"
+                },
+                {
+                    "key": "HttpStack",
+                    "label": "Http Stack To Use",
+                    "type": "string",
+                    "default": "",
+                    "description": "Define the http stack to be used for license server requests, 'Help me, Inky' and other cases (LLM/MCP calls are not affected). Can be httpclient, winhttp, prefer-winhttp, prefer-httpclient (which is the default). [HttpStack]"
+                },
+                {
+                    "key": "APIDebug",
+                    "label": "API Debug Mode",
+                    "type": "boolean",
+                    "default": "False",
+                    "description": "Enable this to write the full request and response payloads for troubleshooting to debug files on the desktop as well as more log files (e.g., for tooling). Avoid enabling it in production unless you really need diagnostics. Example: False. [APIDebug]"
+                },
+                {
+                    "key": "ToolingLogWindow",
+                    "label": "Tooling Log Window",
+                    "type": "boolean",
+                    "default": "True",
+                    "description": "Enable this to show the live tooling log window while Red Ink runs tool-enabled or agentic tasks. Users can watch progress and cancel the run from that window. Example: True. [ToolingLogWindow]"
+                },
+                {
+                    "key": "ToolingDryRun",
+                    "label": "Tooling Dry Run",
+                    "type": "boolean",
+                    "default": "False",
+                    "description": "Enable this to show a confirmation preview of the tools exposed to the model before a tool-enabled run starts. This is useful for testing or auditing tool availability. Example: False. [ToolingDryRun]"
+                },
+                {
+                    "key": "ToolingMaximumIterations",
+                    "label": "Tooling Maximum Iterations",
+                    "type": "integer",
+                    "validation": ">0",
+                    "default": "50",
+                    "description": "Maximum number of tool-execution iterations Red Ink may perform in one tooling or agent session before it aborts the loop. Increase this only for complex workflows because each iteration can add cost and runtime. Example: 50. [ToolingMaximumIterations]"
+                }
+            ]
     },
     {
       "id": "prompt_resources",
@@ -1050,183 +1177,190 @@
       "id": "content_resources",
       "title": "Content Libraries & Rule Sets",
       "description": "Shared and local files that power document-centric functions such as the resources for Red Ink's agentic features, WebAgent, Find Clause, Document Check, MyDocStyle, redaction and discussion personas. The local files can edited by the users themselves, whereas the shared files can be edited via the ''Expert Config'' menu. You can have these parameters set automatically by using the ''Get Sample Files'' feature in ''Settings'', which will also download sample files to give you an idea on how to build such files.",
-      "fields": [
-        {
-          "key": "AgentResourcesPath",
-          "label": "Agent Resources Directory",
-          "type": "path",
-          "default": "%APPDATA%\\microsoft\\word",
-          "description": "Path to the shared directory that contains agent scripts (inky.md, skills, agents). Use a central network location if the same resources should be shared across users. Example: N:\\AI\\Library. [AgentResourcesPath"
-        },
-        {
-          "key": "AgentResourcesPathLocal",
-          "label": "Agent Resources Directory (Local)",
-          "type": "path",
-          "default": "",
-          "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [AgentResourcesPathLocal]"
-        },
-        {
-          "key": "WebAgentPath",
-          "label": "Web Agent Directory",
-          "type": "path",
-          "default": "%APPDATA%\\microsoft\\word",
-          "description": "Path to the shared directory that contains WebAgent scripts. Use a central network location if the same resources should be shared across users; Red Ink looks for files named redink-ag-*.json. Example: N:\\AI\\Library. [WebAgentPath]"
-        },
-        {
-          "key": "WebAgentPathLocal",
-          "label": "Web Agent Directory (Local)",
-          "type": "path",
-          "default": "",
-          "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [WebAgentPathLocal]"
-        },
-        {
-          "key": "FindClausePath",
-          "label": "Find Clause Directory",
-          "type": "path",
-          "default": "%APPDATA%\\microsoft\\word",
-          "description": "Path to the shared directory that contains clause library files. Use a central network location if the same resources should be shared across users; Red Ink looks for files named redink-lib-*.txt. Example: N:\\AI\\Library. [FindClausePath]"
-        },
-        {
-          "key": "FindClausePathLocal",
-          "label": "Find Clause Directory (Local)",
-          "type": "path",
-          "default": "",
-          "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [FindClausePathLocal]"
-        },
-        {
-          "key": "DocCheckPath",
-          "label": "DocCheck Directory",
-          "type": "path",
-          "default": "%APPDATA%\\microsoft\\word",
-          "description": "Path to the shared directory that contains Document Check rule sets. Use a central network location if the same resources should be shared across users; Red Ink looks for files named redink-dc-*.txt. Example: N:\\AI\\Library. [DocCheckPath]"
-        },
-        {
-          "key": "DocCheckPathLocal",
-          "label": "DocCheck Directory (Local)",
-          "type": "path",
-          "default": "",
-          "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [DocCheckPathLocal]"
-        },
-        {
-          "key": "DocStylePath",
-          "label": "DocStyle Directory",
-          "type": "path",
-          "default": "%APPDATA%\\microsoft\\word",
-          "description": "Path to the shared directory that contains MyDocStyle templates. Use a central network location if the same resources should be shared across users; Red Ink looks for files named redink-ds-*.json. Example: N:\\AI\\Library. [DocStylePath]"
-        },
-        {
-          "key": "DocStylePathLocal",
-          "label": "DocStyle Directory (Local)",
-          "type": "path",
-          "default": "",
-          "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [DocStylePathLocal]"
-        },
-        {
-          "key": "RedactionInstructionsPath",
-          "label": "Redaction Instructions",
-          "type": "path",
-          "default": "%APPDATA%\\microsoft\\word\\redactionlib.txt",
-          "description": "Path to the shared file that contains redaction instructions. Use a central network location if the same resources should be shared across users; the file is used by the redaction feature. Example: N:\\AI\\redactions.txt. [RedactionInstructionsPath]"
-        },
-        {
-          "key": "RedactionInstructionsPathLocal",
-          "label": "Redaction Instructions (Local)",
-          "type": "path",
-          "default": "",
-          "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\redactionslocal.txt. [RedactionInstructionsPathLocal]"
-        },
-        {
-          "key": "DiscussInkyPath",
-          "label": "Discuss this Personas",
-          "type": "path",
-          "default": "%APPDATA%\\microsoft\\word\\personalib.txt",
-          "description": "Path to the shared persona file for the Discuss this function. Use a central network location if the same resources should be shared across users; the file defines reusable personas. Example: N:\\AI\\Library\\personalib.txt. [DiscussInkyPath]"
-        },
-        {
-          "key": "DiscussInkyPathLocal",
-          "label": "Discuss this Personas (Local)",
-          "type": "path",
-          "default": "",
-          "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\personaliblocal.txt. Note that ''Discuss this'' will save Mission files in the same directory by adding ''-missions.txt'' to the filename. [DiscussInkyPathLocal]"
-        }
-      ]
+        "fields": [
+            {
+                "key": "WebAgentPath",
+                "label": "Web Agent Directory",
+                "type": "path",
+                "default": "%APPDATA%\\microsoft\\word",
+                "description": "Path to the shared directory that contains WebAgent scripts. Use a central network location if the same resources should be shared across users; Red Ink looks for files named redink-ag-*.json. Example: N:\\AI\\Library. [WebAgentPath]"
+            },
+            {
+                "key": "WebAgentPathLocal",
+                "label": "Web Agent Directory (Local)",
+                "type": "path",
+                "default": "",
+                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [WebAgentPathLocal]"
+            },
+            {
+                "key": "FindClausePath",
+                "label": "Find Clause Directory",
+                "type": "path",
+                "default": "%APPDATA%\\microsoft\\word",
+                "description": "Path to the shared directory that contains clause library files. Use a central network location if the same resources should be shared across users; Red Ink looks for files named redink-lib-*.txt. Example: N:\\AI\\Library. [FindClausePath]"
+            },
+            {
+                "key": "FindClausePathLocal",
+                "label": "Find Clause Directory (Local)",
+                "type": "path",
+                "default": "",
+                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [FindClausePathLocal]"
+            },
+            {
+                "key": "DocCheckPath",
+                "label": "DocCheck Directory",
+                "type": "path",
+                "default": "%APPDATA%\\microsoft\\word",
+                "description": "Path to the shared directory that contains Document Check rule sets. Use a central network location if the same resources should be shared across users; Red Ink looks for files named redink-dc-*.txt. Example: N:\\AI\\Library. [DocCheckPath]"
+            },
+            {
+                "key": "DocCheckPathLocal",
+                "label": "DocCheck Directory (Local)",
+                "type": "path",
+                "default": "",
+                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [DocCheckPathLocal]"
+            },
+            {
+                "key": "DocStylePath",
+                "label": "DocStyle Directory",
+                "type": "path",
+                "default": "%APPDATA%\\microsoft\\word",
+                "description": "Path to the shared directory that contains MyDocStyle templates. Use a central network location if the same resources should be shared across users; Red Ink looks for files named redink-ds-*.json. Example: N:\\AI\\Library. [DocStylePath]"
+            },
+            {
+                "key": "DocStylePathLocal",
+                "label": "DocStyle Directory (Local)",
+                "type": "path",
+                "default": "",
+                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [DocStylePathLocal]"
+            },
+            {
+                "key": "RedactionInstructionsPath",
+                "label": "Redaction Instructions",
+                "type": "path",
+                "default": "%APPDATA%\\microsoft\\word\\redactionlib.txt",
+                "description": "Path to the shared file that contains redaction instructions. Use a central network location if the same resources should be shared across users; the file is used by the redaction feature. Example: N:\\AI\\redactions.txt. [RedactionInstructionsPath]"
+            },
+            {
+                "key": "RedactionInstructionsPathLocal",
+                "label": "Redaction Instructions (Local)",
+                "type": "path",
+                "default": "",
+                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\redactionslocal.txt. [RedactionInstructionsPathLocal]"
+            },
+            {
+                "key": "DiscussInkyPath",
+                "label": "Discuss this Personas",
+                "type": "path",
+                "default": "%APPDATA%\\microsoft\\word\\personalib.txt",
+                "description": "Path to the shared persona file for the Discuss this function. Use a central network location if the same resources should be shared across users; the file defines reusable personas. Example: N:\\AI\\Library\\personalib.txt. [DiscussInkyPath]"
+            },
+            {
+                "key": "DiscussInkyPathLocal",
+                "label": "Discuss this Personas (Local)",
+                "type": "path",
+                "default": "",
+                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\personaliblocal.txt. Note that ''Discuss this'' will save Mission files in the same directory by adding ''-missions.txt'' to the filename. [DiscussInkyPathLocal]"
+            },
+            {
+                "key": "DictionaryPath",
+                "label": "Global Dictionary",
+                "type": "path",
+                "default": "%APPDATA%\\microsoft\\word\\dictionary.txt",
+                "description": "Path to the shared translation dictionary text file. Use a central network location if the same dictionary should be shared across users. Its content is injected into translation prompts inside <globaldictionary>...</globaldictionary>. Example: N:\\AI\\Library\\dictionary.txt. [DictionaryPath]"
+            },
+            {
+                "key": "DictionaryPathLocal",
+                "label": "User Dictionary",
+                "type": "path",
+                "default": "",
+                "description": "Path to the user's local translation dictionary text file. Its content is injected into translation prompts inside <userdictionary>...</userdictionary>; if both dictionaries exist, the user dictionary takes precedence. Example: %APPDATA%\\Microsoft\\Word\\dictionary_local.txt. [DictionaryPathLocal]"
+            }
+        ]
     },
     {
       "id": "automation_resources",
       "title": "Automation & Library Files",
       "description": "Files and directories used by agent resources, extraction, file renaming, snapshot tracking and MailMover. Keep shared resources on a central path if the same rules should be available to all users.",
-      "fields": [
-        {
-          "key": "AgentResourcesPath",
-          "label": "Agent Resources Directory",
-          "type": "path",
-          "default": "%APPDATA%\\microsoft\\word",
-          "description": "Path to the shared directory that contains agent resources such as inky.md, skills and agents. Use a central network location if the same resources should be shared across users. Example: N:\\AI\\Library. [AgentResourcesPath]"
-        },
-        {
-          "key": "AgentResourcesPathLocal",
-          "label": "Agent Resources Directory (Local)",
-          "type": "path",
-          "default": "",
-          "description": "Path to the user's local version of the same resource directory so personal files can be kept separate from the shared central directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [AgentResourcesPathLocal]"
-        },
-        {
-          "key": "ExtractorPath",
-          "label": "Extractor Library",
-          "type": "path",
-          "default": "%APPDATA%\\microsoft\\word\\extractorlib.txt",
-          "description": "Path to the shared instruction file for Data Extractor. Use a central network location if the same resources should be shared across users; the file stores reusable extraction rules. Example: N:\\AI\\extractorlib.txt. [ExtractorPath]"
-        },
-        {
-          "key": "ExtractorPathLocal",
-          "label": "Extractor Library (Local)",
-          "type": "path",
-          "default": "",
-          "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\extractorliblocal.txt. [ExtractorPathLocal]"
-        },
-        {
-          "key": "RenameLibPath",
-          "label": "Rename Library",
-          "type": "path",
-          "default": "%APPDATA%\\microsoft\\word\\renamelib.txt",
-          "description": "Path to the shared instruction file for File Renamer. Use a central network location if the same resources should be shared across users; the file stores reusable renaming rules. Example: N:\\AI\\renamelib.txt. [RenameLibPath]"
-        },
-        {
-          "key": "RenameLibPathLocal",
-          "label": "Rename Library (Local)",
-          "type": "path",
-          "default": "",
-          "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\renameliblocal.txt. [RenameLibPathLocal]"
-        },
-        {
-          "key": "SnapshotLibPath",
-          "label": "Snapshot Library",
-          "type": "path",
-          "default": "%APPDATA%\\microsoft\\word\\snapshotlib.txt",
-          "description": "Path to the shared snapshot metadata file for Snapshot & Compare. Use a central network location if the same resources should be shared across users; the file stores monitored websites and files. Example: N:\\AI\\Library\\snapshotlib.txt. [SnapshotLibPath]"
-        },
-        {
-          "key": "SnapshotLibPathLocal",
-          "label": "Snapshot Library (Local)",
-          "type": "path",
-          "default": "",
-          "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\snapshotliblocal.txt. [SnapshotLibPathLocal]"
-        },
-        {
-          "key": "MailMoverPath",
-          "label": "Mail Mover",
-          "type": "path",
-          "default": "%APPDATA%\\Microsoft\\Word\\mailmover.txt",
-          "description": "Path to the shared rules file for MailMover. Use a central network location if the same resources should be shared across users; the file stores reusable mail-moving rules. Example: N:\\AI\\Library\\mailmover.txt. [MailMoverPath]"
-        },
-        {
-          "key": "MailMoverPathLocal",
-          "label": "Mail Mover (Local)",
-          "type": "path",
-          "default": "",
-          "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\mailmoverlocal.txt. [MailMoverPathLocal]"
-        }
-      ]
+        "fields": [
+            {
+                "key": "AgentResourcesPath",
+                "label": "Agent Resources Directory",
+                "type": "path",
+                "default": "%APPDATA%\\microsoft\\word",
+                "description": "Path to the shared directory that contains agent resources such as inky.md, skills and agents. Use a central network location if the same resources should be shared across users. Example: N:\\AI\\Library. [AgentResourcesPath]"
+            },
+            {
+                "key": "AgentResourcesPathLocal",
+                "label": "Agent Resources Directory (Local)",
+                "type": "path",
+                "default": "",
+                "description": "Path to the user's local version of the same resource directory so personal files can be kept separate from the shared central directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [AgentResourcesPathLocal]"
+            },
+            {
+                "key": "ExtractorPath",
+                "label": "Extractor Library",
+                "type": "path",
+                "default": "%APPDATA%\\microsoft\\word\\extractorlib.txt",
+                "description": "Path to the shared instruction file for Data Extractor. Use a central network location if the same resources should be shared across users; the file stores reusable extraction rules. Example: N:\\AI\\extractorlib.txt. [ExtractorPath]"
+            },
+            {
+                "key": "ExtractorPathLocal",
+                "label": "Extractor Library (Local)",
+                "type": "path",
+                "default": "",
+                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\extractorliblocal.txt. [ExtractorPathLocal]"
+            },
+            {
+                "key": "RenameLibPath",
+                "label": "Rename Library",
+                "type": "path",
+                "default": "%APPDATA%\\microsoft\\word\\renamelib.txt",
+                "description": "Path to the shared instruction file for File Renamer. Use a central network location if the same resources should be shared across users; the file stores reusable renaming rules. Example: N:\\AI\\renamelib.txt. [RenameLibPath]"
+            },
+            {
+                "key": "RenameLibPathLocal",
+                "label": "Rename Library (Local)",
+                "type": "path",
+                "default": "",
+                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\renameliblocal.txt. [RenameLibPathLocal]"
+            },
+            {
+                "key": "SnapshotLibPath",
+                "label": "Snapshot Library",
+                "type": "path",
+                "default": "%APPDATA%\\microsoft\\word\\snapshotlib.txt",
+                "description": "Path to the shared snapshot metadata file for Snapshot & Compare. Use a central network location if the same resources should be shared across users; the file stores monitored websites and files. Example: N:\\AI\\Library\\snapshotlib.txt. [SnapshotLibPath]"
+            },
+            {
+                "key": "SnapshotLibPathLocal",
+                "label": "Snapshot Library (Local)",
+                "type": "path",
+                "default": "",
+                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\snapshotliblocal.txt. [SnapshotLibPathLocal]"
+            },
+            {
+                "key": "MailMoverPath",
+                "label": "Mail Mover",
+                "type": "path",
+                "default": "%APPDATA%\\Microsoft\\Word\\mailmover.txt",
+                "description": "Path to the shared rules file for MailMover. Use a central network location if the same resources should be shared across users; the file stores reusable mail-moving rules. Example: N:\\AI\\Library\\mailmover.txt. [MailMoverPath]"
+            },
+            {
+                "key": "MailMoverPathLocal",
+                "label": "Mail Mover (Local)",
+                "type": "path",
+                "default": "",
+                "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\mailmoverlocal.txt. [MailMoverPathLocal]"
+            },
+            {
+                "key": "DataCollectorPath",
+                "label": "Data Collector (AutoPilot)",
+                "type": "path",
+                "default": "",
+                "description": "Path to the schema file for the AutoPilot Data Collector. The path should contain the filename of the JSON file that contains the tasks that the Data Collector shall undertake. Example: N:\\AI\\Library\\datacollector.json. [DataCollectorPath]"
+            }
+        ]
     },
     {
       "id": "document_assembly",
@@ -1387,15 +1521,7 @@
           "condition": "ISearch == True",
           "description": "Enable this to enforce privacy constraints on internet search queries. When enabled, the model is instructed never to include personal data, confidential information, or non-public details in search queries sent to external search engines. This affects both the tool definition and the prompt instructions. Example: True. [EnablePrivacyForSearch]"
         },
-        {
-          "key": "ISearch_Timeout",
-          "label": "Timeout (ms)",
-          "type": "integer",
-          "default": "30000",
-          "condition": "ISearch == True",
-          "description": "Maximum time in seconds Red Ink should spend on a single internet-search hit before moving on. Example: 3. [ISearch_Timeout]"
-        },
-        {
+           {
           "key": "ISearch_Timeout",
           "label": "Timeout (ms)",
           "type": "integer",
@@ -1456,10 +1582,10 @@
         },
         {
           "key": "AutoPilotSchedulerLocalChat",
-          "label": "Permit AutoPilot Scheduler in Local Chat",
+          "label": "Permit Scheduler in Local Chat to Send Emails",
           "type": "boolean",
           "default": "False",
-          "description": "Enable this if Local Chat users should be able to access the AutoPilot Scheduler (not only via e-mail). This may allow them to misuse e-mail addresses of others. Example: True. [AutoPilotSchedulerLocalChat]"
+          "description": "Enable this if Local Chat users should be able to create scheduling tasks that are performed by automatically sending an e-mail to the user (under the user's name to the user's mailbox). If this is not allowed, the tasks are executed in the Local Chat browser. Example: True. [AutoPilotSchedulerLocalChat]"
         },
         {
           "key": "ForceDrawioLocal",

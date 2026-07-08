@@ -66,6 +66,32 @@ Partial Public Class ThisAddIn
 
     Private Const LegacyWebExtensionRoute As String = "/redink"
 
+    Private Function IsLocalChatAndInkyPlayEnabled() As System.Boolean
+        Return INI_WebServerBlock <> 2
+    End Function
+
+    Private Function IsLegacyEdgeExtensionReceiverEnabled() As System.Boolean
+        Return INI_WebServerBlock <> 3
+    End Function
+
+    Private Sub SendFeatureBlockedResponse(
+        ByVal res As System.Net.HttpListenerResponse,
+        ByVal requestId As System.String,
+        ByVal message As System.String,
+        Optional ByVal addCors As System.Boolean = False
+    )
+        Dim payload() As System.Byte = System.Text.Encoding.UTF8.GetBytes(message)
+
+        SendBufferedHttpResponse(
+            res,
+            403,
+            "text/plain; charset=utf-8",
+            payload,
+            requestId,
+            "feature-blocked",
+            addCors:=addCors)
+    End Sub
+
     Private Const AllToolUse As String = "Advanced tools"
     Private Const AllToolUseDescription As String =
         "Turns selected advanced tools on or off. Configure which advanced tools are callable through the Agents button."
@@ -108,6 +134,7 @@ Partial Public Class ThisAddIn
         Public Property UseSecond As Boolean
         Public Property FileObject As String
         Public Property ChatId As Integer = 1
+        Public Property ScheduledTaskId As String = ""
 
         Public Sub Dispose() Implements IDisposable.Dispose
             Try
@@ -119,9 +146,56 @@ Partial Public Class ThisAddIn
         End Sub
     End Class
 
+    Private Class PendingScheduledBrowserTask
+        Public Property TaskId As String = ""
+        Public Property Prompt As String = ""
+        Public Property ChatId As Integer = 2
+        Public Property CreatedUtc As DateTime = DateTime.UtcNow
+    End Class
+
     Private ReadOnly jobMap As New System.Collections.Concurrent.ConcurrentDictionary(Of String, LlmJob)()
     Private activeJobs As Integer = 0
     Private Const JobTtlMinutes As Integer = 45
+    Private ReadOnly _pendingScheduledBrowserTaskGate As New Object()
+    Private _pendingScheduledBrowserTask As PendingScheduledBrowserTask = Nothing
+
+    Friend Sub QueuePendingScheduledBrowserTask(taskId As String, prompt As String, Optional chatId As Integer = 2)
+        If String.IsNullOrWhiteSpace(taskId) OrElse String.IsNullOrWhiteSpace(prompt) Then Return
+
+        SyncLock _pendingScheduledBrowserTaskGate
+            _pendingScheduledBrowserTask = New PendingScheduledBrowserTask() With {
+                .TaskId = taskId,
+                .Prompt = prompt,
+                .ChatId = chatId,
+                .CreatedUtc = DateTime.UtcNow
+            }
+        End SyncLock
+    End Sub
+
+    Friend Function HasPendingScheduledBrowserTask() As Boolean
+        SyncLock _pendingScheduledBrowserTaskGate
+            Return _pendingScheduledBrowserTask IsNot Nothing
+        End SyncLock
+    End Function
+
+    Friend Sub ClearPendingScheduledBrowserTask(Optional taskId As String = Nothing)
+        SyncLock _pendingScheduledBrowserTaskGate
+            If _pendingScheduledBrowserTask Is Nothing Then Return
+
+            If String.IsNullOrWhiteSpace(taskId) OrElse
+               _pendingScheduledBrowserTask.TaskId.Equals(taskId, StringComparison.OrdinalIgnoreCase) Then
+                _pendingScheduledBrowserTask = Nothing
+            End If
+        End SyncLock
+    End Sub
+
+    Private Function ClaimPendingScheduledBrowserTask() As PendingScheduledBrowserTask
+        SyncLock _pendingScheduledBrowserTaskGate
+            Dim claimed = _pendingScheduledBrowserTask
+            _pendingScheduledBrowserTask = Nothing
+            Return claimed
+        End SyncLock
+    End Function
 
     ''' <summary>
     ''' Handles a single HTTP request (routing: favicon, UI HTML, API POST, CORS preflight).
@@ -142,11 +216,43 @@ Partial Public Class ThisAddIn
         Dim requestMethod As System.String = If(req.HttpMethod, System.String.Empty)
         Dim debugEnabled As System.Boolean = INI_APIDebug
 
+        Dim isLegacyWebExtensionRequest As System.Boolean =
+            System.String.Equals(requestPath, LegacyWebExtensionRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
+            System.String.Equals(requestPath, LegacyWebExtensionRoute & "/", System.StringComparison.OrdinalIgnoreCase)
+
+        Dim isLocalChatRequest As System.Boolean =
+            System.String.Equals(requestPath, "/", System.StringComparison.OrdinalIgnoreCase) OrElse
+            System.String.Equals(requestPath, "/inky/ping", System.StringComparison.OrdinalIgnoreCase) OrElse
+            System.String.Equals(requestPath, InkyUiRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
+            System.String.Equals(requestPath, InkyUiRoute & "/", System.StringComparison.OrdinalIgnoreCase) OrElse
+            System.String.Equals(requestPath, InkyPlayRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
+            System.String.Equals(requestPath, InkyPlayRoute & "/", System.StringComparison.OrdinalIgnoreCase) OrElse
+            System.String.Equals(requestPath, InkyApiRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
+            System.String.Equals(requestPath, InkyApiRoute & "/", System.StringComparison.OrdinalIgnoreCase)
+
         System.Threading.Interlocked.Increment(activeRequests)
 
         Dim hb As System.Threading.Timer = Nothing
 
         Try
+            If isLocalChatRequest AndAlso Not IsLocalChatAndInkyPlayEnabled() Then
+                SendFeatureBlockedResponse(
+                    res,
+                    requestId,
+                    "Local chat and InkyPlay are disabled by WebServerBlock.",
+                    addCors:=True)
+                Return
+            End If
+
+            If isLegacyWebExtensionRequest AndAlso Not IsLegacyEdgeExtensionReceiverEnabled() Then
+                SendFeatureBlockedResponse(
+                    res,
+                    requestId,
+                    "The Edge extension receiver is disabled by WebServerBlock.",
+                    addCors:=True)
+                Return
+            End If
+
             If debugEnabled Then
                 Dim rawUrl As System.String = ""
                 Dim hostHeader As System.String = ""
@@ -1028,16 +1134,49 @@ Partial Public Class ThisAddIn
     End Function
 
     ''' <summary>
-    ''' Returns localized greeting based on current UI culture.
+    ''' Returns the host application's UI culture two-letter ISO code or "en" fallback.
+    ''' </summary>
+    Private Function GetHostUiLanguageTwoLetter() As System.String
+        Try
+            Dim app As Microsoft.Office.Interop.Outlook.Application = Nothing
+            Dim languageSettings As Microsoft.Office.Core.LanguageSettings = Nothing
+
+            Try
+                app = Me.Application
+            Catch
+                app = Nothing
+            End Try
+
+            If app IsNot Nothing Then
+                Try
+                    languageSettings = app.LanguageSettings
+                Catch
+                    languageSettings = Nothing
+                End Try
+            End If
+
+            If languageSettings IsNot Nothing Then
+                Dim lcid As System.Int32 =
+                    languageSettings.LanguageID(Microsoft.Office.Core.MsoAppLanguageID.msoLanguageIDUI)
+
+                Return New System.Globalization.CultureInfo(lcid).TwoLetterISOLanguageName
+            End If
+        Catch
+        End Try
+
+        Try
+            Return System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName
+        Catch
+            Return "en"
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Returns localized greeting based on the Outlook UI language.
     ''' </summary>
     Private Function GetFriendlyGreeting() As System.String
         Dim name As System.String = GetBotName()
-        Dim tl As System.String
-        Try
-            tl = System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName
-        Catch
-            tl = "en"
-        End Try
+        Dim tl As System.String = GetHostUiLanguageTwoLetter()
 
         Select Case tl
             Case "de" : Return $"Hallo! Ich bin {name}. Wie kann ich helfen?"
@@ -1066,8 +1205,11 @@ Partial Public Class ThisAddIn
         Public SupportsFileUploads As System.Boolean = False
         Public ToolingEnabled As System.Boolean = False
         Public SelectedToolNames As System.Collections.Generic.List(Of String) = New System.Collections.Generic.List(Of String)()
-        Public SelectedMainToolNames As System.Collections.Generic.List(Of String) = New System.Collections.Generic.List(Of String)()
-        Public SelectedAdvancedToolNames As System.Collections.Generic.List(Of String) = New System.Collections.Generic.List(Of String)()
+        ' Opt-out persistence: store only the tools the user explicitly turned OFF.
+        ' Anything not listed is on by default (incl. newly added tools). Renamed from the
+        ' legacy "Selected..." fields so old opt-in values are dropped on first load.
+        Public DeselectedMainToolNames As System.Collections.Generic.List(Of String) = New System.Collections.Generic.List(Of String)()
+        Public DeselectedAdvancedToolNames As System.Collections.Generic.List(Of String) = New System.Collections.Generic.List(Of String)()
         Public AgentModeEnabled As System.Boolean = False
         Public PreAgentModelKey As System.String = ""
         Public PreAgentUseSecondApi As System.Boolean = False
@@ -1086,14 +1228,10 @@ Partial Public Class ThisAddIn
     End Class
 
     ''' <summary>
-    ''' Returns current UI culture two-letter ISO code or "en" fallback.
+    ''' Returns the Outlook UI language two-letter ISO code or "en" fallback.
     ''' </summary>
     Private Function GetUserLanguageTwoLetter() As System.String
-        Try
-            Return System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName
-        Catch
-            Return "en"
-        End Try
+        Return GetHostUiLanguageTwoLetter()
     End Function
 
     ''' <summary>
@@ -1341,7 +1479,7 @@ Partial Public Class ThisAddIn
         End If
 
         _chatToolingEnabled = enabled
-        _chatAdvancedToolsEnabled = enabled AndAlso supportsTooling AndAlso Not _apActive
+        _chatAdvancedToolsEnabled = st.AgentModeEnabled AndAlso enabled AndAlso supportsTooling AndAlso Not _apActive
 
         Return enabled
     End Function
@@ -1509,8 +1647,17 @@ Partial Public Class ThisAddIn
 
         _selectedToolsForChat = GetLocalChatEffectiveSelection(st, includeInteractiveM365Tools:=True)
 
+        If activeChatId = AP_SchedulerLocalChatId AndAlso HasActiveScheduledTaskWorkspace() Then
+            _selectedToolsForChat =
+                MergeScheduledTaskExecutionTools(
+                    _selectedToolsForChat,
+                    includeAllAdvancedTools:=True,
+                    executionMode:=AP_TaskExecutionModeBrowserPrompt)
+        End If
+
         If (_selectedToolsForChat Is Nothing OrElse _selectedToolsForChat.Count = 0) AndAlso
-           Not IsChatAgentWorkspaceConnected() Then
+           Not IsChatAgentWorkspaceConnected() AndAlso
+           Not HasActiveScheduledTaskWorkspace() Then
             Return False
         End If
 
@@ -1523,8 +1670,18 @@ Partial Public Class ThisAddIn
     Private Function EnsureToolsSelected(st As InkyState,
                                          Optional includeInteractiveM365Tools As Boolean = False) As Boolean
         _selectedToolsForChat = GetLocalChatEffectiveSelection(st, includeInteractiveM365Tools)
+
+        If activeChatId = AP_SchedulerLocalChatId AndAlso HasActiveScheduledTaskWorkspace() Then
+            _selectedToolsForChat =
+                MergeScheduledTaskExecutionTools(
+                    _selectedToolsForChat,
+                    includeAllAdvancedTools:=True,
+                    executionMode:=AP_TaskExecutionModeBrowserPrompt)
+        End If
+
         Return (_selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0) OrElse
-               IsChatAgentWorkspaceConnected()
+               IsChatAgentWorkspaceConnected() OrElse
+               HasActiveScheduledTaskWorkspace()
     End Function
 
     ''' <summary>
@@ -1535,10 +1692,9 @@ Partial Public Class ThisAddIn
 
         Try
             Dim st = LoadInkyState()
-            MigrateLocalChatToolSelections(st, includeInteractiveM365Tools)
 
             Dim selectedNameSet As New HashSet(Of String)(
-                If(st.SelectedMainToolNames, New List(Of String)()),
+                ResolveLocalChatSelectedMainToolNames(st, includeInteractiveM365Tools),
                 StringComparer.OrdinalIgnoreCase)
 
             For Each t In GetLocalChatMainSelectableTools(includeInteractiveM365Tools)
@@ -1594,11 +1750,11 @@ Partial Public Class ThisAddIn
         html.AppendLine("button:disabled{opacity:.5;cursor:not-allowed} ")
         html.AppendLine("button.is-pressed,.chatTab.is-pressed{transform:translateY(1px);box-shadow:var(--press-shadow);filter:brightness(.92);} ")
         html.AppendLine("button:active:not(:disabled){transform:translateY(1px);box-shadow:var(--press-shadow);filter:brightness(.9);} ")
-        html.AppendLine(".chat{flex:1;overflow:auto;padding:1rem;} ")
-        html.AppendLine(".row{display:flex;margin:0 auto 1rem auto;max-width:1000px;padding:0 .25rem;} ")
+        html.AppendLine(".chat{flex:1;overflow-y:auto;overflow-x:hidden;padding:1rem;box-sizing:border-box;} ")
+        html.AppendLine(".row{display:flex;margin:0 auto 1rem auto;max-width:100%;width:100%;padding:0 .25rem;box-sizing:border-box;min-width:0;} ")
         html.AppendLine(".row.bot{justify-content:flex-start} ")
         html.AppendLine(".row.user{justify-content:flex-end} ")
-        html.AppendLine(".bubble{max-width:75%;padding:1rem;border:1px solid var(--border);background:var(--card);border-radius:1rem;box-shadow:0 1px 3px rgba(0,0,0,.25)} ")
+        html.AppendLine(".bubble{max-width:85%;min-width:0;box-sizing:border-box;padding:1rem;border:1px solid var(--border);background:var(--card);border-radius:1rem;box-shadow:0 1px 3px rgba(0,0,0,.25);overflow-wrap:anywhere;word-break:break-word;} ")
         html.AppendLine(".bot .bubble{border-top-right-radius:.35rem} ")
         html.AppendLine(".user .bubble{border-top-left-radius:.35rem} ")
         html.AppendLine(".role{font-size:.75rem;color:var(--muted);margin-bottom:.25rem} ")
@@ -1609,7 +1765,8 @@ Partial Public Class ThisAddIn
         html.AppendLine(":root.light a{text-decoration-color:rgba(0,0,0,.4)} ")
         html.AppendLine("a:hover{filter:brightness(1.15)} ")
         html.AppendLine("code,pre{font-family:ui-monospace,Consolas,monospace;font-size:.85rem} ")
-        html.AppendLine("pre{overflow:auto;padding:.75rem;border:1px solid var(--border);border-radius:.6rem;position:relative;background:var(--elev);} ")
+        html.AppendLine("pre{overflow-x:auto;max-width:100%;padding:.75rem;border:1px solid var(--border);border-radius:.6rem;position:relative;background:var(--elev);box-sizing:border-box;} ")
+        html.AppendLine("table{display:block;max-width:100%;overflow-x:auto;border-collapse:collapse;margin:6px 0;} ")
         html.AppendLine(".code-copy-btn{position:absolute;top:6px;right:6px;padding:4px 8px;font-size:.65rem;line-height:1;border:1px solid var(--border);border-radius:4px;background:rgba(0,0,0,.45);backdrop-filter:blur(3px);cursor:pointer;display:flex;align-items:center;gap:6px;color:var(--fg);opacity:0;transition:opacity .18s,background .18s;} ")
         html.AppendLine("pre:hover .code-copy-btn{opacity:1} ")
         html.AppendLine(".code-copy-btn svg{width:16px;height:16px;display:block} ")
@@ -1799,6 +1956,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("let __jobStartTs=0;")
         html.AppendLine("let __elapsedTimer=null;")
         html.AppendLine("let __lastPrompt=" & Newtonsoft.Json.JsonConvert.SerializeObject(My.Settings.Inky_LastPrompt) & ";")
+        html.AppendLine("let __pendingScheduledTaskId='';")
 
         ' Press feedback
         html.AppendLine("(function(){const pressOn=e=>{const b=e.target.closest('button');if(!b||b.disabled)return;b.classList.add('is-pressed');};const pressOff=()=>{document.querySelectorAll('button.is-pressed').forEach(b=>b.classList.remove('is-pressed'));};['mousedown','touchstart'].forEach(ev=>document.addEventListener(ev,pressOn,{passive:true}));['mouseup','mouseleave','blur'].forEach(ev=>document.addEventListener(ev,pressOff));document.addEventListener('keydown',e=>{if((e.key===' '||e.key==='Enter')){const b=e.target.closest('button');if(b&&!b.disabled)b.classList.add('is-pressed');}});document.addEventListener('keyup',e=>{if(e.key===' '||e.key==='Enter')pressOff();});})();")
@@ -1873,7 +2031,8 @@ Partial Public Class ThisAddIn
         html.AppendLine("function removeTypingBubble(){if(__typingBubbleId){removeTempBubble(__typingBubbleId);__typingBubbleId=null;}stopElapsedTimer();}")
 
         ' Boot        
-        html.AppendLine("async function boot(){const st=await api('inky_getstate');if(!st.ok){alert(st.error||'Init failed');return;}__supportsFiles=(st.supportsFiles===true);setTheme(st.darkMode!==false);render(st.history||[]);modelSel.innerHTML='';for(const m of (st.models||[])){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}updateModelTooltip();if(st.greeting&&(!Array.isArray(st.history)||st.history.length===0)){msgEl.placeholder=st.greeting;}setActiveChatBtn(st.activeChat||1);__modelSupportsTooling=(st.supportsTooling===true);__toolingEnabled=(st.toolingEnabled===true);toolingChk.checked=__toolingEnabled;__toolLogEnabled=(st.toolingLogEnabled!==false);toolLogBtn.classList.toggle('active',__toolLogEnabled);__memoryEnabled=(st.inkyMemoryEnabled===true);memoryChk.checked=__memoryEnabled;memoryEditLnk.style.display=__memoryEnabled?'inline':'none';syncAdvancedToolsUi({advancedToolsEnabled:st.advancedToolsEnabled===true,agentWorkspace:st.agentWorkspace,agentFiles:st.agentFiles||[],agentModelAvailable:st.agentModelAvailable===true,agentModelActive:st.agentModelActive===true});adjustModelSel();}")
+        html.AppendLine("async function claimScheduledTask(){const r=await api('inky_claimscheduledtask');if(!r||!r.ok)return null;return r.task||null;}")
+        html.AppendLine("async function boot(){const st=await api('inky_getstate');if(!st.ok){alert(st.error||'Init failed');return;}__supportsFiles=(st.supportsFiles===true);setTheme(st.darkMode!==false);render(st.history||[]);modelSel.innerHTML='';for(const m of (st.models||[])){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}updateModelTooltip();if(st.greeting&&(!Array.isArray(st.history)||st.history.length===0)){msgEl.placeholder=st.greeting;}setActiveChatBtn(st.activeChat||1);__modelSupportsTooling=(st.supportsTooling===true);__toolingEnabled=(st.toolingEnabled===true);toolingChk.checked=__toolingEnabled;__toolLogEnabled=(st.toolingLogEnabled!==false);toolLogBtn.classList.toggle('active',__toolLogEnabled);__memoryEnabled=(st.inkyMemoryEnabled===true);memoryChk.checked=__memoryEnabled;memoryEditLnk.style.display=__memoryEnabled?'inline':'none';syncAdvancedToolsUi({advancedToolsEnabled:st.advancedToolsEnabled===true,agentWorkspace:st.agentWorkspace,agentFiles:st.agentFiles||[],agentModelAvailable:st.agentModelAvailable===true,agentModelActive:st.agentModelActive===true});adjustModelSel();const scheduledTask=await claimScheduledTask();if(scheduledTask&&scheduledTask.prompt&&!__currentJobId){__pendingScheduledTaskId=scheduledTask.taskId||'';msgEl.value=scheduledTask.prompt;await send();}}")
 
         ' Poll job
         html.AppendLine("function buildAssistantTurnFromJobResult(r){const md=String((r&&r.result)||'').trim();if(!md)return null;const html=String((r&&r.resultHtml)||'').trim()||md.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>');return {role:'assistant',markdown:md,html:html,utc:new Date().toISOString()};}")
@@ -1881,7 +2040,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("async function pollJob(jobId){if(!jobId)return;__currentJobId=jobId;__jobCanceled=false;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);try{for(;;){await new Promise(r=>setTimeout(r,2000));if(__jobCanceled)break;const s=await api('inky_jobstatus',{Job:jobId});if(!s.ok){console.warn('job status error',s.error);break;}if(s.status==='running'){continue;}if(s.status==='done'){if(Array.isArray(s.history)){render(s.history);}else{const st=await api('inky_getstate');if(st.ok){const hist=ensureJobResultVisible(st,s);render(hist);}else{render(ensureJobResultVisible({history:[]},s));console.warn('state sync error',st&&st.error);}}const stSync=await api('inky_getstate');if(stSync&&stSync.ok){if(stSync.agentFiles)updateAgentFilesDisplay(stSync.agentFiles);syncAdvancedToolsUi({advancedToolsEnabled:stSync.advancedToolsEnabled===true,agentWorkspace:stSync.agentWorkspace,agentFiles:stSync.agentFiles||[],agentModelAvailable:stSync.agentModelAvailable===true,agentModelActive:stSync.agentModelActive===true});}break;}if(s.status==='canceled'){const st=await api('inky_getstate');if(st.ok){render(st.history||[]);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);}break;}if(s.status==='error'){console.warn('job failed',s.error);break;}const st=await api('inky_getstate');if(st.ok){const hist=ensureJobResultVisible(st,s);render(hist);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);}break;}}finally{cancelBtn.style.display='none';removeTypingBubble();sendBtn.disabled=false;pureBtn.disabled=false;disableChatSwitch(false);__currentJobId=null;adjustModelSel();}}")
 
         ' Send (normal)
-        html.AppendLine("async function send(){if(__currentJobId){return;}const t=msgEl.value.trim();if(!t)return;__lastPrompt=t;msgEl.value='';sendBtn.disabled=true;pureBtn.disabled=true;chatEl.insertAdjacentHTML('beforeend',`<div class=""row user""><div class=""bubble""><div class=""role"">You</div><div>${t.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>')}</div></div></div>`);let typingId=addTempAssistantBubble('<span class=""typing-dots""><span></span><span></span><span></span></span>');const payload={Text:t};if(__pendingFilePath)payload.FileObject=__pendingFilePath;let r;try{r=await api('inky_send',payload);}catch(e){r={ok:false,error:e.message||'Network error'};}if(!r||!r.ok){removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;alert(r&&r.error||'Error');__pendingFilePath='';adjustModelSel();return;}__pendingFilePath='';if(r.job){if(r.history){render(r.history||[]);}removeTempBubble(typingId);__typingBubbleId=null;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);pollJob(r.job);}else{removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;if(r.history){render(r.history||[]);}adjustModelSel();}}")
+        html.AppendLine("async function send(){if(__currentJobId){return;}const t=msgEl.value.trim();if(!t)return;const scheduledTaskId=__pendingScheduledTaskId||'';__pendingScheduledTaskId='';__lastPrompt=t;msgEl.value='';sendBtn.disabled=true;pureBtn.disabled=true;chatEl.insertAdjacentHTML('beforeend',`<div class=""row user""><div class=""bubble""><div class=""role"">You</div><div>${t.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>')}</div></div></div>`);let typingId=addTempAssistantBubble('<span class=""typing-dots""><span></span><span></span><span></span></span>');const payload={Text:t};if(scheduledTaskId)payload.ScheduledTaskId=scheduledTaskId;if(__pendingFilePath)payload.FileObject=__pendingFilePath;let r;try{r=await api('inky_send',payload);}catch(e){r={ok:false,error:e.message||'Network error'};}if(!r||!r.ok){removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;alert(r&&r.error||'Error');__pendingFilePath='';adjustModelSel();return;}__pendingFilePath='';if(r.job){if(r.history){render(r.history||[]);}removeTempBubble(typingId);__typingBubbleId=null;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);pollJob(r.job);}else{removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;if(r.history){render(r.history||[]);}adjustModelSel();}}")
 
         ' PureSend
         html.AppendLine("async function pureSend(){if(__currentJobId){return;}const t=msgEl.value.trim();if(!t)return;__lastPrompt=t;msgEl.value='';sendBtn.disabled=true;pureBtn.disabled=true;chatEl.insertAdjacentHTML('beforeend',`<div class=""row user""><div class=""bubble""><div class=""role"">You</div><div>${('Pure: '+t).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>')}</div></div></div>`);let typingId=addTempAssistantBubble('<span class=""typing-dots""><span></span><span></span><span></span></span>');const payload={Text:t};if(__pendingFilePath)payload.FileObject=__pendingFilePath;let r;try{r=await api('inky_pure',payload);}catch(e){r={ok:false,error:e.message||'Network error'};}if(!r||!r.ok){removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;alert(r&&r.error||'Error');__pendingFilePath='';adjustModelSel();return;}__pendingFilePath='';if(r.job){if(r.history){render(r.history||[]);}removeTempBubble(typingId);__typingBubbleId=null;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);pollJob(r.job);}else{removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;if(r.history){render(r.history||[]);}adjustModelSel();}}")
@@ -1904,7 +2063,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("sendBtn.addEventListener('click',send);")
         html.AppendLine("pureBtn.addEventListener('click',pureSend);")
         html.AppendLine("cancelBtn.addEventListener('click',async()=>{if(!__currentJobId)return;__jobCanceled=true;await api('inky_cancel',{Job:__currentJobId});});")
-        html.AppendLine("chatEl.addEventListener('click',e=>{const a=e.target&&e.target.closest&&e.target.closest('a[href]');if(!a)return;if(a.target!=='_blank'){a.target='_blank';a.rel='noopener noreferrer';}});")
+        html.AppendLine("chatEl.addEventListener('click',async e=>{const a=e.target&&e.target.closest&&e.target.closest('a[href]');if(!a)return;const href=String(a.getAttribute('href')||'').trim();if(!href)return;if(/^file:\/\//i.test(href)||/^[A-Za-z]:[\\/]/.test(href)){e.preventDefault();const r=await api('inky_openpath',{Path:href});if(!r||!r.ok)alert((r&&r.error)||'Could not open file link');return;}if(a.target!=='_blank'){a.target='_blank';a.rel='noopener noreferrer';}});")
         html.AppendLine("async function switchChat(n){if(__currentJobId)return;const r=await api('inky_switch',{Chat:String(n)});if(!r.ok){alert(r.error||'Switch failed');return;}setActiveChatBtn(r.activeChat||n);render(r.history||[]);if(r.greeting){msgEl.placeholder=r.greeting;}if(r.models&&r.models.length){modelSel.innerHTML='';for(const m of r.models){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}}if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}syncAdvancedToolsUi({advancedToolsEnabled:r.advancedToolsEnabled===true,agentWorkspace:r.agentWorkspace,agentFiles:r.agentFiles||[],agentModelAvailable:r.agentModelAvailable===true,agentModelActive:r.agentModelActive===true});updateModelTooltip();adjustModelSel();}")
         html.AppendLine("chat1Btn.addEventListener('click',()=>switchChat(1));")
         html.AppendLine("chat2Btn.addEventListener('click',()=>switchChat(2));")
@@ -2038,35 +2197,15 @@ Partial Public Class ThisAddIn
                             If enabled Then
                                 Dim effectiveAgentTools =
                 GetLocalChatEffectiveTools(
-                    st.SelectedMainToolNames,
-                    ResolveLocalChatAdvancedToolNamesForEnabledState(st.SelectedAdvancedToolNames, includeInteractiveM365Tools:=True),
+                    ResolveLocalChatSelectedMainToolNames(st, includeInteractiveM365Tools:=True),
+                    ResolveLocalChatSelectedAdvancedToolNames(st, includeInteractiveM365Tools:=True),
                     True,
                     includeInteractiveM365Tools:=True)
 
                                 If effectiveAgentTools.Count = 0 AndAlso Not IsChatAgentWorkspaceConnected() Then
-                                    Dim selectedMainToolNames As List(Of String) = Nothing
-                                    Dim selectedAdvancedToolNames As List(Of String) = Nothing
-
-                                    Await SwitchToUi(
-                    Sub()
-                        selectedMainToolNames =
-                            ShowLocalChatToolSelectionDialog(
-                                If(st.SelectedMainToolNames, New List(Of String)()),
-                                ResolveLocalChatAdvancedToolNamesForEnabledState(st.SelectedAdvancedToolNames, includeInteractiveM365Tools:=True),
-                                selectedAdvancedToolNames,
-                                includeInteractiveM365Tools:=True)
-                    End Sub).ConfigureAwait(False)
-
-                                    If selectedMainToolNames Is Nothing Then
-                                        Return JsonOk(New With {.ok = True, .cancelled = True})
-                                    End If
-
-                                    st.SelectedMainToolNames = selectedMainToolNames
-                                    st.SelectedAdvancedToolNames =
-                    NormalizeLocalChatAdvancedToolNames(selectedAdvancedToolNames, includeInteractiveM365Tools:=True)
-                                Else
-                                    st.SelectedAdvancedToolNames =
-                    ResolveLocalChatAdvancedToolNamesForEnabledState(st.SelectedAdvancedToolNames, includeInteractiveM365Tools:=True)
+                                    ' Opt-out defaults keep all tools on unless the user deselected them all.
+                                    ' Do not auto-open the selection dialog here; report a plain error instead.
+                                    Return JsonErr("Agent mode requires at least one tool or a connected workspace. All tools are on by default — use the Tools button to re-enable some (or connect a workspace), then try again.")
                                 End If
 
                                 st.ToolingEnabled = True
@@ -2196,58 +2335,24 @@ Partial Public Class ThisAddIn
 
                                 ' Ensure sources are actually selected (prompt user if necessary)
                                 Dim effectiveAgentTools =
-    GetLocalChatEffectiveTools(
-        st.SelectedMainToolNames,
-        ResolveLocalChatAdvancedToolNamesForEnabledState(st.SelectedAdvancedToolNames, includeInteractiveM365Tools:=True),
-        True,
-        includeInteractiveM365Tools:=True)
+                                            GetLocalChatEffectiveTools(
+                                                ResolveLocalChatSelectedMainToolNames(st, includeInteractiveM365Tools:=True),
+                                                ResolveLocalChatSelectedAdvancedToolNames(st, includeInteractiveM365Tools:=True),
+                                                True,
+                                                includeInteractiveM365Tools:=True)
 
                                 If effectiveAgentTools.Count = 0 AndAlso Not IsChatAgentWorkspaceConnected() Then
-                                    Dim selectedMainToolNames As List(Of String) = Nothing
-                                    Dim selectedAdvancedToolNames As List(Of String) = Nothing
-
-                                    Try
-                                        Await SwitchToUi(
-                                            Sub()
-                                                selectedMainToolNames =
-                                                    ShowLocalChatToolSelectionDialog(
-                                                        If(st.SelectedMainToolNames, New List(Of String)()),
-                                                        ResolveLocalChatAdvancedToolNamesForEnabledState(st.SelectedAdvancedToolNames, includeInteractiveM365Tools:=True),
-                                                        selectedAdvancedToolNames,
-                                                        includeInteractiveM365Tools:=True)
-                                            End Sub).ConfigureAwait(False)
-                                    Catch
-                                    End Try
-
-                                    If selectedMainToolNames IsNot Nothing Then
-                                        st.SelectedMainToolNames = selectedMainToolNames
-                                        st.SelectedAdvancedToolNames =
-                                            NormalizeLocalChatAdvancedToolNames(selectedAdvancedToolNames, includeInteractiveM365Tools:=True)
-
-                                        st.SelectedToolNames =
-                                            GetLocalChatEffectiveTools(
-                                                st.SelectedMainToolNames,
-                                                ResolveLocalChatAdvancedToolNamesForEnabledState(st.SelectedAdvancedToolNames, includeInteractiveM365Tools:=True),
-                                                True,
-                                                includeInteractiveM365Tools:=True).
-                                                Select(Function(tl) tl.ToolName).
-                                                Distinct(StringComparer.OrdinalIgnoreCase).
-                                                ToList()
-                                    Else
-                                        ' User cancelled — abort the toggle
-                                        st.AgentModelActive = False
-                                        st.SelectedModelKey = st.PreAgentModelKey
-                                        st.UseSecondApi = st.PreAgentUseSecondApi
-                                        st.PreAgentModelKey = ""
-                                        st.PreAgentUseSecondApi = False
-                                        st.AgentModeEnabled = False
-                                        _chatAdvancedToolsEnabled = False
-                                        SaveInkyState(st)
-                                        Return JsonErr($"Agent model requires {ToolFriendlyName.ToLower()} to be selected. Please select at least one source and try again.")
-                                    End If
-                                Else
-                                    st.SelectedAdvancedToolNames =
-                                        ResolveLocalChatAdvancedToolNamesForEnabledState(st.SelectedAdvancedToolNames, includeInteractiveM365Tools:=True)
+                                    ' Opt-out defaults keep all tools on unless the user deselected them all.
+                                    ' Abort the toggle and restore the previous model instead of auto-opening a dialog.
+                                    st.AgentModelActive = False
+                                    st.SelectedModelKey = st.PreAgentModelKey
+                                    st.UseSecondApi = st.PreAgentUseSecondApi
+                                    st.PreAgentModelKey = ""
+                                    st.PreAgentUseSecondApi = False
+                                    st.AgentModeEnabled = False
+                                    _chatAdvancedToolsEnabled = False
+                                    SaveInkyState(st)
+                                    Return JsonErr($"The agent model requires at least one {ToolFriendlyName.ToLower()} or a connected workspace. All tools are on by default — use the Tools button to re-enable some, then try again.")
                                 End If
 
                                 ' Only now is agent mode actually active.
@@ -2453,6 +2558,34 @@ Partial Public Class ThisAddIn
                             Return JsonErr("Failed to open workspace: " & ex.Message)
                         End Try
 
+                    Case "inky_openpath"
+                        Try
+                            Dim rawPath As String = j("Path")?.ToString()
+                            If String.IsNullOrWhiteSpace(rawPath) Then
+                                Return JsonErr("Missing path.")
+                            End If
+
+                            Dim fullPath As String = rawPath.Trim()
+
+                            If fullPath.StartsWith("file://", StringComparison.OrdinalIgnoreCase) Then
+                                fullPath = New Uri(fullPath).LocalPath
+                            End If
+
+                            fullPath = Path.GetFullPath(fullPath)
+
+                            If File.Exists(fullPath) Then
+                                Process.Start("explorer.exe", "/select,""" & fullPath & """")
+                            ElseIf Directory.Exists(fullPath) Then
+                                Process.Start("explorer.exe", """" & fullPath & """")
+                            Else
+                                Return JsonErr("The referenced path does not exist.")
+                            End If
+
+                            Return JsonOk(New With {.ok = True})
+                        Catch ex As Exception
+                            Return JsonErr("Failed to open path: " & ex.Message)
+                        End Try
+
                     Case "inky_settoolinglog"
                         Try
                             Dim enabled As Boolean = CBool(j("Enabled"))
@@ -2498,8 +2631,8 @@ Partial Public Class ThisAddIn
                                 Sub()
                                     selectedMainToolNames =
                                         ShowLocalChatToolSelectionDialog(
-                                            If(st.SelectedMainToolNames, New List(Of String)()),
-                                            If(st.SelectedAdvancedToolNames, New List(Of String)()),
+                                            ResolveLocalChatSelectedMainToolNames(st, includeInteractiveM365Tools),
+                                            ResolveLocalChatSelectedAdvancedToolNames(st, includeInteractiveM365Tools),
                                             selectedAdvancedToolNames,
                                             includeInteractiveM365Tools)
                                 End Sub).ConfigureAwait(False)
@@ -2508,8 +2641,10 @@ Partial Public Class ThisAddIn
                                 Return JsonOk(New With {.ok = True, .cancelled = True})
                             End If
 
-                            st.SelectedMainToolNames = selectedMainToolNames
-                            st.SelectedAdvancedToolNames = If(selectedAdvancedToolNames, New List(Of String)())
+                            st.DeselectedMainToolNames =
+                                ComputeLocalChatDeselectedMainToolNames(selectedMainToolNames, includeInteractiveM365Tools)
+                            st.DeselectedAdvancedToolNames =
+                                ComputeLocalChatDeselectedAdvancedToolNames(If(selectedAdvancedToolNames, New List(Of String)()), includeInteractiveM365Tools)
                             _selectedToolsForChat = GetLocalChatEffectiveSelection(st, includeInteractiveM365Tools)
 
                             If HasLocalChatAnyCallableTools(st, includeInteractiveM365Tools) Then
@@ -2522,8 +2657,8 @@ Partial Public Class ThisAddIn
                             Return JsonOk(New With {
                                 .ok = True,
                                 .tools = GetToolListForBrowser(includeInteractiveM365Tools:=True),
-                                .count = st.SelectedMainToolNames.Count,
-                                .advancedCount = st.SelectedAdvancedToolNames.Count,
+                                .count = ResolveLocalChatSelectedMainToolNames(st, includeInteractiveM365Tools).Count,
+                                .advancedCount = ResolveLocalChatSelectedAdvancedToolNames(st, includeInteractiveM365Tools).Count,
                                 .toolingEnabled = st.ToolingEnabled,
                                 .advancedToolsEnabled = st.AgentModeEnabled
                             })
@@ -2546,7 +2681,9 @@ Partial Public Class ThisAddIn
                             Dim includeInteractiveM365Tools As Boolean = True
 
                             If enabled AndAlso Not EnsureToolsSelected(st, includeInteractiveM365Tools:=includeInteractiveM365Tools) Then
-                                Return JsonOk(New With {.ok = False, .openSources = True, .error = "No tools selected"})
+                                ' Opt-out defaults keep all tools on unless the user deselected them all.
+                                ' Report a plain error rather than signalling the UI to auto-open the selection dialog.
+                                Return JsonErr("Tooling requires at least one tool or a connected workspace. All tools are on by default — use the Tools button to re-enable some, then try again.")
                             End If
 
                             st.ToolingEnabled = enabled
@@ -2578,9 +2715,9 @@ Partial Public Class ThisAddIn
                                 .enabled = st.ToolingEnabled,
                                 .supportsTooling = CurrentModelSupportsTooling(st),
                                 .tools = GetToolListForBrowser(includeInteractiveM365Tools:=True),
-                                .selectedCount = If(st.SelectedMainToolNames, New List(Of String)()).Count,
+                                .selectedCount = ResolveLocalChatSelectedMainToolNames(st, includeInteractiveM365Tools:=True).Count,
                                 .advancedToolsEnabled = st.AgentModeEnabled,
-                                .advancedSelectedCount = If(st.SelectedAdvancedToolNames, New List(Of String)()).Count
+                                .advancedSelectedCount = ResolveLocalChatSelectedAdvancedToolNames(st, includeInteractiveM365Tools:=True).Count
                             })
                         Catch ex As Exception
                             Return JsonErr("Failed to get tooling state: " & ex.Message)
@@ -2690,8 +2827,31 @@ Partial Public Class ThisAddIn
                             Throw
                         End Try
 
-                    ' Remaining cases kept intact (command-specific logic)
+                     ' Remaining cases kept intact (command-specific logic)
                     ' ------------------------------------------------------------------
+                    Case "inky_claimscheduledtask"
+                        Dim claimed = ClaimPendingScheduledBrowserTask()
+
+                        If claimed IsNot Nothing Then
+                            activeChatId = claimed.ChatId
+                            Try
+                                My.Settings.Inky_LastChat = activeChatId
+                                My.Settings.Save()
+                            Catch
+                            End Try
+                        End If
+
+                        Return JsonOk(New With {
+                                .ok = True,
+                                .task = If(claimed Is Nothing,
+                                           Nothing,
+                                           New With {
+                                               .taskId = claimed.TaskId,
+                                               .prompt = claimed.Prompt,
+                                               .chatId = claimed.ChatId
+                                           })
+                            })
+
                     Case "inky_switch"
                         Dim which As String = j("Chat")?.ToString()
                         activeChatId = If(which = "2", 2, 1)
@@ -2858,6 +3018,7 @@ Partial Public Class ThisAddIn
                         Dim fileObject As System.String = j("FileObject")?.ToString()
                         Dim uploadedTempPath As System.String = fileObject
                         Dim textBody As System.String = j("Text")?.ToString()
+                        Dim scheduledTaskId As System.String = j("ScheduledTaskId")?.ToString()
                         If System.String.IsNullOrWhiteSpace(textBody) Then
                             Return JsonErr("Please enter a message.")
                         End If
@@ -3099,6 +3260,11 @@ Partial Public Class ThisAddIn
 
                         Dim useSecondApiLocal As Boolean = st.UseSecondApi
                         Dim selectedModelKeyLocal As String = st.SelectedModelKey
+                        Dim supportsToolingForJob As Boolean = CurrentModelSupportsTooling(st)
+                        Dim toolingEnabledForJob As Boolean = st.ToolingEnabled AndAlso supportsToolingForJob
+                        Dim agentModeEnabledForJob As Boolean = st.AgentModeEnabled AndAlso toolingEnabledForJob
+                        Dim selectedToolsForJob As List(Of ModelConfig) =
+                            GetLocalChatEffectiveSelection(st, includeInteractiveM365Tools:=True)
                         ' Capture file object (may be Nothing after extraction)
                         Dim finalFileObject As String = fileObject
                         Dim tempUploadPathCopy As String = uploadedTempPath
@@ -3115,7 +3281,8 @@ Partial Public Class ThisAddIn
                                         .Cts = jobCts,
                                         .UseSecond = useSecondApiLocal,
                                         .FileObject = finalFileObject,
-                                        .ChatId = originatingChatId
+                                        .ChatId = originatingChatId,
+                                        .ScheduledTaskId = If(scheduledTaskId, "")
                                     }
                         If Not jobMap.TryAdd(jobId, job) Then
                             jobCts.Dispose()
@@ -3131,6 +3298,11 @@ Partial Public Class ThisAddIn
                         Catch
                         End Try
                         llmOperationCts = jobCts
+
+                        If Not String.IsNullOrWhiteSpace(scheduledTaskId) Then
+                            SchedulerMarkLocalTaskRunning(scheduledTaskId)
+                        End If
+
                         ' Replace the original System.Threading.Tasks.Task.Run(Sub() ... End Sub) block with this:
                         System.Threading.Tasks.Task.Run(
                             Sub()
@@ -3141,6 +3313,7 @@ Partial Public Class ThisAddIn
                                 Dim agentAbortDetected As Boolean = False
                                 Dim agentToolCallLogSnapshot As List(Of AutoPilotToolCallEntry) = Nothing
                                 Dim agentOutputFiles As List(Of String) = Nothing
+                                Dim scheduledTaskFinalized As Boolean = False
                                 Try
                                     ' (1) Alternate model application (safer pattern)
                                     If useSecondApiLocal AndAlso Not String.IsNullOrWhiteSpace(selectedModelKeyLocal) Then
@@ -3168,21 +3341,10 @@ Partial Public Class ThisAddIn
                                         End Try
                                     End If
                                     ' (2) Run LLM - with or without tooling
-                                    Dim stForTooling = LoadInkyState()
-                                    Dim useAgentMode As Boolean = _chatAdvancedToolsEnabled AndAlso stForTooling.AgentModeEnabled AndAlso Not _apActive
-
-                                    ' Safety: reload _selectedToolsForChat from persisted state if it was
-                                    ' unexpectedly cleared (e.g. by SyncToolingState in another request)
-                                    If _selectedToolsForChat Is Nothing OrElse _selectedToolsForChat.Count = 0 Then
-                                        If stForTooling.SelectedToolNames IsNot Nothing AndAlso stForTooling.SelectedToolNames.Count > 0 Then
-                                            Try
-                                                Dim availTools = GetAvailableTools(includeInteractiveM365Tools:=True)
-                                                Dim nameSet = New HashSet(Of String)(stForTooling.SelectedToolNames, StringComparer.OrdinalIgnoreCase)
-                                                _selectedToolsForChat = availTools.Where(Function(tl) Not String.IsNullOrWhiteSpace(tl.ToolName) AndAlso nameSet.Contains(tl.ToolName)).ToList()
-                                            Catch
-                                            End Try
-                                        End If
-                                    End If
+                                    Dim useAgentMode As Boolean =
+                                        agentModeEnabledForJob AndAlso
+                                        supportsToolingForJob AndAlso
+                                        Not _apActive
 
                                     Dim agentToolsForJob As List(Of ModelConfig) = Nothing
 
@@ -3203,17 +3365,17 @@ Partial Public Class ThisAddIn
                                     End If
 
                                     If useAgentMode Then
-                                        agentToolsForJob = ChatAgentSetupToolContext()
+                                        agentToolsForJob = ChatAgentSetupToolContext(selectedToolsForJob)
                                     End If
 
                                     Try
-                                        If useToolTrigger AndAlso _selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0 Then
+                                        If useToolTrigger AndAlso selectedToolsForJob IsNot Nothing AndAlso selectedToolsForJob.Count > 0 Then
                                             ' (t) trigger path: use ToolDefaultModel with selected sources
                                             ' Respects INI_ToolingLogWindow (same as Form1.vb chkShowToolingLog)
                                             localOutput = ExecuteToolingLoop(
                                                     sysPromptBase,
                                                     "",
-                                                    _selectedToolsForChat,
+                                                    selectedToolsForJob,
                                                     True,
                                                     finalFileObject,
                                                     False, "",
@@ -3277,7 +3439,21 @@ Partial Public Class ThisAddIn
                                             RemoveUncitedKnowledgeSourceCopies(localOutput)
 
                                             ' Collect outputs to Desktop\Inky\...
-                                            agentOutputFiles = ChatAgentCollectAndCopyOutputs()
+                                            Dim citedExternalFiles =
+                                                ExtractCitedLocalFilePaths(localOutput).
+                                                    Where(Function(p)
+                                                              If String.IsNullOrWhiteSpace(_chatAgentTempDir) Then Return True
+                                                              Return Not IsPathWithinOrEqual(p, _chatAgentTempDir)
+                                                          End Function).
+                                                    ToList()
+
+                                            agentOutputFiles = ChatAgentCollectAndCopyOutputs(citedExternalFiles)
+
+                                            If Not String.IsNullOrWhiteSpace(job.ScheduledTaskId) AndAlso
+                                               agentOutputFiles IsNot Nothing AndAlso
+                                               agentOutputFiles.Count > 0 Then
+                                                SchedulerPersistLocalBrowserOutputs(job.ScheduledTaskId, agentOutputFiles)
+                                            End If
 
                                             If agentAbortDetected Then
                                                 localOutput = BuildChatAgentAbortReport(
@@ -3293,11 +3469,11 @@ Partial Public Class ThisAddIn
                                                 End If
                                             End If
 
-                                        ElseIf ShouldUseTooling(stForTooling) AndAlso _selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0 Then
+                                        ElseIf toolingEnabledForJob AndAlso selectedToolsForJob IsNot Nothing AndAlso selectedToolsForJob.Count > 0 Then
                                             localOutput = ExecuteToolingLoop(
                                                     sysPromptBase,
                                                     "",
-                                                    _selectedToolsForChat,
+                                                    selectedToolsForJob,
                                                     useSecondApiLocal,
                                                     finalFileObject,
                                                     False, "",
@@ -3364,16 +3540,35 @@ Partial Public Class ThisAddIn
                                     $"[Inky] Assistant result was returned but could not be persisted for job={job.Id}; chat={job.ChatId}")
                                     End If
 
+                                    If Not String.IsNullOrWhiteSpace(job.ScheduledTaskId) AndAlso Not scheduledTaskFinalized Then
+                                        SchedulerCompleteLocalBrowserTask(job.ScheduledTaskId, assistantText)
+                                        scheduledTaskFinalized = True
+                                    End If
+
                                     If wasCanceled AndAlso localOutput.Length = 0 Then
                                         tcs.TrySetCanceled()
                                     Else
                                         tcs.TrySetResult(assistantText)
                                     End If
                                 Catch exOp As OperationCanceledException
+                                    If Not String.IsNullOrWhiteSpace(job.ScheduledTaskId) AndAlso Not scheduledTaskFinalized Then
+                                        SchedulerFailLocalBrowserTask(job.ScheduledTaskId, "Aborted by user.")
+                                        scheduledTaskFinalized = True
+                                    End If
                                     tcs.TrySetCanceled()
                                 Catch ex As System.Exception
+                                    If Not String.IsNullOrWhiteSpace(job.ScheduledTaskId) AndAlso Not scheduledTaskFinalized Then
+                                        SchedulerFailLocalBrowserTask(job.ScheduledTaskId, ex.Message)
+                                        scheduledTaskFinalized = True
+                                    End If
                                     tcs.TrySetException(ex)
                                 Finally
+                                    If Not String.IsNullOrWhiteSpace(job.ScheduledTaskId) AndAlso
+                                       Not scheduledTaskFinalized AndAlso
+                                       jobCts.IsCancellationRequested Then
+                                        SchedulerFailLocalBrowserTask(job.ScheduledTaskId, "Aborted by user.")
+                                    End If
+
                                     ' (4) Cleanup temp upload
                                     Try
                                         If Not String.IsNullOrWhiteSpace(tempUploadPathCopy) AndAlso IO.File.Exists(tempUploadPathCopy) Then
@@ -3745,12 +3940,22 @@ Partial Public Class ThisAddIn
                         End Try
                         ' Check if new model supports tooling
                         Dim supportsTooling = CurrentModelSupportsTooling(st)
-                        If Not supportsTooling AndAlso st.ToolingEnabled Then
+
+                        If Not supportsTooling Then
+                            Dim hadAnyToolingState As Boolean =
+                                st.ToolingEnabled OrElse
+                                st.AgentModeEnabled OrElse
+                                _chatToolingEnabled OrElse
+                                _chatAdvancedToolsEnabled
+
                             st.ToolingEnabled = False
+                            st.AgentModeEnabled = False
                             _chatToolingEnabled = False
-                        End If
-                        If Not supportsTooling AndAlso st.ToolingEnabled Then
-                            ChatAgentClearFiles()
+                            _chatAdvancedToolsEnabled = False
+
+                            If hadAnyToolingState Then
+                                ChatAgentClearFiles()
+                            End If
                         End If
 
                         ' Auto-enable tooling when switching TO a tooling-capable model
@@ -3886,10 +4091,11 @@ Partial Public Class ThisAddIn
                 ' ─── 1  guard clauses ─────────────────────────────────────────
                 If String.IsNullOrWhiteSpace(textBody0) Then Return ""
                 Dim targetLang As String = Await SwitchToUi(Function()
-                                                                Return SLib.ShowCustomInputBox(
+                                                                Return Global.SharedLibrary.SharedLibrary.SharedMethods.PromptForTargetLanguage(
                                                                     "Enter your target language:",
                                                                     AN & " Translate (for Browser)",
-                                                                    True, INI_Language1)
+                                                                    INI_Language1,
+                                                                    _context)
                                                             End Function)
                 If String.IsNullOrWhiteSpace(targetLang) OrElse targetLang = "ESC" Then
                     Return ""
@@ -3966,7 +4172,7 @@ Partial Public Class ThisAddIn
                     }
                 End If
                 OtherPrompt = Await SwitchToUi(Function()
-                                                   Return SLib.ShowCustomInputBox(promptMsg, promptCaption, False, "", My.Settings.LastPrompt, If(wordInstalled, OptionalButtons, Nothing))
+                                                   Return SLib.ShowCustomInputBox(promptMsg, promptCaption, False, "", My.Settings.LastPrompt, If(wordInstalled, OptionalButtons, Nothing), Context:=_context)
                                                End Function)
                 Dim doMarkupFlag As Boolean = False
                 Dim doInsertFlag As Boolean = False
@@ -4330,34 +4536,12 @@ Partial Public Class ThisAddIn
     End Function
 
 
+    ' Opt-out migration is handled by renaming the persisted fields (old "Selected..." values
+    ' simply do not bind to the new "Deselected..." fields), so no in-place migration is needed.
+    ' Retained as a no-op to keep existing call sites stable.
     Private Sub MigrateLocalChatToolSelections(st As InkyState,
                                            Optional includeInteractiveM365Tools As Boolean = True)
-        If st Is Nothing Then Return
-
-        If (st.SelectedMainToolNames IsNot Nothing AndAlso st.SelectedMainToolNames.Count > 0) OrElse
-           (st.SelectedAdvancedToolNames IsNot Nothing AndAlso st.SelectedAdvancedToolNames.Count > 0) Then
-            Return
-        End If
-
-        If st.SelectedToolNames Is Nothing OrElse st.SelectedToolNames.Count = 0 Then
-            Return
-        End If
-
-        Dim legacySet As New HashSet(Of String)(st.SelectedToolNames, StringComparer.OrdinalIgnoreCase)
-
-        st.SelectedMainToolNames =
-            GetLocalChatMainSelectableTools(includeInteractiveM365Tools).
-                Where(Function(t) legacySet.Contains(t.ToolName)).
-                Select(Function(t) t.ToolName).
-                Distinct(StringComparer.OrdinalIgnoreCase).
-                ToList()
-
-        st.SelectedAdvancedToolNames =
-            GetLocalChatAdvancedSelectableTools(includeInteractiveM365Tools).
-                Where(Function(t) legacySet.Contains(t.ToolName)).
-                Select(Function(t) t.ToolName).
-                Distinct(StringComparer.OrdinalIgnoreCase).
-                ToList()
+        ' Intentionally left blank.
     End Sub
 
     Private Function GetLocalChatEffectiveSelection(st As InkyState,
@@ -4366,14 +4550,11 @@ Partial Public Class ThisAddIn
             Return New List(Of ModelConfig)()
         End If
 
-        MigrateLocalChatToolSelections(st, includeInteractiveM365Tools)
-        st.SelectedAdvancedToolNames =
-            NormalizeLocalChatAdvancedToolNames(st.SelectedAdvancedToolNames, includeInteractiveM365Tools)
-
+        ' Opt-out defaults: resolve selected = available-for-state minus the user's deselections.
         Dim effective =
             GetLocalChatEffectiveTools(
-                st.SelectedMainToolNames,
-                st.SelectedAdvancedToolNames,
+                ResolveLocalChatSelectedMainToolNames(st, includeInteractiveM365Tools),
+                ResolveLocalChatSelectedAdvancedToolNames(st, includeInteractiveM365Tools),
                 st.AgentModeEnabled,
                 includeInteractiveM365Tools)
 

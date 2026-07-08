@@ -882,7 +882,11 @@ Partial Public Class ThisAddIn
     Public Async Function InOther() As Task(Of Boolean)
         System.Windows.Forms.Application.DoEvents()
         Dim selectedRange As Excel.Range = TryCast(Globals.ThisAddIn.Application.Selection, Excel.Range)
-        TranslateLanguage = SLib.ShowCustomInputBox("Enter your target language:", $"{AN} Translate", True)
+        TranslateLanguage = Global.SharedLibrary.SharedLibrary.SharedMethods.PromptForTargetLanguage(
+            "Enter your target language:",
+            $"{AN} Translate",
+            "",
+            _context)
         If Not String.IsNullOrEmpty(TranslateLanguage) Then
             If selectedRange IsNot Nothing Then
                 selectedRange.Select()
@@ -897,7 +901,11 @@ Partial Public Class ThisAddIn
     ''' <returns>Task(Of Boolean). Result variable not explicitly returned.</returns>
     Public Async Function InOtherFormulas() As Task(Of Boolean)
         System.Windows.Forms.Application.DoEvents()
-        TranslateLanguage = SLib.ShowCustomInputBox("Enter your target language:", $"{AN} Translate", True)
+        TranslateLanguage = Global.SharedLibrary.SharedLibrary.SharedMethods.PromptForTargetLanguage(
+            "Enter your target language:",
+            $"{AN} Translate",
+            "",
+            _context)
         If Not String.IsNullOrEmpty(TranslateLanguage) Then
             Dim result As Boolean = Await ProcessSelectedRange(SP_Translate, True, False, True, False, True, False)
         End If
@@ -1133,7 +1141,7 @@ Partial Public Class ThisAddIn
 
         Dim PromptLibInstruct As String = ""
         If INI_PromptLib Then
-            PromptLibInstruct = " or press 'OK' for the prompt library"
+            PromptLibInstruct = " or press 'OK' or '/' for the prompt library"
         End If
         If DefaultPrefix.Trim() <> "" Then
             DefaultPrefixText = $" (default prefix: '{DefaultPrefix}')"
@@ -1150,9 +1158,9 @@ Partial Public Class ThisAddIn
                         }
 
         If Not NoSelectedCells Then
-            OtherPrompt = Trim(SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute on the selected cells (start {CBCInstruct}; {TextInstruct}; {PaneInstruct}; {BatchInstruct}; {BubblesInstruct})" & PromptLibInstruct & PureInstruct & ExtInstruct & AddonInstruct & LastPromptInstruct & DefaultPrefixText & ":", $"{AN} Freestyle (using " & If(UseSecondAPI, INI_Model_2, INI_Model) & ")", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons))
+            OtherPrompt = Trim(SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute on the selected cells (start {CBCInstruct}; {TextInstruct}; {PaneInstruct}; {BatchInstruct}; {BubblesInstruct})" & PromptLibInstruct & PureInstruct & ExtInstruct & AddonInstruct & LastPromptInstruct & DefaultPrefixText & ":", $"{AN} Freestyle (using " & If(UseSecondAPI, INI_Model_2, INI_Model) & ")", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons, _context))
         Else
-            OtherPrompt = Trim(SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute {PromptLibInstruct} (the result will be shown to you before inserting anything into your worksheet); {PaneInstruct}{BatchInstruct}{PureInstruct}{ExtInstruct}{AddonInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle (using " & If(UseSecondAPI, INI_Model_2, INI_Model) & ")", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons))
+            OtherPrompt = Trim(SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute {PromptLibInstruct} (the result will be shown to you before inserting anything into your worksheet); {PaneInstruct}{BatchInstruct}{PureInstruct}{ExtInstruct}{AddonInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle (using " & If(UseSecondAPI, INI_Model_2, INI_Model) & ")", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons, _context))
             DoRange = True
         End If
         If String.IsNullOrEmpty(OtherPrompt) And OtherPrompt <> "ESC" And INI_PromptLib Then
@@ -1395,7 +1403,11 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Public Sub HelpMeInky()
         If _win Is Nothing OrElse _win.IsDisposed Then
-            _win = New HelpMeInky(_context, RDV)
+            _win = New HelpMeInky(
+                _context,
+                RDV,
+                New System.Globalization.CultureInfo(
+                    Globals.ThisAddIn.Application.LanguageSettings.LanguageID(Microsoft.Office.Core.MsoAppLanguageID.msoLanguageIDUI)).DisplayName)
         End If
         ' No owner needed
         _win.ShowRaised()
@@ -1406,6 +1418,7 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Public Sub ShowSettings()
         Dim Settings As New Dictionary(Of String, String) From {
+            {"SimpleMenuOverride", "Simple menu"},
             {"Temperature", "Temperature of {model}"},
             {"Timeout", "Timeout of {model}"},
             {"Temperature_2", "Temperature of {model2}"},
@@ -1426,6 +1439,7 @@ Partial Public Class ThisAddIn
             {"FormulaInstruction", "Additional formula instructions:"}
         }
         Dim SettingsTips As New Dictionary(Of String, String) From {
+            {"SimpleMenuOverride", "Only show the simple menu features in this add-in (can be defined)"},
             {"Temperature", "The higher, the more creative the LLM will be (0.0-2.0)"},
             {"Timeout", "In milliseconds"},
             {"Temperature_2", "The higher, the more creative the LLM will be (0.0-2.0)"},
@@ -1449,7 +1463,18 @@ Partial Public Class ThisAddIn
         Dim splash As New SplashScreen("Updating menu following your changes ...")
         splash.Show()
         splash.Refresh()
+        RemoveMenu = True
+        MenusAdded = False
         AddContextMenu()
+
+        Try
+            If Globals.Ribbons.Ribbon1 IsNot Nothing Then
+                Globals.Ribbons.Ribbon1.ApplyRibbonVisibilityConfiguration()
+            End If
+        Catch
+            ' non-critical
+        End Try
+
         splash.Close()
     End Sub
 

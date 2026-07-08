@@ -35,6 +35,7 @@ Imports System.Reflection
 Imports System.Runtime.InteropServices
 Imports System.Threading
 Imports System.Windows.Forms
+Imports SharedLibrary.SharedLibrary.SharedContext
 
 Namespace SharedLibrary
     Partial Public Class SharedMethods
@@ -74,9 +75,35 @@ Namespace SharedLibrary
         ''' The window handle if a known Office application class is found; otherwise <see cref="IntPtr.Zero"/>.
         ''' </returns>
         Private Shared Function GetOfficeApplicationHwnd() As IntPtr
+            ' Prefer the host window captured at add-in startup (UpdateHandler.HostHandle).
+            ' It points at the actually running host (Outlook, Word or Excel). Probing by
+            ' window class below would otherwise return a different Office app that merely
+            ' happens to be open (e.g. Word in the background while the Outlook add-in shows
+            ' a dialog), parenting the dialog to the wrong application, pushing it behind
+            ' that app and stealing focus from it.
+            Dim host As System.IntPtr = UpdateHandler.HostHandle
+            If host <> System.IntPtr.Zero Then
+                ' If the user is currently working in another top-level window of the SAME
+                ' host process (e.g. an Outlook Inspector while editing an e-mail, rather
+                ' than the main Explorer window), prefer that foreground window as the owner.
+                ' Otherwise parenting to the main host window would bring the main window to
+                ' the front and hide the Inspector the user is actually editing.
+                Dim fg As System.IntPtr = NativeMethods.GetForegroundWindow()
+                If fg <> System.IntPtr.Zero AndAlso fg <> host Then
+                    Dim hostPid As Integer = 0
+                    Dim fgPid As Integer = 0
+                    NativeMethods.GetWindowThreadProcessId(host, hostPid)
+                    NativeMethods.GetWindowThreadProcessId(fg, fgPid)
+                    If hostPid <> 0 AndAlso fgPid = hostPid Then Return fg
+                End If
+
+                Return host
+            End If
+
+            ' Fallbacks (only used if the host handle was not captured at startup).
             ' Try Word first.
-            Dim hwnd As IntPtr = FindWindow("OpusApp", Nothing)
-            If hwnd <> IntPtr.Zero Then Return hwnd
+            Dim hwnd As System.IntPtr = FindWindow("OpusApp", Nothing)
+            If hwnd <> System.IntPtr.Zero Then Return hwnd
 
             ' Try Excel.
             hwnd = FindWindow("XLMAIN", Nothing)
@@ -353,7 +380,8 @@ Namespace SharedLibrary
                                                     Optional DefaultValue As String = "",
                                                     Optional CtrlP As String = "",
                                                     Optional OptionalButtons As System.Tuple(Of System.String, System.String, System.String)() = Nothing,
-                                                    Optional InsertButtons As System.Tuple(Of System.String, System.String, System.String)() = Nothing
+                                                    Optional InsertButtons As System.Tuple(Of System.String, System.String, System.String)() = Nothing,
+                                                    Optional Context As ISharedContext = Nothing
                                                 ) As String
 
             ' Screen working area (accounts for taskbar, etc.).
@@ -567,6 +595,32 @@ Namespace SharedLibrary
                                                          e.SuppressKeyPress = True
                                                      End If
                                                  End Sub
+            End If
+
+            ' Slash-triggered prompt library insertion for multi-line mode.
+            If Not SimpleInput AndAlso Context IsNot Nothing AndAlso Context.INI_PromptLib Then
+                Dim promptLibraryPath As String = Context.INI_PromptLibPath
+                Dim promptLibraryPathLocal As String = Context.INI_PromptLibPathLocal
+                Dim promptLibraryContext As ISharedContext = Context
+
+                AddHandler inputTextBox.KeyPress,
+                    Sub(sender, e)
+                        If e.KeyChar <> "/"c Then Return
+
+                        Dim slashAction As SharedMethods.PromptLibrarySlashAction =
+                            SharedMethods.HandlePromptLibrarySlash(
+                                inputTextBox,
+                                promptLibraryPath,
+                                promptLibraryPathLocal,
+                                promptLibraryContext,
+                                CtrlP,
+                                True   ' NoWarning
+                            )
+
+                        If slashAction <> SharedMethods.PromptLibrarySlashAction.NotTriggered Then
+                            e.Handled = True
+                        End If
+                    End Sub
             End If
 
             ' After AutoSize computed, clamp to screen, set MinimumSize (so buttons stay visible),
@@ -2197,13 +2251,18 @@ Namespace SharedLibrary
                 Dim param = params(i)
                 Dim rawValue As Object = param.Value
 
-                Dim lbl As New System.Windows.Forms.Label() With {
-                    .Text = param.Name & ":",
-                    .AutoSize = True,
-                    .Anchor = AnchorStyles.Left,
-                    .Margin = New Padding(0, 0, 8, 8)
-                }
-                mainLayout.Controls.Add(lbl, 0, i + 1)
+                Dim showLabel As Boolean = Not String.IsNullOrWhiteSpace(param.Name)
+                Dim lbl As System.Windows.Forms.Label = Nothing
+
+                If showLabel Then
+                    lbl = New System.Windows.Forms.Label() With {
+                        .Text = param.Name & ":",
+                        .AutoSize = True,
+                        .Anchor = AnchorStyles.Left,
+                        .Margin = New Padding(0, 0, 8, 8)
+                    }
+                    mainLayout.Controls.Add(lbl, 0, i + 1)
+                End If
 
                 Dim ctrl As Control
 
@@ -2305,7 +2364,9 @@ Namespace SharedLibrary
                             txt.WordWrap = True
                             txt.MinimumSize = New Size(400, multilineHeight)
                             txt.Size = New Size(400, multilineHeight)
-                            lbl.Anchor = AnchorStyles.Left Or AnchorStyles.Top
+                            If lbl IsNot Nothing Then
+                                lbl.Anchor = AnchorStyles.Left Or AnchorStyles.Top
+                            End If
                         Else
                             txt.MinimumSize = New Size(400, 0)
                         End If
@@ -2322,7 +2383,12 @@ Namespace SharedLibrary
                 End If
 
                 param.InputControl = ctrl
-                mainLayout.Controls.Add(ctrl, 1, i + 1)
+                If showLabel Then
+                    mainLayout.Controls.Add(ctrl, 1, i + 1)
+                Else
+                    mainLayout.Controls.Add(ctrl, 0, i + 1)
+                    mainLayout.SetColumnSpan(ctrl, 2)
+                End If
             Next
 
             ' Buttons.
