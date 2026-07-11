@@ -1521,19 +1521,20 @@ Partial Public Class ThisAddIn
             newMail = Application.CreateItem(OlItemType.olMailItem)
 
             Dim safeRecipients As New List(Of String)()
+            Dim mainLocalChatMailboxAddress As String = ""
 
             If Not _apActive Then
                 If Not INI_AutoPilotSchedulerLocalChat Then
                     Throw New InvalidOperationException("Local Chat scheduled e-mail delivery is disabled.")
                 End If
 
-                Dim currentMailboxAddress As String = GetLocalChatPrimaryMailboxSmtpAddress()
+                mainLocalChatMailboxAddress = GetLocalChatMainMailboxSmtpAddress()
 
-                If String.IsNullOrWhiteSpace(currentMailboxAddress) Then
-                    Throw New InvalidOperationException("Could not determine the current mailbox address for Local Chat scheduled e-mail delivery.")
+                If String.IsNullOrWhiteSpace(mainLocalChatMailboxAddress) Then
+                    Throw New InvalidOperationException("Local Chat scheduled e-mail delivery requires the main mailbox to be available.")
                 End If
 
-                safeRecipients.Add(currentMailboxAddress.Trim())
+                safeRecipients.Add(mainLocalChatMailboxAddress)
             Else
                 If task.DeliverTo IsNot Nothing Then
                     safeRecipients = task.DeliverTo.
@@ -1619,8 +1620,38 @@ Partial Public Class ThisAddIn
                 Debug.WriteLine($"[AutoPilot] Failed to stamp cleanup metadata on scheduled task result: {ex.Message}")
             End Try
 
-            ' Use the same sending account as the monitored mailbox
-            If _apConfig IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(_apConfig.MonitoredMailbox) Then
+            If Not _apActive Then
+                Dim mainSendingMailboxAddress As String = mainLocalChatMailboxAddress
+
+                If String.IsNullOrWhiteSpace(mainSendingMailboxAddress) Then
+                    mainSendingMailboxAddress = GetLocalChatMainMailboxSmtpAddress()
+                End If
+
+                If String.IsNullOrWhiteSpace(mainSendingMailboxAddress) Then
+                    Throw New InvalidOperationException("Local Chat scheduled e-mail delivery requires the main mailbox to be available.")
+                End If
+
+                Dim ns = Application.GetNamespace("MAPI")
+                Dim sendingAccount As Account = Nothing
+
+                For i As Integer = 1 To ns.Accounts.Count
+                    Dim acct As Account = ns.Accounts(i)
+                    If acct IsNot Nothing AndAlso
+                       Not String.IsNullOrWhiteSpace(acct.SmtpAddress) AndAlso
+                       acct.SmtpAddress.Trim().Equals(mainSendingMailboxAddress, StringComparison.OrdinalIgnoreCase) Then
+                        sendingAccount = acct
+                        Exit For
+                    End If
+                Next
+
+                If sendingAccount Is Nothing Then
+                    Throw New InvalidOperationException(
+                        $"Main mailbox '{mainSendingMailboxAddress}' is not available as an Outlook sending account.")
+                End If
+
+                newMail.SendUsingAccount = sendingAccount
+
+            ElseIf _apConfig IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(_apConfig.MonitoredMailbox) Then
                 Try
                     Dim ns = Application.GetNamespace("MAPI")
                     For i As Integer = 1 To ns.Accounts.Count
