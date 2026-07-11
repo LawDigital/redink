@@ -1340,91 +1340,102 @@ Partial Public Class ThisAddIn
 
         Dim outputSnapshot As Dictionary(Of String, Long) = SnapshotAutoPilotOutputFiles()
         Dim response As ToolResponse = Nothing
+        Dim enableLocalToolingMirror As Boolean = _chatAgentActive AndAlso Not _apActive
 
-        Select Case toolCall.ToolName
-            Case AP_Tool_ProcessWordDoc
-                response = Await ExecuteProcessWordDocTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ExtractPdfText
-                response = Await ExecuteExtractPdfTextTool(toolCall, context, cancellationToken)
-            Case AP_Tool_MergePdfs
-                response = Await ExecuteMergePdfsTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ReadAttachment
-                response = Await ExecuteReadAttachmentTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ListAttachments
-                response = ExecuteListAttachmentsTool(toolCall, context)
-            Case AP_Tool_DescribeBinary
-                response = Await ExecuteDescribeBinaryTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CommentWordDoc
-                response = Await ExecuteCommentWordDocTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CommentPdf
-                response = Await ExecuteCommentPdfTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CompareWordDocs
-                response = Await ExecuteCompareWordDocsTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ReadWordDocDetails
-                response = Await ExecuteReadWordDocDetailsTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CreatePdfFromText
-                response = ExecuteCreatePdfFromTextTool(toolCall, context)
-            Case AP_Tool_ExtractExcelData
-                response = ExecuteExtractExcelDataTool(toolCall, context)
-            Case AP_Tool_ExcelListLiveWorksheets
-                response = Await ExecuteExcelListLiveWorksheetsTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ExcelReadLiveRange
-                response = Await ExecuteExcelReadLiveRangeTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ExcelCompleteLiveWorkbook
-                response = Await ExecuteExcelCompleteLiveWorkbookTool(toolCall, context, cancellationToken)
-            Case AP_Tool_SplitPdf
-                response = ExecuteSplitPdfTool(toolCall, context)
-            Case AP_Tool_AddPdfWatermark
-                response = ExecuteAddPdfWatermarkTool(toolCall, context)
-            Case AP_Tool_WordToPdf
-                response = Await ExecuteWordToPdfTool(toolCall, context, cancellationToken)
-            Case AP_Tool_SearchInAttachments
-                response = Await ExecuteSearchInAttachmentsTool(toolCall, context, cancellationToken)
-            Case AP_Tool_SummarizeThread
-                response = ExecuteSummarizeThreadTool(toolCall, context)
-            Case AP_Tool_PdfToWord
-                response = Await ExecutePdfToWordTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CreateWordDoc
-                response = Await ExecuteCreateWordDocTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CreateExcel
-                response = Await ExecuteCreateExcelTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CreatePowerPoint
-                response = Await ExecuteCreatePowerPointTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CreateCodeFile
-                response = Await ExecuteCreateCodeFileTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ExtractDataFromAttachments
-                response = Await ExecuteExtractDataFromAttachmentsTool(toolCall, context, cancellationToken)
-            Case AP_Tool_RedactPdf
-                response = Await ExecuteRedactPdfTool(toolCall, context, cancellationToken)
-            Case AP_Tool_OverlayPdf
-                response = Await ExecuteOverlayPdfTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CreateAudioFile
-                response = Await ExecuteCreateAudioFileTool(toolCall, context, cancellationToken)
-            Case AP_Tool_GenerateImage
-                response = Await ExecuteGenerateImageTool(toolCall, context, cancellationToken)
-            Case AP_Tool_WebGrounding
-                response = Await ExecuteWebGroundingTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ManageScheduledTasks
-                response = Await ExecuteManageScheduledTasksTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ManageUserMemory
-                response = Await ExecuteManageUserMemoryTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ManageUserFiles
-                response = Await ExecuteManageUserFilesTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ListCollectionUseCases
-                response = Await ExecuteListCollectionUseCasesTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CollectData
-                response = Await ExecuteCollectDataTool(toolCall, context, cancellationToken)
-            Case AP_Tool_PreviewCollection
-                response = Await ExecutePreviewCollectionTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CompleteWordTables
-                response = Await ExecuteCompleteWordTablesTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ReportInability
-                response = Await ExecuteReportInabilityTool(toolCall, context, cancellationToken)
-            Case Else
-                Return Nothing
-        End Select
+        If enableLocalToolingMirror Then
+            System.Threading.Interlocked.Increment(_apMirrorDashboardLogToLocalToolingDepth)
+        End If
 
-        Return NormalizeAutoPilotToolResponse(toolCall, response, outputSnapshot)
+        Try
+            Select Case toolCall.ToolName
+                Case AP_Tool_ProcessWordDoc
+                    response = Await ExecuteProcessWordDocTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ExtractPdfText
+                    response = Await ExecuteExtractPdfTextTool(toolCall, context, cancellationToken)
+                Case AP_Tool_MergePdfs
+                    response = Await ExecuteMergePdfsTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ReadAttachment
+                    response = Await ExecuteReadAttachmentTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ListAttachments
+                    response = ExecuteListAttachmentsTool(toolCall, context)
+                Case AP_Tool_DescribeBinary
+                    response = Await ExecuteDescribeBinaryTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CommentWordDoc
+                    response = Await ExecuteCommentWordDocTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CommentPdf
+                    response = Await ExecuteCommentPdfTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CompareWordDocs
+                    response = Await ExecuteCompareWordDocsTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ReadWordDocDetails
+                    response = Await ExecuteReadWordDocDetailsTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CreatePdfFromText
+                    response = ExecuteCreatePdfFromTextTool(toolCall, context)
+                Case AP_Tool_ExtractExcelData
+                    response = ExecuteExtractExcelDataTool(toolCall, context)
+                Case AP_Tool_ExcelListLiveWorksheets
+                    response = Await ExecuteExcelListLiveWorksheetsTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ExcelReadLiveRange
+                    response = Await ExecuteExcelReadLiveRangeTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ExcelCompleteLiveWorkbook
+                    response = Await ExecuteExcelCompleteLiveWorkbookTool(toolCall, context, cancellationToken)
+                Case AP_Tool_SplitPdf
+                    response = ExecuteSplitPdfTool(toolCall, context)
+                Case AP_Tool_AddPdfWatermark
+                    response = ExecuteAddPdfWatermarkTool(toolCall, context)
+                Case AP_Tool_WordToPdf
+                    response = Await ExecuteWordToPdfTool(toolCall, context, cancellationToken)
+                Case AP_Tool_SearchInAttachments
+                    response = Await ExecuteSearchInAttachmentsTool(toolCall, context, cancellationToken)
+                Case AP_Tool_SummarizeThread
+                    response = ExecuteSummarizeThreadTool(toolCall, context)
+                Case AP_Tool_PdfToWord
+                    response = Await ExecutePdfToWordTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CreateWordDoc
+                    response = Await ExecuteCreateWordDocTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CreateExcel
+                    response = Await ExecuteCreateExcelTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CreatePowerPoint
+                    response = Await ExecuteCreatePowerPointTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CreateCodeFile
+                    response = Await ExecuteCreateCodeFileTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ExtractDataFromAttachments
+                    response = Await ExecuteExtractDataFromAttachmentsTool(toolCall, context, cancellationToken)
+                Case AP_Tool_RedactPdf
+                    response = Await ExecuteRedactPdfTool(toolCall, context, cancellationToken)
+                Case AP_Tool_OverlayPdf
+                    response = Await ExecuteOverlayPdfTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CreateAudioFile
+                    response = Await ExecuteCreateAudioFileTool(toolCall, context, cancellationToken)
+                Case AP_Tool_GenerateImage
+                    response = Await ExecuteGenerateImageTool(toolCall, context, cancellationToken)
+                Case AP_Tool_WebGrounding
+                    response = Await ExecuteWebGroundingTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ManageScheduledTasks
+                    response = Await ExecuteManageScheduledTasksTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ManageUserMemory
+                    response = Await ExecuteManageUserMemoryTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ManageUserFiles
+                    response = Await ExecuteManageUserFilesTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ListCollectionUseCases
+                    response = Await ExecuteListCollectionUseCasesTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CollectData
+                    response = Await ExecuteCollectDataTool(toolCall, context, cancellationToken)
+                Case AP_Tool_PreviewCollection
+                    response = Await ExecutePreviewCollectionTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CompleteWordTables
+                    response = Await ExecuteCompleteWordTablesTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ReportInability
+                    response = Await ExecuteReportInabilityTool(toolCall, context, cancellationToken)
+                Case Else
+                    Return Nothing
+            End Select
+
+            Return NormalizeAutoPilotToolResponse(toolCall, response, outputSnapshot)
+        Finally
+            If enableLocalToolingMirror Then
+                System.Threading.Interlocked.Decrement(_apMirrorDashboardLogToLocalToolingDepth)
+            End If
+        End Try
     End Function
 
     Private Function SnapshotAutoPilotOutputFiles() As Dictionary(Of String, Long)

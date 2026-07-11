@@ -183,6 +183,12 @@ Partial Public Class ThisAddIn
     Private _apUseSecondApi As Boolean = False
 
     ''' <summary>
+    ''' Nesting counter used to mirror AutoPilot internal-tool progress into the
+    ''' Local Chat tooling log only while an internal AutoPilot tool is executing.
+    ''' </summary>
+    Private _apMirrorDashboardLogToLocalToolingDepth As Integer = 0
+
+    ''' <summary>
     ''' Paths of knowledge-store source files copied into the temp directory.
     ''' Only these are candidates for citation-based filtering — tool outputs
     ''' from process_word_document, merge_pdfs, etc. are never filtered.
@@ -3406,7 +3412,7 @@ Partial Public Class ThisAddIn
             End Try
 
             reply.Send()
-            Try : MoveLastSentToInkyReplies(cleanupGroupId, cleanupIsEligible, cleanupAnsweredUtc, cleanupDeleteAfterUtc) : Catch : End Try
+            Try : MoveLastSentToInkyReplies(cleanupGroupId, cleanupIsEligible, cleanupAnsweredUtc, cleanupDeleteAfterUtc, reply.Subject, senderAddr) : Catch : End Try
 
         Catch ex As System.Exception
             ApDashboardLog($"ERROR sending reply: {ex.Message}", "error")
@@ -3457,7 +3463,9 @@ Partial Public Class ThisAddIn
     Private Sub MoveLastSentToInkyReplies(Optional groupId As String = Nothing,
                                           Optional isEligible As Boolean = False,
                                           Optional answeredUtc As DateTime? = Nothing,
-                                          Optional deleteAfterUtc As DateTime? = Nothing)
+                                          Optional deleteAfterUtc As DateTime? = Nothing,
+                                          Optional expectedSubject As String = Nothing,
+                                          Optional expectedTo As String = Nothing)
         Try
             Dim ns = Application.GetNamespace("MAPI")
             Dim sentFolder = ns.GetDefaultFolder(OlDefaultFolders.olFolderSentMail)
@@ -3484,14 +3492,45 @@ Partial Public Class ThisAddIn
                         If mi2 Is Nothing Then Continue For
                         If mi2.Categories Is Nothing OrElse Not mi2.Categories.Contains(AP_CategoryName) Then Continue For
 
-                        ' When a cleanup group id is supplied, bind the move/stamp to the
-                        ' exact reply we just sent for this group instead of blindly taking
-                        ' the most recent categorized item. This prevents an older AutoPilot
-                        ' reply from being picked (and the just-sent reply from being left in
-                        ' Sent Items without persisted cleanup metadata, so it is never deleted).
-                        If Not String.IsNullOrWhiteSpace(groupId) AndAlso
-                           Not String.Equals(GetCleanupGroupId(mi2), groupId, StringComparison.OrdinalIgnoreCase) Then
-                            Continue For
+                        If Not String.IsNullOrWhiteSpace(groupId) Then
+                            Dim itemGroupId = GetCleanupGroupId(mi2)
+
+                            If Not String.Equals(itemGroupId, groupId, StringComparison.OrdinalIgnoreCase) Then
+                                Dim isFallbackMatch As Boolean = False
+
+                                If String.IsNullOrWhiteSpace(itemGroupId) AndAlso HasAutoReplyHeader(mi2) Then
+                                    Dim subjectMatches As Boolean = True
+                                    If Not String.IsNullOrWhiteSpace(expectedSubject) Then
+                                        subjectMatches = String.Equals(
+                                            If(mi2.Subject, ""),
+                                            expectedSubject,
+                                            StringComparison.OrdinalIgnoreCase)
+                                    End If
+
+                                    Dim toMatches As Boolean = True
+                                    If Not String.IsNullOrWhiteSpace(expectedTo) Then
+                                        Dim toValue As String = ""
+                                        Try
+                                            toValue = If(mi2.To, "")
+                                        Catch
+                                        End Try
+
+                                        If Not String.IsNullOrWhiteSpace(toValue) Then
+                                            toMatches = toValue.IndexOf(expectedTo, StringComparison.OrdinalIgnoreCase) >= 0
+                                        End If
+                                    End If
+
+                                    isFallbackMatch = subjectMatches AndAlso toMatches
+                                End If
+
+                                If Not isFallbackMatch Then
+                                    Continue For
+                                End If
+
+                                ApDashboardLog(
+                                    "🗑 Auto-delete fallback matched sent copy without persisted cleanup group metadata; stamping after move.",
+                                    "warn")
+                            End If
                         End If
 
                         movedObj = mi2.Move(inkyFolder)
@@ -3554,8 +3593,12 @@ Partial Public Class ThisAddIn
     ''' Does NOT prepend a timestamp here because LogWindow.AppendLogInternal
     ''' already adds [HH:mm:ss]. Instead we prepend the date-only portion so the
     ''' dashboard shows [HH:mm:ss] [dd-MMM] message.
+    ''' During Local Chat execution of AutoPilot internal tools, progress entries
+    ''' are also mirrored into the active tooling log window.
     ''' </summary>
-    Private Sub ApDashboardLog(message As String, level As String)
+    Private Sub ApDashboardLog(message As String,
+                               level As String,
+                               Optional mirrorToLocalToolingLog As Boolean = False)
         Debug.WriteLine($"[AutoPilot] [{level}] {message}")
 
         Try
@@ -3572,9 +3615,21 @@ Partial Public Class ThisAddIn
         Catch
         End Try
 
-        ' Intentionally do not mirror AutoPilot dashboard entries into the Local Chat
-        ' tooling log. Local Chat already receives direct context.Log(...) messages,
-        ' and mirroring here creates duplicate entries such as web_grounding progress.
+        Dim shouldMirrorToLocalToolingLog As Boolean =
+            _chatAgentActive AndAlso
+            Not _apActive AndAlso
+            _activeToolingContext IsNot Nothing AndAlso
+            (mirrorToLocalToolingLog OrElse
+             System.Threading.Interlocked.CompareExchange(_apMirrorDashboardLogToLocalToolingDepth, 0, 0) > 0)
+
+        If Not shouldMirrorToLocalToolingLog Then
+            Return
+        End If
+
+        Try
+            _activeToolingContext.MirrorVisibleLog(message, level)
+        Catch
+        End Try
     End Sub
 
     ''' <summary>Marks the dashboard operation as complete.</summary>
@@ -4875,8 +4930,7 @@ Partial Public Class ThisAddIn
             End Try
 
             newMail.Send()
-            Try : MoveLastSentToInkyReplies(cleanupGroupId, cleanupIsEligible, cleanupAnsweredUtc, cleanupDeleteAfterUtc) : Catch : End Try
-
+            Try : MoveLastSentToInkyReplies(cleanupGroupId, cleanupIsEligible, cleanupAnsweredUtc, cleanupDeleteAfterUtc, newMail.Subject, recipientEmail) : Catch : End Try
         Catch ex As System.Exception
             ApDashboardLog($"ERROR sending voicemail reply: {ex.Message}", "error")
         Finally

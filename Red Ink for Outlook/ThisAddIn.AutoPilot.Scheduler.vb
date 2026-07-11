@@ -1594,6 +1594,31 @@ Partial Public Class ThisAddIn
             Catch : End Try
             Try : newMail.Categories = AP_CategoryName : Catch : End Try
 
+            Dim cleanupGroupId As String = Nothing
+            Dim cleanupIsEligible As Boolean = False
+            Dim cleanupAnsweredUtc As DateTime? = Nothing
+            Dim cleanupDeleteAfterUtc As DateTime? = Nothing
+
+            Try
+                cleanupDeleteAfterUtc = GetAutoDeleteCutoffUtc()
+                cleanupIsEligible = cleanupDeleteAfterUtc.HasValue
+
+                If cleanupIsEligible Then
+                    cleanupGroupId = Guid.NewGuid().ToString("N")
+                    cleanupAnsweredUtc = DateTime.UtcNow
+
+                    StampCleanupMetadata(
+                        newMail,
+                        cleanupGroupId,
+                        isEligible:=True,
+                        answeredUtc:=cleanupAnsweredUtc,
+                        deleteAfterUtc:=cleanupDeleteAfterUtc,
+                        saveItem:=False)
+                End If
+            Catch ex As System.Exception
+                Debug.WriteLine($"[AutoPilot] Failed to stamp cleanup metadata on scheduled task result: {ex.Message}")
+            End Try
+
             ' Use the same sending account as the monitored mailbox
             If _apConfig IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(_apConfig.MonitoredMailbox) Then
                 Try
@@ -1609,7 +1634,7 @@ Partial Public Class ThisAddIn
             End If
 
             newMail.Send()
-            Try : MoveLastSentToInkyReplies() : Catch : End Try
+            Try : MoveLastSentToInkyReplies(cleanupGroupId, cleanupIsEligible, cleanupAnsweredUtc, cleanupDeleteAfterUtc, newMail.Subject, newMail.To) : Catch : End Try
             ApDashboardLog($"📅 Result e-mail sent to: {String.Join(", ", task.DeliverTo)}", "info")
 
         Catch ex As System.Exception
