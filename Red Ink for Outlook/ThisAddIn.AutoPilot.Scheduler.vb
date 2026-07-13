@@ -740,36 +740,48 @@ Partial Public Class ThisAddIn
             If task.SnoozeUntilUtc > now Then Continue For
             If task.NextDueUtc > now Then Continue For
 
-            If IsLocalInteractiveScheduledTask(task) Then
+            Dim isLocalInteractiveTask = IsLocalInteractiveScheduledTask(task)
+
+            If isLocalInteractiveTask Then
                 If task.LocalExecutionState.Equals(AP_TaskLocalExecutionStateQueued, StringComparison.OrdinalIgnoreCase) Then Continue For
                 If task.LocalExecutionState.Equals(AP_TaskLocalExecutionStateRunning, StringComparison.OrdinalIgnoreCase) Then Continue For
-
-                Await HandleDueLocalInteractiveTaskAsync(task, ct)
+            ElseIf task.LastExecutedUtc >= task.NextDueUtc Then
                 Continue For
             End If
 
-            If task.LastExecutedUtc >= task.NextDueUtc Then Continue For
-
-            ' This task is due — execute it
-            ApDashboardLog($"📅 Executing scheduled task: {task.Id.Substring(0, 8)}... — ""{Truncate(task.Instruction, 60)}""", "info")
+            If Not _apProcessingSemaphore.Wait(0) Then
+                Return
+            End If
 
             Try
-                Await ExecuteScheduledTask(task, ct)
+                If isLocalInteractiveTask Then
+                    Await HandleDueLocalInteractiveTaskAsync(task, ct)
+                    Continue For
+                End If
 
-                ' Mark as executed and advance schedule
-                task.LastExecutedUtc = DateTime.UtcNow
-                task.FailureRetryCount = 0
-                task.LastResult = "Completed successfully at " & DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss UTC")
+                ' This task is due — execute it
+                ApDashboardLog($"📅 Executing scheduled task: {task.Id.Substring(0, 8)}... — ""{Truncate(task.Instruction, 60)}""", "info")
 
-                AdvanceTaskSchedule(task)
-                SchedulerUpdateTask(task)
+                Try
+                    Await ExecuteScheduledTask(task, ct)
 
-                ApDashboardLog($"📅 Task {task.Id.Substring(0, 8)}... completed. Next due: {If(task.Status = "completed", "(none — completed)", task.NextDueUtc.ToString("yyyy-MM-dd HH:mm UTC"))}", "info")
+                    ' Mark as executed and advance schedule
+                    task.LastExecutedUtc = DateTime.UtcNow
+                    task.FailureRetryCount = 0
+                    task.LastResult = "Completed successfully at " & DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss UTC")
 
-            Catch ex As OperationCanceledException
-                Throw
-            Catch ex As System.Exception
-                HandleScheduledTaskExecutionFailure(task, ex)
+                    AdvanceTaskSchedule(task)
+                    SchedulerUpdateTask(task)
+
+                    ApDashboardLog($"📅 Task {task.Id.Substring(0, 8)}... completed. Next due: {If(task.Status = "completed", "(none — completed)", task.NextDueUtc.ToString("yyyy-MM-dd HH:mm UTC"))}", "info")
+
+                Catch ex As OperationCanceledException
+                    Throw
+                Catch ex As System.Exception
+                    HandleScheduledTaskExecutionFailure(task, ex)
+                End Try
+            Finally
+                _apProcessingSemaphore.Release()
             End Try
         Next
     End Function

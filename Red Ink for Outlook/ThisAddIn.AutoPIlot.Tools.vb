@@ -514,21 +514,26 @@ Partial Public Class ThisAddIn
             .ToolPriority = 980,
             .ToolInstructionsPrompt =
                 AP_Tool_ExcelReadLiveRange & ": Reads the live contents of an existing Excel attachment through Excel Interop, not through XML/OpenXML parsing. " &
-                "Use this for existing workbooks whenever formulas, dropdowns, validations, comments, threaded comments, recalculated values, colors, or current workbook state matter. " &
+                "Use this for existing workbooks whenever formulas, dropdowns, validations, comments, threaded comments, recalculated values, colors, font properties, common formatting, structure, protection details, conditional formatting, data bars, icon sets, or current workbook state matter. " &
                 "For form completion or updating an existing workbook, call excel_list_live_worksheets first, then this tool to understand the live sheet content and options, and only then call excel_complete_live_workbook. " &
                 "If worksheet_name is omitted, the first worksheet is used. If range_address is omitted, the worksheet's used range is read. " &
-                "By default include_formulas is false and include_color is true.",
+                "By default include_formulas is false, include_color is true, include_font_properties is false, include_formatting is false, include_structure is false, include_protection_details is false, and include_conditional_formatting is false.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_ExcelReadLiveRange & """," &
                 """description"":""Reads a worksheet or range from an existing Excel attachment through live Excel Interop. " &
-                "This is the preferred reader for existing workbooks that may contain active formulas, dropdowns, validations, recalculated values, comments, or protected sheets. " &
-                "Defaults: first worksheet if worksheet_name is omitted, used range if range_address is omitted, include_formulas=false, include_color=true.""," &
+                "This is the preferred reader for existing workbooks that may contain active formulas, dropdowns, validations, recalculated values, comments, font properties, colors, common formatting, structure, protection details, conditional formatting, data bars, icon sets, or protected sheets. " &
+                "Defaults: first worksheet if worksheet_name is omitted, used range if range_address is omitted, include_formulas=false, include_color=true, include_font_properties=false, include_formatting=false, include_structure=false, include_protection_details=false, include_conditional_formatting=false.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """attachment_name"":{""type"":""string"",""description"":""Filename of the Excel attachment to read""}," &
                 """worksheet_name"":{""type"":""string"",""description"":""Optional worksheet name. If omitted, the first worksheet is used.""}," &
                 """range_address"":{""type"":""string"",""description"":""Optional Excel range in A1 notation, for example 'A1:D20'. If omitted, the worksheet's used range is read.""}," &
                 """include_formulas"":{""type"":""boolean"",""description"":""Optional. Default false. Include cell formulas in the output.""}," &
-                """include_color"":{""type"":""boolean"",""description"":""Optional. Default true. Include font and background color information in the output.""}" &
+                """include_color"":{""type"":""boolean"",""description"":""Optional. Default true. Include font and background color information in the output.""}," &
+                """include_font_properties"":{""type"":""boolean"",""description"":""Optional. Default false. Include font properties such as name, size, strikethrough, bold, italic, and underline in the output.""}," &
+                """include_formatting"":{""type"":""boolean"",""description"":""Optional. Default false. Include common formatting such as number format, alignment, wrapping, shrink-to-fit, and borders in the output.""}," &
+                """include_structure"":{""type"":""boolean"",""description"":""Optional. Default false. Include structural details such as row height, column width, and merged-area information.""}," &
+                """include_protection_details"":{""type"":""boolean"",""description"":""Optional. Default false. Include cell protection flags such as locked and formula_hidden.""}," &
+                """include_conditional_formatting"":{""type"":""boolean"",""description"":""Optional. Default false. Include conditional-formatting summaries, including data bars and icon sets.""}" &
                 "},""required"":[""attachment_name""]}}"
         })
 
@@ -538,17 +543,17 @@ Partial Public Class ThisAddIn
             .ModelDescription = "Complete Live Excel Workbook (built-in)",
             .ToolPriority = 990,
             .ToolInstructionsPrompt =
-                AP_Tool_ExcelCompleteLiveWorkbook & ": Completes or updates an existing Excel attachment through live Excel Interop and saves a new '_completed.xlsx' copy. " &
-                "Use this for any Excel form completion or update task when formulas, dropdowns, validations, recalculation, protection, or current workbook state matter. " &
+                AP_Tool_ExcelCompleteLiveWorkbook & ": Completes or updates an existing Excel attachment through Excel Interop and saves a new '_completed.xlsx' copy. " &
+                "Use this for any Excel form completion or update task when formulas, dropdowns, validations, recalculation, protection, current workbook state, or cell and structure formatting matter. " &
                 "Do not use normal XML-based Excel editing for such tasks. " &
-                "Before filling an existing workbook, first call excel_list_live_worksheets and then excel_read_live_range so the tool loop understands the current workbook structure, live values, and available options. " &
-                "Updates are provided as JSON. Each update targets a single cell and can set a value, a formula, and/or a comment. " &
+                "Before filling an existing workbook, first call excel_list_live_worksheets and then excel_read_live_range so the tool loop understands the current workbook structure, live values, available options, and any required formatting. " &
+                "Updates are provided as JSON. Each update targets a single cell and can set a value, a formula, a comment, font formatting, fill formatting, common formatting, borders, row height, column width, merge state, and cell protection flags. " &
                 "If worksheet_name is omitted, the first worksheet is used. A per-update worksheet_name may override the default worksheet. " &
                 "For formulas, prefer English Excel formulas with comma separators when possible. The tool includes locale-safe fallbacks for localized Excel installations and different list separators.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_ExcelCompleteLiveWorkbook & """," &
                 """description"":""Updates an existing Excel attachment through live Excel Interop and saves a new '_completed.xlsx' copy. " &
-                "This is the preferred tool for completing existing Excel workbooks that may contain active formulas, dropdowns, validations, recalculation, or protected sheets with LiftLock markers. " &
+                "This is the preferred tool for completing existing Excel workbooks that may contain active formulas, dropdowns, validations, recalculation, protected sheets with LiftLock markers, or required formatting such as strikethrough, font color, fill color, number format, alignment, borders, row height, column width, merge state, and cell protection flags. " &
                 "Use JSON-based cell updates. Prefer English Excel formulas with comma separators; locale fallbacks are built in.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """attachment_name"":{""type"":""string"",""description"":""Filename of the Excel attachment to complete or update""}," &
@@ -558,7 +563,33 @@ Partial Public Class ThisAddIn
                 """cell"":{""type"":""string"",""description"":""Target cell address in A1 notation, for example 'B12'""}," &
                 """value"":{""description"":""Optional cell value. Use JSON string, number, boolean, or null.""}," &
                 """formula"":{""type"":""string"",""description"":""Optional Excel formula for the cell. Prefer English function names and comma separators, starting with '='. Locale-safe fallbacks are applied automatically.""}," &
-                """comment"":{""type"":""string"",""description"":""Optional comment text to add as a threaded comment or reply where supported.""}" &
+                """comment"":{""type"":""string"",""description"":""Optional comment text to add as a threaded comment or reply where supported.""}," &
+                """font"":{""type"":""object"",""description"":""Optional font properties to set on the target cell."",""properties"":{" &
+                """name"":{""type"":""string"",""description"":""Optional font name.""}," &
+                """size"":{""description"":""Optional font size as number.""}," &
+                """strikethrough"":{""type"":""boolean"",""description"":""Optional. Set or clear strikethrough formatting.""}," &
+                """bold"":{""type"":""boolean"",""description"":""Optional. Set or clear bold formatting.""}," &
+                """italic"":{""type"":""boolean"",""description"":""Optional. Set or clear italic formatting.""}," &
+                """color"":{""description"":""Optional font color. Use '#RRGGBB', an integer OLE color value, or 'automatic'.""}," &
+                """underline"":{""description"":""Optional. Use true/false or one of: 'none', 'single', 'double', 'single_accounting', 'double_accounting'.""}" &
+                "}}," &
+                """fill"":{""type"":""object"",""description"":""Optional fill properties to set on the target cell."",""properties"":{" &
+                """color"":{""description"":""Optional background color. Use '#RRGGBB', an integer OLE color value, or 'none' to clear the fill.""}" &
+                "}}," &
+                """number_format"":{""type"":""string"",""description"":""Optional Excel number format string.""}," &
+                """horizontal_alignment"":{""type"":""string"",""description"":""Optional horizontal alignment: general, left, center, right, fill, justify, center_across_selection, distributed.""}," &
+                """vertical_alignment"":{""type"":""string"",""description"":""Optional vertical alignment: top, center, bottom, justify, distributed.""}," &
+                """wrap_text"":{""type"":""boolean"",""description"":""Optional. Enable or disable wrap text.""}," &
+                """shrink_to_fit"":{""type"":""boolean"",""description"":""Optional. Enable or disable shrink to fit.""}," &
+                """borders"":{""type"":""object"",""description"":""Optional border settings. Supported properties: top, bottom, left, right. Each side may be 'none' or an object with optional style, weight, and color.""}," &
+                """row_height"":{""description"":""Optional row height for the target cell's row.""}," &
+                """column_width"":{""description"":""Optional column width for the target cell's column.""}," &
+                """merge_action"":{""type"":""string"",""description"":""Optional merge action: 'merge' or 'unmerge'.""}," &
+                """merge_range"":{""type"":""string"",""description"":""Optional A1 range for the merge action. If omitted, the target cell or its current merged area is used.""}," &
+                """protection"":{""type"":""object"",""description"":""Optional cell protection properties to set on the target cell or merged area."",""properties"":{" &
+                """locked"":{""type"":""boolean"",""description"":""Optional. Set or clear the locked flag.""}," &
+                """formula_hidden"":{""type"":""boolean"",""description"":""Optional. Set or clear the formula-hidden flag.""}" &
+                "}}" &
                 "},""required"":[""cell""]}}" &
                 "},""required"":[""attachment_name"",""updates""]}}"
         })

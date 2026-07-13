@@ -178,7 +178,10 @@ Partial Public Class ThisAddIn
     Private ReadOnly _apSenderLastMailSentUtc As New ConcurrentDictionary(Of String, DateTime)(StringComparer.OrdinalIgnoreCase)
     Private _apSessionReplyCount As Integer = 0
     Private ReadOnly _apMailQueue As New ConcurrentQueue(Of String)()
+
+    ' Serializes AutoPilot mail processing and scheduler task execution so they never overlap.
     Private ReadOnly _apProcessingSemaphore As New SemaphoreSlim(1, 1)
+
     Private _apSelectedTools As List(Of ModelConfig) = Nothing
     Private _apUseSecondApi As Boolean = False
 
@@ -1074,70 +1077,82 @@ Partial Public Class ThisAddIn
     Private Async Function AutoPilotProcessingPump(ct As CancellationToken) As Task
         Try
             While Not ct.IsCancellationRequested
-                Dim entryId As String = Nothing
-                If _apMailQueue.TryDequeue(entryId) Then
-                    ' Clean up enqueue time tracking for this mail
-                    Dim dummy As DateTime
-                    _apQueueEnqueueTimes.TryRemove(entryId, dummy)
-                    ' NOTE: Do NOT remove _apQueueNotifiedEntryIds here.
-                    ' ProcessIncomingMailAsync needs to check it for the holding-notice
-                    ' cooldown bypass. It is cleaned up after processing completes.
-
-                    ' Track the active job for progress notifications
-                    _apCurrentProcessingEntryId = entryId
-                    _apActiveJobLastNotifiedUtc = DateTime.MinValue
-
-                    Dim pending = _apMailQueue.Count
-                    If pending > 0 Then
-                        ApDashboardLog($"⏳ {pending} mail(s) queued behind current processing", "step")
-                    End If
-
-                    ' Classify and time the current mail
-                    Try
-                        _apCurrentProcessingCategory = Await SwitchToUi(Function() As String
-                                                                            Try
-                                                                                Dim ns = Application.GetNamespace("MAPI")
-                                                                                Dim obj = ns.GetItemFromID(entryId)
-                                                                                If TypeOf obj Is MailItem Then
-                                                                                    Dim mi = DirectCast(obj, MailItem)
-                                                                                    Try : Return ClassifyMailCategory(mi)
-                                                                                    Finally : Marshal.ReleaseComObject(mi) : End Try
-                                                                                End If
-                                                                            Catch : End Try
-                                                                            Return AP_Cat_TextOnly
-                                                                        End Function)
-                    Catch
-                        _apCurrentProcessingCategory = AP_Cat_TextOnly
-                    End Try
-
-                    ' Create a per-job CancellationTokenSource linked to the session CTS
-                    _apCurrentJobCts = CancellationTokenSource.CreateLinkedTokenSource(ct)
-                    Dim jobCt = _apCurrentJobCts.Token
-
-                    _apCurrentProcessingStopwatch = Stopwatch.StartNew()
-                    Try
-                        Await ProcessIncomingMailAsync(entryId, jobCt)
-                    Catch ex As OperationCanceledException When Not ct.IsCancellationRequested
-                        ' Job-level abort (not session-level) — log and continue to next mail
-                        ApDashboardLog($"⛔ Job aborted by operator for: {entryId.Substring(0, Math.Min(20, entryId.Length))}...", "warn")
-                    Finally
-                        _apCurrentProcessingStopwatch.Stop()
-                        UpdateCategoryTiming(_apCurrentProcessingCategory, _apCurrentProcessingStopwatch.Elapsed.TotalSeconds)
-                        ApDashboardLog($"⏱ Completed in {_apCurrentProcessingStopwatch.Elapsed.TotalSeconds:F1}s [{_apCurrentProcessingCategory}]", "step")
-                        _apCurrentProcessingStopwatch = Nothing
-                        _apCurrentProcessingCategory = Nothing
-                        _apCurrentProcessingEntryId = Nothing
-                        _apActiveJobLastNotifiedUtc = DateTime.MinValue
-                        ' Clean up notification and catch-up tracking AFTER processing is complete
-                        _apQueueNotifiedEntryIds.TryRemove(entryId, dummy)
-                        Dim dummyCatchUp As Boolean
-                        _apCatchUpEntryIds.TryRemove(entryId, dummyCatchUp)
-                        Try : _apCurrentJobCts?.Dispose() : Catch : End Try
-                        _apCurrentJobCts = Nothing
-                    End Try
-                Else
+                If _apMailQueue.IsEmpty Then
                     Await Task.Delay(1000, ct)
+                    Continue While
                 End If
+
+                If Not _apProcessingSemaphore.Wait(0) Then
+                    Await Task.Delay(1000, ct)
+                    Continue While
+                End If
+
+                Try
+                    Dim entryId As String = Nothing
+                    If _apMailQueue.TryDequeue(entryId) Then
+                        ' Clean up enqueue time tracking for this mail
+                        Dim dummy As DateTime
+                        _apQueueEnqueueTimes.TryRemove(entryId, dummy)
+                        ' NOTE: Do NOT remove _apQueueNotifiedEntryIds here.
+                        ' ProcessIncomingMailAsync needs to check it for the holding-notice
+                        ' cooldown bypass. It is cleaned up after processing completes.
+
+                        ' Track the active job for progress notifications
+                        _apCurrentProcessingEntryId = entryId
+                        _apActiveJobLastNotifiedUtc = DateTime.MinValue
+
+                        Dim pending = _apMailQueue.Count
+                        If pending > 0 Then
+                            ApDashboardLog($"⏳ {pending} mail(s) queued behind current processing", "step")
+                        End If
+
+                        ' Classify and time the current mail
+                        Try
+                            _apCurrentProcessingCategory = Await SwitchToUi(Function() As String
+                                                                                Try
+                                                                                    Dim ns = Application.GetNamespace("MAPI")
+                                                                                    Dim obj = ns.GetItemFromID(entryId)
+                                                                                    If TypeOf obj Is MailItem Then
+                                                                                        Dim mi = DirectCast(obj, MailItem)
+                                                                                        Try : Return ClassifyMailCategory(mi)
+                                                                                        Finally : Marshal.ReleaseComObject(mi) : End Try
+                                                                                    End If
+                                                                                Catch : End Try
+                                                                                Return AP_Cat_TextOnly
+                                                                            End Function)
+                        Catch
+                            _apCurrentProcessingCategory = AP_Cat_TextOnly
+                        End Try
+
+                        ' Create a per-job CancellationTokenSource linked to the session CTS
+                        _apCurrentJobCts = CancellationTokenSource.CreateLinkedTokenSource(ct)
+                        Dim jobCt = _apCurrentJobCts.Token
+
+                        _apCurrentProcessingStopwatch = Stopwatch.StartNew()
+                        Try
+                            Await ProcessIncomingMailAsync(entryId, jobCt)
+                        Catch ex As OperationCanceledException When Not ct.IsCancellationRequested
+                            ' Job-level abort (not session-level) — log and continue to next mail
+                            ApDashboardLog($"⛔ Job aborted by operator for: {entryId.Substring(0, Math.Min(20, entryId.Length))}...", "warn")
+                        Finally
+                            _apCurrentProcessingStopwatch.Stop()
+                            UpdateCategoryTiming(_apCurrentProcessingCategory, _apCurrentProcessingStopwatch.Elapsed.TotalSeconds)
+                            ApDashboardLog($"⏱ Completed in {_apCurrentProcessingStopwatch.Elapsed.TotalSeconds:F1}s [{_apCurrentProcessingCategory}]", "step")
+                            _apCurrentProcessingStopwatch = Nothing
+                            _apCurrentProcessingCategory = Nothing
+                            _apCurrentProcessingEntryId = Nothing
+                            _apActiveJobLastNotifiedUtc = DateTime.MinValue
+                            ' Clean up notification and catch-up tracking AFTER processing is complete
+                            _apQueueNotifiedEntryIds.TryRemove(entryId, dummy)
+                            Dim dummyCatchUp As Boolean
+                            _apCatchUpEntryIds.TryRemove(entryId, dummyCatchUp)
+                            Try : _apCurrentJobCts?.Dispose() : Catch : End Try
+                            _apCurrentJobCts = Nothing
+                        End Try
+                    End If
+                Finally
+                    _apProcessingSemaphore.Release()
+                End Try
             End While
         Catch ex As OperationCanceledException
             ApDashboardLog("AutoPilot cancelled.", "step")
