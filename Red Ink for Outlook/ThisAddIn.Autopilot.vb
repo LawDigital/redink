@@ -175,6 +175,7 @@ Partial Public Class ThisAddIn
     Private _apConfig As AutoPilotConfig = Nothing
     Private _apCts As CancellationTokenSource = Nothing
     Private _apDashboard As LogWindow = Nothing
+    Private _apDashboardDisplaySettingsHooked As Boolean = False
     Private ReadOnly _apSenderLastMailSentUtc As New ConcurrentDictionary(Of String, DateTime)(StringComparer.OrdinalIgnoreCase)
     Private _apSessionReplyCount As Integer = 0
     Private ReadOnly _apMailQueue As New ConcurrentQueue(Of String)()
@@ -296,12 +297,18 @@ Partial Public Class ThisAddIn
         If Not _apActive Then Return
         _apActive = False
         Try : RemoveHandler Application.NewMailEx, AddressOf AutoPilot_NewMailEx : Catch : End Try
+        Try : SaveAutoPilotDashboardBounds(_apDashboard) : Catch : End Try
         Try
             If _apDashboard IsNot Nothing Then
                 RemoveHandler _apDashboard.CancelRequested, AddressOf AutoPilot_DashboardCancelRequested
                 RemoveHandler _apDashboard.AbortJobRequested, AddressOf AutoPilot_DashboardAbortJobRequested
+                RemoveHandler _apDashboard.FormClosing, AddressOf AutoPilot_DashboardFormClosing
             End If
         Catch : End Try
+        If _apDashboardDisplaySettingsHooked Then
+            Try : RemoveHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf AutoPilot_DashboardDisplaySettingsChanged : Catch : End Try
+            _apDashboardDisplaySettingsHooked = False
+        End If
         Try : _apNotificationTimer?.Dispose() : Catch : End Try
         _apNotificationTimer = Nothing
         StopAutoDeleteTimer()
@@ -354,8 +361,11 @@ Partial Public Class ThisAddIn
             Sub()
                 Try
                     If _apDashboard Is Nothing OrElse _apDashboard.IsDisposed Then Return
+                    EnsureAutoPilotDashboardVisible()
                     _apDashboard.Show()
+                    EnsureAutoPilotDashboardVisible()
                     _apDashboard.BringToFront()
+                    _apDashboard.Activate()
                 Catch
                 End Try
             End Sub
@@ -464,8 +474,19 @@ Partial Public Class ThisAddIn
                 _apDashboard.Text = $"{AN6} AutoPilot Dashboard"
                 AddHandler _apDashboard.CancelRequested, AddressOf AutoPilot_DashboardCancelRequested
                 AddHandler _apDashboard.AbortJobRequested, AddressOf AutoPilot_DashboardAbortJobRequested
+                AddHandler _apDashboard.FormClosing, AddressOf AutoPilot_DashboardFormClosing
                 _apDashboard.ShowAbortJobButton(True)
+                RestoreAutoPilotDashboardBounds()
                 _apDashboard.Show()
+                EnsureAutoPilotDashboardVisible()
+
+                Try
+                    If Not _apDashboardDisplaySettingsHooked Then
+                        AddHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf AutoPilot_DashboardDisplaySettingsChanged
+                        _apDashboardDisplaySettingsHooked = True
+                    End If
+                Catch
+                End Try
 
                 ' Add Scheduler dashboard button if scheduler is enabled
                 If config.EnableScheduler Then
@@ -626,6 +647,75 @@ Partial Public Class ThisAddIn
         Else
             ApDashboardLog("No job currently processing to abort.", "step")
         End If
+    End Sub
+
+    ''' <summary>Restores the AutoPilot dashboard position and size from <c>My.Settings</c>.</summary>
+    Private Sub RestoreAutoPilotDashboardBounds()
+        If _apDashboard Is Nothing OrElse _apDashboard.IsDisposed Then Return
+
+        Try
+            Dim savedX As Integer = My.Settings.AP_DashboardWindowX
+            Dim savedY As Integer = My.Settings.AP_DashboardWindowY
+            Dim savedW As Integer = My.Settings.AP_DashboardWindowW
+            Dim savedH As Integer = My.Settings.AP_DashboardWindowH
+
+            Dim minWidth As Integer = Math.Max(_apDashboard.MinimumSize.Width, 1)
+            Dim minHeight As Integer = Math.Max(_apDashboard.MinimumSize.Height, 1)
+            Dim hasSavedBounds As Boolean = savedW >= minWidth AndAlso savedH >= minHeight
+
+            If hasSavedBounds Then
+                _apDashboard.StartPosition = FormStartPosition.Manual
+                _apDashboard.SetBounds(savedX, savedY, savedW, savedH)
+            End If
+        Catch
+        End Try
+
+        EnsureAutoPilotDashboardVisible()
+    End Sub
+
+    ''' <summary>Saves the AutoPilot dashboard position and size into <c>My.Settings</c>.</summary>
+    Private Sub SaveAutoPilotDashboardBounds(Optional dashboard As Form = Nothing)
+        Dim target As Form = If(dashboard, _apDashboard)
+        If target Is Nothing OrElse target.IsDisposed Then Return
+
+        Try
+            My.Settings.AP_DashboardWindowX = target.Left
+            My.Settings.AP_DashboardWindowY = target.Top
+            My.Settings.AP_DashboardWindowW = target.Width
+            My.Settings.AP_DashboardWindowH = target.Height
+            My.Settings.Save()
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>Ensures the AutoPilot dashboard remains reachable on a visible screen.</summary>
+    Private Sub EnsureAutoPilotDashboardVisible()
+        If _apDashboard Is Nothing OrElse _apDashboard.IsDisposed Then Return
+
+        Try
+            SharedMethods.EnsureVisibleOnScreen(_apDashboard)
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>Saves dashboard bounds when the current dashboard window is closed.</summary>
+    Private Sub AutoPilot_DashboardFormClosing(sender As Object, e As FormClosingEventArgs)
+        If Not ReferenceEquals(sender, _apDashboard) Then Return
+        SaveAutoPilotDashboardBounds(_apDashboard)
+    End Sub
+
+    ''' <summary>Repositions the dashboard after monitor or resolution changes.</summary>
+    Private Sub AutoPilot_DashboardDisplaySettingsChanged(sender As Object, e As EventArgs)
+        If _apDashboard Is Nothing OrElse _apDashboard.IsDisposed Then Return
+
+        Try
+            If _apDashboard.InvokeRequired Then
+                _apDashboard.BeginInvoke(New MethodInvoker(AddressOf EnsureAutoPilotDashboardVisible))
+            Else
+                EnsureAutoPilotDashboardVisible()
+            End If
+        Catch
+        End Try
     End Sub
 
     ''' <summary>
@@ -864,10 +954,12 @@ Partial Public Class ThisAddIn
             Dim selectedEntryIds As List(Of String) = Nothing
 
             If _apConfig.IsUnattended Then
-                ' Unattended auto-start: skip the preview dialog, process all candidates
-                ' but exclude reprocess candidates in unattended mode (only operator should choose those)
-                selectedEntryIds = candidates.Where(Function(c) Not c.IsReprocessCandidate).Select(Function(c) c.EntryID).ToList()
-                ApDashboardLog($"Unattended mode — auto-selecting {selectedEntryIds.Count} new catch-up mail(s) (skipping {reprocessCandidateCount} reprocess candidates).", "info")
+                ' Unattended auto-start: skip the preview dialog and process every
+                ' catch-up candidate, including reprocess candidates enabled by settings.
+                selectedEntryIds = candidates.Select(Function(c) c.EntryID).ToList()
+                ApDashboardLog(
+                    $"Unattended mode — auto-selecting {selectedEntryIds.Count} catch-up mail(s) ({candidates.Count - reprocessCandidateCount} new, {reprocessCandidateCount} reprocess).",
+                    "info")
             Else
                 ' Show preview dialog using MultiModelSelectorForm pattern
                 ' Pre-select only NEW (unprocessed) mails; reprocess candidates are unchecked by default
