@@ -82,7 +82,7 @@
     <DefineConstants>$(DefineConstants),HAS_WINRT</DefineConstants>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Develop'">
-    <ApplicationVersion>1.6.9.700</ApplicationVersion>
+    <ApplicationVersion>1.6.10.700</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\develop\outlook\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/develop/outlook/</InstallUrl>
     <ProductName>Red Ink for Outlook %28Develop%29</ProductName>

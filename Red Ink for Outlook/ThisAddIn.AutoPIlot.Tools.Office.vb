@@ -1598,9 +1598,12 @@ Partial Public Class ThisAddIn
                     chart.ChartTitle.Text = chartTitle
                 End If
 
-                ' ── Series colors ──
+                ' ── Series / point colors ──
                 Dim seriesColorsArr = TryCast(chartObj("series_colors"), JArray)
                 Dim singleSeriesColor = ParseHexColor(chartObj.Value(Of String)("color"))
+                ' Pie and doughnut charts have a single series whose slices are POINTS,
+                ' so per-slice colors must be applied point-by-point rather than per series.
+                Dim isPointColored As Boolean = (chartType = "pie" OrElse chartType = "doughnut")
                 If (seriesColorsArr IsNot Nothing AndAlso seriesColorsArr.Count > 0) OrElse singleSeriesColor.HasValue Then
                     Dim seriesCol As Object = Nothing
                     Try
@@ -1610,15 +1613,46 @@ Partial Public Class ThisAddIn
                             Dim ser As Object = Nothing
                             Try
                                 ser = seriesCol.Item(si)
-                                Dim clr As Integer? = Nothing
-                                If seriesColorsArr IsNot Nothing AndAlso seriesColorsArr.Count > 0 Then
-                                    clr = ParseHexColor(seriesColorsArr((si - 1) Mod seriesColorsArr.Count).ToString())
-                                ElseIf singleSeriesColor.HasValue Then
-                                    clr = singleSeriesColor
-                                End If
-                                If clr.HasValue Then
-                                    Try : ser.Format.Fill.ForeColor.RGB = clr.Value : Catch : End Try
-                                    Try : ser.Format.Line.ForeColor.RGB = clr.Value : Catch : End Try
+
+                                If isPointColored AndAlso seriesColorsArr IsNot Nothing AndAlso seriesColorsArr.Count > 0 Then
+                                    ' Color each slice/point of the pie or doughnut individually
+                                    Dim pts As Object = Nothing
+                                    Try
+                                        pts = ser.Points()
+                                        Dim ptCount As Integer = CInt(pts.Count)
+                                        For pi As Integer = 1 To ptCount
+                                            Dim pt As Object = Nothing
+                                            Try
+                                                pt = pts.Item(pi)
+                                                Dim pClr = ParseHexColor(seriesColorsArr((pi - 1) Mod seriesColorsArr.Count).ToString())
+                                                If pClr.HasValue Then
+                                                    Try : pt.Format.Fill.ForeColor.RGB = pClr.Value : Catch : End Try
+                                                End If
+                                            Catch
+                                            Finally
+                                                If pt IsNot Nothing Then
+                                                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(pt) : Catch : End Try
+                                                End If
+                                            End Try
+                                        Next
+                                    Catch
+                                    Finally
+                                        If pts IsNot Nothing Then
+                                            Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(pts) : Catch : End Try
+                                        End If
+                                    End Try
+                                Else
+                                    ' Standard per-series coloring
+                                    Dim clr As Integer? = Nothing
+                                    If seriesColorsArr IsNot Nothing AndAlso seriesColorsArr.Count > 0 Then
+                                        clr = ParseHexColor(seriesColorsArr((si - 1) Mod seriesColorsArr.Count).ToString())
+                                    ElseIf singleSeriesColor.HasValue Then
+                                        clr = singleSeriesColor
+                                    End If
+                                    If clr.HasValue Then
+                                        Try : ser.Format.Fill.ForeColor.RGB = clr.Value : Catch : End Try
+                                        Try : ser.Format.Line.ForeColor.RGB = clr.Value : Catch : End Try
+                                    End If
                                 End If
                             Catch
                             Finally
