@@ -954,11 +954,13 @@ Partial Public Class ThisAddIn
             Dim selectedEntryIds As List(Of String) = Nothing
 
             If _apConfig.IsUnattended Then
-                ' Unattended auto-start: skip the preview dialog and process every
-                ' catch-up candidate, including reprocess candidates enabled by settings.
-                selectedEntryIds = candidates.Select(Function(c) c.EntryID).ToList()
+                ' Unattended auto-start (no button pressed): skip the preview dialog and
+                ' process ONLY new (unprocessed) mails. Already-processed [REPROCESS]
+                ' candidates are never auto-selected — the operator must choose those
+                ' explicitly in the attended catch-up preview dialog.
+                selectedEntryIds = candidates.Where(Function(c) Not c.IsReprocessCandidate).Select(Function(c) c.EntryID).ToList()
                 ApDashboardLog(
-                    $"Unattended mode — auto-selecting {selectedEntryIds.Count} catch-up mail(s) ({candidates.Count - reprocessCandidateCount} new, {reprocessCandidateCount} reprocess).",
+                    $"Unattended mode — auto-selecting {selectedEntryIds.Count} new catch-up mail(s) (skipping {reprocessCandidateCount} reprocess candidate(s)).",
                     "info")
             Else
                 ' Show preview dialog using MultiModelSelectorForm pattern
@@ -1997,6 +1999,16 @@ Partial Public Class ThisAddIn
                 _apCurrentAttachments = attachmentPaths
                 _apCurrentMailInfo = mailInfo
 
+                Dim previousChatAgentWorkspace As ChatAgentWorkspaceState = _chatAgentWorkspace
+                Dim previousChatAgentWorkspaceLoaded As Boolean = _chatAgentWorkspaceLoaded
+                Dim previousWorkspaceOnlyMode As Boolean = SharedLibrary.Agents.PathPolicy.RestrictToWorkspaceRootOnly
+
+                _chatAgentWorkspace = BuildAutoPilotTempWorkspaceState()
+                _chatAgentWorkspaceLoaded = _chatAgentWorkspace IsNot Nothing
+                SyncWorkspaceToPathPolicy(includeSessionTempFallback:=True)
+                SharedLibrary.Agents.PathPolicy.RestrictToWorkspaceRootOnly = True
+                SharedLibrary.Agents.PathPolicy.SetStrictExtraRoots({_apCurrentTempDir})
+
                 Dim response As String
 
                 ' ── Set AutoPilot-specific max tool iterations ──
@@ -2084,6 +2096,11 @@ Partial Public Class ThisAddIn
                     _apCurrentTempDir = Nothing
                     _apCurrentAttachments = Nothing
                     _apCurrentMailInfo = Nothing
+                    _chatAgentWorkspace = previousChatAgentWorkspace
+                    _chatAgentWorkspaceLoaded = previousChatAgentWorkspaceLoaded
+                    SharedLibrary.Agents.PathPolicy.RestrictToWorkspaceRootOnly = previousWorkspaceOnlyMode
+                    SharedLibrary.Agents.PathPolicy.SetStrictExtraRoots(Nothing)
+                    SyncWorkspaceToPathPolicy()
                     MaxToolIterations = previousMaxToolIterations
                     ClearAttachmentCaches()
                 End Try

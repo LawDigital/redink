@@ -4143,7 +4143,7 @@ Partial Public Class ThisAddIn
         LogAgentToolCallStatistic(toolCall.ToolName)
 
         ' ── workspace_extract_text: unified file reader for Local Chat agent (no staging) ──
-        If _chatAgentActive AndAlso Not _apActive AndAlso
+        If ((_chatAgentActive AndAlso Not _apActive) OrElse _apActive) AndAlso
            toolCall.ToolName.Equals(SharedLibrary.Agents.WorkspaceTools.ToolExtractText, StringComparison.OrdinalIgnoreCase) Then
 
             Dim resp As New ToolResponse() With {.CallId = toolCall.CallId, .ToolName = toolCall.ToolName}
@@ -4193,8 +4193,8 @@ Partial Public Class ThisAddIn
             Return resp
         End If
 
-        ' ── workspace_read_many: shared UTF-8 text reader for multiple files (Local Chat Agent only) ──
-        If _chatAgentActive AndAlso Not _apActive AndAlso
+        ' ── workspace_read_many: shared UTF-8 text reader for multiple files ──
+        If ((_chatAgentActive AndAlso Not _apActive) OrElse _apActive OrElse HasActiveScheduledTaskWorkspace()) AndAlso
            toolCall.ToolName.Equals(SharedLibrary.Agents.WorkspaceTools.ToolReadMany, StringComparison.OrdinalIgnoreCase) Then
 
             Dim rmResp As New ToolResponse() With {.CallId = toolCall.CallId, .ToolName = toolCall.ToolName}
@@ -4209,8 +4209,8 @@ Partial Public Class ThisAddIn
             Return rmResp
         End If
 
-        ' ── workspace_extract_text_many: extract text from multiple files (Local Chat Agent only) ──
-        If _chatAgentActive AndAlso Not _apActive AndAlso
+        ' ── workspace_extract_text_many: extract text from multiple files (Local Chat, AutoPilot, scheduled tasks) ──
+        If ((_chatAgentActive AndAlso Not _apActive) OrElse _apActive OrElse HasActiveScheduledTaskWorkspace()) AndAlso
            toolCall.ToolName.Equals(SharedLibrary.Agents.WorkspaceTools.ToolExtractTextMany, StringComparison.OrdinalIgnoreCase) Then
 
             Dim etmResp As New ToolResponse() With {.CallId = toolCall.CallId, .ToolName = toolCall.ToolName}
@@ -4288,7 +4288,7 @@ Partial Public Class ThisAddIn
             Return etmResp
         End If
 
-        If _chatAgentActive AndAlso Not _apActive AndAlso
+        If ((_chatAgentActive AndAlso Not _apActive) OrElse _apActive OrElse HasActiveScheduledTaskWorkspace()) AndAlso
            SharedLibrary.Agents.WorkspaceTools.IsWorkspaceTool(toolCall.ToolName) Then
 
             Dim wsResp As New ToolResponse() With {
@@ -4332,8 +4332,10 @@ Partial Public Class ThisAddIn
             Return wsResp
         End If
 
-        ' ── Local Chat Agent workspace tools; never available to AutoPilot ──
-        If _chatAgentActive AndAlso Not _apActive AndAlso IsChatAgentWorkspaceTool(toolCall.ToolName) Then
+        ' ── Agent workspace tools for Local Chat Agent and AutoPilot temp workspaces ──
+        If ((_chatAgentActive AndAlso Not _apActive) OrElse _apActive OrElse HasActiveScheduledTaskWorkspace()) AndAlso
+           IsChatAgentWorkspaceTool(toolCall.ToolName) Then
+
             Dim workspaceResult = Await ExecuteChatAgentWorkspaceTool(toolCall, context, cancellationToken)
             Return workspaceResult
         End If

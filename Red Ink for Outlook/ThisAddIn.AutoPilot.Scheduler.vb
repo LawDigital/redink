@@ -830,6 +830,9 @@ Partial Public Class ThisAddIn
         Dim executionUseSecondApi As Boolean = _apUseSecondApi
         Dim restoreExecutionConfig As Boolean = False
         Dim originalExecutionConfig As ModelConfig = Nothing
+        Dim previousChatAgentWorkspace As ChatAgentWorkspaceState = _chatAgentWorkspace
+        Dim previousChatAgentWorkspaceLoaded As Boolean = _chatAgentWorkspaceLoaded
+        Dim previousWorkspaceOnlyMode As Boolean = SharedLibrary.Agents.PathPolicy.RestrictToWorkspaceRootOnly
 
         Try
             ' Create isolated temp directory
@@ -899,6 +902,22 @@ Partial Public Class ThisAddIn
                 .Body = task.Instruction
             }
             _apCurrentToolCallLog = New List(Of AutoPilotToolCallEntry)()
+
+            _chatAgentWorkspace = New ChatAgentWorkspaceState() With {
+            .RootPath = _apScheduledWorkspaceRoot,
+            .PersistUntilRevoked = False,
+            .AllowRead = True,
+            .AllowWrite = True,
+            .AllowMoveCopyRename = True,
+            .AllowDelete = True,
+            .SaveDroppedFilesToWorkspace = False,
+            .IncludeHiddenSystem = False
+        }
+            _chatAgentWorkspaceLoaded = True
+            SyncWorkspaceToPathPolicy()
+            SharedLibrary.Agents.PathPolicy.RestrictToWorkspaceRootOnly = True
+            SharedLibrary.Agents.PathPolicy.SetStrictExtraRoots({tempDir, _apScheduledWorkspaceRoot})
+
             MaxToolIterations = AP_MaxToolIterations
 
             ' Build prompts — tell the LLM it is executing a scheduled task
@@ -1038,6 +1057,11 @@ Partial Public Class ThisAddIn
                 RefreshScheduledTaskWorkspaceTracking(task.Id)
             Catch
             End Try
+
+            _chatAgentWorkspace = previousChatAgentWorkspace
+            _chatAgentWorkspaceLoaded = previousChatAgentWorkspaceLoaded
+            SharedLibrary.Agents.PathPolicy.RestrictToWorkspaceRootOnly = previousWorkspaceOnlyMode
+            SharedLibrary.Agents.PathPolicy.SetStrictExtraRoots(Nothing)
 
             DeactivateScheduledTaskWorkspace(task.Id)
 

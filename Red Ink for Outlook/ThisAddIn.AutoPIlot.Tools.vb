@@ -228,6 +228,12 @@ Partial Public Class ThisAddIn
         ' Deterministic helper for exact text/data computation inside AutoPilot.
         tools.Add(SharedLibrary.Agents.JsRunTool.Build())
 
+        ' Shared file/workspace tools available inside the current AutoPilot workspace.
+        tools.AddRange(SharedLibrary.Agents.TextTools.BuildAll())
+        tools.AddRange(SharedLibrary.Agents.WordTools.BuildAll())
+        tools.AddRange(SharedLibrary.Agents.WorkspaceTools.BuildAll())
+        tools.AddRange(GetAutoPilotAgentWorkspaceTools())
+
         ' ── process_word_document ──
         tools.Add(New ModelConfig() With {
         .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ProcessWordDoc,
@@ -812,16 +818,27 @@ Partial Public Class ThisAddIn
                 """h_align"":{""type"":""string"",""enum"":[""left"",""center"",""right""],""description"":""REQUIRED: left=text, center=headers/labels, right=numbers""}," &
                 """v_align"":{""type"":""string"",""enum"":[""top"",""center"",""bottom""]}," &
                 """wrap_text"":{""type"":""boolean"",""description"":""REQUIRED true for long text cells""}," &
-                """border"":{""type"":""string"",""description"":""REQUIRED: 'all-thin' for all cells. Also: medium, thick, all-medium, bottom-thin, bottom-medium""}," &
-                """border_color"":{""type"":""string"",""description"":""Border color hex RGB""}" &
+                                """border"":{""type"":""string"",""description"":""REQUIRED: 'all-thin' for all cells. Also: medium, thick, all-medium, bottom-thin, bottom-medium""}," &
+                """border_color"":{""type"":""string"",""description"":""Border color hex RGB""}," &
+                """text_rotation"":{""type"":""integer"",""description"":""Text rotation in degrees (-90 to 90). Use 255 for vertical stacked text.""}," &
+                """indent"":{""type"":""integer"",""description"":""Indent level (0 or more).""}," &
+                """comment"":{""type"":""string"",""description"":""Cell note/comment text.""}," &
+                """hyperlink"":{""type"":""string"",""description"":""Hyperlink URL or target for the cell.""}," &
+                """hyperlink_display"":{""type"":""string"",""description"":""Optional display text for the hyperlink.""}" &
                 "}},""description"":""Cells for default/first sheet""}," &
                 """sheets"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
                 """name"":{""type"":""string""},""cells"":{""type"":""array"",""items"":{""type"":""object""}}" &
-                "}},""description"":""Multiple sheets. Each: name + cells array.""}," &
+                "}},""description"":""Multiple sheets. Each entry has name + cells array. In addition, ANY of the following top-level settings may be specified per sheet to override the workbook default for that sheet: column_widths, row_heights, auto_fit_columns, auto_fit_rows, merge_ranges, freeze_pane, auto_filter, data_validations, conditional_formats, print_setup, tab_color, show_gridlines, zoom, right_to_left.""}," &
                 """file_name"":{""type"":""string"",""description"":""Filename without extension""}," &
                 """sheet_name"":{""type"":""string"",""description"":""Tab name for single-sheet mode""}," &
                 """column_widths"":{""type"":""object"",""description"":""REQUIRED: {col_letter: width} for EVERY column. 12-15 short, 25-35 descriptions, 12-18 numbers""}," &
                 """row_heights"":{""type"":""object"",""description"":""Row heights. Set header row to 28""}," &
+                """auto_fit_columns"":{""description"":""Auto-fit column widths. Use true or 'all' to fit all columns, a single column letter, or an array of column letters. Explicit column_widths override auto-fit.""}," &
+                """auto_fit_rows"":{""description"":""Auto-fit row heights. Use true or 'all' to fit all rows, a single row number, or an array of row numbers.""}," &
+                """tab_color"":{""type"":""string"",""description"":""Worksheet tab color as hex RGB e.g. #4472C4.""}," &
+                """show_gridlines"":{""type"":""boolean"",""description"":""Show or hide worksheet gridlines.""}," &
+                """zoom"":{""type"":""integer"",""description"":""Worksheet zoom level percent (10-400).""}," &
+                """right_to_left"":{""type"":""boolean"",""description"":""Display the worksheet right-to-left.""}," &
                 """merge_ranges"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Ranges to merge""}," &
                 """freeze_pane"":{""type"":""string"",""description"":""REQUIRED: Always 'A2'""}," &
                 """auto_filter"":{""type"":""string"",""description"":""REQUIRED: Header range e.g. 'A1:F1'""}," &
@@ -845,7 +862,14 @@ Partial Public Class ThisAddIn
                 """position"":{""type"":""string"",""description"":""Top-left anchor cell for the embedded chart, e.g. 'E2'""}," &
                 """width"":{""type"":""number"",""description"":""Chart width in Excel points. If omitted, defaults to 480. IMPORTANT: Use Excel points, not inches, centimeters, or cell counts. Example: 480 points is about 6.67 inches.""}," &
                 """height"":{""type"":""number"",""description"":""Chart height in Excel points. If omitted, defaults to 300. IMPORTANT: Use Excel points, not inches, centimeters, or cell counts. Example: 300 points is about 4.17 inches.""}," &
-                """sheet_name"":{""type"":""string"",""description"":""Optional worksheet name on which to place the chart. Defaults to the first sheet.""}" &
+                                """sheet_name"":{""type"":""string"",""description"":""Optional worksheet name on which to place the chart. Defaults to the first sheet.""}," &
+                """color"":{""type"":""string"",""description"":""Optional single series color as hex RGB e.g. #4472C4. Applied to all series if series_colors is omitted.""}," &
+                """series_colors"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Optional per-series colors as hex RGB. Cycles if fewer than the number of series.""}," &
+                """show_legend"":{""type"":""boolean"",""description"":""Show or hide the chart legend.""}," &
+                """legend_position"":{""type"":""string"",""enum"":[""top"",""bottom"",""left"",""right"",""corner""],""description"":""Legend placement.""}," &
+                """show_data_labels"":{""type"":""boolean"",""description"":""Show data labels on the series.""}," &
+                """x_axis_title"":{""type"":""string"",""description"":""Optional category (x) axis title.""}," &
+                """y_axis_title"":{""type"":""string"",""description"":""Optional value (y) axis title.""}" &
                 "}},""description"":""Charts to create. Width and height are specified in Excel points; if omitted, the default size is 480 x 300 points.""}," &
                 """named_ranges"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
                 """name"":{""type"":""string""},""range"":{""type"":""string""}" &
@@ -1760,7 +1784,54 @@ Partial Public Class ThisAddIn
             Next
         Next
 
+        ' Fallback: resolve the name against the granted workspace so that AutoPilot
+        ' Office tools (process_word_document, comment_word_document, compare_word_documents,
+        ' etc.) work on local workspace documents, not only on mail attachments.
+        Dim workspaceMatch As AutoPilotAttachmentInfo = TryResolveWorkspaceFile(trimmedName)
+        If workspaceMatch IsNot Nothing Then Return workspaceMatch
+
         Return Nothing
+    End Function
+
+    ''' <summary>
+    ''' Attempts to resolve <paramref name="fileName"/> against the granted workspace root.
+    ''' Returns a transient <see cref="AutoPilotAttachmentInfo"/> pointing at the workspace
+    ''' file (marked <c>IsToolOutput=True</c> so it is treated as an in-session file), or
+    ''' <c>Nothing</c> when no workspace is configured or the file is not found.
+    ''' </summary>
+    Private Function TryResolveWorkspaceFile(fileName As String) As AutoPilotAttachmentInfo
+        If String.IsNullOrWhiteSpace(fileName) Then Return Nothing
+
+        Dim state As SharedLibrary.Agents.WorkspaceState = SharedLibrary.Agents.WorkspaceStore.Load("outlook")
+        If state Is Nothing OrElse String.IsNullOrWhiteSpace(state.RootPath) OrElse
+           Not Directory.Exists(state.RootPath) Then
+            Return Nothing
+        End If
+
+        Dim candidate As String
+        Try
+            ' Accept both a bare leaf name and a workspace-relative path.
+            candidate = Path.GetFullPath(Path.Combine(state.RootPath, fileName))
+        Catch
+            Return Nothing
+        End Try
+
+        ' Confine resolution to the workspace root.
+        Dim rootFull As String = Path.GetFullPath(state.RootPath)
+        If Not candidate.StartsWith(rootFull, StringComparison.OrdinalIgnoreCase) Then Return Nothing
+        If Not File.Exists(candidate) Then Return Nothing
+
+        Return New AutoPilotAttachmentInfo() With {
+            .OriginalFileName = Path.GetFileName(candidate),
+            .Extension = Path.GetExtension(candidate).ToLowerInvariant(),
+            .TempFilePath = candidate,
+            .SourcePath = candidate,
+            .SizeBytes = New FileInfo(candidate).Length,
+            .IsOverSizeLimit = False,
+            .StatusMessage = "Workspace file",
+            .IsToolOutput = True,
+            .OutputFiles = New List(Of String)()
+        }
     End Function
 
     ''' <summary>
