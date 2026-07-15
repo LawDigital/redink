@@ -2369,13 +2369,18 @@ Public Class frmAIChat
             Dim doc As Microsoft.Office.Interop.Word.Document = Globals.ThisAddIn.Application.ActiveDocument
             Dim wordApp As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
 
+            ' Capture the specific window we modify so the Finally restore targets the SAME
+            ' window even if the active window changes meanwhile (e.g., a document-management
+            ' add-in switches documents during the operation).
+            Dim targetWindow As Word.Window = wordApp.ActiveWindow
+
             ' Save current view settings for restoration
-            Dim originalRevisionsView As Word.WdRevisionsView = wordApp.ActiveWindow.View.RevisionsView
-            Dim originalShowRevisions As Boolean = wordApp.ActiveWindow.View.ShowRevisionsAndComments
+            Dim originalRevisionsView As Word.WdRevisionsView = targetWindow.View.RevisionsView
+            Dim originalShowRevisions As Boolean = targetWindow.View.ShowRevisionsAndComments
 
             Try
                 ' Temporarily show only final text (no tracked deletions)
-                With wordApp.ActiveWindow.View
+                With targetWindow.View
                     .RevisionsView = Microsoft.Office.Interop.Word.WdRevisionsView.wdRevisionsViewFinal
                     .ShowRevisionsAndComments = False
                 End With
@@ -2399,11 +2404,15 @@ Public Class frmAIChat
                 Return baseText
 
             Finally
-                ' Restore original view settings
-                With wordApp.ActiveWindow.View
-                    .RevisionsView = originalRevisionsView
-                    .ShowRevisionsAndComments = originalShowRevisions
-                End With
+                ' Restore original view settings on the SAME window we changed
+                Try
+                    With targetWindow.View
+                        .RevisionsView = originalRevisionsView
+                        .ShowRevisionsAndComments = originalShowRevisions
+                    End With
+                Catch
+                    ' Best-effort restore; the window may no longer be valid
+                End Try
             End Try
 
         Catch ex As Exception
@@ -2439,13 +2448,17 @@ Public Class frmAIChat
                 chkIncludeselection.Checked = False
                 Return ""
             Else
+                ' Capture the specific window we modify so the Finally restore targets the SAME
+                ' window even if the active window changes meanwhile.
+                Dim targetWindow As Word.Window = wordApp.ActiveWindow
+
                 ' Save current view settings
-                Dim originalRevisionsView As Word.WdRevisionsView = wordApp.ActiveWindow.View.RevisionsView
-                Dim originalShowRevisions As Boolean = wordApp.ActiveWindow.View.ShowRevisionsAndComments
+                Dim originalRevisionsView As Word.WdRevisionsView = targetWindow.View.RevisionsView
+                Dim originalShowRevisions As Boolean = targetWindow.View.ShowRevisionsAndComments
 
                 Try
                     ' Temporarily show only final text
-                    With wordApp.ActiveWindow.View
+                    With targetWindow.View
                         .RevisionsView = Microsoft.Office.Interop.Word.WdRevisionsView.wdRevisionsViewFinal
                         .ShowRevisionsAndComments = False
                     End With
@@ -2469,11 +2482,15 @@ Public Class frmAIChat
                     Return baseText
 
                 Finally
-                    ' Restore original view settings
-                    With wordApp.ActiveWindow.View
-                        .RevisionsView = originalRevisionsView
-                        .ShowRevisionsAndComments = originalShowRevisions
-                    End With
+                    ' Restore original view settings on the SAME window we changed
+                    Try
+                        With targetWindow.View
+                            .RevisionsView = originalRevisionsView
+                            .ShowRevisionsAndComments = originalShowRevisions
+                        End With
+                    Catch
+                        ' Best-effort restore; the window may no longer be valid
+                    End Try
                 End Try
             End If
         Catch ex As Exception
@@ -4743,7 +4760,16 @@ Partial Public Class frmAIChat
                 Dim scheme = e.Url.Scheme.ToLowerInvariant()
                 If scheme = "http" OrElse scheme = "https" OrElse scheme = "mailto" Then
                     e.Cancel = True
-                    Process.Start(New ProcessStartInfo(e.Url.ToString()) With {.UseShellExecute = True})
+                    ' Launch outside the browser navigation event to avoid starting a process
+                    ' from within the WebBrowser COM callback (a re-entrancy / crash risk).
+                    Dim urlToOpen As String = e.Url.ToString()
+                    Me.BeginInvoke(Sub()
+                                       Try
+                                           Process.Start(New ProcessStartInfo(urlToOpen) With {.UseShellExecute = True})
+                                       Catch
+                                           ' Silently ignore errors
+                                       End Try
+                                   End Sub)
                 End If
             End If
         Catch
@@ -4761,7 +4787,16 @@ Partial Public Class frmAIChat
             If doc IsNot Nothing AndAlso doc.ActiveElement IsNot Nothing Then
                 Dim href = doc.ActiveElement.GetAttribute("href")
                 If Not String.IsNullOrWhiteSpace(href) Then
-                    Process.Start(New ProcessStartInfo(href) With {.UseShellExecute = True})
+                    ' Launch outside the browser NewWindow event to avoid starting a process
+                    ' from within the WebBrowser COM callback (a re-entrancy / crash risk).
+                    Dim urlToOpen As String = href
+                    Me.BeginInvoke(Sub()
+                                       Try
+                                           Process.Start(New ProcessStartInfo(urlToOpen) With {.UseShellExecute = True})
+                                       Catch
+                                           ' Silently ignore errors
+                                       End Try
+                                   End Sub)
                 End If
             End If
         Catch
