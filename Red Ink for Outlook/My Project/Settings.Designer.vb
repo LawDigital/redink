@@ -781,6 +781,54 @@ Namespace My
                 Me("AP_SenderToolPolicyPath") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property AP_DashboardWindowX() As Integer
+            Get
+                Return CType(Me("AP_DashboardWindowX"),Integer)
+            End Get
+            Set
+                Me("AP_DashboardWindowX") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property AP_DashboardWindowY() As Integer
+            Get
+                Return CType(Me("AP_DashboardWindowY"),Integer)
+            End Get
+            Set
+                Me("AP_DashboardWindowY") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property AP_DashboardWindowW() As Integer
+            Get
+                Return CType(Me("AP_DashboardWindowW"),Integer)
+            End Get
+            Set
+                Me("AP_DashboardWindowW") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property AP_DashboardWindowH() As Integer
+            Get
+                Return CType(Me("AP_DashboardWindowH"),Integer)
+            End Get
+            Set
+                Me("AP_DashboardWindowH") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

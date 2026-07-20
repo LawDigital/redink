@@ -377,6 +377,9 @@ Partial Public Class ThisAddIn
             ' ── Resolve sheet definitions ──
             ' Support both: top-level "cells" (single sheet) and "sheets" array (multi-sheet)
             Dim sheetDefs As New List(Of (SheetName As String, Cells As JArray))()
+            ' Parallel list holding each sheet's source JObject (Nothing for single-sheet mode),
+            ' used to resolve per-sheet formatting/appearance overrides.
+            Dim sheetObjs As New List(Of JObject)()
             Dim hasVba As Boolean = False
 
             ' Check for VBA modules — determines .xlsm vs .xlsx
@@ -401,6 +404,7 @@ Partial Public Class ThisAddIn
                         If TypeOf sCellsToken Is JArray Then sCells = DirectCast(sCellsToken, JArray)
                         If sCells IsNot Nothing AndAlso sCells.Count > 0 Then
                             sheetDefs.Add((sName, sCells))
+                            sheetObjs.Add(sheetObj)
                         End If
                     Next
                 End If
@@ -423,6 +427,7 @@ Partial Public Class ThisAddIn
                 Dim sheetName = GetArgString(toolCall.Arguments, "sheet_name")
                 If String.IsNullOrWhiteSpace(sheetName) Then sheetName = "Sheet1"
                 sheetDefs.Add((sheetName, cellsArray))
+                sheetObjs.Add(Nothing)
             End If
 
             ' ── Determine file name and extension ──
@@ -466,6 +471,10 @@ Partial Public Class ThisAddIn
                 Dim psObj = toolCall.Arguments("print_setup")
                 If TypeOf psObj Is JObject Then printSetup = DirectCast(psObj, JObject)
             End If
+
+            ' Local copy of arguments for use inside the worksheet-building lambda
+            ' (worksheet appearance and auto-fit settings are read directly from here).
+            Dim excelArgs As Dictionary(Of String, Object) = toolCall.Arguments
 
             Dim totalCells = sheetDefs.Sum(Function(sd) sd.Cells.Count)
             context.Log($"Creating Excel spreadsheet: {fileName} ({sheetDefs.Count} sheet(s), {totalCells} cells)")
@@ -521,19 +530,42 @@ Partial Public Class ThisAddIn
                                                            ' ── Apply cells ──
                                                            ApplyExcelCells(ws, sheetDef.Cells)
 
-                                                           ' ── Column widths (apply per-sheet for first sheet, or if multi-sheet) ──
-                                                           If sheetIdx = 0 AndAlso columnWidths IsNot Nothing Then
-                                                               ApplyColumnWidths(ws, columnWidths)
+                                                           ' ── Resolve per-sheet settings ──
+                                                           ' Top-level settings apply to the first sheet for backward compatibility;
+                                                           ' any key present on the sheet object overrides the top-level value.
+                                                           Dim sheetObjLocal As JObject =
+                                                               If(sheetIdx < sheetObjs.Count, sheetObjs(sheetIdx), Nothing)
+                                                           Dim sArgs As Dictionary(Of String, Object) =
+                                                               BuildSheetArgs(excelArgs, sheetIdx = 0, sheetObjLocal)
+
+                                                           Dim sColumnWidths = ParseColumnWidths(sArgs)
+                                                           Dim sRowHeights = ParseRowHeights(sArgs)
+                                                           Dim sMergeRanges = GetArgStringArray(sArgs, "merge_ranges")
+                                                           Dim sFreezePane = GetArgString(sArgs, "freeze_pane")
+                                                           Dim sAutoFilter = GetArgString(sArgs, "auto_filter")
+                                                           Dim sDataValidations = ParseJsonArray(sArgs, "data_validations")
+                                                           Dim sConditionalFormats = ParseJsonArray(sArgs, "conditional_formats")
+                                                           Dim sPrintSetup As JObject = Nothing
+                                                           If sArgs.ContainsKey("print_setup") Then
+                                                               sPrintSetup = TryCast(sArgs("print_setup"), JObject)
+                                                           End If
+
+                                                           ' ── Auto-fit columns/rows (before explicit widths so explicit values win) ──
+                                                           ApplyAutoFit(ws, sArgs)
+
+                                                           ' ── Column widths ──
+                                                           If sColumnWidths IsNot Nothing Then
+                                                               ApplyColumnWidths(ws, sColumnWidths)
                                                            End If
 
                                                            ' ── Row heights ──
-                                                           If sheetIdx = 0 AndAlso rowHeights IsNot Nothing Then
-                                                               ApplyRowHeights(ws, rowHeights)
+                                                           If sRowHeights IsNot Nothing Then
+                                                               ApplyRowHeights(ws, sRowHeights)
                                                            End If
 
                                                            ' ── Merge ranges ──
-                                                           If sheetIdx = 0 AndAlso mergeRanges IsNot Nothing Then
-                                                               For Each mr In mergeRanges
+                                                           If sMergeRanges IsNot Nothing AndAlso sMergeRanges.Count > 0 Then
+                                                               For Each mr In sMergeRanges
                                                                    Dim mrRange As Microsoft.Office.Interop.Excel.Range = Nothing
                                                                    Try
                                                                        mrRange = ws.Range(mr)
@@ -548,12 +580,12 @@ Partial Public Class ThisAddIn
                                                            End If
 
                                                            ' ── Freeze pane ──
-                                                           If sheetIdx = 0 AndAlso Not String.IsNullOrWhiteSpace(freezePane) Then
+                                                           If Not String.IsNullOrWhiteSpace(sFreezePane) Then
                                                                Dim fpRange As Microsoft.Office.Interop.Excel.Range = Nothing
                                                                Dim activeWin As Microsoft.Office.Interop.Excel.Window = Nothing
                                                                Try
                                                                    ws.Activate()
-                                                                   fpRange = ws.Range(freezePane)
+                                                                   fpRange = ws.Range(sFreezePane)
                                                                    fpRange.Select()
                                                                    activeWin = excelApp.ActiveWindow
                                                                    activeWin.FreezePanes = True
@@ -569,10 +601,10 @@ Partial Public Class ThisAddIn
                                                            End If
 
                                                            ' ── Auto-filter ──
-                                                           If sheetIdx = 0 AndAlso Not String.IsNullOrWhiteSpace(autoFilter) Then
+                                                           If Not String.IsNullOrWhiteSpace(sAutoFilter) Then
                                                                Dim afRange As Microsoft.Office.Interop.Excel.Range = Nothing
                                                                Try
-                                                                   afRange = ws.Range(autoFilter)
+                                                                   afRange = ws.Range(sAutoFilter)
                                                                    afRange.AutoFilter()
                                                                Catch
                                                                Finally
@@ -583,19 +615,22 @@ Partial Public Class ThisAddIn
                                                            End If
 
                                                            ' ── Data validations ──
-                                                           If sheetIdx = 0 AndAlso dataValidations IsNot Nothing Then
-                                                               ApplyDataValidations(ws, dataValidations)
+                                                           If sDataValidations IsNot Nothing Then
+                                                               ApplyDataValidations(ws, sDataValidations)
                                                            End If
 
                                                            ' ── Conditional formatting ──
-                                                           If sheetIdx = 0 AndAlso conditionalFormats IsNot Nothing Then
-                                                               ApplyConditionalFormats(ws, conditionalFormats)
+                                                           If sConditionalFormats IsNot Nothing Then
+                                                               ApplyConditionalFormats(ws, sConditionalFormats)
                                                            End If
 
                                                            ' ── Print setup ──
-                                                           If sheetIdx = 0 AndAlso printSetup IsNot Nothing Then
-                                                               ApplyPrintSetup(ws, printSetup)
+                                                           If sPrintSetup IsNot Nothing Then
+                                                               ApplyPrintSetup(ws, sPrintSetup)
                                                            End If
+
+                                                           ' ── Worksheet appearance (tab color, gridlines, zoom, right-to-left) ──
+                                                           ApplyWorksheetAppearance(ws, sArgs)
                                                        Finally
                                                            If ws IsNot Nothing Then
                                                                Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(ws) : Catch : End Try
@@ -746,6 +781,37 @@ Partial Public Class ThisAddIn
         Dim arr = DirectCast(obj, JArray)
         If arr.Count = 0 Then Return Nothing
         Return arr.OfType(Of JObject)().ToList()
+    End Function
+
+    ''' <summary>
+    ''' Builds an effective argument dictionary for a single sheet by overlaying the
+    ''' sheet object's own properties on top of the top-level arguments. Top-level
+    ''' values are only used as a base for the first sheet, preserving backward
+    ''' compatibility with single-sheet workbooks.
+    ''' </summary>
+    Private Shared Function BuildSheetArgs(topLevel As Dictionary(Of String, Object),
+                                           isFirstSheet As Boolean,
+                                           sheetObj As JObject) As Dictionary(Of String, Object)
+        Dim result As New Dictionary(Of String, Object)(StringComparer.OrdinalIgnoreCase)
+
+        If isFirstSheet AndAlso topLevel IsNot Nothing Then
+            For Each kv In topLevel
+                result(kv.Key) = kv.Value
+            Next
+        End If
+
+        If sheetObj IsNot Nothing Then
+            For Each prop In sheetObj.Properties()
+                ' "name" and "cells" are structural, not formatting settings.
+                If prop.Name.Equals("name", StringComparison.OrdinalIgnoreCase) OrElse
+                   prop.Name.Equals("cells", StringComparison.OrdinalIgnoreCase) Then
+                    Continue For
+                End If
+                result(prop.Name) = prop.Value
+            Next
+        End If
+
+        Return result
     End Function
 
     ''' <summary>
@@ -904,6 +970,43 @@ Partial Public Class ThisAddIn
                     Dim borderColor = ParseHexColor(cellObj.Value(Of String)("border_color"))
                     ApplyBorderStyle(cell, borderStyle, borderColor)
                 End If
+
+                ' ── Text rotation (degrees: -90..90, or 255 for stacked/vertical) ──
+                Dim rotationToken = cellObj("text_rotation")
+                If rotationToken IsNot Nothing Then
+                    Dim rot As Integer
+                    If Integer.TryParse(rotationToken.ToString(), rot) Then
+                        Try : cell.Orientation = rot : Catch : End Try
+                    End If
+                End If
+
+                ' ── Indent level ──
+                Dim indentToken = cellObj("indent")
+                If indentToken IsNot Nothing Then
+                    Dim ind As Integer
+                    If Integer.TryParse(indentToken.ToString(), ind) AndAlso ind >= 0 Then
+                        Try : cell.IndentLevel = ind : Catch : End Try
+                    End If
+                End If
+
+                ' ── Cell note/comment ──
+                Dim noteText = cellObj.Value(Of String)("comment")
+                If String.IsNullOrWhiteSpace(noteText) Then noteText = cellObj.Value(Of String)("note")
+                If Not String.IsNullOrWhiteSpace(noteText) Then
+                    Try : cell.ClearComments() : Catch : End Try
+                    Try : cell.AddComment(noteText) : Catch : End Try
+                End If
+
+                ' ── Hyperlink ──
+                Dim linkAddr = cellObj.Value(Of String)("hyperlink")
+                If Not String.IsNullOrWhiteSpace(linkAddr) Then
+                    Dim linkDisplay = cellObj.Value(Of String)("hyperlink_display")
+                    Try
+                        ws.Hyperlinks.Add(Anchor:=cell, Address:=linkAddr,
+                                          TextToDisplay:=If(String.IsNullOrWhiteSpace(linkDisplay), linkAddr, linkDisplay))
+                    Catch
+                    End Try
+                End If
             Finally
                 If cell IsNot Nothing Then
                     Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(cell) : Catch : End Try
@@ -1013,6 +1116,171 @@ Partial Public Class ThisAddIn
                 End If
             End Try
         Next
+    End Sub
+
+    ''' <summary>
+    ''' Auto-fits column widths and/or row heights based on tool arguments.
+    ''' Accepts true (fit all), "all"/"*", a single letter/number, or an array of letters/numbers.
+    ''' </summary>
+    Private Shared Sub ApplyAutoFit(ws As Microsoft.Office.Interop.Excel.Worksheet,
+                                    args As Dictionary(Of String, Object))
+        If args Is Nothing Then Return
+        Try
+            If args.ContainsKey("auto_fit_columns") Then
+                AutoFitColumns(ws, TryCast(args("auto_fit_columns"), JToken))
+            End If
+            If args.ContainsKey("auto_fit_rows") Then
+                AutoFitRows(ws, TryCast(args("auto_fit_rows"), JToken))
+            End If
+        Catch
+        End Try
+    End Sub
+
+    Private Shared Sub AutoFitColumns(ws As Microsoft.Office.Interop.Excel.Worksheet, tok As JToken)
+        If tok Is Nothing Then Return
+        Select Case tok.Type
+            Case JTokenType.Boolean
+                If CBool(tok) Then AutoFitAllColumns(ws)
+            Case JTokenType.String
+                Dim s = tok.ToString().Trim()
+                If s.Equals("all", StringComparison.OrdinalIgnoreCase) OrElse s = "*" Then
+                    AutoFitAllColumns(ws)
+                Else
+                    AutoFitColumnLetter(ws, s)
+                End If
+            Case JTokenType.Array
+                For Each item As JToken In DirectCast(tok, JArray)
+                    AutoFitColumnLetter(ws, item.ToString().Trim())
+                Next
+        End Select
+    End Sub
+
+    Private Shared Sub AutoFitAllColumns(ws As Microsoft.Office.Interop.Excel.Worksheet)
+        Dim used As Microsoft.Office.Interop.Excel.Range = Nothing
+        Dim cols As Microsoft.Office.Interop.Excel.Range = Nothing
+        Try
+            used = ws.UsedRange
+            cols = used.Columns
+            cols.AutoFit()
+        Catch
+        Finally
+            If cols IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(cols) : Catch : End Try
+            If used IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(used) : Catch : End Try
+        End Try
+    End Sub
+
+    Private Shared Sub AutoFitColumnLetter(ws As Microsoft.Office.Interop.Excel.Worksheet, letter As String)
+        If String.IsNullOrWhiteSpace(letter) Then Return
+        Dim colRange As Microsoft.Office.Interop.Excel.Range = Nothing
+        Try
+            colRange = ws.Columns(letter & ":" & letter)
+            colRange.AutoFit()
+        Catch
+        Finally
+            If colRange IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(colRange) : Catch : End Try
+        End Try
+    End Sub
+
+    Private Shared Sub AutoFitRows(ws As Microsoft.Office.Interop.Excel.Worksheet, tok As JToken)
+        If tok Is Nothing Then Return
+        Select Case tok.Type
+            Case JTokenType.Boolean
+                If CBool(tok) Then AutoFitAllRows(ws)
+            Case JTokenType.String
+                Dim s = tok.ToString().Trim()
+                If s.Equals("all", StringComparison.OrdinalIgnoreCase) OrElse s = "*" Then
+                    AutoFitAllRows(ws)
+                Else
+                    Dim rowNum As Integer
+                    If Integer.TryParse(s, rowNum) Then AutoFitRowNumber(ws, rowNum)
+                End If
+            Case JTokenType.Array
+                For Each item As JToken In DirectCast(tok, JArray)
+                    Dim rowNum As Integer
+                    If Integer.TryParse(item.ToString().Trim(), rowNum) Then AutoFitRowNumber(ws, rowNum)
+                Next
+        End Select
+    End Sub
+
+    Private Shared Sub AutoFitAllRows(ws As Microsoft.Office.Interop.Excel.Worksheet)
+        Dim used As Microsoft.Office.Interop.Excel.Range = Nothing
+        Dim rws As Microsoft.Office.Interop.Excel.Range = Nothing
+        Try
+            used = ws.UsedRange
+            rws = used.Rows
+            rws.AutoFit()
+        Catch
+        Finally
+            If rws IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(rws) : Catch : End Try
+            If used IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(used) : Catch : End Try
+        End Try
+    End Sub
+
+    Private Shared Sub AutoFitRowNumber(ws As Microsoft.Office.Interop.Excel.Worksheet, rowNum As Integer)
+        If rowNum < 1 Then Return
+        Dim rowRange As Microsoft.Office.Interop.Excel.Range = Nothing
+        Try
+            rowRange = ws.Rows(rowNum)
+            rowRange.AutoFit()
+        Catch
+        Finally
+            If rowRange IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(rowRange) : Catch : End Try
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Applies worksheet-level appearance settings: tab color, gridline visibility,
+    ''' zoom level, and right-to-left layout.
+    ''' </summary>
+    Private Shared Sub ApplyWorksheetAppearance(ws As Microsoft.Office.Interop.Excel.Worksheet,
+                                                args As Dictionary(Of String, Object))
+        If args Is Nothing Then Return
+
+        ' ── Tab color ──
+        Dim tabColorStr As String = Nothing
+        If args.ContainsKey("tab_color") Then
+            Dim tt = TryCast(args("tab_color"), JToken)
+            If tt IsNot Nothing Then tabColorStr = tt.ToString()
+        End If
+        Dim tabColor = ParseHexColor(tabColorStr)
+        If tabColor.HasValue Then
+            Try : ws.Tab.Color = tabColor.Value : Catch : End Try
+        End If
+
+        ' ── Right-to-left ──
+        If args.ContainsKey("right_to_left") Then
+            Dim rtlTok = TryCast(args("right_to_left"), JToken)
+            If rtlTok IsNot Nothing AndAlso rtlTok.Type = JTokenType.Boolean Then
+                Try : ws.DisplayRightToLeft = CBool(rtlTok) : Catch : End Try
+            End If
+        End If
+
+        ' ── Gridlines / zoom (require the active window) ──
+        Dim hasGridlines = args.ContainsKey("show_gridlines")
+        Dim hasZoom = args.ContainsKey("zoom")
+        If hasGridlines OrElse hasZoom Then
+            Dim win As Microsoft.Office.Interop.Excel.Window = Nothing
+            Try
+                ws.Activate()
+                win = ws.Application.ActiveWindow
+                If hasGridlines Then
+                    Dim gTok = TryCast(args("show_gridlines"), JToken)
+                    If gTok IsNot Nothing AndAlso gTok.Type = JTokenType.Boolean Then
+                        Try : win.DisplayGridlines = CBool(gTok) : Catch : End Try
+                    End If
+                End If
+                If hasZoom Then
+                    Dim zTok = TryCast(args("zoom"), JToken)
+                    Dim z As Integer
+                    If zTok IsNot Nothing AndAlso Integer.TryParse(zTok.ToString(), z) AndAlso z >= 10 AndAlso z <= 400 Then
+                        Try : win.Zoom = z : Catch : End Try
+                    End If
+                End If
+            Catch
+            Finally
+                If win IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(win) : Catch : End Try
+            End Try
+        End If
     End Sub
 
     ''' <summary>
@@ -1328,6 +1596,132 @@ Partial Public Class ThisAddIn
                 If Not String.IsNullOrWhiteSpace(chartTitle) Then
                     chart.HasTitle = True
                     chart.ChartTitle.Text = chartTitle
+                End If
+
+                ' ── Series / point colors ──
+                Dim seriesColorsArr = TryCast(chartObj("series_colors"), JArray)
+                Dim singleSeriesColor = ParseHexColor(chartObj.Value(Of String)("color"))
+                ' Pie and doughnut charts have a single series whose slices are POINTS,
+                ' so per-slice colors must be applied point-by-point rather than per series.
+                Dim isPointColored As Boolean = (chartType = "pie" OrElse chartType = "doughnut")
+                If (seriesColorsArr IsNot Nothing AndAlso seriesColorsArr.Count > 0) OrElse singleSeriesColor.HasValue Then
+                    Dim seriesCol As Object = Nothing
+                    Try
+                        seriesCol = chart.SeriesCollection()
+                        Dim seriesCount As Integer = CInt(seriesCol.Count)
+                        For si As Integer = 1 To seriesCount
+                            Dim ser As Object = Nothing
+                            Try
+                                ser = seriesCol.Item(si)
+
+                                If isPointColored AndAlso seriesColorsArr IsNot Nothing AndAlso seriesColorsArr.Count > 0 Then
+                                    ' Color each slice/point of the pie or doughnut individually
+                                    Dim pts As Object = Nothing
+                                    Try
+                                        pts = ser.Points()
+                                        Dim ptCount As Integer = CInt(pts.Count)
+                                        For pi As Integer = 1 To ptCount
+                                            Dim pt As Object = Nothing
+                                            Try
+                                                pt = pts.Item(pi)
+                                                Dim pClr = ParseHexColor(seriesColorsArr((pi - 1) Mod seriesColorsArr.Count).ToString())
+                                                If pClr.HasValue Then
+                                                    Try : pt.Format.Fill.ForeColor.RGB = pClr.Value : Catch : End Try
+                                                End If
+                                            Catch
+                                            Finally
+                                                If pt IsNot Nothing Then
+                                                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(pt) : Catch : End Try
+                                                End If
+                                            End Try
+                                        Next
+                                    Catch
+                                    Finally
+                                        If pts IsNot Nothing Then
+                                            Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(pts) : Catch : End Try
+                                        End If
+                                    End Try
+                                Else
+                                    ' Standard per-series coloring
+                                    Dim clr As Integer? = Nothing
+                                    If seriesColorsArr IsNot Nothing AndAlso seriesColorsArr.Count > 0 Then
+                                        clr = ParseHexColor(seriesColorsArr((si - 1) Mod seriesColorsArr.Count).ToString())
+                                    ElseIf singleSeriesColor.HasValue Then
+                                        clr = singleSeriesColor
+                                    End If
+                                    If clr.HasValue Then
+                                        Try : ser.Format.Fill.ForeColor.RGB = clr.Value : Catch : End Try
+                                        Try : ser.Format.Line.ForeColor.RGB = clr.Value : Catch : End Try
+                                    End If
+                                End If
+                            Catch
+                            Finally
+                                If ser IsNot Nothing Then
+                                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(ser) : Catch : End Try
+                                End If
+                            End Try
+                        Next
+                    Catch
+                    Finally
+                        If seriesCol IsNot Nothing Then
+                            Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(seriesCol) : Catch : End Try
+                        End If
+                    End Try
+                End If
+
+                ' ── Legend ──
+                Dim legendToken = chartObj("show_legend")
+                If legendToken IsNot Nothing AndAlso legendToken.Type = JTokenType.Boolean Then
+                    Try : chart.HasLegend = CBool(legendToken) : Catch : End Try
+                End If
+                Dim legendPos = chartObj.Value(Of String)("legend_position")
+                If Not String.IsNullOrWhiteSpace(legendPos) Then
+                    Try
+                        chart.HasLegend = True
+                        Select Case legendPos.ToLowerInvariant()
+                            Case "bottom" : chart.Legend.Position = Microsoft.Office.Interop.Excel.XlLegendPosition.xlLegendPositionBottom
+                            Case "top" : chart.Legend.Position = Microsoft.Office.Interop.Excel.XlLegendPosition.xlLegendPositionTop
+                            Case "left" : chart.Legend.Position = Microsoft.Office.Interop.Excel.XlLegendPosition.xlLegendPositionLeft
+                            Case "right" : chart.Legend.Position = Microsoft.Office.Interop.Excel.XlLegendPosition.xlLegendPositionRight
+                            Case "corner" : chart.Legend.Position = Microsoft.Office.Interop.Excel.XlLegendPosition.xlLegendPositionCorner
+                        End Select
+                    Catch
+                    End Try
+                End If
+
+                ' ── Data labels ──
+                If GetJBool(chartObj, "show_data_labels") Then
+                    Try : chart.ApplyDataLabels() : Catch : End Try
+                End If
+
+                ' ── Axis titles ──
+                Dim xAxisTitle = chartObj.Value(Of String)("x_axis_title")
+                If Not String.IsNullOrWhiteSpace(xAxisTitle) Then
+                    Dim xAxis As Object = Nothing
+                    Try
+                        xAxis = chart.Axes(Microsoft.Office.Interop.Excel.XlAxisType.xlCategory)
+                        xAxis.HasTitle = True
+                        xAxis.AxisTitle.Text = xAxisTitle
+                    Catch
+                    Finally
+                        If xAxis IsNot Nothing Then
+                            Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(xAxis) : Catch : End Try
+                        End If
+                    End Try
+                End If
+                Dim yAxisTitle = chartObj.Value(Of String)("y_axis_title")
+                If Not String.IsNullOrWhiteSpace(yAxisTitle) Then
+                    Dim yAxis As Object = Nothing
+                    Try
+                        yAxis = chart.Axes(Microsoft.Office.Interop.Excel.XlAxisType.xlValue)
+                        yAxis.HasTitle = True
+                        yAxis.AxisTitle.Text = yAxisTitle
+                    Catch
+                    Finally
+                        If yAxis IsNot Nothing Then
+                            Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(yAxis) : Catch : End Try
+                        End If
+                    End Try
                 End If
 
             Catch ex As Exception

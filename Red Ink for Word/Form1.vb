@@ -569,6 +569,32 @@ Public Class frmAIChat
     ''' </summary>
     Private _chatHistory As New List(Of (Role As String, Content As String))
 
+    ' Loaded external context (attached via the Load Context button)
+    Private Const PersistedContextFileName As String = "redink-wordchatcontext.txt"
+
+    Private Shared ReadOnly SupportedContextExtensions As String() = {
+        ".txt", ".rtf", ".doc", ".docx", ".xlsx", ".pdf", ".pptx", ".msg", ".eml",
+        ".ini", ".csv", ".log", ".json", ".xml", ".html", ".htm", ".md",
+        ".vb", ".cs", ".js", ".ts", ".py", ".java", ".cpp", ".c", ".h", ".sql", ".yaml", ".yml"
+    }
+
+    Private Shared _cachedLoadedContextContent As String = Nothing
+    Private Shared _cachedLoadedContextPath As String = Nothing
+
+    Private _loadedContextContent As String = Nothing
+    Private _loadedContextPath As String = Nothing
+    Private _isUpdatingPersistContextCheckbox As Boolean = False
+    Private ReadOnly _contextToolTip As New System.Windows.Forms.ToolTip()
+
+    ''' <summary>Button: attach or remove external context material (files or a folder).</summary>
+    Private WithEvents btnLoadContext As New Button() With {.Text = "Load Context", .AutoSize = True}
+
+    ''' <summary>Checkbox: persist the loaded context temporarily to a temp file.</summary>
+    Private WithEvents chkPersistContext As New System.Windows.Forms.CheckBox() With {
+        .Text = "Persist context temporarily",
+        .AutoSize = True
+    }
+
     ' =========================================================================
     ' Constructor
     ' =========================================================================
@@ -765,6 +791,7 @@ Public Class frmAIChat
         ' Populate button panel
         pnlButtons.Padding = New Padding(0, 2, 8, 12)
         pnlButtons.Controls.Add(btnSend)
+        pnlButtons.Controls.Add(btnLoadContext)
         pnlButtons.Controls.Add(btnCopyLastAnswer)
         pnlButtons.Controls.Add(btnCopy)
         pnlButtons.Controls.Add(btnClear)
@@ -791,6 +818,7 @@ Public Class frmAIChat
         pnlCheckboxes.Controls.Add(chkIncludeOtherDocs)
         pnlCheckboxes.Controls.Add(chkInkyMemory)
         pnlCheckboxes.Controls.Add(lnkEditMemory)
+        pnlCheckboxes.Controls.Add(chkPersistContext)
 
         ' Attach event handlers to buttons
         AddHandler btnCopy.Click, AddressOf btnCopy_Click
@@ -809,12 +837,26 @@ Public Class frmAIChat
         AddHandler chkIncludeOtherDocs.Click, AddressOf chkIncludeOtherDocs_Click
         AddHandler chkInkyMemory.Click, AddressOf chkInkyMemory_Click
         AddHandler lnkEditMemory.LinkClicked, AddressOf lnkEditMemory_LinkClicked
+        AddHandler btnLoadContext.Click, AddressOf btnLoadContext_Click
+        AddHandler chkPersistContext.CheckedChanged, AddressOf chkPersistContext_CheckedChanged
 
         ' Attach event handlers for tooling controls
         AddHandler chkEnableTooling.Click, AddressOf chkEnableTooling_Click
         AddHandler chkAdvancedTools.Click, AddressOf chkAdvancedTools_Click
         AddHandler chkShowToolingLog.CheckedChanged, AddressOf chkShowToolingLog_CheckedChanged
         AddHandler btnTools.Click, AddressOf btnTools_Click
+
+        _isUpdatingPersistContextCheckbox = True
+        Try : chkPersistContext.Checked = My.Settings.ChatPersistContext : Catch : chkPersistContext.Checked = False : End Try
+        _isUpdatingPersistContextCheckbox = False
+        UpdatePersistContextTooltip()
+
+        If Not chkPersistContext.Checked Then
+            DeletePersistedContextFile(False)
+        End If
+
+        Await RestoreLoadedContextAsync()
+        UpdateLoadContextButtonText()
 
         RestoreAlternateModelFromSettings()
 
@@ -1106,6 +1148,14 @@ Public Class frmAIChat
 
                 fullPrompt.AppendLine("The following are the other open Word documents (each enclosed in <DOCUMENTn> tags, including their name so you can refer to them):")
                 fullPrompt.AppendLine(otherDocs)
+            End If
+
+            ' Add loaded external context if present
+            If Not String.IsNullOrWhiteSpace(_loadedContextContent) Then
+                fullPrompt.AppendLine("The user also loaded the following external context material:")
+                fullPrompt.AppendLine("<LOADED_CONTEXT>")
+                fullPrompt.AppendLine(_loadedContextContent)
+                fullPrompt.AppendLine("</LOADED_CONTEXT>")
             End If
 
             ' Add current user message
@@ -2369,13 +2419,18 @@ Public Class frmAIChat
             Dim doc As Microsoft.Office.Interop.Word.Document = Globals.ThisAddIn.Application.ActiveDocument
             Dim wordApp As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
 
+            ' Capture the specific window we modify so the Finally restore targets the SAME
+            ' window even if the active window changes meanwhile (e.g., a document-management
+            ' add-in switches documents during the operation).
+            Dim targetWindow As Word.Window = wordApp.ActiveWindow
+
             ' Save current view settings for restoration
-            Dim originalRevisionsView As Word.WdRevisionsView = wordApp.ActiveWindow.View.RevisionsView
-            Dim originalShowRevisions As Boolean = wordApp.ActiveWindow.View.ShowRevisionsAndComments
+            Dim originalRevisionsView As Word.WdRevisionsView = targetWindow.View.RevisionsView
+            Dim originalShowRevisions As Boolean = targetWindow.View.ShowRevisionsAndComments
 
             Try
                 ' Temporarily show only final text (no tracked deletions)
-                With wordApp.ActiveWindow.View
+                With targetWindow.View
                     .RevisionsView = Microsoft.Office.Interop.Word.WdRevisionsView.wdRevisionsViewFinal
                     .ShowRevisionsAndComments = False
                 End With
@@ -2399,11 +2454,15 @@ Public Class frmAIChat
                 Return baseText
 
             Finally
-                ' Restore original view settings
-                With wordApp.ActiveWindow.View
-                    .RevisionsView = originalRevisionsView
-                    .ShowRevisionsAndComments = originalShowRevisions
-                End With
+                ' Restore original view settings on the SAME window we changed
+                Try
+                    With targetWindow.View
+                        .RevisionsView = originalRevisionsView
+                        .ShowRevisionsAndComments = originalShowRevisions
+                    End With
+                Catch
+                    ' Best-effort restore; the window may no longer be valid
+                End Try
             End Try
 
         Catch ex As Exception
@@ -2439,13 +2498,17 @@ Public Class frmAIChat
                 chkIncludeselection.Checked = False
                 Return ""
             Else
+                ' Capture the specific window we modify so the Finally restore targets the SAME
+                ' window even if the active window changes meanwhile.
+                Dim targetWindow As Word.Window = wordApp.ActiveWindow
+
                 ' Save current view settings
-                Dim originalRevisionsView As Word.WdRevisionsView = wordApp.ActiveWindow.View.RevisionsView
-                Dim originalShowRevisions As Boolean = wordApp.ActiveWindow.View.ShowRevisionsAndComments
+                Dim originalRevisionsView As Word.WdRevisionsView = targetWindow.View.RevisionsView
+                Dim originalShowRevisions As Boolean = targetWindow.View.ShowRevisionsAndComments
 
                 Try
                     ' Temporarily show only final text
-                    With wordApp.ActiveWindow.View
+                    With targetWindow.View
                         .RevisionsView = Microsoft.Office.Interop.Word.WdRevisionsView.wdRevisionsViewFinal
                         .ShowRevisionsAndComments = False
                     End With
@@ -2469,11 +2532,15 @@ Public Class frmAIChat
                     Return baseText
 
                 Finally
-                    ' Restore original view settings
-                    With wordApp.ActiveWindow.View
-                        .RevisionsView = originalRevisionsView
-                        .ShowRevisionsAndComments = originalShowRevisions
-                    End With
+                    ' Restore original view settings on the SAME window we changed
+                    Try
+                        With targetWindow.View
+                            .RevisionsView = originalRevisionsView
+                            .ShowRevisionsAndComments = originalShowRevisions
+                        End With
+                    Catch
+                        ' Best-effort restore; the window may no longer be valid
+                    End Try
                 End Try
             End If
         Catch ex As Exception
@@ -4685,6 +4752,434 @@ Partial Public Class frmAIChat
     End Class
 
     ' =========================================================================
+    ' Load Context and File Handling
+    ' =========================================================================
+
+    Private Sub AppendSystemMessage(message As String)
+        Try
+            AppendToChatHistory(Environment.NewLine & "[System] " & message & Environment.NewLine)
+        Catch
+        End Try
+        Try
+            AppendHtml($"<div class='msg system'><span class='content'>{HtmlEncode("[System] " & message)}</span></div>")
+            PersistChatHtml()
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Gets the Red Ink storage directory in the user's application data folder
+    ''' (same location convention used by DiscussInky).
+    ''' </summary>
+    Private Function GetRedInkStorageDirectoryPath() As String
+        Dim storageDir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "redink")
+        Try
+            If Not System.IO.Directory.Exists(storageDir) Then
+                System.IO.Directory.CreateDirectory(storageDir)
+            End If
+        Catch
+        End Try
+        Return storageDir
+    End Function
+
+    Private Function GetPersistedContextFilePath() As String
+        Return System.IO.Path.Combine(GetRedInkStorageDirectoryPath(), PersistedContextFileName)
+    End Function
+
+    Private Function GetContextDragDropFilter() As String
+        If ThisAddIn.INI_AllowLegacyDocFiles Then
+            Return "Supported Context Files|*.txt;*.rtf;*.doc;*.docx;*.xlsx;*.pdf;*.pptx;*.msg;*.eml;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.vb;*.cs;*.js;*.ts;*.py;*.java;*.cpp;*.c;*.h;*.sql;*.yaml;*.yml|All Files (*.*)|*.*"
+        End If
+
+        Return "Supported Context Files|*.txt;*.rtf;*.docx;*.xlsx;*.pdf;*.pptx;*.msg;*.eml;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.vb;*.cs;*.js;*.ts;*.py;*.java;*.cpp;*.c;*.h;*.sql;*.yaml;*.yml|All Files (*.*)|*.*"
+    End Function
+
+
+    Private Sub UpdatePersistContextTooltip()
+        If chkPersistContext.Checked Then
+            _contextToolTip.SetToolTip(chkPersistContext, "Currently stored in: " & GetPersistedContextFilePath())
+        Else
+            _contextToolTip.SetToolTip(chkPersistContext, "")
+        End If
+    End Sub
+
+    Private Sub DeletePersistedContextFile(showMessage As Boolean)
+        Try
+            Dim persistPath = GetPersistedContextFilePath()
+            If System.IO.File.Exists(persistPath) Then
+                System.IO.File.Delete(persistPath)
+                If showMessage Then
+                    AppendSystemMessage("Persisted context file deleted.")
+                End If
+            End If
+        Catch ex As System.Exception
+            If showMessage Then
+                AppendSystemMessage($"Failed to delete persisted context: {ex.Message}")
+            End If
+        End Try
+    End Sub
+
+    Private Sub PersistLoadedContextToTempFile()
+        If String.IsNullOrWhiteSpace(_loadedContextContent) Then Return
+        System.IO.File.WriteAllText(GetPersistedContextFilePath(), _loadedContextContent, System.Text.Encoding.UTF8)
+    End Sub
+
+    Private Async Function LoadSingleContextFileAsync(filePath As String, askUser As Boolean) As Task(Of (Content As String, PdfMayBeIncomplete As Boolean))
+        If String.IsNullOrWhiteSpace(filePath) OrElse Not System.IO.File.Exists(filePath) Then
+            Return ("", False)
+        End If
+
+        ' Silent suppresses per-file error boxes; AskUser lets GetFileContentEx handle the OCR prompt itself.
+        Dim result = Await Globals.ThisAddIn.GetFileContentEx(filePath, True, False, askUser)
+        Return (result.Content, result.PdfMayBeIncomplete)
+    End Function
+
+    Private Async Function LoadContextFromPathAsync(selectedPath As String, interactive As Boolean) As Task(Of (CombinedContent As String, DisplayPath As String, LoadedCount As Integer, Summary As String))
+        Dim isFile As Boolean = System.IO.File.Exists(selectedPath)
+        Dim isDirectory As Boolean = System.IO.Directory.Exists(selectedPath)
+
+        If Not isFile AndAlso Not isDirectory Then
+            Return ("", "", 0, "Selected path does not exist.")
+        End If
+
+        Dim filesToProcess As New List(Of String)
+        Dim failedFiles As New List(Of String)
+        Dim loadedFiles As New List(Of Tuple(Of String, Integer))
+        Dim pdfsWithPossibleImages As New List(Of String)
+        Dim ignoredCount As Integer = 0
+
+        If isFile Then
+            Dim ext = System.IO.Path.GetExtension(selectedPath).ToLowerInvariant()
+            If Array.IndexOf(SupportedContextExtensions, ext) < 0 Then
+                Return ("", "", 0, $"The selected file type '{ext}' is not supported for loaded context.")
+            End If
+
+            filesToProcess.Add(selectedPath)
+        Else
+            Dim allFiles = System.IO.Directory.GetFiles(selectedPath, "*.*", System.IO.SearchOption.TopDirectoryOnly)
+
+            For Each f In allFiles
+                Dim ext = System.IO.Path.GetExtension(f).ToLowerInvariant()
+                If Array.IndexOf(SupportedContextExtensions, ext) >= 0 Then
+                    filesToProcess.Add(f)
+                Else
+                    ignoredCount += 1
+                End If
+            Next
+
+            If filesToProcess.Count > 50 Then
+                If interactive Then
+                    Dim truncateAnswer = ShowCustomYesNoBox(
+                        $"The directory contains {filesToProcess.Count} supported files, but the maximum is 50." & vbCrLf & vbCrLf &
+                        "Only the first 50 files will be loaded. Continue?",
+                        "Yes, continue",
+                        "No, abort")
+
+                    If truncateAnswer <> 1 Then
+                        Return ("", "", 0, "")
+                    End If
+                End If
+
+                filesToProcess = filesToProcess.GetRange(0, 50)
+            ElseIf interactive AndAlso filesToProcess.Count > 10 Then
+                Dim confirmAnswer = ShowCustomYesNoBox(
+                    $"The directory contains {filesToProcess.Count} files to load. Continue?",
+                    "Yes, continue",
+                    "No, abort")
+
+                If confirmAnswer <> 1 Then
+                    Return ("", "", 0, "")
+                End If
+            End If
+
+            If filesToProcess.Count = 0 Then
+                Return ("", "", 0, $"No supported files found in directory '{selectedPath}'.")
+            End If
+        End If
+
+        Dim resultBuilder As New System.Text.StringBuilder()
+        Dim useDocumentTags As Boolean = (filesToProcess.Count > 1)
+        Dim documentCounter As Integer = 0
+
+        For Each filePath In filesToProcess
+            Dim result = Await LoadSingleContextFileAsync(filePath, interactive)
+            Dim content = result.Content
+
+            If result.PdfMayBeIncomplete Then
+                pdfsWithPossibleImages.Add(filePath)
+            End If
+
+            If String.IsNullOrWhiteSpace(content) OrElse content.StartsWith("Error:", StringComparison.OrdinalIgnoreCase) Then
+                failedFiles.Add(filePath)
+                Continue For
+            End If
+
+            documentCounter += 1
+            loadedFiles.Add(Tuple.Create(filePath, content.Length))
+
+            If useDocumentTags Then
+                Dim fileName = System.IO.Path.GetFileName(filePath)
+                resultBuilder.Append($"<document{documentCounter} name=""{fileName}"">")
+                resultBuilder.Append(content)
+                resultBuilder.Append($"</document{documentCounter}>")
+            Else
+                resultBuilder.Append(content)
+            End If
+        Next
+
+        Dim summary As New System.Text.StringBuilder()
+
+        If loadedFiles.Count > 0 Then
+            summary.AppendLine($"Successfully loaded ({loadedFiles.Count} file(s)):")
+            Dim totalChars As Integer = 0
+            For Each item In loadedFiles
+                summary.AppendLine($"  • {System.IO.Path.GetFileName(item.Item1)} ({item.Item2:N0} chars)")
+                totalChars += item.Item2
+            Next
+            summary.AppendLine($"  Total: {totalChars:N0} characters")
+            summary.AppendLine()
+        End If
+
+        If failedFiles.Count > 0 Then
+            summary.AppendLine($"Failed to load ({failedFiles.Count} item(s)):")
+            For Each item In failedFiles
+                summary.AppendLine($"  • {System.IO.Path.GetFileName(item)}")
+            Next
+            summary.AppendLine()
+        End If
+
+        If pdfsWithPossibleImages.Count > 0 Then
+            summary.AppendLine($"PDFs that may contain images/scans ({pdfsWithPossibleImages.Count} file(s)):")
+            For Each item In pdfsWithPossibleImages
+                summary.AppendLine($"  • {System.IO.Path.GetFileName(item)}")
+            Next
+            summary.AppendLine("  (Text extraction may be incomplete because OCR was not performed)")
+            summary.AppendLine()
+        End If
+
+        If ignoredCount > 0 Then
+            summary.AppendLine($"Ignored unsupported files: {ignoredCount}")
+            summary.AppendLine()
+        End If
+
+        Return (
+            resultBuilder.ToString(),
+            If(isFile, selectedPath, selectedPath & " (directory)"),
+            loadedFiles.Count,
+            summary.ToString().TrimEnd()
+        )
+    End Function
+
+    Private Async Function RestoreLoadedContextAsync() As System.Threading.Tasks.Task
+        If Not String.IsNullOrWhiteSpace(_cachedLoadedContextContent) AndAlso Not String.IsNullOrWhiteSpace(_cachedLoadedContextPath) Then
+            _loadedContextContent = _cachedLoadedContextContent
+            _loadedContextPath = _cachedLoadedContextPath
+            AppendSystemMessage("Context restored from cache.")
+            Return
+        End If
+
+        If chkPersistContext.Checked Then
+            Dim persistPath = GetPersistedContextFilePath()
+            If System.IO.File.Exists(persistPath) Then
+                Try
+                    _loadedContextContent = System.IO.File.ReadAllText(persistPath, System.Text.Encoding.UTF8)
+                    _loadedContextPath = "(Persisted Context)"
+                    _cachedLoadedContextContent = _loadedContextContent
+                    _cachedLoadedContextPath = _loadedContextPath
+                    AppendSystemMessage($"Context restored from persisted storage ({_loadedContextContent.Length:N0} characters).")
+                    Return
+                Catch ex As System.Exception
+                    AppendSystemMessage($"Failed to restore persisted context: {ex.Message}")
+                End Try
+            End If
+        End If
+
+        Dim savedPath As String = ""
+        Try
+            savedPath = My.Settings.ChatContextPath
+        Catch
+            Return
+        End Try
+
+        If String.IsNullOrWhiteSpace(savedPath) Then Return
+
+        If Not System.IO.File.Exists(savedPath) AndAlso Not System.IO.Directory.Exists(savedPath) Then
+            Try
+                My.Settings.ChatContextPath = ""
+                My.Settings.Save()
+            Catch
+            End Try
+            Return
+        End If
+
+        Dim restored = Await LoadContextFromPathAsync(savedPath, False)
+        If String.IsNullOrWhiteSpace(restored.CombinedContent) Then Return
+
+        _loadedContextContent = restored.CombinedContent
+        _loadedContextPath = restored.DisplayPath
+        _cachedLoadedContextContent = _loadedContextContent
+        _cachedLoadedContextPath = _loadedContextPath
+
+        If chkPersistContext.Checked Then
+            Try
+                PersistLoadedContextToTempFile()
+            Catch
+            End Try
+        End If
+
+        AppendSystemMessage($"Context restored from saved path: {System.IO.Path.GetFileName(savedPath)}.")
+    End Function
+
+    Private Async Sub btnLoadContext_Click(sender As Object, e As EventArgs)
+        If Not String.IsNullOrWhiteSpace(_loadedContextContent) Then
+            RemoveLoadedContext()
+        Else
+            Await PromptForLoadedContextAsync()
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' Updates the Load Context button caption to reflect whether external context is loaded.
+    ''' </summary>
+    Private Sub UpdateLoadContextButtonText()
+        btnLoadContext.Text = If(String.IsNullOrWhiteSpace(_loadedContextContent), "Load Context", "Remove Context")
+    End Sub
+
+    ''' <summary>
+    ''' Removes any loaded external context (in-memory, cache, persisted file, and saved path).
+    ''' </summary>
+    Private Sub RemoveLoadedContext()
+        _loadedContextContent = Nothing
+        _loadedContextPath = Nothing
+        _cachedLoadedContextContent = Nothing
+        _cachedLoadedContextPath = Nothing
+        DeletePersistedContextFile(False)
+
+        Try
+            My.Settings.ChatContextPath = ""
+            My.Settings.Save()
+        Catch
+        End Try
+
+        AppendSystemMessage("Loaded context removed.")
+        UpdateLoadContextButtonText()
+    End Sub
+
+    Private Async Function PromptForLoadedContextAsync() As System.Threading.Tasks.Task
+        Try
+            Globals.ThisAddIn.DragDropFormLabel = "... a file or folder you want to use as external context, or click Browse"
+            Globals.ThisAddIn.DragDropFormFilter = GetContextDragDropFilter()
+
+            Dim selectedPath As String = ""
+
+            Using frm As New DragDropForm(DragDropMode.FileOrDirectory)
+                If frm.ShowDialog() = DialogResult.OK Then
+                    selectedPath = frm.SelectedFilePath
+                End If
+            End Using
+
+            Globals.ThisAddIn.DragDropFormLabel = ""
+            Globals.ThisAddIn.DragDropFormFilter = ""
+
+            If String.IsNullOrWhiteSpace(selectedPath) Then
+                Return
+            End If
+
+            Dim loaded = Await LoadContextFromPathAsync(selectedPath, True)
+
+            If String.IsNullOrWhiteSpace(loaded.Summary) AndAlso String.IsNullOrWhiteSpace(loaded.CombinedContent) Then
+                Return
+            End If
+
+            If Not String.IsNullOrWhiteSpace(loaded.Summary) Then
+                Dim proceedAnswer = ShowCustomYesNoBox(
+                    loaded.Summary & vbCrLf & vbCrLf & "Do you want to use this context?",
+                    "Yes, proceed",
+                    "No, retry")
+
+                If proceedAnswer <> 1 Then
+                    Await PromptForLoadedContextAsync()
+                    Return
+                End If
+            End If
+
+            If String.IsNullOrWhiteSpace(loaded.CombinedContent) Then
+                AppendSystemMessage("Failed to load context or all files are empty.")
+                Return
+            End If
+
+            _loadedContextContent = loaded.CombinedContent
+            _loadedContextPath = loaded.DisplayPath
+            _cachedLoadedContextContent = _loadedContextContent
+            _cachedLoadedContextPath = _loadedContextPath
+
+            If chkPersistContext.Checked Then
+                Try
+                    PersistLoadedContextToTempFile()
+                    AppendSystemMessage($"Context loaded and persisted ({_loadedContextContent.Length:N0} characters from {loaded.LoadedCount} file(s)).")
+                Catch ex As System.Exception
+                    AppendSystemMessage($"Context loaded ({_loadedContextContent.Length:N0} characters) but failed to persist: {ex.Message}")
+                End Try
+            Else
+                AppendSystemMessage($"Context loaded: {loaded.LoadedCount} file(s), {_loadedContextContent.Length:N0} characters total.")
+            End If
+
+            Try
+                My.Settings.ChatContextPath = selectedPath
+                My.Settings.Save()
+            Catch
+            End Try
+
+        Catch ex As System.Exception
+            AppendSystemMessage($"Error loading context: {ex.Message}")
+        Finally
+            Globals.ThisAddIn.DragDropFormLabel = ""
+            Globals.ThisAddIn.DragDropFormFilter = ""
+            UpdateLoadContextButtonText()
+        End Try
+    End Function
+
+    Private Sub chkPersistContext_CheckedChanged(sender As Object, e As EventArgs)
+        If _isUpdatingPersistContextCheckbox Then Return
+
+        Try
+            Dim persistPath = GetPersistedContextFilePath()
+
+            If chkPersistContext.Checked Then
+                If Not String.IsNullOrWhiteSpace(_cachedLoadedContextContent) Then
+                    System.IO.File.WriteAllText(persistPath, _cachedLoadedContextContent, System.Text.Encoding.UTF8)
+                    AppendSystemMessage($"Context persisted to temporary storage ({_cachedLoadedContextContent.Length:N0} characters).")
+                Else
+                    AppendSystemMessage("No context loaded to persist. Load context first, then check this box.")
+                End If
+            Else
+                If System.IO.File.Exists(persistPath) Then
+                    Dim answer = ShowCustomYesNoBox(
+                        "Do you want to delete the persisted context file? This cannot be undone if you quit Word.",
+                        "Yes, delete",
+                        "No, keep it")
+
+                    If answer = 1 Then
+                        DeletePersistedContextFile(True)
+                    Else
+                        _isUpdatingPersistContextCheckbox = True
+                        chkPersistContext.Checked = True
+                        _isUpdatingPersistContextCheckbox = False
+                        Return
+                    End If
+                End If
+            End If
+
+            My.Settings.ChatPersistContext = chkPersistContext.Checked
+            My.Settings.Save()
+            UpdatePersistContextTooltip()
+
+        Catch ex As System.Exception
+            AppendSystemMessage($"Error handling persist context setting: {ex.Message}")
+        End Try
+    End Sub
+
+    ' =========================================================================
     ' Persistence
     ' =========================================================================
 
@@ -4743,7 +5238,16 @@ Partial Public Class frmAIChat
                 Dim scheme = e.Url.Scheme.ToLowerInvariant()
                 If scheme = "http" OrElse scheme = "https" OrElse scheme = "mailto" Then
                     e.Cancel = True
-                    Process.Start(New ProcessStartInfo(e.Url.ToString()) With {.UseShellExecute = True})
+                    ' Launch outside the browser navigation event to avoid starting a process
+                    ' from within the WebBrowser COM callback (a re-entrancy / crash risk).
+                    Dim urlToOpen As String = e.Url.ToString()
+                    Me.BeginInvoke(Sub()
+                                       Try
+                                           Process.Start(New ProcessStartInfo(urlToOpen) With {.UseShellExecute = True})
+                                       Catch
+                                           ' Silently ignore errors
+                                       End Try
+                                   End Sub)
                 End If
             End If
         Catch
@@ -4761,7 +5265,16 @@ Partial Public Class frmAIChat
             If doc IsNot Nothing AndAlso doc.ActiveElement IsNot Nothing Then
                 Dim href = doc.ActiveElement.GetAttribute("href")
                 If Not String.IsNullOrWhiteSpace(href) Then
-                    Process.Start(New ProcessStartInfo(href) With {.UseShellExecute = True})
+                    ' Launch outside the browser NewWindow event to avoid starting a process
+                    ' from within the WebBrowser COM callback (a re-entrancy / crash risk).
+                    Dim urlToOpen As String = href
+                    Me.BeginInvoke(Sub()
+                                       Try
+                                           Process.Start(New ProcessStartInfo(urlToOpen) With {.UseShellExecute = True})
+                                       Catch
+                                           ' Silently ignore errors
+                                       End Try
+                                   End Sub)
                 End If
             End If
         Catch

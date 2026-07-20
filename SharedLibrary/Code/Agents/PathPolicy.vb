@@ -39,6 +39,7 @@ Namespace Agents
         ' --------------------------------------------------------------- workspace
 
         Private Shared _workspaceRoot As String = Nothing
+        Private Shared ReadOnly _restrictToWorkspaceRootOnly As New AsyncLocal(Of Boolean)
 
         ''' <summary>Sets the active workspace root for this process (host call). Pass Nothing to clear.</summary>
         Public Shared Sub SetWorkspaceRoot(rootOrNothing As String)
@@ -58,6 +59,44 @@ Namespace Agents
                 Return _workspaceRoot
             End Get
         End Property
+
+        ''' <summary>
+        ''' When enabled, path resolution is limited strictly to the active workspace root.
+        ''' Desktop fallback and skill roots are ignored.
+        ''' </summary>
+        Public Shared Property RestrictToWorkspaceRootOnly As Boolean
+            Get
+                Return _restrictToWorkspaceRootOnly.Value
+            End Get
+            Set(value As Boolean)
+                _restrictToWorkspaceRootOnly.Value = value
+            End Set
+        End Property
+
+        Private Shared _strictExtraRoots As String() = Nothing
+
+        ''' <summary>
+        ''' Registers additional roots that are also permitted (read and write) while
+        ''' <see cref="RestrictToWorkspaceRootOnly"/> is active. Hosts use this to allow,
+        ''' for example, both the AutoPilot temp directory and the scheduled-task
+        ''' workspace directory during a locked run. Pass Nothing to clear.
+        ''' </summary>
+        Public Shared Sub SetStrictExtraRoots(rootsOrNothing As IEnumerable(Of String))
+            If rootsOrNothing Is Nothing Then
+                _strictExtraRoots = Nothing
+                Return
+            End If
+
+            Dim collected As New List(Of String)()
+            For Each r In rootsOrNothing
+                If String.IsNullOrWhiteSpace(r) Then Continue For
+                Try
+                    collected.Add(Path.GetFullPath(r))
+                Catch
+                End Try
+            Next
+            _strictExtraRoots = If(collected.Count > 0, collected.ToArray(), Nothing)
+        End Sub
 
         ' --------------------------------------------------------------- chat-author scope
 
@@ -121,9 +160,11 @@ Namespace Agents
                 Throw New ArgumentException("Path is empty.", NameOf(requestedPath))
             End If
 
+            Dim wasRelative As Boolean = Not Path.IsPathRooted(requestedPath)
+
             Dim full As String
             Try
-                If Path.IsPathRooted(requestedPath) Then
+                If Not wasRelative Then
                     full = Path.GetFullPath(requestedPath)
                 Else
                     full = Path.GetFullPath(Path.Combine(GetDefaultWritableRoot(), requestedPath))
@@ -137,11 +178,50 @@ Namespace Agents
                 Throw New UnauthorizedAccessException("Device paths are not allowed.")
             End If
 
+            Dim ws = If(_workspaceRoot, "")
+
+            If _restrictToWorkspaceRootOnly.Value Then
+                ' Collect the strict allow-set: the active workspace root plus any
+                ' additional host-registered roots (e.g. the AutoPilot temp directory and
+                ' the scheduled-task workspace). Both read and write are confined to these.
+                Dim strictRoots As New List(Of String)()
+                If Not String.IsNullOrWhiteSpace(ws) AndAlso Directory.Exists(ws) Then
+                    strictRoots.Add(Path.GetFullPath(ws))
+                End If
+                Dim extra = _strictExtraRoots
+                If extra IsNot Nothing Then
+                    For Each r In extra
+                        If Not String.IsNullOrWhiteSpace(r) AndAlso Directory.Exists(r) Then
+                            strictRoots.Add(Path.GetFullPath(r))
+                        End If
+                    Next
+                End If
+
+                If strictRoots.Count = 0 Then
+                    Throw New UnauthorizedAccessException("Workspace-only mode is active but no workspace root is configured.")
+                End If
+
+                ' Writes are confined strictly to the allowed roots.
+                For Each r In strictRoots
+                    If IsUnder(full, r) Then Return full
+                Next
+
+                ' Reads are additionally permitted under discovered skill directories
+                ' (SKILL.md, scripts/ and references/), which are always read-only sources.
+                ' This lets a skill load its bundled reference files even while the
+                ' workspace is otherwise locked to the temp/scheduled directory.
+                If access = PathAccess.Read Then
+                    Dim skillReadResult As String = TryResolveUnderSkillDirectories(full, requestedPath, wasRelative)
+                    If skillReadResult IsNot Nothing Then Return skillReadResult
+                End If
+
+                Throw New UnauthorizedAccessException("Path is outside the active workspace root.")
+            End If
+
             ' Build allow-set.
             Dim writeRoots As New List(Of String)()
             Dim readRoots As New List(Of String)()
 
-            Dim ws = If(_workspaceRoot, "")
             If Not String.IsNullOrWhiteSpace(ws) AndAlso Directory.Exists(ws) Then
                 writeRoots.Add(Path.GetFullPath(ws))
                 readRoots.Add(Path.GetFullPath(ws))
@@ -169,10 +249,42 @@ Namespace Agents
                 Next
             Catch
             End Try
+
+            ' Existing agent folders (agents/<name>/ or the agents/ base for single-file agents)
+            ' are always readable so the author can inspect and revise them.
+            Dim agentFullRoots As New List(Of String)()
+            Try
+                For Each ag In AgentResources.Agents
+                    If ag Is Nothing OrElse String.IsNullOrWhiteSpace(ag.DirectoryPath) Then Continue For
+                    agentFullRoots.Add(Path.GetFullPath(ag.DirectoryPath))
+                Next
+            Catch
+            End Try
+
+            ' Resource base directories (skills/ and agents/) so brand-new skills and agents
+            ' (and their subdirectories) can be created in author mode. Local is always
+            ' permitted; central requires the explicit opt-in flag.
+            Dim authorBaseRoots As New List(Of String)()
+            Try
+                For Each baseDir In AgentResources.GetLocalResourceBaseDirectories()
+                    If Not String.IsNullOrWhiteSpace(baseDir) Then authorBaseRoots.Add(Path.GetFullPath(baseDir))
+                Next
+                If SkillAuthorMode.AllowCentralWrites Then
+                    For Each baseDir In AgentResources.GetCentralResourceBaseDirectories()
+                        If Not String.IsNullOrWhiteSpace(baseDir) Then authorBaseRoots.Add(Path.GetFullPath(baseDir))
+                    Next
+                End If
+            Catch
+            End Try
+
             readRoots.AddRange(skillReadRoots)
             readRoots.AddRange(skillFullRoots)
+            readRoots.AddRange(agentFullRoots)
+            readRoots.AddRange(authorBaseRoots)
             If _chatAuthor.Value OrElse SkillAuthorMode.IsActive Then
                 writeRoots.AddRange(skillFullRoots)
+                writeRoots.AddRange(agentFullRoots)
+                writeRoots.AddRange(authorBaseRoots)
             End If
 
             Dim roots = If(access = PathAccess.Write, writeRoots, readRoots)
@@ -180,7 +292,42 @@ Namespace Agents
                 If IsUnder(full, r) Then Return full
             Next
 
+            ' For read access, allow a relative path to resolve against a skill directory
+            ' when it does not exist under the normal roots (e.g. "references/spec.md").
+            If access = PathAccess.Read Then
+                Dim skillReadResult As String = TryResolveUnderSkillDirectories(full, requestedPath, wasRelative)
+                If skillReadResult IsNot Nothing Then Return skillReadResult
+            End If
+
             Throw New UnauthorizedAccessException("Path is outside the allowed roots for " & access.ToString().ToLowerInvariant() & " access.")
+        End Function
+
+        ''' <summary>
+        ''' Attempts to resolve a read path under any discovered skill directory. Returns
+        ''' the canonical path when the (absolute) path already lies under a skill folder,
+        ''' or when the original request was relative and combining it with a skill folder
+        ''' yields an existing file. Returns Nothing when no skill match is found.
+        ''' </summary>
+        Private Shared Function TryResolveUnderSkillDirectories(full As String, requestedPath As String, wasRelative As Boolean) As String
+            Try
+                For Each sk In AgentResources.Skills
+                    If sk Is Nothing OrElse String.IsNullOrWhiteSpace(sk.DirectoryPath) Then Continue For
+                    Dim skFull As String = Path.GetFullPath(sk.DirectoryPath)
+
+                    ' Absolute path already inside a skill directory.
+                    If IsUnder(full, skFull) Then Return full
+
+                    ' Relative request resolved against the skill directory.
+                    If wasRelative AndAlso Not String.IsNullOrWhiteSpace(requestedPath) Then
+                        Dim candidate As String = Path.GetFullPath(Path.Combine(skFull, requestedPath))
+                        If IsUnder(candidate, skFull) AndAlso File.Exists(candidate) Then
+                            Return candidate
+                        End If
+                    End If
+                Next
+            Catch
+            End Try
+            Return Nothing
         End Function
 
         Private Shared Function IsUnder(candidate As String, root As String) As Boolean

@@ -212,9 +212,7 @@ Partial Public Class ThisAddIn
                     Return
                 End If
 
-                Dim uniqueID As String = System.Guid.NewGuid().ToString()
-                userDataFolder = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "RedInkWebView2_" & uniqueID)
-                System.IO.Directory.CreateDirectory(userDataFolder)
+                userDataFolder = SharedLibrary.SharedLibrary.SharedMethods.CreateWebView2TransientFolder()
 
                 form = New System.Windows.Forms.Form() With {
                     .Width = 1920,

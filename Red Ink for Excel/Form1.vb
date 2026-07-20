@@ -371,6 +371,7 @@ Public Class frmAIChat
         End If
 
         Await RestoreLoadedContextAsync()
+        UpdateLoadContextButtonText()
 
         If String.IsNullOrWhiteSpace(txtChatHistory.Text) Then
             Dim result = Await WelcomeMessage()
@@ -1074,8 +1075,23 @@ Public Class frmAIChat
         AppendToChatHistory(prefix & "[System] " & message & Environment.NewLine)
     End Sub
 
+    ''' <summary>
+    ''' Gets the Red Ink storage directory in the user's application data folder
+    ''' (same location convention used by DiscussInky).
+    ''' </summary>
+    Private Function GetRedInkStorageDirectoryPath() As String
+        Dim storageDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "redink")
+        Try
+            If Not Directory.Exists(storageDir) Then
+                Directory.CreateDirectory(storageDir)
+            End If
+        Catch
+        End Try
+        Return storageDir
+    End Function
+
     Private Function GetPersistedContextFilePath() As String
-        Return Path.Combine(Path.GetTempPath(), PersistedContextFileName)
+        Return Path.Combine(GetRedInkStorageDirectoryPath(), PersistedContextFileName)
     End Function
 
     Private Function GetContextDragDropFilter() As String
@@ -1086,21 +1102,6 @@ Public Class frmAIChat
         Return "Supported Context Files|*.txt;*.rtf;*.docx;*.pdf;*.pptx;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.vb;*.cs;*.js;*.ts;*.py;*.java;*.cpp;*.c;*.h;*.sql;*.yaml;*.yml|All Files (*.*)|*.*"
     End Function
 
-    Private Function PathContainsPdfFiles(selectedPath As String) As Boolean
-        If File.Exists(selectedPath) Then
-            Return String.Equals(Path.GetExtension(selectedPath), ".pdf", StringComparison.OrdinalIgnoreCase)
-        End If
-
-        If Directory.Exists(selectedPath) Then
-            For Each f In Directory.GetFiles(selectedPath, "*.*", SearchOption.TopDirectoryOnly)
-                If String.Equals(Path.GetExtension(f), ".pdf", StringComparison.OrdinalIgnoreCase) Then
-                    Return True
-                End If
-            Next
-        End If
-
-        Return False
-    End Function
 
     Private Sub UpdatePersistContextTooltip()
         If chkPersistContext.Checked Then
@@ -1131,16 +1132,17 @@ Public Class frmAIChat
         File.WriteAllText(GetPersistedContextFilePath(), _loadedContextContent, Encoding.UTF8)
     End Sub
 
-    Private Async Function LoadSingleContextFileAsync(filePath As String, enableOCR As Boolean, silent As Boolean) As Task(Of (Content As String, PdfMayBeIncomplete As Boolean))
+    Private Async Function LoadSingleContextFileAsync(filePath As String, askUser As Boolean) As Task(Of (Content As String, PdfMayBeIncomplete As Boolean))
         If String.IsNullOrWhiteSpace(filePath) OrElse Not File.Exists(filePath) Then
             Return ("", False)
         End If
 
-        Dim result = Await Globals.ThisAddIn.GetFileContentEx(filePath, silent, enableOCR, False)
+        ' Silent suppresses per-file error boxes; AskUser lets GetFileContentEx handle the OCR prompt itself.
+        Dim result = Await Globals.ThisAddIn.GetFileContentEx(filePath, True, False, askUser)
         Return (result.Content, result.PdfMayBeIncomplete)
     End Function
 
-    Private Async Function LoadContextFromPathAsync(selectedPath As String, enableOCR As Boolean, interactive As Boolean) As Task(Of (CombinedContent As String, DisplayPath As String, LoadedCount As Integer, Summary As String))
+    Private Async Function LoadContextFromPathAsync(selectedPath As String, interactive As Boolean) As Task(Of (CombinedContent As String, DisplayPath As String, LoadedCount As Integer, Summary As String))
         Dim isFile As Boolean = File.Exists(selectedPath)
         Dim isDirectory As Boolean = Directory.Exists(selectedPath)
 
@@ -1208,7 +1210,7 @@ Public Class frmAIChat
         Dim documentCounter As Integer = 0
 
         For Each filePath In filesToProcess
-            Dim result = Await LoadSingleContextFileAsync(filePath, enableOCR, True)
+            Dim result = Await LoadSingleContextFileAsync(filePath, interactive)
             Dim content = result.Content
 
             If result.PdfMayBeIncomplete Then
@@ -1318,7 +1320,7 @@ Public Class frmAIChat
             Return
         End If
 
-        Dim restored = Await LoadContextFromPathAsync(savedPath, False, False)
+        Dim restored = Await LoadContextFromPathAsync(savedPath, False)
         If String.IsNullOrWhiteSpace(restored.CombinedContent) Then Return
 
         _loadedContextContent = restored.CombinedContent
@@ -1337,7 +1339,38 @@ Public Class frmAIChat
     End Function
 
     Private Async Sub btnLoadContext_Click(sender As Object, e As EventArgs)
-        Await PromptForLoadedContextAsync()
+        If Not String.IsNullOrWhiteSpace(_loadedContextContent) Then
+            RemoveLoadedContext()
+        Else
+            Await PromptForLoadedContextAsync()
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' Updates the Load Context button caption to reflect whether external context is loaded.
+    ''' </summary>
+    Private Sub UpdateLoadContextButtonText()
+        btnLoadContext.Text = If(String.IsNullOrWhiteSpace(_loadedContextContent), "Load Context", "Remove Context")
+    End Sub
+
+    ''' <summary>
+    ''' Removes any loaded external context (in-memory, cache, persisted file, and saved path).
+    ''' </summary>
+    Private Sub RemoveLoadedContext()
+        _loadedContextContent = Nothing
+        _loadedContextPath = Nothing
+        _cachedLoadedContextContent = Nothing
+        _cachedLoadedContextPath = Nothing
+        DeletePersistedContextFile(False)
+
+        Try
+            My.Settings.ChatContextPath = ""
+            My.Settings.Save()
+        Catch
+        End Try
+
+        AppendSystemMessage("Loaded context removed.")
+        UpdateLoadContextButtonText()
     End Sub
 
     Private Async Function PromptForLoadedContextAsync() As Task
@@ -1383,18 +1416,7 @@ Public Class frmAIChat
                 Return
             End If
 
-            Dim enableOCR As Boolean = False
-            If PathContainsPdfFiles(selectedPath) AndAlso SharedMethods.IsOcrAvailable(_context) Then
-                Dim ocrAnswer = ShowCustomYesNoBox(
-                    "Some files may require OCR to extract text. Enable OCR for PDF processing?" & vbCrLf & vbCrLf &
-                    "OCR may take longer but helps with scanned documents.",
-                    "Yes, enable OCR",
-                    "No, skip OCR")
-
-                enableOCR = (ocrAnswer = 1)
-            End If
-
-            Dim loaded = Await LoadContextFromPathAsync(selectedPath, enableOCR, True)
+            Dim loaded = Await LoadContextFromPathAsync(selectedPath, True)
 
             If String.IsNullOrWhiteSpace(loaded.Summary) AndAlso String.IsNullOrWhiteSpace(loaded.CombinedContent) Then
                 Return
@@ -1444,6 +1466,7 @@ Public Class frmAIChat
         Finally
             Globals.ThisAddIn.DragDropFormLabel = ""
             Globals.ThisAddIn.DragDropFormFilter = ""
+            UpdateLoadContextButtonText()
         End Try
     End Function
 

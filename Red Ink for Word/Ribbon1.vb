@@ -20,13 +20,13 @@ Public Class Ribbon1
             Dim theme = DetectOfficeTheme()
             Select Case theme
                 Case OfficeTheme.Light
-                    Menu1.Image = SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Medium)
+                    Menu1.Image = SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Large)
                 Case Else
-                    Menu1.Image = SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)
+                    Menu1.Image = SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Large)
             End Select
             Menu1.ShowImage = True
         Catch
-            Menu1.Image = SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)
+            Menu1.Image = SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Large)
             Menu1.ShowImage = True
         End Try
     End Sub
@@ -92,21 +92,25 @@ Public Class Ribbon1
             Dim available = PrimaryModelManager.GetAvailableModels()
             Dim current = PrimaryModelManager.GetCurrentModelNumber()
 
-            ' Hide the entire model menu if there are fewer than 2 models
-            Menu6.Visible = (available.Count > 1)
+            ' Hide the entire model menu if there are fewer than 2 models.
+            ' Use the availability helper so a subsequent ApplyRibbonVisibilityConfiguration()
+            ' does not force the menu visible again when no additional models are defined.
+            SetRibbonControlVisibleByAvailability(Menu6, available.Count > 1)
 
             For i = 1 To 10
                 Dim btn = GetModelButton(i)
                 If btn Is Nothing Then Continue For
 
                 If available.Contains(i) Then
-                    btn.Visible = True
+                    SetRibbonControlVisibleByAvailability(btn, True)
                     Dim label = PrimaryModelManager.GetModelDisplayName(i)
                     btn.Label = If(i = current, $"{label} (active)", label)
                 Else
-                    btn.Visible = False
+                    SetRibbonControlVisibleByAvailability(btn, False)
                 End If
             Next
+
+            ApplyRibbonVisibilityConfiguration()
         Catch
             ' non-critical
         End Try

@@ -103,7 +103,7 @@ Partial Class Ribbon1
         'Menu1
         '
         Me.Menu1.ControlSize = Microsoft.Office.Core.RibbonControlSize.RibbonControlSizeLarge
-        Me.Menu1.Image = SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)
+        Me.Menu1.Image = SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Large)
         Me.Menu1.Items.Add(Me.RI_Primlang)
         Me.Menu1.Items.Add(Me.RI_Translate)
         Me.Menu1.Items.Add(Me.RI_QuickTranslate)
@@ -530,7 +530,7 @@ Partial Class Ribbon2
         'Menu1
         '
         Me.Menu1.ControlSize = Microsoft.Office.Core.RibbonControlSize.RibbonControlSizeLarge
-        Me.Menu1.Image = SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)
+        Me.Menu1.Image = SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Large)
         Me.Menu1.Items.Add(Me.RI_Primlang)
         Me.Menu1.Items.Add(Me.RI_Translate)
         Me.Menu1.Items.Add(Me.RI_QuickTranslate)

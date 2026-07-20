@@ -20,13 +20,13 @@ Public Class Ribbon1
             Dim theme = DetectOfficeTheme()
             Select Case theme
                 Case OfficeTheme.Dark
-                    Menu1.Image = SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)
+                    Menu1.Image = SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Large)
                 Case Else
-                    Menu1.Image = SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Medium)
+                    Menu1.Image = SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Large)
             End Select
             Menu1.ShowImage = True
         Catch
-            Menu1.Image = SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)
+            Menu1.Image = SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Large)
             Menu1.ShowImage = True
         End Try
     End Sub

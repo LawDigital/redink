@@ -98,12 +98,55 @@ Namespace Agents
                 result("instructions") = body
                 result("scripts") = JArray.FromObject(scripts)
                 result("references") = JArray.FromObject(references)
+
+                ' Provide a discovery index of all skills and agents with their exact
+                ' file paths. Without this, an authoring skill has to guess where a
+                ' resource lives, which leads to failed reads and accidental new files.
+                result("resource_index") = BuildResourceIndex()
+
                 If Not String.IsNullOrWhiteSpace(input) Then result("input") = input
 
                 Return result.ToString(Formatting.None)
             Catch ex As Exception
                 Return JsonConvert.SerializeObject(New With {Key .error = "skill_invoke_failed", Key .message = ex.Message})
             End Try
+        End Function
+
+        Private Shared Function BuildResourceIndex() As JObject
+            Dim idx As New JObject()
+
+            Dim skillsArr As New JArray()
+            Try
+                For Each s In AgentResources.Skills
+                    If s Is Nothing Then Continue For
+                    Dim o As New JObject()
+                    o("name") = If(s.Name, "")
+                    o("origin") = If(s.IsLocal, "local", "central")
+                    o("file") = If(s.FilePath, "")
+                    o("dir") = If(s.DirectoryPath, "")
+                    skillsArr.Add(o)
+                Next
+            Catch
+            End Try
+
+            Dim agentsArr As New JArray()
+            Try
+                For Each a In AgentResources.Agents
+                    If a Is Nothing Then Continue For
+                    Dim o As New JObject()
+                    o("name") = If(a.Name, "")
+                    o("origin") = If(a.IsLocal, "local", "central")
+                    o("file") = If(a.FilePath, "")
+                    o("dir") = If(a.DirectoryPath, "")
+                    agentsArr.Add(o)
+                Next
+            Catch
+            End Try
+
+            idx("skills") = skillsArr
+            idx("agents") = agentsArr
+            idx("note") = "To modify an existing resource, edit the exact 'file' path shown here with text_read/text_write. Do not invent new paths or new folders."
+            Return idx
         End Function
 
         Private Shared Function InventoryDir(dir As String) As List(Of Object)

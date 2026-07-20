@@ -91,13 +91,23 @@ Public Class DrawioEditorForm
     ''' </summary>
     Private Async Sub InitializeWebViewAsync()
         Try
-            Dim userDataFolder As String = Path.Combine(Path.GetTempPath(), "RedInk_WebView2_Drawio")
-            Directory.CreateDirectory(userDataFolder)
+            Dim userDataFolder As String = SharedLibrary.SharedLibrary.SharedMethods.GetWebView2UserDataFolder()
 
             Dim env As CoreWebView2Environment =
                 Await CoreWebView2Environment.CreateAsync(Nothing, userDataFolder)
 
             Await webView.EnsureCoreWebView2Async(env)
+
+            AddHandler webView.CoreWebView2.ProcessFailed,
+                Sub(s, e)
+                    SharedLibrary.SharedLibrary.SharedMethods.LogWebView2ProcessFailed("Drawio", e.ProcessFailedKind.ToString(), e.ExitCode.ToString())
+                    Try
+                        If e.ProcessFailedKind = CoreWebView2ProcessFailedKind.RenderProcessExited Then
+                            webView.Reload()
+                        End If
+                    Catch
+                    End Try
+                End Sub
 
             webView.CoreWebView2.Settings.AreDevToolsEnabled = True
             webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = True

@@ -40,6 +40,20 @@ Namespace Agents
             Interlocked.Increment(_persistent)
         End Sub
 
+        ' When False (default), author-mode writes are confined to the LOCAL resource
+        ' root (the user's .inky directory). Set True to also permit writing into the
+        ' shared/central resource root. Kept separate so the safe default is local-only.
+        Private Shared _allowCentralWrites As Integer = 0
+
+        Public Shared Property AllowCentralWrites As Boolean
+            Get
+                Return Volatile.Read(_allowCentralWrites) > 0
+            End Get
+            Set(value As Boolean)
+                Volatile.Write(_allowCentralWrites, If(value, 1, 0))
+            End Set
+        End Property
+
         Public Shared Sub Disable()
             If Volatile.Read(_persistent) > 0 Then Interlocked.Decrement(_persistent)
         End Sub

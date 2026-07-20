@@ -117,6 +117,10 @@ Namespace Agents
             End Select
 
             Dim fi As New FileInfo(target)
+
+            ' Pick up edits to SKILL.md/AGENT.md immediately when writing into a resource root.
+            AgentResources.RefreshIfResourcePath(target)
+
             Return JsonConvert.SerializeObject(New With {
                 Key .path = target,
                 Key .size = fi.Length,
