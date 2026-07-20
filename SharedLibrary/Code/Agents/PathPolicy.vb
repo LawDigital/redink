@@ -249,10 +249,42 @@ Namespace Agents
                 Next
             Catch
             End Try
+
+            ' Existing agent folders (agents/<name>/ or the agents/ base for single-file agents)
+            ' are always readable so the author can inspect and revise them.
+            Dim agentFullRoots As New List(Of String)()
+            Try
+                For Each ag In AgentResources.Agents
+                    If ag Is Nothing OrElse String.IsNullOrWhiteSpace(ag.DirectoryPath) Then Continue For
+                    agentFullRoots.Add(Path.GetFullPath(ag.DirectoryPath))
+                Next
+            Catch
+            End Try
+
+            ' Resource base directories (skills/ and agents/) so brand-new skills and agents
+            ' (and their subdirectories) can be created in author mode. Local is always
+            ' permitted; central requires the explicit opt-in flag.
+            Dim authorBaseRoots As New List(Of String)()
+            Try
+                For Each baseDir In AgentResources.GetLocalResourceBaseDirectories()
+                    If Not String.IsNullOrWhiteSpace(baseDir) Then authorBaseRoots.Add(Path.GetFullPath(baseDir))
+                Next
+                If SkillAuthorMode.AllowCentralWrites Then
+                    For Each baseDir In AgentResources.GetCentralResourceBaseDirectories()
+                        If Not String.IsNullOrWhiteSpace(baseDir) Then authorBaseRoots.Add(Path.GetFullPath(baseDir))
+                    Next
+                End If
+            Catch
+            End Try
+
             readRoots.AddRange(skillReadRoots)
             readRoots.AddRange(skillFullRoots)
+            readRoots.AddRange(agentFullRoots)
+            readRoots.AddRange(authorBaseRoots)
             If _chatAuthor.Value OrElse SkillAuthorMode.IsActive Then
                 writeRoots.AddRange(skillFullRoots)
+                writeRoots.AddRange(agentFullRoots)
+                writeRoots.AddRange(authorBaseRoots)
             End If
 
             Dim roots = If(access = PathAccess.Write, writeRoots, readRoots)

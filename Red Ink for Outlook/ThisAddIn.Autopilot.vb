@@ -614,7 +614,12 @@ Partial Public Class ThisAddIn
         If config.AutoDeleteAfterHours > 0 Then
             ApDashboardLog($"🗑 Auto-delete enabled after {config.AutoDeleteAfterHours}h (includes Deleted Items).", "info")
             StartAutoDeleteTimer()
-            RunAutoDeleteCleanupAsync(_apCts.Token, "startup")
+            If AP_RunAutoDeleteCleanupOnStartup Then
+                ApDashboardLog("🗑 Auto-delete startup cleanup enabled — running initial pass.", "step")
+                RunAutoDeleteCleanupAsync(_apCts.Token, "startup")
+            Else
+                ApDashboardLog("🗑 Auto-delete startup cleanup disabled — cleanup runs on the periodic timer only.", "step")
+            End If
         Else
             ApDashboardLog("🗑 Auto-delete disabled.", "info")
         End If
@@ -1795,7 +1800,13 @@ Partial Public Class ThisAddIn
                 isExistingConversation = IsPartOfAutoPilotConversation(mi)
             Catch : End Try
 
-            If IsAutoReplyOrOof(mailInfo) Then : ApDashboardLog("SKIP (auto-reply/OOF): " & mailInfo.Subject, "step") : Return : End If
+            If IsAutoReplyOrOof(mailInfo) Then
+                ' Do not process auto-replies/OOF, but schedule them for auto-deletion
+                ' as part of their originating AutoPilot conversation group.
+                Await SwitchToUi(Sub() TagAutoReplyOrOofForCleanup(mi))
+                ApDashboardLog("SKIP (auto-reply/OOF): " & mailInfo.Subject, "step")
+                Return
+            End If
 
             ' SECURITY: Filter rules (domain/sender) are NEVER bypassed — they are the trust boundary.
             ' An attacker could spoof a ConversationID (same subject line) to join an existing thread,

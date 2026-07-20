@@ -1744,6 +1744,30 @@ Namespace My
                 Me("ChatIncludeOtherOpenWordDocs") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property ChatContextPath() As String
+            Get
+                Return CType(Me("ChatContextPath"),String)
+            End Get
+            Set
+                Me("ChatContextPath") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property ChatPersistContext() As Boolean
+            Get
+                Return CType(Me("ChatPersistContext"),Boolean)
+            End Get
+            Set
+                Me("ChatPersistContext") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

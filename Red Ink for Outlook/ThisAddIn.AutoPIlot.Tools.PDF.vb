@@ -471,46 +471,7 @@ Partial Public Class ThisAddIn
             Using doc As New PdfSharp.Pdf.PdfDocument()
                 doc.Info.Title = If(title, "Generated Document")
 
-                Dim font = New PdfSharp.Drawing.XFont("Arial", 11)
-                Dim titleFont = New PdfSharp.Drawing.XFont("Arial", 16, PdfSharp.Drawing.XFontStyleEx.Bold)
-                Dim margin = 50.0
-                Dim pageWidth = 595.0 ' A4
-                Dim pageHeight = 842.0
-                Dim usableWidth = pageWidth - 2 * margin
-                Dim lineHeight = 15.0
-                Dim y = margin
-
-                Dim page = doc.AddPage()
-                page.Width = pageWidth
-                page.Height = pageHeight
-                Dim gfx = PdfSharp.Drawing.XGraphics.FromPdfPage(page)
-
-                ' Title
-                If Not String.IsNullOrWhiteSpace(title) Then
-                    gfx.DrawString(title, titleFont, PdfSharp.Drawing.XBrushes.Black,
-                                   New PdfSharp.Drawing.XRect(margin, y, usableWidth, 30),
-                                   PdfSharp.Drawing.XStringFormats.TopLeft)
-                    y += 35
-                End If
-
-                ' Content lines
-                Dim lines = content.Split({vbCrLf, vbLf, vbCr}, StringSplitOptions.None)
-                For Each line In lines
-                    If y + lineHeight > pageHeight - margin Then
-                        page = doc.AddPage()
-                        page.Width = pageWidth
-                        page.Height = pageHeight
-                        gfx = PdfSharp.Drawing.XGraphics.FromPdfPage(page)
-                        y = margin
-                    End If
-
-                    If Not String.IsNullOrEmpty(line) Then
-                        gfx.DrawString(line, font, PdfSharp.Drawing.XBrushes.Black,
-                                       New PdfSharp.Drawing.XRect(margin, y, usableWidth, lineHeight),
-                                       PdfSharp.Drawing.XStringFormats.TopLeft)
-                    End If
-                    y += lineHeight
-                Next
+                RenderMarkdownToPdf(doc, title, content)
 
                 doc.Save(outputPath)
             End Using
@@ -534,11 +495,511 @@ Partial Public Class ThisAddIn
     End Function
 
 
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  MARKDOWN → PDF RENDERING (word-wrapped, inline formatting)
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>Represents a single inline text run with its resolved style.</summary>
+    Private NotInheritable Class ApPdfInlineRun
+        Public Property Text As String
+        Public Property Bold As Boolean
+        Public Property Italic As Boolean
+        Public Property Code As Boolean
+        Public Property Url As String
+    End Class
+
+    ''' <summary>Page layout state shared while rendering Markdown content to a PDF.</summary>
+    Private NotInheritable Class ApPdfLayout
+        Public Doc As PdfSharp.Pdf.PdfDocument
+        Public Gfx As PdfSharp.Drawing.XGraphics
+        Public Page As PdfSharp.Pdf.PdfPage
+        Public Y As Double
+        Public ReadOnly Margin As Double = 50.0
+        Public ReadOnly PageWidth As Double = 595.0  ' A4
+        Public ReadOnly PageHeight As Double = 842.0
+        Public ReadOnly Property UsableWidth As Double
+            Get
+                Return PageWidth - 2 * Margin
+            End Get
+        End Property
+
+        Public Sub NewPage()
+            Page = Doc.AddPage()
+            Page.Width = PageWidth
+            Page.Height = PageHeight
+            Gfx = PdfSharp.Drawing.XGraphics.FromPdfPage(Page)
+            Y = Margin
+        End Sub
+
+        ''' <summary>Ensures the given vertical space fits, adding a page if needed.</summary>
+        Public Sub EnsureSpace(requiredHeight As Double)
+            If Y + requiredHeight > PageHeight - Margin Then NewPage()
+        End Sub
+    End Class
+
+    ''' <summary>Renders Markdown-formatted content to the PDF with word wrapping and inline styling.</summary>
+    Private Sub RenderMarkdownToPdf(doc As PdfSharp.Pdf.PdfDocument, title As String, content As String)
+        Dim layout As New ApPdfLayout() With {.Doc = doc}
+        layout.NewPage()
+
+        If Not String.IsNullOrWhiteSpace(title) Then
+            Dim titleFont = New PdfSharp.Drawing.XFont("Arial", 16, PdfSharp.Drawing.XFontStyleEx.Bold)
+            DrawWrappedRuns(layout, New List(Of ApPdfInlineRun) From {New ApPdfInlineRun() With {.Text = title, .Bold = True}}, titleFont, 0.0, 20.0)
+            layout.Y += 10.0
+        End If
+
+        Dim lines = content.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf).Split(vbLf(0))
+        Dim i = 0
+        While i < lines.Length
+            ' Fenced code block: collect lines until the closing fence.
+            Dim fenceMatch = System.Text.RegularExpressions.Regex.Match(lines(i), "^\s*(```|~~~)")
+            If fenceMatch.Success Then
+                Dim fence = fenceMatch.Groups(1).Value
+                Dim codeLines As New List(Of String)()
+                i += 1
+                While i < lines.Length AndAlso Not lines(i).TrimStart().StartsWith(fence)
+                    codeLines.Add(lines(i))
+                    i += 1
+                End While
+                If i < lines.Length Then i += 1 ' skip closing fence
+                DrawCodeBlock(layout, codeLines)
+            ElseIf IsTableRow(lines(i)) AndAlso i + 1 < lines.Length AndAlso IsTableSeparator(lines(i + 1)) Then
+                ' Pipe table: header row, separator row, then body rows until a non-table line.
+                Dim tableLines As New List(Of String)()
+                tableLines.Add(lines(i))          ' header
+                i += 2                             ' skip separator
+                While i < lines.Length AndAlso IsTableRow(lines(i))
+                    tableLines.Add(lines(i))
+                    i += 1
+                End While
+                DrawTable(layout, tableLines)
+            Else
+                RenderMarkdownLine(layout, lines(i))
+                i += 1
+            End If
+        End While
+
+        DrawPageNumbers(layout)
+    End Sub
+
+    ''' <summary>Returns True when a line looks like a Markdown pipe-table row.</summary>
+    Private Function IsTableRow(line As String) As Boolean
+        If String.IsNullOrWhiteSpace(line) Then Return False
+        Return line.Trim().Contains("|"c)
+    End Function
+
+    ''' <summary>Returns True when a line is a Markdown table separator (e.g. |---|:--:|).</summary>
+    Private Function IsTableSeparator(line As String) As Boolean
+        If String.IsNullOrWhiteSpace(line) Then Return False
+        Return System.Text.RegularExpressions.Regex.IsMatch(line.Trim(), "^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?$")
+    End Function
+
+    ''' <summary>Splits a pipe-table row into trimmed cell values, ignoring outer pipes.</summary>
+    Private Function SplitTableRow(line As String) As List(Of String)
+        Dim trimmed = line.Trim()
+        If trimmed.StartsWith("|") Then trimmed = trimmed.Substring(1)
+        If trimmed.EndsWith("|") Then trimmed = trimmed.Substring(0, trimmed.Length - 1)
+        ' Split on unescaped pipes.
+        Dim parts = System.Text.RegularExpressions.Regex.Split(trimmed, "(?<!\\)\|")
+        Return parts.Select(Function(p) p.Replace("\|", "|").Trim()).ToList()
+    End Function
+
+    ''' <summary>
+    ''' Renders a Markdown pipe table as a bordered grid with a shaded, bold header row.
+    ''' Column widths are distributed evenly across the usable page width; cell text wraps.
+    ''' </summary>
+    Private Sub DrawTable(layout As ApPdfLayout, tableLines As List(Of String))
+        Const fontSize As Double = 10.0
+        Const cellPad As Double = 4.0
+        Dim lineHeight = fontSize + 3.0
+
+        Dim rows = tableLines.Select(AddressOf SplitTableRow).ToList()
+        If rows.Count = 0 Then Return
+        Dim colCount = rows.Max(Function(r) r.Count)
+        If colCount = 0 Then Return
+
+        Dim colWidth = layout.UsableWidth / colCount
+        Dim headerFont = New PdfSharp.Drawing.XFont("Arial", fontSize, PdfSharp.Drawing.XFontStyleEx.Bold)
+        Dim bodyFont = New PdfSharp.Drawing.XFont("Arial", fontSize)
+        Dim borderPen As New PdfSharp.Drawing.XPen(PdfSharp.Drawing.XColor.FromArgb(180, 180, 180), 0.6)
+        Dim headerBrush As New PdfSharp.Drawing.XSolidBrush(PdfSharp.Drawing.XColor.FromArgb(238, 238, 238))
+
+        layout.Y += 4.0
+
+        For rowIndex = 0 To rows.Count - 1
+            Dim row = rows(rowIndex)
+            Dim isHeader = (rowIndex = 0)
+            Dim cellFont = If(isHeader, headerFont, bodyFont)
+
+            ' Pre-compute wrapped lines per cell to determine the row height.
+            Dim wrappedCells As New List(Of List(Of String))()
+            Dim maxLines = 1
+            For col = 0 To colCount - 1
+                Dim cellText = If(col < row.Count, row(col), String.Empty)
+                Dim wrapped = WrapPlainText(layout, cellText, cellFont, colWidth - 2 * cellPad)
+                wrappedCells.Add(wrapped)
+                maxLines = Math.Max(maxLines, wrapped.Count)
+            Next
+
+            Dim rowHeight = maxLines * lineHeight + 2 * cellPad
+            layout.EnsureSpace(rowHeight)
+            Dim rowTop = layout.Y
+
+            ' Header background.
+            If isHeader Then
+                layout.Gfx.DrawRectangle(headerBrush, layout.Margin, rowTop, layout.UsableWidth, rowHeight)
+            End If
+
+            ' Cell text and vertical borders.
+            For col = 0 To colCount - 1
+                Dim cellX = layout.Margin + col * colWidth
+                Dim textY = rowTop + cellPad
+                For Each cellLine In wrappedCells(col)
+                    layout.Gfx.DrawString(cellLine, cellFont, PdfSharp.Drawing.XBrushes.Black,
+                                          New PdfSharp.Drawing.XRect(cellX + cellPad, textY, colWidth - 2 * cellPad, lineHeight),
+                                          PdfSharp.Drawing.XStringFormats.TopLeft)
+                    textY += lineHeight
+                Next
+                layout.Gfx.DrawLine(borderPen, cellX, rowTop, cellX, rowTop + rowHeight)
+            Next
+
+            ' Right border and horizontal borders.
+            layout.Gfx.DrawLine(borderPen, layout.Margin + layout.UsableWidth, rowTop, layout.Margin + layout.UsableWidth, rowTop + rowHeight)
+            layout.Gfx.DrawLine(borderPen, layout.Margin, rowTop, layout.Margin + layout.UsableWidth, rowTop)
+            layout.Gfx.DrawLine(borderPen, layout.Margin, rowTop + rowHeight, layout.Margin + layout.UsableWidth, rowTop + rowHeight)
+
+            layout.Y += rowHeight
+        Next
+
+        layout.Y += 6.0
+    End Sub
+
+    ''' <summary>Word-wraps plain (unstyled) text to a maximum width, returning the wrapped lines.</summary>
+    Private Function WrapPlainText(layout As ApPdfLayout, text As String,
+                                   font As PdfSharp.Drawing.XFont, maxWidth As Double) As List(Of String)
+        Dim result As New List(Of String)()
+        ' Strip inline markers so table cells read cleanly (deterministic, format-agnostic).
+        Dim plain = System.Text.RegularExpressions.Regex.Replace(text, "\[([^\]]+)\]\(([^)]+)\)", "$1")
+        plain = plain.Replace("**", "").Replace("`", "")
+
+        If String.IsNullOrEmpty(plain) Then
+            result.Add(String.Empty)
+            Return result
+        End If
+
+        Dim words = plain.Split(" "c)
+        Dim current As New System.Text.StringBuilder()
+        For Each word In words
+            Dim candidate = If(current.Length = 0, word, current.ToString() & " " & word)
+            If layout.Gfx.MeasureString(candidate, font).Width > maxWidth AndAlso current.Length > 0 Then
+                result.Add(current.ToString())
+                current.Clear()
+                current.Append(word)
+            Else
+                current.Clear()
+                current.Append(candidate)
+            End If
+        Next
+        If current.Length > 0 Then result.Add(current.ToString())
+        If result.Count = 0 Then result.Add(String.Empty)
+        Return result
+    End Function
+
+    ''' <summary>Stamps a centered "Page X of Y" footer on every page of the document.</summary>
+    Private Sub DrawPageNumbers(layout As ApPdfLayout)
+        Dim footerFont = New PdfSharp.Drawing.XFont("Arial", 8)
+        Dim total = layout.Doc.PageCount
+        For idx = 0 To total - 1
+            Dim pg = layout.Doc.Pages(idx)
+            Using g = PdfSharp.Drawing.XGraphics.FromPdfPage(pg)
+                Dim label = $"Page {idx + 1} of {total}"
+                g.DrawString(label, footerFont, PdfSharp.Drawing.XBrushes.Gray,
+                             New PdfSharp.Drawing.XRect(0, layout.PageHeight - 30, layout.PageWidth, 20),
+                             PdfSharp.Drawing.XStringFormats.TopCenter)
+            End Using
+        Next
+    End Sub
+
+    ''' <summary>Renders a verbatim code block in a monospace font over a light shaded background.</summary>
+    Private Sub DrawCodeBlock(layout As ApPdfLayout, codeLines As List(Of String))
+        Const fontSize As Double = 9.5
+        Dim lineHeight = fontSize + 3.0
+        Dim codeFont = New PdfSharp.Drawing.XFont("Courier New", fontSize)
+        Dim pad = 6.0
+        layout.Y += 4.0
+
+        For Each cl In codeLines
+            layout.EnsureSpace(lineHeight)
+            ' Shaded background strip for the line.
+            layout.Gfx.DrawRectangle(New PdfSharp.Drawing.XSolidBrush(PdfSharp.Drawing.XColor.FromArgb(245, 245, 245)),
+                                     layout.Margin, layout.Y, layout.UsableWidth, lineHeight)
+            layout.Gfx.DrawString(If(cl, String.Empty), codeFont, PdfSharp.Drawing.XBrushes.DarkSlateGray,
+                                  New PdfSharp.Drawing.XRect(layout.Margin + pad, layout.Y, layout.UsableWidth - pad, lineHeight),
+                                  PdfSharp.Drawing.XStringFormats.TopLeft)
+            layout.Y += lineHeight
+        Next
+        layout.Y += 4.0
+    End Sub
+
+    ''' <summary>Renders one Markdown source line (heading, rule, list item, or paragraph) into the layout.</summary>
+    Private Sub RenderMarkdownLine(layout As ApPdfLayout, rawLine As String)
+        ' Blank line → paragraph spacing.
+        If String.IsNullOrWhiteSpace(rawLine) Then
+            layout.Y += 8.0
+            Return
+        End If
+
+        ' Horizontal rule: a line consisting only of 3+ of -, *, or _ (optionally spaced).
+        Dim ruleCandidate = rawLine.Trim()
+        If System.Text.RegularExpressions.Regex.IsMatch(ruleCandidate, "^(\s*([-*_])\s*){3,}$") Then
+            DrawHorizontalRule(layout)
+            Return
+        End If
+
+        ' Blockquote: leading '>' → indented, gray, with a left rule bar.
+        Dim quoteMatch = System.Text.RegularExpressions.Regex.Match(rawLine, "^\s*>\s?(.*)$")
+        If quoteMatch.Success Then
+            DrawBlockquoteLine(layout, quoteMatch.Groups(1).Value)
+            Return
+        End If
+
+        Dim text = rawLine
+        Dim indent = 0.0
+        Dim fontSize = 11.0
+        Dim bold = False
+        Dim bulletPrefix As String = Nothing
+
+        ' Headings: leading '#' markers.
+        Dim headingMatch = System.Text.RegularExpressions.Regex.Match(text, "^(#{1,6})\s+(.*)$")
+        If headingMatch.Success Then
+            Dim level = headingMatch.Groups(1).Value.Length
+            text = headingMatch.Groups(2).Value
+            fontSize = Math.Max(12.0, 20.0 - (level - 1) * 2.0)
+            bold = True
+            layout.Y += 6.0
+        Else
+            ' Unordered list items: -, *, or + followed by space.
+            Dim bulletMatch = System.Text.RegularExpressions.Regex.Match(text, "^(\s*)([-*+])\s+(.*)$")
+            Dim orderedMatch = System.Text.RegularExpressions.Regex.Match(text, "^(\s*)(\d+[.)])\s+(.*)$")
+            If bulletMatch.Success Then
+                indent = ListIndent(bulletMatch.Groups(1).Value)
+                bulletPrefix = "•  "
+                text = bulletMatch.Groups(3).Value
+            ElseIf orderedMatch.Success Then
+                indent = ListIndent(orderedMatch.Groups(1).Value)
+                bulletPrefix = orderedMatch.Groups(2).Value & "  "
+                text = orderedMatch.Groups(3).Value
+            End If
+        End If
+
+        Dim runs = ParseInlineMarkdown(text)
+        If bulletPrefix IsNot Nothing Then
+            runs.Insert(0, New ApPdfInlineRun() With {.Text = bulletPrefix})
+        End If
+
+        Dim style = If(bold, PdfSharp.Drawing.XFontStyleEx.Bold, PdfSharp.Drawing.XFontStyleEx.Regular)
+        Dim baseFont = New PdfSharp.Drawing.XFont("Arial", fontSize, style)
+        Dim lineHeight = fontSize + 4.0
+        DrawWrappedRuns(layout, runs, baseFont, indent, lineHeight)
+    End Sub
+
+    ''' <summary>
+    ''' Computes the horizontal indent (in points) for a list item from its leading whitespace,
+    ''' mapping each nesting level to a fixed step so nested lists are clearly offset from their parent.
+    ''' </summary>
+    Private Function ListIndent(leadingWhitespace As String) As Double
+        Const spacesPerLevel As Integer = 2
+        Const pointsPerLevel As Double = 18.0
+        Const baseIndent As Double = 18.0
+
+        ' Normalize tabs to the per-level space width so mixed indentation still maps to levels.
+        Dim spaceCount = 0
+        For Each ch In leadingWhitespace
+            spaceCount += If(ch = vbTab(0), spacesPerLevel, 1)
+        Next
+
+        Dim level = spaceCount \ spacesPerLevel
+        Return baseIndent + level * pointsPerLevel
+    End Function
+
+    ''' <summary>
+    ''' Registers a clickable web-link annotation over a token rectangle, converting the
+    ''' top-left drawing coordinates into PDF user space (bottom-left origin).
+    ''' </summary>
+    Private Sub AddWebLinkAnnotation(layout As ApPdfLayout, x As Double, topY As Double,
+                                     width As Double, height As Double, url As String)
+        Dim pdfBottom = layout.PageHeight - (topY + height)
+        Dim pdfTop = layout.PageHeight - topY
+        Dim rect As New PdfSharp.Pdf.PdfRectangle(
+            New PdfSharp.Drawing.XPoint(x, pdfBottom),
+            New PdfSharp.Drawing.XPoint(x + width, pdfTop))
+        layout.Page.AddWebLink(rect, url)
+    End Sub
+
+    ''' <summary>Renders one blockquote line: gray italic text indented behind a left rule bar.</summary>
+    Private Sub DrawBlockquoteLine(layout As ApPdfLayout, quoteText As String)
+        Const fontSize As Double = 11.0
+        Dim lineHeight = fontSize + 4.0
+        Dim indent = 18.0
+        layout.EnsureSpace(lineHeight)
+
+        ' Left vertical bar.
+        Dim barPen As New PdfSharp.Drawing.XPen(PdfSharp.Drawing.XColor.FromArgb(200, 200, 200), 2.0)
+        layout.Gfx.DrawLine(barPen, layout.Margin + 6.0, layout.Y, layout.Margin + 6.0, layout.Y + lineHeight)
+
+        Dim runs = ParseInlineMarkdown(quoteText)
+        Dim baseFont = New PdfSharp.Drawing.XFont("Arial", fontSize, PdfSharp.Drawing.XFontStyleEx.Italic)
+        DrawWrappedRuns(layout, runs, baseFont, indent, lineHeight)
+    End Sub
+
+    ''' <summary>Draws a horizontal rule spanning the usable page width, paging if required.</summary>
+    Private Sub DrawHorizontalRule(layout As ApPdfLayout)
+        layout.Y += 4.0
+        layout.EnsureSpace(10.0)
+        Dim pen As New PdfSharp.Drawing.XPen(PdfSharp.Drawing.XColors.Gray, 0.75)
+        Dim ruleY = layout.Y + 3.0
+        layout.Gfx.DrawLine(pen, layout.Margin, ruleY, layout.Margin + layout.UsableWidth, ruleY)
+        layout.Y += 12.0
+    End Sub
+
+    ''' <summary>Parses inline Markdown (links, **bold**, *italic*/_italic_, `code`) into styled runs.</summary>
+    Private Function ParseInlineMarkdown(text As String) As List(Of ApPdfInlineRun)
+        Dim runs As New List(Of ApPdfInlineRun)()
+        Dim buffer As New System.Text.StringBuilder()
+        Dim bold = False
+        Dim italic = False
+        Dim code = False
+        Dim i = 0
+
+        Dim flush = Sub()
+                        If buffer.Length > 0 Then
+                            runs.Add(New ApPdfInlineRun() With {.Text = buffer.ToString(), .Bold = bold, .Italic = italic, .Code = code})
+                            buffer.Clear()
+                        End If
+                    End Sub
+
+        Dim linkPattern As New System.Text.RegularExpressions.Regex("\[([^\]]+)\]\(([^)]+)\)")
+
+        While i < text.Length
+            Dim c = text(i)
+
+            ' Link [label](url): emit the label runs carrying the URL.
+            If Not code AndAlso c = "["c Then
+                Dim m = linkPattern.Match(text, i)
+                If m.Success AndAlso m.Index = i Then
+                    flush()
+                    Dim label = m.Groups(1).Value
+                    Dim url = m.Groups(2).Value
+                    For Each labelRun In ParseInlineMarkdown(label)
+                        labelRun.Url = url
+                        labelRun.Bold = labelRun.Bold Or bold
+                        labelRun.Italic = labelRun.Italic Or italic
+                        runs.Add(labelRun)
+                    Next
+                    i = m.Index + m.Length
+                    Continue While
+                End If
+            End If
+
+            If c = "`"c Then
+                flush()
+                code = Not code
+                i += 1
+            ElseIf Not code AndAlso c = "*"c AndAlso i + 1 < text.Length AndAlso text(i + 1) = "*"c Then
+                flush()
+                bold = Not bold
+                i += 2
+            ElseIf Not code AndAlso (c = "*"c OrElse c = "_"c) Then
+                flush()
+                italic = Not italic
+                i += 1
+            ElseIf c = "\"c AndAlso i + 1 < text.Length Then
+                buffer.Append(text(i + 1))
+                i += 2
+            Else
+                buffer.Append(c)
+                i += 1
+            End If
+        End While
+
+        flush()
+        If runs.Count = 0 Then runs.Add(New ApPdfInlineRun() With {.Text = String.Empty})
+        Return runs
+    End Function
+
+    ''' <summary>Word-wraps a sequence of styled runs across the page, drawing each token and paging as needed.</summary>
+    Private Sub DrawWrappedRuns(layout As ApPdfLayout, runs As List(Of ApPdfInlineRun),
+                                baseFont As PdfSharp.Drawing.XFont, indent As Double, lineHeight As Double)
+        Dim available = layout.UsableWidth - indent
+        Dim x = layout.Margin + indent
+        Dim lineStarted = False
+
+        layout.EnsureSpace(lineHeight)
+
+        For Each run In runs
+            Dim runFont = ResolveRunFont(baseFont, run)
+            ' Preserve spaces by splitting while keeping whitespace tokens.
+            Dim tokens = System.Text.RegularExpressions.Regex.Split(run.Text, "(\s+)")
+            For Each token In tokens
+                If token.Length = 0 Then Continue For
+                Dim tokenWidth = layout.Gfx.MeasureString(token, runFont).Width
+
+                ' Wrap when the token no longer fits on the current line.
+                If lineStarted AndAlso x + tokenWidth > layout.Margin + indent + available AndAlso Not String.IsNullOrWhiteSpace(token) Then
+                    layout.Y += lineHeight
+                    layout.EnsureSpace(lineHeight)
+                    x = layout.Margin + indent
+                    lineStarted = False
+                    ' Skip a leading space token at the start of a wrapped line.
+                    If String.IsNullOrWhiteSpace(token) Then Continue For
+                End If
+
+                ' Avoid a leading space at the very start of a line.
+                If Not lineStarted AndAlso String.IsNullOrWhiteSpace(token) Then Continue For
+
+                Dim isLink = Not String.IsNullOrEmpty(run.Url)
+                Dim brush As PdfSharp.Drawing.XBrush
+                If isLink Then
+                    brush = New PdfSharp.Drawing.XSolidBrush(PdfSharp.Drawing.XColor.FromArgb(0, 102, 204))
+                ElseIf run.Code Then
+                    brush = PdfSharp.Drawing.XBrushes.DarkSlateGray
+                Else
+                    brush = PdfSharp.Drawing.XBrushes.Black
+                End If
+
+                layout.Gfx.DrawString(token, runFont, brush,
+                                      New PdfSharp.Drawing.XRect(x, layout.Y, tokenWidth + 2.0, lineHeight),
+                                      PdfSharp.Drawing.XStringFormats.TopLeft)
+
+                If isLink AndAlso Not String.IsNullOrWhiteSpace(token) Then
+                    ' Underline and register a clickable web-link annotation over the token rectangle.
+                    Dim underlineY = layout.Y + runFont.Height - 1.5
+                    layout.Gfx.DrawLine(New PdfSharp.Drawing.XPen(PdfSharp.Drawing.XColor.FromArgb(0, 102, 204), 0.6),
+                                        x, underlineY, x + tokenWidth, underlineY)
+                    AddWebLinkAnnotation(layout, x, layout.Y, tokenWidth, runFont.Height, run.Url)
+                End If
+
+                x += tokenWidth
+                lineStarted = True
+            Next
+        Next
+
+        layout.Y += lineHeight
+    End Sub
+
+    ''' <summary>Resolves the concrete font (family and style) for an inline run.</summary>
+    Private Function ResolveRunFont(baseFont As PdfSharp.Drawing.XFont, run As ApPdfInlineRun) As PdfSharp.Drawing.XFont
+        Dim style = baseFont.Style
+        If run.Bold Then style = style Or PdfSharp.Drawing.XFontStyleEx.Bold
+        If run.Italic Then style = style Or PdfSharp.Drawing.XFontStyleEx.Italic
+        Dim family = If(run.Code, "Courier New", baseFont.FontFamily.Name)
+        Return New PdfSharp.Drawing.XFont(family, baseFont.Size, style)
+    End Function
+
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL EXECUTION: split_pdf
     ' ═══════════════════════════════════════════════════════════════════════════
-
     Private Function ExecuteSplitPdfTool(toolCall As ToolCall, context As ToolExecutionContext) As ToolResponse
         Dim response As New ToolResponse() With {
             .CallId = toolCall.CallId, .ToolName = toolCall.ToolName, .Timestamp = DateTime.UtcNow

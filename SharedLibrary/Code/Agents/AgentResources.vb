@@ -90,6 +90,70 @@ Namespace Agents
             End Get
         End Property
 
+        Public Shared ReadOnly Property ConfiguredCentralPath As String
+            Get
+                Return If(_configuredCentralPath, String.Empty)
+            End Get
+        End Property
+
+        ''' <summary>Returns the skills/ and agents/ base directories under the LOCAL root.</summary>
+        Public Shared Function GetLocalResourceBaseDirectories() As IReadOnlyList(Of String)
+            Return BuildResourceBaseDirectories(_configuredLocalPath)
+        End Function
+
+        ''' <summary>Returns the skills/ and agents/ base directories under the CENTRAL root.</summary>
+        Public Shared Function GetCentralResourceBaseDirectories() As IReadOnlyList(Of String)
+            Return BuildResourceBaseDirectories(_configuredCentralPath)
+        End Function
+
+        Private Shared Function BuildResourceBaseDirectories(root As String) As IReadOnlyList(Of String)
+            Dim list As New List(Of String)()
+            If String.IsNullOrWhiteSpace(root) Then Return list
+            list.Add(System.IO.Path.Combine(root, "skills"))
+            list.Add(System.IO.Path.Combine(root, "agents"))
+            Return list
+        End Function
+
+        ''' <summary>
+        ''' If <paramref name="writtenPath"/> lies under a configured resource root
+        ''' (skills/ or agents/, local or central), rescans the in-memory index so an
+        ''' edited SKILL.md/AGENT.md (and its cached body) is picked up in the same
+        ''' session. Safe to call after every write; it is a no-op for non-resource paths.
+        ''' </summary>
+        Public Shared Sub RefreshIfResourcePath(writtenPath As String)
+            If String.IsNullOrWhiteSpace(writtenPath) Then Return
+
+            Dim full As String
+            Try
+                full = System.IO.Path.GetFullPath(writtenPath)
+            Catch
+                Return
+            End Try
+
+            Dim baseDirs As New List(Of String)()
+            baseDirs.AddRange(GetLocalResourceBaseDirectories())
+            baseDirs.AddRange(GetCentralResourceBaseDirectories())
+
+            For Each baseDir In baseDirs
+                If String.IsNullOrWhiteSpace(baseDir) Then Continue For
+                Dim b As String
+                Try
+                    b = System.IO.Path.GetFullPath(baseDir).
+                        TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar)
+                Catch
+                    Continue For
+                End Try
+
+                If full.StartsWith(b & System.IO.Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) Then
+                    Try
+                        Refresh()
+                    Catch
+                    End Try
+                    Return
+                End If
+            Next
+        End Sub
+
         Private Sub New()
         End Sub
 

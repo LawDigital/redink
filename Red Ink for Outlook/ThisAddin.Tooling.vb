@@ -829,8 +829,13 @@ Partial Public Class ThisAddIn
             context.Log("Selected tools: (none)")
         End If
 
-        ' Calculate effective timeout for LLM calls
-        Dim effectiveTimeout As Integer = CInt(If(useSecondAPI, INI_Timeout_2, INI_Timeout))
+        ' Calculate effective timeout for LLM calls.
+        ' INI_Timeout / INI_Timeout_2 are stored in milliseconds; convert to whole
+        ' seconds here because the guard below uses TimeSpan.FromSeconds. A default
+        ' of 30 seconds is applied when the configured value is zero/invalid.
+        Dim configuredTimeoutMs As Integer = CInt(If(useSecondAPI, INI_Timeout_2, INI_Timeout))
+        If configuredTimeoutMs <= 0 Then configuredTimeoutMs = 30000
+        Dim effectiveTimeout As Integer = System.Math.Max(1, CInt(System.Math.Ceiling(configuredTimeoutMs / 1000.0)))
 
         Try
             Await ResolveMemoryGroundingModeAsync(

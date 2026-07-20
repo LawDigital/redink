@@ -671,12 +671,19 @@ Namespace SharedLibrary
 
                 ' Expand known variables using Environment.GetEnvironmentVariable and ensure proper path format
                 expandedPath = Regex.Replace(expandedPath, "%APPDATA%", Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData)), RegexOptions.IgnoreCase)
+                expandedPath = Regex.Replace(expandedPath, "%LOCALAPPDATA%", Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), RegexOptions.IgnoreCase)
+                expandedPath = Regex.Replace(expandedPath, "%PROGRAMDATA%", Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), RegexOptions.IgnoreCase)
                 expandedPath = Regex.Replace(expandedPath, "%USERPROFILE%", Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)), RegexOptions.IgnoreCase)
                 expandedPath = Regex.Replace(expandedPath, "%WINDIR%", Path.Combine(Environment.GetEnvironmentVariable("WINDIR")), RegexOptions.IgnoreCase)
                 expandedPath = Regex.Replace(expandedPath, "%TEMP%", Path.Combine(Path.GetTempPath()), RegexOptions.IgnoreCase)
                 expandedPath = Regex.Replace(expandedPath, "%HOMEPATH%", Path.Combine(Environment.GetEnvironmentVariable("HOMEPATH")), RegexOptions.IgnoreCase)
                 expandedPath = Regex.Replace(expandedPath, "%APPSTARTUPPATH%", Path.Combine(System.Windows.Forms.Application.StartupPath), RegexOptions.IgnoreCase)
                 expandedPath = Regex.Replace(expandedPath, "%DESKTOP%", Environment.GetFolderPath(Environment.SpecialFolder.Desktop), RegexOptions.IgnoreCase)
+                expandedPath = Regex.Replace(expandedPath, "%DOCUMENTS%", Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), RegexOptions.IgnoreCase)
+                expandedPath = Regex.Replace(expandedPath, "%MYDOCUMENTS%", Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), RegexOptions.IgnoreCase)
+                expandedPath = Regex.Replace(expandedPath, "%DOWNLOADS%", Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads"), RegexOptions.IgnoreCase)
+                expandedPath = Regex.Replace(expandedPath, "%PROGRAMFILES%", Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), RegexOptions.IgnoreCase)
+                expandedPath = Regex.Replace(expandedPath, "%COMMONDOCUMENTS%", Environment.GetFolderPath(Environment.SpecialFolder.CommonDocuments), RegexOptions.IgnoreCase)
 
                 ' Clean up any potential double backslashes (but preserve UNC paths)
                 If Not expandedPath.StartsWith("\\") Then
@@ -1180,6 +1187,110 @@ Namespace SharedLibrary
             End If
 
             frm.SetBounds(newLeft, newTop, newWidth, newHeight)
+        End Sub
+
+        ''' <summary>
+        ''' Returns the single, canonical Red Ink data root under LOCALAPPDATA.
+        ''' All temporary/working data for the add-in should live below this folder so it is
+        ''' in one predictable, per-user, non-roaming location instead of being spread across
+        ''' TEMP and APPDATA. The folder is created if it does not exist.
+        ''' </summary>
+        Public Shared Function GetRedInkLocalRoot() As String
+            Dim root As String = System.IO.Path.Combine(
+                System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
+                "RedInk")
+            Try
+                System.IO.Directory.CreateDirectory(root)
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine($"[RedInk] GetRedInkLocalRoot failed: {ex.Message}")
+            End Try
+            Return root
+        End Function
+
+        ''' <summary>
+        ''' Returns the single, canonical WebView2 user-data folder for all long-lived WebView2
+        ''' controls in the process. Sharing one folder (with identical environment options)
+        ''' prevents separate instances from creating conflicting or corrupt browser profiles.
+        ''' The name is versioned so a future profile-schema change can self-heal by switching
+        ''' to a new subfolder instead of reusing a corrupt one.
+        ''' </summary>
+        Public Shared Function GetWebView2UserDataFolder() As String
+            Dim folder As String = System.IO.Path.Combine(GetRedInkLocalRoot(), "WebView2", "v1")
+            Try
+                System.IO.Directory.CreateDirectory(folder)
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine($"[WebView2] GetWebView2UserDataFolder failed: {ex.Message}")
+            End Try
+            Return folder
+        End Function
+
+        ''' <summary>
+        ''' Creates and returns a fresh, unique WebView2 profile folder for a short-lived
+        ''' (per-call) WebView2 instance, located under the canonical Red Ink root. The caller
+        ''' is responsible for deleting it when finished; any that leak are reclaimed by
+        ''' <see cref="CleanupOrphanedWebView2Profiles"/>.
+        ''' </summary>
+        Public Shared Function CreateWebView2TransientFolder() As String
+            Dim folder As String = System.IO.Path.Combine(
+                GetRedInkLocalRoot(), "WebView2", "transient", System.Guid.NewGuid().ToString("N"))
+            System.IO.Directory.CreateDirectory(folder)
+            Return folder
+        End Function
+
+        ''' <summary>
+        ''' Deletes orphaned per-call WebView2 profile folders (from short-lived instances) as
+        ''' well as legacy WebView2 folders left in TEMP by earlier versions. Folders still
+        ''' locked by a running process are skipped. Safe to call at startup and shutdown.
+        ''' </summary>
+        Public Shared Sub CleanupOrphanedWebView2Profiles()
+            ' Current transient location.
+            Try
+                Dim transientRoot As String = System.IO.Path.Combine(GetRedInkLocalRoot(), "WebView2", "transient")
+                If System.IO.Directory.Exists(transientRoot) Then
+                    For Each dir As String In System.IO.Directory.GetDirectories(transientRoot)
+                        Try
+                            System.IO.Directory.Delete(dir, True)
+                        Catch
+                            ' Still locked by a live instance; leave it for a later pass.
+                        End Try
+                    Next
+                End If
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine($"[WebView2] Transient cleanup failed: {ex.Message}")
+            End Try
+
+            ' Legacy locations from earlier versions (TEMP).
+            Try
+                Dim tempRoot As String = System.IO.Path.GetTempPath()
+                Dim legacyPatterns() As String = {"RedInkWebView2_*", "RedInk_WebView2_*", "RedInk_JsSandbox", "RedInk_DrawioHost"}
+                For Each pattern As String In legacyPatterns
+                    For Each dir As String In System.IO.Directory.GetDirectories(tempRoot, pattern)
+                        Try
+                            System.IO.Directory.Delete(dir, True)
+                        Catch
+                            ' Locked or in use; skip.
+                        End Try
+                    Next
+                Next
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine($"[WebView2] Legacy cleanup failed: {ex.Message}")
+            End Try
+        End Sub
+
+        ''' <summary>
+        ''' Central log sink for WebView2 <c>ProcessFailed</c> events. Records the failure so an
+        ''' intermittent WebView2 crash (which otherwise silently breaks rendering or hangs
+        ''' script execution) leaves a diagnosable trace.
+        ''' </summary>
+        ''' <param name="source">Short identifier of the calling site (e.g. "InboxBoard", "Drawio", "JsSandbox").</param>
+        ''' <param name="failedKind">The <c>ProcessFailedKind</c> value, converted to string by the caller.</param>
+        ''' <param name="details">Optional additional detail (exit code, process description, etc.).</param>
+        Public Shared Sub LogWebView2ProcessFailed(source As String, failedKind As String, Optional details As String = "")
+            Dim message As String = $"[WebView2] ProcessFailed in {source}: {failedKind}"
+            If Not String.IsNullOrWhiteSpace(details) Then
+                message &= $" ({details})"
+            End If
+            System.Diagnostics.Debug.WriteLine(message)
         End Sub
 
     End Class
