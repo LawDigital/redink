@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 8.7.2026
+' 20.7.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -60,7 +60,7 @@ Partial Public Class ThisAddIn
     Public Const AN6 As String = "Inky"
     Public Const AN4 As String = "redink_"
 
-    Public Shared Version As String = "V.080726" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.200726" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -237,14 +237,8 @@ Partial Public Class ThisAddIn
         ' 3) Give that Control to the UpdateHandler so it can Invoke on it
         UpdateHandler.MainControl = mainThreadControl
 
-        ' 4) Capture the host window’s HWND (Word / Excel / Outlook)
-        Dim hwnd As IntPtr
-        Dim progId = Me.Application.GetType().Name.ToLowerInvariant()
-        If progId.Contains("word") OrElse progId.Contains("excel") Then
-            hwnd = New IntPtr(CInt(Me.Application.Hwnd))
-        Else
-            hwnd = FindWindow("rctrl_renwnd32", Nothing)
-        End If
+        ' 4) Capture the host window’s HWND.
+        Dim hwnd As IntPtr = FindWindow("rctrl_renwnd32", Nothing)
         UpdateHandler.HostHandle = hwnd
 
         ' Other tasks that need to be done at startup
@@ -428,9 +422,9 @@ Partial Public Class ThisAddIn
                 Using anchor As New System.Windows.Forms.Control()
                     Dim h = anchor.Handle
                 End Using
+                SharedLibrary.SharedLibrary.SharedMethods.CleanupOrphanedWebView2Profiles()
                 SharedLibrary.Agents.WebView2JsSandbox.Initialize(
-                    System.Threading.SynchronizationContext.Current,
-                    System.IO.Path.Combine(System.IO.Path.GetTempPath(), "RedInk_JsSandbox"))
+                    System.Threading.SynchronizationContext.Current)
             Catch
                 ' js_run will report "sandbox_uninitialized" if this failed.
             End Try

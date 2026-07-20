@@ -228,6 +228,12 @@ Partial Public Class ThisAddIn
         ' Deterministic helper for exact text/data computation inside AutoPilot.
         tools.Add(SharedLibrary.Agents.JsRunTool.Build())
 
+        ' Shared file/workspace tools available inside the current AutoPilot workspace.
+        tools.AddRange(SharedLibrary.Agents.TextTools.BuildAll())
+        tools.AddRange(SharedLibrary.Agents.WordTools.BuildAll())
+        tools.AddRange(SharedLibrary.Agents.WorkspaceTools.BuildAll())
+        tools.AddRange(GetAutoPilotAgentWorkspaceTools())
+
         ' ── process_word_document ──
         tools.Add(New ModelConfig() With {
         .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ProcessWordDoc,
@@ -514,21 +520,26 @@ Partial Public Class ThisAddIn
             .ToolPriority = 980,
             .ToolInstructionsPrompt =
                 AP_Tool_ExcelReadLiveRange & ": Reads the live contents of an existing Excel attachment through Excel Interop, not through XML/OpenXML parsing. " &
-                "Use this for existing workbooks whenever formulas, dropdowns, validations, comments, threaded comments, recalculated values, colors, or current workbook state matter. " &
+                "Use this for existing workbooks whenever formulas, dropdowns, validations, comments, threaded comments, recalculated values, colors, font properties, common formatting, structure, protection details, conditional formatting, data bars, icon sets, or current workbook state matter. " &
                 "For form completion or updating an existing workbook, call excel_list_live_worksheets first, then this tool to understand the live sheet content and options, and only then call excel_complete_live_workbook. " &
                 "If worksheet_name is omitted, the first worksheet is used. If range_address is omitted, the worksheet's used range is read. " &
-                "By default include_formulas is false and include_color is true.",
+                "By default include_formulas is false, include_color is true, include_font_properties is false, include_formatting is false, include_structure is false, include_protection_details is false, and include_conditional_formatting is false.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_ExcelReadLiveRange & """," &
                 """description"":""Reads a worksheet or range from an existing Excel attachment through live Excel Interop. " &
-                "This is the preferred reader for existing workbooks that may contain active formulas, dropdowns, validations, recalculated values, comments, or protected sheets. " &
-                "Defaults: first worksheet if worksheet_name is omitted, used range if range_address is omitted, include_formulas=false, include_color=true.""," &
+                "This is the preferred reader for existing workbooks that may contain active formulas, dropdowns, validations, recalculated values, comments, font properties, colors, common formatting, structure, protection details, conditional formatting, data bars, icon sets, or protected sheets. " &
+                "Defaults: first worksheet if worksheet_name is omitted, used range if range_address is omitted, include_formulas=false, include_color=true, include_font_properties=false, include_formatting=false, include_structure=false, include_protection_details=false, include_conditional_formatting=false.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """attachment_name"":{""type"":""string"",""description"":""Filename of the Excel attachment to read""}," &
                 """worksheet_name"":{""type"":""string"",""description"":""Optional worksheet name. If omitted, the first worksheet is used.""}," &
                 """range_address"":{""type"":""string"",""description"":""Optional Excel range in A1 notation, for example 'A1:D20'. If omitted, the worksheet's used range is read.""}," &
                 """include_formulas"":{""type"":""boolean"",""description"":""Optional. Default false. Include cell formulas in the output.""}," &
-                """include_color"":{""type"":""boolean"",""description"":""Optional. Default true. Include font and background color information in the output.""}" &
+                """include_color"":{""type"":""boolean"",""description"":""Optional. Default true. Include font and background color information in the output.""}," &
+                """include_font_properties"":{""type"":""boolean"",""description"":""Optional. Default false. Include font properties such as name, size, strikethrough, bold, italic, and underline in the output.""}," &
+                """include_formatting"":{""type"":""boolean"",""description"":""Optional. Default false. Include common formatting such as number format, alignment, wrapping, shrink-to-fit, and borders in the output.""}," &
+                """include_structure"":{""type"":""boolean"",""description"":""Optional. Default false. Include structural details such as row height, column width, and merged-area information.""}," &
+                """include_protection_details"":{""type"":""boolean"",""description"":""Optional. Default false. Include cell protection flags such as locked and formula_hidden.""}," &
+                """include_conditional_formatting"":{""type"":""boolean"",""description"":""Optional. Default false. Include conditional-formatting summaries, including data bars and icon sets.""}" &
                 "},""required"":[""attachment_name""]}}"
         })
 
@@ -538,17 +549,17 @@ Partial Public Class ThisAddIn
             .ModelDescription = "Complete Live Excel Workbook (built-in)",
             .ToolPriority = 990,
             .ToolInstructionsPrompt =
-                AP_Tool_ExcelCompleteLiveWorkbook & ": Completes or updates an existing Excel attachment through live Excel Interop and saves a new '_completed.xlsx' copy. " &
-                "Use this for any Excel form completion or update task when formulas, dropdowns, validations, recalculation, protection, or current workbook state matter. " &
+                AP_Tool_ExcelCompleteLiveWorkbook & ": Completes or updates an existing Excel attachment through Excel Interop and saves a new '_completed.xlsx' copy. " &
+                "Use this for any Excel form completion or update task when formulas, dropdowns, validations, recalculation, protection, current workbook state, or cell and structure formatting matter. " &
                 "Do not use normal XML-based Excel editing for such tasks. " &
-                "Before filling an existing workbook, first call excel_list_live_worksheets and then excel_read_live_range so the tool loop understands the current workbook structure, live values, and available options. " &
-                "Updates are provided as JSON. Each update targets a single cell and can set a value, a formula, and/or a comment. " &
+                "Before filling an existing workbook, first call excel_list_live_worksheets and then excel_read_live_range so the tool loop understands the current workbook structure, live values, available options, and any required formatting. " &
+                "Updates are provided as JSON. Each update targets a single cell and can set a value, a formula, a comment, font formatting, fill formatting, common formatting, borders, row height, column width, merge state, and cell protection flags. " &
                 "If worksheet_name is omitted, the first worksheet is used. A per-update worksheet_name may override the default worksheet. " &
                 "For formulas, prefer English Excel formulas with comma separators when possible. The tool includes locale-safe fallbacks for localized Excel installations and different list separators.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_ExcelCompleteLiveWorkbook & """," &
                 """description"":""Updates an existing Excel attachment through live Excel Interop and saves a new '_completed.xlsx' copy. " &
-                "This is the preferred tool for completing existing Excel workbooks that may contain active formulas, dropdowns, validations, recalculation, or protected sheets with LiftLock markers. " &
+                "This is the preferred tool for completing existing Excel workbooks that may contain active formulas, dropdowns, validations, recalculation, protected sheets with LiftLock markers, or required formatting such as strikethrough, font color, fill color, number format, alignment, borders, row height, column width, merge state, and cell protection flags. " &
                 "Use JSON-based cell updates. Prefer English Excel formulas with comma separators; locale fallbacks are built in.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """attachment_name"":{""type"":""string"",""description"":""Filename of the Excel attachment to complete or update""}," &
@@ -558,7 +569,33 @@ Partial Public Class ThisAddIn
                 """cell"":{""type"":""string"",""description"":""Target cell address in A1 notation, for example 'B12'""}," &
                 """value"":{""description"":""Optional cell value. Use JSON string, number, boolean, or null.""}," &
                 """formula"":{""type"":""string"",""description"":""Optional Excel formula for the cell. Prefer English function names and comma separators, starting with '='. Locale-safe fallbacks are applied automatically.""}," &
-                """comment"":{""type"":""string"",""description"":""Optional comment text to add as a threaded comment or reply where supported.""}" &
+                """comment"":{""type"":""string"",""description"":""Optional comment text to add as a threaded comment or reply where supported.""}," &
+                """font"":{""type"":""object"",""description"":""Optional font properties to set on the target cell."",""properties"":{" &
+                """name"":{""type"":""string"",""description"":""Optional font name.""}," &
+                """size"":{""description"":""Optional font size as number.""}," &
+                """strikethrough"":{""type"":""boolean"",""description"":""Optional. Set or clear strikethrough formatting.""}," &
+                """bold"":{""type"":""boolean"",""description"":""Optional. Set or clear bold formatting.""}," &
+                """italic"":{""type"":""boolean"",""description"":""Optional. Set or clear italic formatting.""}," &
+                """color"":{""description"":""Optional font color. Use '#RRGGBB', an integer OLE color value, or 'automatic'.""}," &
+                """underline"":{""description"":""Optional. Use true/false or one of: 'none', 'single', 'double', 'single_accounting', 'double_accounting'.""}" &
+                "}}," &
+                """fill"":{""type"":""object"",""description"":""Optional fill properties to set on the target cell."",""properties"":{" &
+                """color"":{""description"":""Optional background color. Use '#RRGGBB', an integer OLE color value, or 'none' to clear the fill.""}" &
+                "}}," &
+                """number_format"":{""type"":""string"",""description"":""Optional Excel number format string.""}," &
+                """horizontal_alignment"":{""type"":""string"",""description"":""Optional horizontal alignment: general, left, center, right, fill, justify, center_across_selection, distributed.""}," &
+                """vertical_alignment"":{""type"":""string"",""description"":""Optional vertical alignment: top, center, bottom, justify, distributed.""}," &
+                """wrap_text"":{""type"":""boolean"",""description"":""Optional. Enable or disable wrap text.""}," &
+                """shrink_to_fit"":{""type"":""boolean"",""description"":""Optional. Enable or disable shrink to fit.""}," &
+                """borders"":{""type"":""object"",""description"":""Optional border settings. Supported properties: top, bottom, left, right. Each side may be 'none' or an object with optional style, weight, and color.""}," &
+                """row_height"":{""description"":""Optional row height for the target cell's row.""}," &
+                """column_width"":{""description"":""Optional column width for the target cell's column.""}," &
+                """merge_action"":{""type"":""string"",""description"":""Optional merge action: 'merge' or 'unmerge'.""}," &
+                """merge_range"":{""type"":""string"",""description"":""Optional A1 range for the merge action. If omitted, the target cell or its current merged area is used.""}," &
+                """protection"":{""type"":""object"",""description"":""Optional cell protection properties to set on the target cell or merged area."",""properties"":{" &
+                """locked"":{""type"":""boolean"",""description"":""Optional. Set or clear the locked flag.""}," &
+                """formula_hidden"":{""type"":""boolean"",""description"":""Optional. Set or clear the formula-hidden flag.""}" &
+                "}}" &
                 "},""required"":[""cell""]}}" &
                 "},""required"":[""attachment_name"",""updates""]}}"
         })
@@ -781,16 +818,27 @@ Partial Public Class ThisAddIn
                 """h_align"":{""type"":""string"",""enum"":[""left"",""center"",""right""],""description"":""REQUIRED: left=text, center=headers/labels, right=numbers""}," &
                 """v_align"":{""type"":""string"",""enum"":[""top"",""center"",""bottom""]}," &
                 """wrap_text"":{""type"":""boolean"",""description"":""REQUIRED true for long text cells""}," &
-                """border"":{""type"":""string"",""description"":""REQUIRED: 'all-thin' for all cells. Also: medium, thick, all-medium, bottom-thin, bottom-medium""}," &
-                """border_color"":{""type"":""string"",""description"":""Border color hex RGB""}" &
+                                """border"":{""type"":""string"",""description"":""REQUIRED: 'all-thin' for all cells. Also: medium, thick, all-medium, bottom-thin, bottom-medium""}," &
+                """border_color"":{""type"":""string"",""description"":""Border color hex RGB""}," &
+                """text_rotation"":{""type"":""integer"",""description"":""Text rotation in degrees (-90 to 90). Use 255 for vertical stacked text.""}," &
+                """indent"":{""type"":""integer"",""description"":""Indent level (0 or more).""}," &
+                """comment"":{""type"":""string"",""description"":""Cell note/comment text.""}," &
+                """hyperlink"":{""type"":""string"",""description"":""Hyperlink URL or target for the cell.""}," &
+                """hyperlink_display"":{""type"":""string"",""description"":""Optional display text for the hyperlink.""}" &
                 "}},""description"":""Cells for default/first sheet""}," &
                 """sheets"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
                 """name"":{""type"":""string""},""cells"":{""type"":""array"",""items"":{""type"":""object""}}" &
-                "}},""description"":""Multiple sheets. Each: name + cells array.""}," &
+                "}},""description"":""Multiple sheets. Each entry has name + cells array. In addition, ANY of the following top-level settings may be specified per sheet to override the workbook default for that sheet: column_widths, row_heights, auto_fit_columns, auto_fit_rows, merge_ranges, freeze_pane, auto_filter, data_validations, conditional_formats, print_setup, tab_color, show_gridlines, zoom, right_to_left.""}," &
                 """file_name"":{""type"":""string"",""description"":""Filename without extension""}," &
                 """sheet_name"":{""type"":""string"",""description"":""Tab name for single-sheet mode""}," &
                 """column_widths"":{""type"":""object"",""description"":""REQUIRED: {col_letter: width} for EVERY column. 12-15 short, 25-35 descriptions, 12-18 numbers""}," &
                 """row_heights"":{""type"":""object"",""description"":""Row heights. Set header row to 28""}," &
+                """auto_fit_columns"":{""description"":""Auto-fit column widths. Use true or 'all' to fit all columns, a single column letter, or an array of column letters. Explicit column_widths override auto-fit.""}," &
+                """auto_fit_rows"":{""description"":""Auto-fit row heights. Use true or 'all' to fit all rows, a single row number, or an array of row numbers.""}," &
+                """tab_color"":{""type"":""string"",""description"":""Worksheet tab color as hex RGB e.g. #4472C4.""}," &
+                """show_gridlines"":{""type"":""boolean"",""description"":""Show or hide worksheet gridlines.""}," &
+                """zoom"":{""type"":""integer"",""description"":""Worksheet zoom level percent (10-400).""}," &
+                """right_to_left"":{""type"":""boolean"",""description"":""Display the worksheet right-to-left.""}," &
                 """merge_ranges"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Ranges to merge""}," &
                 """freeze_pane"":{""type"":""string"",""description"":""REQUIRED: Always 'A2'""}," &
                 """auto_filter"":{""type"":""string"",""description"":""REQUIRED: Header range e.g. 'A1:F1'""}," &
@@ -814,7 +862,14 @@ Partial Public Class ThisAddIn
                 """position"":{""type"":""string"",""description"":""Top-left anchor cell for the embedded chart, e.g. 'E2'""}," &
                 """width"":{""type"":""number"",""description"":""Chart width in Excel points. If omitted, defaults to 480. IMPORTANT: Use Excel points, not inches, centimeters, or cell counts. Example: 480 points is about 6.67 inches.""}," &
                 """height"":{""type"":""number"",""description"":""Chart height in Excel points. If omitted, defaults to 300. IMPORTANT: Use Excel points, not inches, centimeters, or cell counts. Example: 300 points is about 4.17 inches.""}," &
-                """sheet_name"":{""type"":""string"",""description"":""Optional worksheet name on which to place the chart. Defaults to the first sheet.""}" &
+                                """sheet_name"":{""type"":""string"",""description"":""Optional worksheet name on which to place the chart. Defaults to the first sheet.""}," &
+                """color"":{""type"":""string"",""description"":""Optional single series color as hex RGB e.g. #4472C4. Applied to all series if series_colors is omitted.""}," &
+                """series_colors"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Optional per-series colors as hex RGB. Cycles if fewer than the number of series.""}," &
+                """show_legend"":{""type"":""boolean"",""description"":""Show or hide the chart legend.""}," &
+                """legend_position"":{""type"":""string"",""enum"":[""top"",""bottom"",""left"",""right"",""corner""],""description"":""Legend placement.""}," &
+                """show_data_labels"":{""type"":""boolean"",""description"":""Show data labels on the series.""}," &
+                """x_axis_title"":{""type"":""string"",""description"":""Optional category (x) axis title.""}," &
+                """y_axis_title"":{""type"":""string"",""description"":""Optional value (y) axis title.""}" &
                 "}},""description"":""Charts to create. Width and height are specified in Excel points; if omitted, the default size is 480 x 300 points.""}," &
                 """named_ranges"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
                 """name"":{""type"":""string""},""range"":{""type"":""string""}" &
@@ -1340,91 +1395,102 @@ Partial Public Class ThisAddIn
 
         Dim outputSnapshot As Dictionary(Of String, Long) = SnapshotAutoPilotOutputFiles()
         Dim response As ToolResponse = Nothing
+        Dim enableLocalToolingMirror As Boolean = _chatAgentActive AndAlso Not _apActive
 
-        Select Case toolCall.ToolName
-            Case AP_Tool_ProcessWordDoc
-                response = Await ExecuteProcessWordDocTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ExtractPdfText
-                response = Await ExecuteExtractPdfTextTool(toolCall, context, cancellationToken)
-            Case AP_Tool_MergePdfs
-                response = Await ExecuteMergePdfsTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ReadAttachment
-                response = Await ExecuteReadAttachmentTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ListAttachments
-                response = ExecuteListAttachmentsTool(toolCall, context)
-            Case AP_Tool_DescribeBinary
-                response = Await ExecuteDescribeBinaryTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CommentWordDoc
-                response = Await ExecuteCommentWordDocTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CommentPdf
-                response = Await ExecuteCommentPdfTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CompareWordDocs
-                response = Await ExecuteCompareWordDocsTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ReadWordDocDetails
-                response = Await ExecuteReadWordDocDetailsTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CreatePdfFromText
-                response = ExecuteCreatePdfFromTextTool(toolCall, context)
-            Case AP_Tool_ExtractExcelData
-                response = ExecuteExtractExcelDataTool(toolCall, context)
-            Case AP_Tool_ExcelListLiveWorksheets
-                response = Await ExecuteExcelListLiveWorksheetsTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ExcelReadLiveRange
-                response = Await ExecuteExcelReadLiveRangeTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ExcelCompleteLiveWorkbook
-                response = Await ExecuteExcelCompleteLiveWorkbookTool(toolCall, context, cancellationToken)
-            Case AP_Tool_SplitPdf
-                response = ExecuteSplitPdfTool(toolCall, context)
-            Case AP_Tool_AddPdfWatermark
-                response = ExecuteAddPdfWatermarkTool(toolCall, context)
-            Case AP_Tool_WordToPdf
-                response = Await ExecuteWordToPdfTool(toolCall, context, cancellationToken)
-            Case AP_Tool_SearchInAttachments
-                response = Await ExecuteSearchInAttachmentsTool(toolCall, context, cancellationToken)
-            Case AP_Tool_SummarizeThread
-                response = ExecuteSummarizeThreadTool(toolCall, context)
-            Case AP_Tool_PdfToWord
-                response = Await ExecutePdfToWordTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CreateWordDoc
-                response = Await ExecuteCreateWordDocTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CreateExcel
-                response = Await ExecuteCreateExcelTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CreatePowerPoint
-                response = Await ExecuteCreatePowerPointTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CreateCodeFile
-                response = Await ExecuteCreateCodeFileTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ExtractDataFromAttachments
-                response = Await ExecuteExtractDataFromAttachmentsTool(toolCall, context, cancellationToken)
-            Case AP_Tool_RedactPdf
-                response = Await ExecuteRedactPdfTool(toolCall, context, cancellationToken)
-            Case AP_Tool_OverlayPdf
-                response = Await ExecuteOverlayPdfTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CreateAudioFile
-                response = Await ExecuteCreateAudioFileTool(toolCall, context, cancellationToken)
-            Case AP_Tool_GenerateImage
-                response = Await ExecuteGenerateImageTool(toolCall, context, cancellationToken)
-            Case AP_Tool_WebGrounding
-                response = Await ExecuteWebGroundingTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ManageScheduledTasks
-                response = Await ExecuteManageScheduledTasksTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ManageUserMemory
-                response = Await ExecuteManageUserMemoryTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ManageUserFiles
-                response = Await ExecuteManageUserFilesTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ListCollectionUseCases
-                response = Await ExecuteListCollectionUseCasesTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CollectData
-                response = Await ExecuteCollectDataTool(toolCall, context, cancellationToken)
-            Case AP_Tool_PreviewCollection
-                response = Await ExecutePreviewCollectionTool(toolCall, context, cancellationToken)
-            Case AP_Tool_CompleteWordTables
-                response = Await ExecuteCompleteWordTablesTool(toolCall, context, cancellationToken)
-            Case AP_Tool_ReportInability
-                response = Await ExecuteReportInabilityTool(toolCall, context, cancellationToken)
-            Case Else
-                Return Nothing
-        End Select
+        If enableLocalToolingMirror Then
+            System.Threading.Interlocked.Increment(_apMirrorDashboardLogToLocalToolingDepth)
+        End If
 
-        Return NormalizeAutoPilotToolResponse(toolCall, response, outputSnapshot)
+        Try
+            Select Case toolCall.ToolName
+                Case AP_Tool_ProcessWordDoc
+                    response = Await ExecuteProcessWordDocTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ExtractPdfText
+                    response = Await ExecuteExtractPdfTextTool(toolCall, context, cancellationToken)
+                Case AP_Tool_MergePdfs
+                    response = Await ExecuteMergePdfsTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ReadAttachment
+                    response = Await ExecuteReadAttachmentTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ListAttachments
+                    response = ExecuteListAttachmentsTool(toolCall, context)
+                Case AP_Tool_DescribeBinary
+                    response = Await ExecuteDescribeBinaryTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CommentWordDoc
+                    response = Await ExecuteCommentWordDocTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CommentPdf
+                    response = Await ExecuteCommentPdfTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CompareWordDocs
+                    response = Await ExecuteCompareWordDocsTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ReadWordDocDetails
+                    response = Await ExecuteReadWordDocDetailsTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CreatePdfFromText
+                    response = ExecuteCreatePdfFromTextTool(toolCall, context)
+                Case AP_Tool_ExtractExcelData
+                    response = ExecuteExtractExcelDataTool(toolCall, context)
+                Case AP_Tool_ExcelListLiveWorksheets
+                    response = Await ExecuteExcelListLiveWorksheetsTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ExcelReadLiveRange
+                    response = Await ExecuteExcelReadLiveRangeTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ExcelCompleteLiveWorkbook
+                    response = Await ExecuteExcelCompleteLiveWorkbookTool(toolCall, context, cancellationToken)
+                Case AP_Tool_SplitPdf
+                    response = ExecuteSplitPdfTool(toolCall, context)
+                Case AP_Tool_AddPdfWatermark
+                    response = ExecuteAddPdfWatermarkTool(toolCall, context)
+                Case AP_Tool_WordToPdf
+                    response = Await ExecuteWordToPdfTool(toolCall, context, cancellationToken)
+                Case AP_Tool_SearchInAttachments
+                    response = Await ExecuteSearchInAttachmentsTool(toolCall, context, cancellationToken)
+                Case AP_Tool_SummarizeThread
+                    response = ExecuteSummarizeThreadTool(toolCall, context)
+                Case AP_Tool_PdfToWord
+                    response = Await ExecutePdfToWordTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CreateWordDoc
+                    response = Await ExecuteCreateWordDocTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CreateExcel
+                    response = Await ExecuteCreateExcelTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CreatePowerPoint
+                    response = Await ExecuteCreatePowerPointTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CreateCodeFile
+                    response = Await ExecuteCreateCodeFileTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ExtractDataFromAttachments
+                    response = Await ExecuteExtractDataFromAttachmentsTool(toolCall, context, cancellationToken)
+                Case AP_Tool_RedactPdf
+                    response = Await ExecuteRedactPdfTool(toolCall, context, cancellationToken)
+                Case AP_Tool_OverlayPdf
+                    response = Await ExecuteOverlayPdfTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CreateAudioFile
+                    response = Await ExecuteCreateAudioFileTool(toolCall, context, cancellationToken)
+                Case AP_Tool_GenerateImage
+                    response = Await ExecuteGenerateImageTool(toolCall, context, cancellationToken)
+                Case AP_Tool_WebGrounding
+                    response = Await ExecuteWebGroundingTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ManageScheduledTasks
+                    response = Await ExecuteManageScheduledTasksTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ManageUserMemory
+                    response = Await ExecuteManageUserMemoryTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ManageUserFiles
+                    response = Await ExecuteManageUserFilesTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ListCollectionUseCases
+                    response = Await ExecuteListCollectionUseCasesTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CollectData
+                    response = Await ExecuteCollectDataTool(toolCall, context, cancellationToken)
+                Case AP_Tool_PreviewCollection
+                    response = Await ExecutePreviewCollectionTool(toolCall, context, cancellationToken)
+                Case AP_Tool_CompleteWordTables
+                    response = Await ExecuteCompleteWordTablesTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ReportInability
+                    response = Await ExecuteReportInabilityTool(toolCall, context, cancellationToken)
+                Case Else
+                    Return Nothing
+            End Select
+
+            Return NormalizeAutoPilotToolResponse(toolCall, response, outputSnapshot)
+        Finally
+            If enableLocalToolingMirror Then
+                System.Threading.Interlocked.Decrement(_apMirrorDashboardLogToLocalToolingDepth)
+            End If
+        End Try
     End Function
 
     Private Function SnapshotAutoPilotOutputFiles() As Dictionary(Of String, Long)
@@ -1718,7 +1784,54 @@ Partial Public Class ThisAddIn
             Next
         Next
 
+        ' Fallback: resolve the name against the granted workspace so that AutoPilot
+        ' Office tools (process_word_document, comment_word_document, compare_word_documents,
+        ' etc.) work on local workspace documents, not only on mail attachments.
+        Dim workspaceMatch As AutoPilotAttachmentInfo = TryResolveWorkspaceFile(trimmedName)
+        If workspaceMatch IsNot Nothing Then Return workspaceMatch
+
         Return Nothing
+    End Function
+
+    ''' <summary>
+    ''' Attempts to resolve <paramref name="fileName"/> against the granted workspace root.
+    ''' Returns a transient <see cref="AutoPilotAttachmentInfo"/> pointing at the workspace
+    ''' file (marked <c>IsToolOutput=True</c> so it is treated as an in-session file), or
+    ''' <c>Nothing</c> when no workspace is configured or the file is not found.
+    ''' </summary>
+    Private Function TryResolveWorkspaceFile(fileName As String) As AutoPilotAttachmentInfo
+        If String.IsNullOrWhiteSpace(fileName) Then Return Nothing
+
+        Dim state As SharedLibrary.Agents.WorkspaceState = SharedLibrary.Agents.WorkspaceStore.Load("outlook")
+        If state Is Nothing OrElse String.IsNullOrWhiteSpace(state.RootPath) OrElse
+           Not Directory.Exists(state.RootPath) Then
+            Return Nothing
+        End If
+
+        Dim candidate As String
+        Try
+            ' Accept both a bare leaf name and a workspace-relative path.
+            candidate = Path.GetFullPath(Path.Combine(state.RootPath, fileName))
+        Catch
+            Return Nothing
+        End Try
+
+        ' Confine resolution to the workspace root.
+        Dim rootFull As String = Path.GetFullPath(state.RootPath)
+        If Not candidate.StartsWith(rootFull, StringComparison.OrdinalIgnoreCase) Then Return Nothing
+        If Not File.Exists(candidate) Then Return Nothing
+
+        Return New AutoPilotAttachmentInfo() With {
+            .OriginalFileName = Path.GetFileName(candidate),
+            .Extension = Path.GetExtension(candidate).ToLowerInvariant(),
+            .TempFilePath = candidate,
+            .SourcePath = candidate,
+            .SizeBytes = New FileInfo(candidate).Length,
+            .IsOverSizeLimit = False,
+            .StatusMessage = "Workspace file",
+            .IsToolOutput = True,
+            .OutputFiles = New List(Of String)()
+        }
     End Function
 
     ''' <summary>

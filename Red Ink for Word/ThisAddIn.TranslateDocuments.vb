@@ -159,15 +159,81 @@ Partial Public Class ThisAddIn
     End Function
 
     Private Shared Function CreateDocumentCopyFromSavedSource(sourcePath As String, destinationPath As String, fileFormat As WdSaveFormat) As Boolean
+        ' Local, saved source: plain file copy — no Word interop needed at all.
+        If Not IsRemoteDocumentPath(sourcePath) AndAlso File.Exists(sourcePath) Then
+            File.Copy(sourcePath, destinationPath, overwrite:=True)
+            Return File.Exists(destinationPath)
+        End If
+
+        ' Remote source (e.g., SharePoint): materialize a local copy through Word using SaveAs2.
+        ' Prefer REUSING the already-running primary Word instance so we do NOT start a second
+        ' Word process (which would load any document-management add-in a second time — a known
+        ' crash / re-entrancy vector). Only if reuse is not possible do we fall back to an
+        ' isolated secondary instance.
+        If TryCreateRemoteCopyViaPrimaryInstance(sourcePath, destinationPath, fileFormat) Then
+            Return True
+        End If
+
+        Return CreateRemoteCopyViaSecondaryInstance(sourcePath, destinationPath, fileFormat)
+    End Function
+
+    ''' <summary>
+    ''' Attempts to create a local copy of a remote (e.g., SharePoint) document by reusing the
+    ''' primary Word instance. Only proceeds if Word actually opens a NEW document; if the source
+    ''' was already open (e.g., it is the active document), the returned reference points at the
+    ''' live document and must not be overwritten via SaveAs2, so this returns False to let the
+    ''' caller fall back to an isolated secondary instance.
+    ''' </summary>
+    Private Shared Function TryCreateRemoteCopyViaPrimaryInstance(sourcePath As String, destinationPath As String, fileFormat As WdSaveFormat) As Boolean
+        Dim wordApp As Word.Application = Nothing
+        Dim openedDoc As Word.Document = Nothing
+
+        Try
+            wordApp = Globals.ThisAddIn.Application
+            If wordApp Is Nothing OrElse wordApp.Documents Is Nothing Then Return False
+
+            Dim countBefore As Integer = wordApp.Documents.Count
+
+            openedDoc = wordApp.Documents.Open(
+                FileName:=sourcePath,
+                ReadOnly:=True,
+                Visible:=False,
+                AddToRecentFiles:=False)
+
+            ' If the document count did not grow, Word returned an already-open document
+            ' (the live active document). Do NOT SaveAs2 over it and do NOT close it.
+            If wordApp.Documents.Count <= countBefore Then
+                openedDoc = Nothing
+                Return False
+            End If
+
+            openedDoc.SaveAs2(
+                FileName:=destinationPath,
+                FileFormat:=fileFormat,
+                AddToRecentFiles:=False)
+
+            Return File.Exists(destinationPath)
+
+        Catch
+            Return False
+        Finally
+            If openedDoc IsNot Nothing Then
+                Try : openedDoc.Close(WdSaveOptions.wdDoNotSaveChanges) : Catch : End Try
+                Try : Marshal.FinalReleaseComObject(openedDoc) : Catch : End Try
+            End If
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Fallback that creates a local copy of a remote document in an isolated secondary Word
+    ''' instance. Used only when the primary instance cannot be reused safely (e.g., the remote
+    ''' source is already open as the active document).
+    ''' </summary>
+    Private Shared Function CreateRemoteCopyViaSecondaryInstance(sourcePath As String, destinationPath As String, fileFormat As WdSaveFormat) As Boolean
         Dim secondaryWordApp As Word.Application = Nothing
         Dim secondaryDoc As Word.Document = Nothing
 
         Try
-            If Not IsRemoteDocumentPath(sourcePath) AndAlso File.Exists(sourcePath) Then
-                File.Copy(sourcePath, destinationPath, overwrite:=True)
-                Return File.Exists(destinationPath)
-            End If
-
             secondaryWordApp = New Word.Application With {
             .Visible = False,
             .DisplayAlerts = WdAlertLevel.wdAlertsNone
@@ -892,18 +958,32 @@ Partial Public Class ThisAddIn
         Dim originalDoc As Word.Document = Nothing
         Dim correctedDoc As Word.Document = Nothing
         Dim compareDoc As Word.Document = Nothing
+        Dim tempCompareDir As String = Nothing
 
         Try
             wordApp = Globals.ThisAddIn.Application
             Dim wasScreenUpdating As Boolean = wordApp.ScreenUpdating
             wordApp.ScreenUpdating = False
 
-            ' Determine compare output path
+            ' Determine final compare output path
             Dim comparePath As String = GetCompareFilePath(correctedPath)
 
-            ' Open both documents
-            originalDoc = wordApp.Documents.Open(originalPath, ReadOnly:=True, Visible:=False, AddToRecentFiles:=False)
-            correctedDoc = wordApp.Documents.Open(correctedPath, ReadOnly:=True, Visible:=False, AddToRecentFiles:=False)
+            ' Work entirely on local copies inside a private %TEMP% folder so the compare
+            ' interop never opens documents that live in a document-management or cloud-synced
+            ' location (a known source of crashes / event re-entrancy).
+            tempCompareDir = Path.Combine(Path.GetTempPath(), $"{AN2}_compare_{Guid.NewGuid():N}")
+            Directory.CreateDirectory(tempCompareDir)
+
+            Dim tempOriginalPath As String = Path.Combine(tempCompareDir, "original" & Path.GetExtension(originalPath))
+            Dim tempCorrectedPath As String = Path.Combine(tempCompareDir, "corrected" & Path.GetExtension(correctedPath))
+            Dim tempComparePath As String = Path.Combine(tempCompareDir, "compare.docx")
+
+            File.Copy(originalPath, tempOriginalPath, overwrite:=True)
+            File.Copy(correctedPath, tempCorrectedPath, overwrite:=True)
+
+            ' Open the local copies only (never the original DMS/synced paths)
+            originalDoc = wordApp.Documents.Open(tempOriginalPath, ReadOnly:=True, Visible:=False, AddToRecentFiles:=False)
+            correctedDoc = wordApp.Documents.Open(tempCorrectedPath, ReadOnly:=True, Visible:=False, AddToRecentFiles:=False)
 
             ' Create comparison document using Word's built-in compare feature
             ' This preserves all formatting and shows changes as tracked changes
@@ -925,8 +1005,8 @@ Partial Public Class ThisAddIn
                 IgnoreAllComparisonWarnings:=True
             )
 
-            ' Save the compare document
-            compareDoc.SaveAs2(comparePath, WdSaveFormat.wdFormatXMLDocument)
+            ' Save the compare document to the local temp path first
+            compareDoc.SaveAs2(tempComparePath, WdSaveFormat.wdFormatXMLDocument)
 
             ' Close documents
             compareDoc.Close(WdSaveOptions.wdDoNotSaveChanges)
@@ -940,7 +1020,11 @@ Partial Public Class ThisAddIn
 
             wordApp.ScreenUpdating = wasScreenUpdating
 
-            Return True
+            ' Move the finished compare file to its final destination (plain file I/O only —
+            ' no Word interop against the destination folder).
+            File.Copy(tempComparePath, comparePath, overwrite:=True)
+
+            Return File.Exists(comparePath)
 
         Catch ex As Exception
             Debug.WriteLine($"CreateWordCompareDocument error: {ex.Message}")
@@ -958,6 +1042,9 @@ Partial Public Class ThisAddIn
             End If
             If wordApp IsNot Nothing Then
                 Try : wordApp.ScreenUpdating = True : Catch : End Try
+            End If
+            If Not String.IsNullOrWhiteSpace(tempCompareDir) AndAlso Directory.Exists(tempCompareDir) Then
+                Try : Directory.Delete(tempCompareDir, recursive:=True) : Catch : End Try
             End If
         End Try
     End Function

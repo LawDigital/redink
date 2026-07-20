@@ -175,12 +175,22 @@ Partial Public Class ThisAddIn
     Private _apConfig As AutoPilotConfig = Nothing
     Private _apCts As CancellationTokenSource = Nothing
     Private _apDashboard As LogWindow = Nothing
+    Private _apDashboardDisplaySettingsHooked As Boolean = False
     Private ReadOnly _apSenderLastMailSentUtc As New ConcurrentDictionary(Of String, DateTime)(StringComparer.OrdinalIgnoreCase)
     Private _apSessionReplyCount As Integer = 0
     Private ReadOnly _apMailQueue As New ConcurrentQueue(Of String)()
+
+    ' Serializes AutoPilot mail processing and scheduler task execution so they never overlap.
     Private ReadOnly _apProcessingSemaphore As New SemaphoreSlim(1, 1)
+
     Private _apSelectedTools As List(Of ModelConfig) = Nothing
     Private _apUseSecondApi As Boolean = False
+
+    ''' <summary>
+    ''' Nesting counter used to mirror AutoPilot internal-tool progress into the
+    ''' Local Chat tooling log only while an internal AutoPilot tool is executing.
+    ''' </summary>
+    Private _apMirrorDashboardLogToLocalToolingDepth As Integer = 0
 
     ''' <summary>
     ''' Paths of knowledge-store source files copied into the temp directory.
@@ -287,12 +297,18 @@ Partial Public Class ThisAddIn
         If Not _apActive Then Return
         _apActive = False
         Try : RemoveHandler Application.NewMailEx, AddressOf AutoPilot_NewMailEx : Catch : End Try
+        Try : SaveAutoPilotDashboardBounds(_apDashboard) : Catch : End Try
         Try
             If _apDashboard IsNot Nothing Then
                 RemoveHandler _apDashboard.CancelRequested, AddressOf AutoPilot_DashboardCancelRequested
                 RemoveHandler _apDashboard.AbortJobRequested, AddressOf AutoPilot_DashboardAbortJobRequested
+                RemoveHandler _apDashboard.FormClosing, AddressOf AutoPilot_DashboardFormClosing
             End If
         Catch : End Try
+        If _apDashboardDisplaySettingsHooked Then
+            Try : RemoveHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf AutoPilot_DashboardDisplaySettingsChanged : Catch : End Try
+            _apDashboardDisplaySettingsHooked = False
+        End If
         Try : _apNotificationTimer?.Dispose() : Catch : End Try
         _apNotificationTimer = Nothing
         StopAutoDeleteTimer()
@@ -345,8 +361,11 @@ Partial Public Class ThisAddIn
             Sub()
                 Try
                     If _apDashboard Is Nothing OrElse _apDashboard.IsDisposed Then Return
+                    EnsureAutoPilotDashboardVisible()
                     _apDashboard.Show()
+                    EnsureAutoPilotDashboardVisible()
                     _apDashboard.BringToFront()
+                    _apDashboard.Activate()
                 Catch
                 End Try
             End Sub
@@ -455,8 +474,19 @@ Partial Public Class ThisAddIn
                 _apDashboard.Text = $"{AN6} AutoPilot Dashboard"
                 AddHandler _apDashboard.CancelRequested, AddressOf AutoPilot_DashboardCancelRequested
                 AddHandler _apDashboard.AbortJobRequested, AddressOf AutoPilot_DashboardAbortJobRequested
+                AddHandler _apDashboard.FormClosing, AddressOf AutoPilot_DashboardFormClosing
                 _apDashboard.ShowAbortJobButton(True)
+                RestoreAutoPilotDashboardBounds()
                 _apDashboard.Show()
+                EnsureAutoPilotDashboardVisible()
+
+                Try
+                    If Not _apDashboardDisplaySettingsHooked Then
+                        AddHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf AutoPilot_DashboardDisplaySettingsChanged
+                        _apDashboardDisplaySettingsHooked = True
+                    End If
+                Catch
+                End Try
 
                 ' Add Scheduler dashboard button if scheduler is enabled
                 If config.EnableScheduler Then
@@ -584,7 +614,12 @@ Partial Public Class ThisAddIn
         If config.AutoDeleteAfterHours > 0 Then
             ApDashboardLog($"🗑 Auto-delete enabled after {config.AutoDeleteAfterHours}h (includes Deleted Items).", "info")
             StartAutoDeleteTimer()
-            RunAutoDeleteCleanupAsync(_apCts.Token, "startup")
+            If AP_RunAutoDeleteCleanupOnStartup Then
+                ApDashboardLog("🗑 Auto-delete startup cleanup enabled — running initial pass.", "step")
+                RunAutoDeleteCleanupAsync(_apCts.Token, "startup")
+            Else
+                ApDashboardLog("🗑 Auto-delete startup cleanup disabled — cleanup runs on the periodic timer only.", "step")
+            End If
         Else
             ApDashboardLog("🗑 Auto-delete disabled.", "info")
         End If
@@ -617,6 +652,75 @@ Partial Public Class ThisAddIn
         Else
             ApDashboardLog("No job currently processing to abort.", "step")
         End If
+    End Sub
+
+    ''' <summary>Restores the AutoPilot dashboard position and size from <c>My.Settings</c>.</summary>
+    Private Sub RestoreAutoPilotDashboardBounds()
+        If _apDashboard Is Nothing OrElse _apDashboard.IsDisposed Then Return
+
+        Try
+            Dim savedX As Integer = My.Settings.AP_DashboardWindowX
+            Dim savedY As Integer = My.Settings.AP_DashboardWindowY
+            Dim savedW As Integer = My.Settings.AP_DashboardWindowW
+            Dim savedH As Integer = My.Settings.AP_DashboardWindowH
+
+            Dim minWidth As Integer = Math.Max(_apDashboard.MinimumSize.Width, 1)
+            Dim minHeight As Integer = Math.Max(_apDashboard.MinimumSize.Height, 1)
+            Dim hasSavedBounds As Boolean = savedW >= minWidth AndAlso savedH >= minHeight
+
+            If hasSavedBounds Then
+                _apDashboard.StartPosition = FormStartPosition.Manual
+                _apDashboard.SetBounds(savedX, savedY, savedW, savedH)
+            End If
+        Catch
+        End Try
+
+        EnsureAutoPilotDashboardVisible()
+    End Sub
+
+    ''' <summary>Saves the AutoPilot dashboard position and size into <c>My.Settings</c>.</summary>
+    Private Sub SaveAutoPilotDashboardBounds(Optional dashboard As Form = Nothing)
+        Dim target As Form = If(dashboard, _apDashboard)
+        If target Is Nothing OrElse target.IsDisposed Then Return
+
+        Try
+            My.Settings.AP_DashboardWindowX = target.Left
+            My.Settings.AP_DashboardWindowY = target.Top
+            My.Settings.AP_DashboardWindowW = target.Width
+            My.Settings.AP_DashboardWindowH = target.Height
+            My.Settings.Save()
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>Ensures the AutoPilot dashboard remains reachable on a visible screen.</summary>
+    Private Sub EnsureAutoPilotDashboardVisible()
+        If _apDashboard Is Nothing OrElse _apDashboard.IsDisposed Then Return
+
+        Try
+            SharedMethods.EnsureVisibleOnScreen(_apDashboard)
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>Saves dashboard bounds when the current dashboard window is closed.</summary>
+    Private Sub AutoPilot_DashboardFormClosing(sender As Object, e As FormClosingEventArgs)
+        If Not ReferenceEquals(sender, _apDashboard) Then Return
+        SaveAutoPilotDashboardBounds(_apDashboard)
+    End Sub
+
+    ''' <summary>Repositions the dashboard after monitor or resolution changes.</summary>
+    Private Sub AutoPilot_DashboardDisplaySettingsChanged(sender As Object, e As EventArgs)
+        If _apDashboard Is Nothing OrElse _apDashboard.IsDisposed Then Return
+
+        Try
+            If _apDashboard.InvokeRequired Then
+                _apDashboard.BeginInvoke(New MethodInvoker(AddressOf EnsureAutoPilotDashboardVisible))
+            Else
+                EnsureAutoPilotDashboardVisible()
+            End If
+        Catch
+        End Try
     End Sub
 
     ''' <summary>
@@ -855,10 +959,14 @@ Partial Public Class ThisAddIn
             Dim selectedEntryIds As List(Of String) = Nothing
 
             If _apConfig.IsUnattended Then
-                ' Unattended auto-start: skip the preview dialog, process all candidates
-                ' but exclude reprocess candidates in unattended mode (only operator should choose those)
+                ' Unattended auto-start (no button pressed): skip the preview dialog and
+                ' process ONLY new (unprocessed) mails. Already-processed [REPROCESS]
+                ' candidates are never auto-selected — the operator must choose those
+                ' explicitly in the attended catch-up preview dialog.
                 selectedEntryIds = candidates.Where(Function(c) Not c.IsReprocessCandidate).Select(Function(c) c.EntryID).ToList()
-                ApDashboardLog($"Unattended mode — auto-selecting {selectedEntryIds.Count} new catch-up mail(s) (skipping {reprocessCandidateCount} reprocess candidates).", "info")
+                ApDashboardLog(
+                    $"Unattended mode — auto-selecting {selectedEntryIds.Count} new catch-up mail(s) (skipping {reprocessCandidateCount} reprocess candidate(s)).",
+                    "info")
             Else
                 ' Show preview dialog using MultiModelSelectorForm pattern
                 ' Pre-select only NEW (unprocessed) mails; reprocess candidates are unchecked by default
@@ -1068,70 +1176,82 @@ Partial Public Class ThisAddIn
     Private Async Function AutoPilotProcessingPump(ct As CancellationToken) As Task
         Try
             While Not ct.IsCancellationRequested
-                Dim entryId As String = Nothing
-                If _apMailQueue.TryDequeue(entryId) Then
-                    ' Clean up enqueue time tracking for this mail
-                    Dim dummy As DateTime
-                    _apQueueEnqueueTimes.TryRemove(entryId, dummy)
-                    ' NOTE: Do NOT remove _apQueueNotifiedEntryIds here.
-                    ' ProcessIncomingMailAsync needs to check it for the holding-notice
-                    ' cooldown bypass. It is cleaned up after processing completes.
-
-                    ' Track the active job for progress notifications
-                    _apCurrentProcessingEntryId = entryId
-                    _apActiveJobLastNotifiedUtc = DateTime.MinValue
-
-                    Dim pending = _apMailQueue.Count
-                    If pending > 0 Then
-                        ApDashboardLog($"⏳ {pending} mail(s) queued behind current processing", "step")
-                    End If
-
-                    ' Classify and time the current mail
-                    Try
-                        _apCurrentProcessingCategory = Await SwitchToUi(Function() As String
-                                                                            Try
-                                                                                Dim ns = Application.GetNamespace("MAPI")
-                                                                                Dim obj = ns.GetItemFromID(entryId)
-                                                                                If TypeOf obj Is MailItem Then
-                                                                                    Dim mi = DirectCast(obj, MailItem)
-                                                                                    Try : Return ClassifyMailCategory(mi)
-                                                                                    Finally : Marshal.ReleaseComObject(mi) : End Try
-                                                                                End If
-                                                                            Catch : End Try
-                                                                            Return AP_Cat_TextOnly
-                                                                        End Function)
-                    Catch
-                        _apCurrentProcessingCategory = AP_Cat_TextOnly
-                    End Try
-
-                    ' Create a per-job CancellationTokenSource linked to the session CTS
-                    _apCurrentJobCts = CancellationTokenSource.CreateLinkedTokenSource(ct)
-                    Dim jobCt = _apCurrentJobCts.Token
-
-                    _apCurrentProcessingStopwatch = Stopwatch.StartNew()
-                    Try
-                        Await ProcessIncomingMailAsync(entryId, jobCt)
-                    Catch ex As OperationCanceledException When Not ct.IsCancellationRequested
-                        ' Job-level abort (not session-level) — log and continue to next mail
-                        ApDashboardLog($"⛔ Job aborted by operator for: {entryId.Substring(0, Math.Min(20, entryId.Length))}...", "warn")
-                    Finally
-                        _apCurrentProcessingStopwatch.Stop()
-                        UpdateCategoryTiming(_apCurrentProcessingCategory, _apCurrentProcessingStopwatch.Elapsed.TotalSeconds)
-                        ApDashboardLog($"⏱ Completed in {_apCurrentProcessingStopwatch.Elapsed.TotalSeconds:F1}s [{_apCurrentProcessingCategory}]", "step")
-                        _apCurrentProcessingStopwatch = Nothing
-                        _apCurrentProcessingCategory = Nothing
-                        _apCurrentProcessingEntryId = Nothing
-                        _apActiveJobLastNotifiedUtc = DateTime.MinValue
-                        ' Clean up notification and catch-up tracking AFTER processing is complete
-                        _apQueueNotifiedEntryIds.TryRemove(entryId, dummy)
-                        Dim dummyCatchUp As Boolean
-                        _apCatchUpEntryIds.TryRemove(entryId, dummyCatchUp)
-                        Try : _apCurrentJobCts?.Dispose() : Catch : End Try
-                        _apCurrentJobCts = Nothing
-                    End Try
-                Else
+                If _apMailQueue.IsEmpty Then
                     Await Task.Delay(1000, ct)
+                    Continue While
                 End If
+
+                If Not _apProcessingSemaphore.Wait(0) Then
+                    Await Task.Delay(1000, ct)
+                    Continue While
+                End If
+
+                Try
+                    Dim entryId As String = Nothing
+                    If _apMailQueue.TryDequeue(entryId) Then
+                        ' Clean up enqueue time tracking for this mail
+                        Dim dummy As DateTime
+                        _apQueueEnqueueTimes.TryRemove(entryId, dummy)
+                        ' NOTE: Do NOT remove _apQueueNotifiedEntryIds here.
+                        ' ProcessIncomingMailAsync needs to check it for the holding-notice
+                        ' cooldown bypass. It is cleaned up after processing completes.
+
+                        ' Track the active job for progress notifications
+                        _apCurrentProcessingEntryId = entryId
+                        _apActiveJobLastNotifiedUtc = DateTime.MinValue
+
+                        Dim pending = _apMailQueue.Count
+                        If pending > 0 Then
+                            ApDashboardLog($"⏳ {pending} mail(s) queued behind current processing", "step")
+                        End If
+
+                        ' Classify and time the current mail
+                        Try
+                            _apCurrentProcessingCategory = Await SwitchToUi(Function() As String
+                                                                                Try
+                                                                                    Dim ns = Application.GetNamespace("MAPI")
+                                                                                    Dim obj = ns.GetItemFromID(entryId)
+                                                                                    If TypeOf obj Is MailItem Then
+                                                                                        Dim mi = DirectCast(obj, MailItem)
+                                                                                        Try : Return ClassifyMailCategory(mi)
+                                                                                        Finally : Marshal.ReleaseComObject(mi) : End Try
+                                                                                    End If
+                                                                                Catch : End Try
+                                                                                Return AP_Cat_TextOnly
+                                                                            End Function)
+                        Catch
+                            _apCurrentProcessingCategory = AP_Cat_TextOnly
+                        End Try
+
+                        ' Create a per-job CancellationTokenSource linked to the session CTS
+                        _apCurrentJobCts = CancellationTokenSource.CreateLinkedTokenSource(ct)
+                        Dim jobCt = _apCurrentJobCts.Token
+
+                        _apCurrentProcessingStopwatch = Stopwatch.StartNew()
+                        Try
+                            Await ProcessIncomingMailAsync(entryId, jobCt)
+                        Catch ex As OperationCanceledException When Not ct.IsCancellationRequested
+                            ' Job-level abort (not session-level) — log and continue to next mail
+                            ApDashboardLog($"⛔ Job aborted by operator for: {entryId.Substring(0, Math.Min(20, entryId.Length))}...", "warn")
+                        Finally
+                            _apCurrentProcessingStopwatch.Stop()
+                            UpdateCategoryTiming(_apCurrentProcessingCategory, _apCurrentProcessingStopwatch.Elapsed.TotalSeconds)
+                            ApDashboardLog($"⏱ Completed in {_apCurrentProcessingStopwatch.Elapsed.TotalSeconds:F1}s [{_apCurrentProcessingCategory}]", "step")
+                            _apCurrentProcessingStopwatch = Nothing
+                            _apCurrentProcessingCategory = Nothing
+                            _apCurrentProcessingEntryId = Nothing
+                            _apActiveJobLastNotifiedUtc = DateTime.MinValue
+                            ' Clean up notification and catch-up tracking AFTER processing is complete
+                            _apQueueNotifiedEntryIds.TryRemove(entryId, dummy)
+                            Dim dummyCatchUp As Boolean
+                            _apCatchUpEntryIds.TryRemove(entryId, dummyCatchUp)
+                            Try : _apCurrentJobCts?.Dispose() : Catch : End Try
+                            _apCurrentJobCts = Nothing
+                        End Try
+                    End If
+                Finally
+                    _apProcessingSemaphore.Release()
+                End Try
             End While
         Catch ex As OperationCanceledException
             ApDashboardLog("AutoPilot cancelled.", "step")
@@ -1680,7 +1800,13 @@ Partial Public Class ThisAddIn
                 isExistingConversation = IsPartOfAutoPilotConversation(mi)
             Catch : End Try
 
-            If IsAutoReplyOrOof(mailInfo) Then : ApDashboardLog("SKIP (auto-reply/OOF): " & mailInfo.Subject, "step") : Return : End If
+            If IsAutoReplyOrOof(mailInfo) Then
+                ' Do not process auto-replies/OOF, but schedule them for auto-deletion
+                ' as part of their originating AutoPilot conversation group.
+                Await SwitchToUi(Sub() TagAutoReplyOrOofForCleanup(mi))
+                ApDashboardLog("SKIP (auto-reply/OOF): " & mailInfo.Subject, "step")
+                Return
+            End If
 
             ' SECURITY: Filter rules (domain/sender) are NEVER bypassed — they are the trust boundary.
             ' An attacker could spoof a ConversationID (same subject line) to join an existing thread,
@@ -1884,6 +2010,16 @@ Partial Public Class ThisAddIn
                 _apCurrentAttachments = attachmentPaths
                 _apCurrentMailInfo = mailInfo
 
+                Dim previousChatAgentWorkspace As ChatAgentWorkspaceState = _chatAgentWorkspace
+                Dim previousChatAgentWorkspaceLoaded As Boolean = _chatAgentWorkspaceLoaded
+                Dim previousWorkspaceOnlyMode As Boolean = SharedLibrary.Agents.PathPolicy.RestrictToWorkspaceRootOnly
+
+                _chatAgentWorkspace = BuildAutoPilotTempWorkspaceState()
+                _chatAgentWorkspaceLoaded = _chatAgentWorkspace IsNot Nothing
+                SyncWorkspaceToPathPolicy(includeSessionTempFallback:=True)
+                SharedLibrary.Agents.PathPolicy.RestrictToWorkspaceRootOnly = True
+                SharedLibrary.Agents.PathPolicy.SetStrictExtraRoots({_apCurrentTempDir})
+
                 Dim response As String
 
                 ' ── Set AutoPilot-specific max tool iterations ──
@@ -1971,6 +2107,11 @@ Partial Public Class ThisAddIn
                     _apCurrentTempDir = Nothing
                     _apCurrentAttachments = Nothing
                     _apCurrentMailInfo = Nothing
+                    _chatAgentWorkspace = previousChatAgentWorkspace
+                    _chatAgentWorkspaceLoaded = previousChatAgentWorkspaceLoaded
+                    SharedLibrary.Agents.PathPolicy.RestrictToWorkspaceRootOnly = previousWorkspaceOnlyMode
+                    SharedLibrary.Agents.PathPolicy.SetStrictExtraRoots(Nothing)
+                    SyncWorkspaceToPathPolicy()
                     MaxToolIterations = previousMaxToolIterations
                     ClearAttachmentCaches()
                 End Try
@@ -3406,7 +3547,7 @@ Partial Public Class ThisAddIn
             End Try
 
             reply.Send()
-            Try : MoveLastSentToInkyReplies(cleanupGroupId, cleanupIsEligible, cleanupAnsweredUtc, cleanupDeleteAfterUtc) : Catch : End Try
+            Try : MoveLastSentToInkyReplies(cleanupGroupId, cleanupIsEligible, cleanupAnsweredUtc, cleanupDeleteAfterUtc, reply.Subject, senderAddr) : Catch : End Try
 
         Catch ex As System.Exception
             ApDashboardLog($"ERROR sending reply: {ex.Message}", "error")
@@ -3457,7 +3598,9 @@ Partial Public Class ThisAddIn
     Private Sub MoveLastSentToInkyReplies(Optional groupId As String = Nothing,
                                           Optional isEligible As Boolean = False,
                                           Optional answeredUtc As DateTime? = Nothing,
-                                          Optional deleteAfterUtc As DateTime? = Nothing)
+                                          Optional deleteAfterUtc As DateTime? = Nothing,
+                                          Optional expectedSubject As String = Nothing,
+                                          Optional expectedTo As String = Nothing)
         Try
             Dim ns = Application.GetNamespace("MAPI")
             Dim sentFolder = ns.GetDefaultFolder(OlDefaultFolders.olFolderSentMail)
@@ -3484,14 +3627,45 @@ Partial Public Class ThisAddIn
                         If mi2 Is Nothing Then Continue For
                         If mi2.Categories Is Nothing OrElse Not mi2.Categories.Contains(AP_CategoryName) Then Continue For
 
-                        ' When a cleanup group id is supplied, bind the move/stamp to the
-                        ' exact reply we just sent for this group instead of blindly taking
-                        ' the most recent categorized item. This prevents an older AutoPilot
-                        ' reply from being picked (and the just-sent reply from being left in
-                        ' Sent Items without persisted cleanup metadata, so it is never deleted).
-                        If Not String.IsNullOrWhiteSpace(groupId) AndAlso
-                           Not String.Equals(GetCleanupGroupId(mi2), groupId, StringComparison.OrdinalIgnoreCase) Then
-                            Continue For
+                        If Not String.IsNullOrWhiteSpace(groupId) Then
+                            Dim itemGroupId = GetCleanupGroupId(mi2)
+
+                            If Not String.Equals(itemGroupId, groupId, StringComparison.OrdinalIgnoreCase) Then
+                                Dim isFallbackMatch As Boolean = False
+
+                                If String.IsNullOrWhiteSpace(itemGroupId) AndAlso HasAutoReplyHeader(mi2) Then
+                                    Dim subjectMatches As Boolean = True
+                                    If Not String.IsNullOrWhiteSpace(expectedSubject) Then
+                                        subjectMatches = String.Equals(
+                                            If(mi2.Subject, ""),
+                                            expectedSubject,
+                                            StringComparison.OrdinalIgnoreCase)
+                                    End If
+
+                                    Dim toMatches As Boolean = True
+                                    If Not String.IsNullOrWhiteSpace(expectedTo) Then
+                                        Dim toValue As String = ""
+                                        Try
+                                            toValue = If(mi2.To, "")
+                                        Catch
+                                        End Try
+
+                                        If Not String.IsNullOrWhiteSpace(toValue) Then
+                                            toMatches = toValue.IndexOf(expectedTo, StringComparison.OrdinalIgnoreCase) >= 0
+                                        End If
+                                    End If
+
+                                    isFallbackMatch = subjectMatches AndAlso toMatches
+                                End If
+
+                                If Not isFallbackMatch Then
+                                    Continue For
+                                End If
+
+                                ApDashboardLog(
+                                    "🗑 Auto-delete fallback matched sent copy without persisted cleanup group metadata; stamping after move.",
+                                    "warn")
+                            End If
                         End If
 
                         movedObj = mi2.Move(inkyFolder)
@@ -3554,8 +3728,12 @@ Partial Public Class ThisAddIn
     ''' Does NOT prepend a timestamp here because LogWindow.AppendLogInternal
     ''' already adds [HH:mm:ss]. Instead we prepend the date-only portion so the
     ''' dashboard shows [HH:mm:ss] [dd-MMM] message.
+    ''' During Local Chat execution of AutoPilot internal tools, progress entries
+    ''' are also mirrored into the active tooling log window.
     ''' </summary>
-    Private Sub ApDashboardLog(message As String, level As String)
+    Private Sub ApDashboardLog(message As String,
+                               level As String,
+                               Optional mirrorToLocalToolingLog As Boolean = False)
         Debug.WriteLine($"[AutoPilot] [{level}] {message}")
 
         Try
@@ -3572,9 +3750,21 @@ Partial Public Class ThisAddIn
         Catch
         End Try
 
-        ' Intentionally do not mirror AutoPilot dashboard entries into the Local Chat
-        ' tooling log. Local Chat already receives direct context.Log(...) messages,
-        ' and mirroring here creates duplicate entries such as web_grounding progress.
+        Dim shouldMirrorToLocalToolingLog As Boolean =
+            _chatAgentActive AndAlso
+            Not _apActive AndAlso
+            _activeToolingContext IsNot Nothing AndAlso
+            (mirrorToLocalToolingLog OrElse
+             System.Threading.Interlocked.CompareExchange(_apMirrorDashboardLogToLocalToolingDepth, 0, 0) > 0)
+
+        If Not shouldMirrorToLocalToolingLog Then
+            Return
+        End If
+
+        Try
+            _activeToolingContext.MirrorVisibleLog(message, level)
+        Catch
+        End Try
     End Sub
 
     ''' <summary>Marks the dashboard operation as complete.</summary>
@@ -4875,8 +5065,7 @@ Partial Public Class ThisAddIn
             End Try
 
             newMail.Send()
-            Try : MoveLastSentToInkyReplies(cleanupGroupId, cleanupIsEligible, cleanupAnsweredUtc, cleanupDeleteAfterUtc) : Catch : End Try
-
+            Try : MoveLastSentToInkyReplies(cleanupGroupId, cleanupIsEligible, cleanupAnsweredUtc, cleanupDeleteAfterUtc, newMail.Subject, recipientEmail) : Catch : End Try
         Catch ex As System.Exception
             ApDashboardLog($"ERROR sending voicemail reply: {ex.Message}", "error")
         Finally

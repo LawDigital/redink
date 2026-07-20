@@ -740,36 +740,48 @@ Partial Public Class ThisAddIn
             If task.SnoozeUntilUtc > now Then Continue For
             If task.NextDueUtc > now Then Continue For
 
-            If IsLocalInteractiveScheduledTask(task) Then
+            Dim isLocalInteractiveTask = IsLocalInteractiveScheduledTask(task)
+
+            If isLocalInteractiveTask Then
                 If task.LocalExecutionState.Equals(AP_TaskLocalExecutionStateQueued, StringComparison.OrdinalIgnoreCase) Then Continue For
                 If task.LocalExecutionState.Equals(AP_TaskLocalExecutionStateRunning, StringComparison.OrdinalIgnoreCase) Then Continue For
-
-                Await HandleDueLocalInteractiveTaskAsync(task, ct)
+            ElseIf task.LastExecutedUtc >= task.NextDueUtc Then
                 Continue For
             End If
 
-            If task.LastExecutedUtc >= task.NextDueUtc Then Continue For
-
-            ' This task is due — execute it
-            ApDashboardLog($"📅 Executing scheduled task: {task.Id.Substring(0, 8)}... — ""{Truncate(task.Instruction, 60)}""", "info")
+            If Not _apProcessingSemaphore.Wait(0) Then
+                Return
+            End If
 
             Try
-                Await ExecuteScheduledTask(task, ct)
+                If isLocalInteractiveTask Then
+                    Await HandleDueLocalInteractiveTaskAsync(task, ct)
+                    Continue For
+                End If
 
-                ' Mark as executed and advance schedule
-                task.LastExecutedUtc = DateTime.UtcNow
-                task.FailureRetryCount = 0
-                task.LastResult = "Completed successfully at " & DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss UTC")
+                ' This task is due — execute it
+                ApDashboardLog($"📅 Executing scheduled task: {task.Id.Substring(0, 8)}... — ""{Truncate(task.Instruction, 60)}""", "info")
 
-                AdvanceTaskSchedule(task)
-                SchedulerUpdateTask(task)
+                Try
+                    Await ExecuteScheduledTask(task, ct)
 
-                ApDashboardLog($"📅 Task {task.Id.Substring(0, 8)}... completed. Next due: {If(task.Status = "completed", "(none — completed)", task.NextDueUtc.ToString("yyyy-MM-dd HH:mm UTC"))}", "info")
+                    ' Mark as executed and advance schedule
+                    task.LastExecutedUtc = DateTime.UtcNow
+                    task.FailureRetryCount = 0
+                    task.LastResult = "Completed successfully at " & DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss UTC")
 
-            Catch ex As OperationCanceledException
-                Throw
-            Catch ex As System.Exception
-                HandleScheduledTaskExecutionFailure(task, ex)
+                    AdvanceTaskSchedule(task)
+                    SchedulerUpdateTask(task)
+
+                    ApDashboardLog($"📅 Task {task.Id.Substring(0, 8)}... completed. Next due: {If(task.Status = "completed", "(none — completed)", task.NextDueUtc.ToString("yyyy-MM-dd HH:mm UTC"))}", "info")
+
+                Catch ex As OperationCanceledException
+                    Throw
+                Catch ex As System.Exception
+                    HandleScheduledTaskExecutionFailure(task, ex)
+                End Try
+            Finally
+                _apProcessingSemaphore.Release()
             End Try
         Next
     End Function
@@ -818,6 +830,9 @@ Partial Public Class ThisAddIn
         Dim executionUseSecondApi As Boolean = _apUseSecondApi
         Dim restoreExecutionConfig As Boolean = False
         Dim originalExecutionConfig As ModelConfig = Nothing
+        Dim previousChatAgentWorkspace As ChatAgentWorkspaceState = _chatAgentWorkspace
+        Dim previousChatAgentWorkspaceLoaded As Boolean = _chatAgentWorkspaceLoaded
+        Dim previousWorkspaceOnlyMode As Boolean = SharedLibrary.Agents.PathPolicy.RestrictToWorkspaceRootOnly
 
         Try
             ' Create isolated temp directory
@@ -887,6 +902,22 @@ Partial Public Class ThisAddIn
                 .Body = task.Instruction
             }
             _apCurrentToolCallLog = New List(Of AutoPilotToolCallEntry)()
+
+            _chatAgentWorkspace = New ChatAgentWorkspaceState() With {
+            .RootPath = _apScheduledWorkspaceRoot,
+            .PersistUntilRevoked = False,
+            .AllowRead = True,
+            .AllowWrite = True,
+            .AllowMoveCopyRename = True,
+            .AllowDelete = True,
+            .SaveDroppedFilesToWorkspace = False,
+            .IncludeHiddenSystem = False
+        }
+            _chatAgentWorkspaceLoaded = True
+            SyncWorkspaceToPathPolicy()
+            SharedLibrary.Agents.PathPolicy.RestrictToWorkspaceRootOnly = True
+            SharedLibrary.Agents.PathPolicy.SetStrictExtraRoots({tempDir, _apScheduledWorkspaceRoot})
+
             MaxToolIterations = AP_MaxToolIterations
 
             ' Build prompts — tell the LLM it is executing a scheduled task
@@ -1026,6 +1057,11 @@ Partial Public Class ThisAddIn
                 RefreshScheduledTaskWorkspaceTracking(task.Id)
             Catch
             End Try
+
+            _chatAgentWorkspace = previousChatAgentWorkspace
+            _chatAgentWorkspaceLoaded = previousChatAgentWorkspaceLoaded
+            SharedLibrary.Agents.PathPolicy.RestrictToWorkspaceRootOnly = previousWorkspaceOnlyMode
+            SharedLibrary.Agents.PathPolicy.SetStrictExtraRoots(Nothing)
 
             DeactivateScheduledTaskWorkspace(task.Id)
 
@@ -1521,19 +1557,20 @@ Partial Public Class ThisAddIn
             newMail = Application.CreateItem(OlItemType.olMailItem)
 
             Dim safeRecipients As New List(Of String)()
+            Dim mainLocalChatMailboxAddress As String = ""
 
             If Not _apActive Then
                 If Not INI_AutoPilotSchedulerLocalChat Then
                     Throw New InvalidOperationException("Local Chat scheduled e-mail delivery is disabled.")
                 End If
 
-                Dim currentMailboxAddress As String = GetLocalChatPrimaryMailboxSmtpAddress()
+                mainLocalChatMailboxAddress = GetLocalChatMainMailboxSmtpAddress()
 
-                If String.IsNullOrWhiteSpace(currentMailboxAddress) Then
-                    Throw New InvalidOperationException("Could not determine the current mailbox address for Local Chat scheduled e-mail delivery.")
+                If String.IsNullOrWhiteSpace(mainLocalChatMailboxAddress) Then
+                    Throw New InvalidOperationException("Local Chat scheduled e-mail delivery requires the main mailbox to be available.")
                 End If
 
-                safeRecipients.Add(currentMailboxAddress.Trim())
+                safeRecipients.Add(mainLocalChatMailboxAddress)
             Else
                 If task.DeliverTo IsNot Nothing Then
                     safeRecipients = task.DeliverTo.
@@ -1594,8 +1631,63 @@ Partial Public Class ThisAddIn
             Catch : End Try
             Try : newMail.Categories = AP_CategoryName : Catch : End Try
 
-            ' Use the same sending account as the monitored mailbox
-            If _apConfig IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(_apConfig.MonitoredMailbox) Then
+            Dim cleanupGroupId As String = Nothing
+            Dim cleanupIsEligible As Boolean = False
+            Dim cleanupAnsweredUtc As DateTime? = Nothing
+            Dim cleanupDeleteAfterUtc As DateTime? = Nothing
+
+            Try
+                cleanupDeleteAfterUtc = GetAutoDeleteCutoffUtc()
+                cleanupIsEligible = cleanupDeleteAfterUtc.HasValue
+
+                If cleanupIsEligible Then
+                    cleanupGroupId = Guid.NewGuid().ToString("N")
+                    cleanupAnsweredUtc = DateTime.UtcNow
+
+                    StampCleanupMetadata(
+                        newMail,
+                        cleanupGroupId,
+                        isEligible:=True,
+                        answeredUtc:=cleanupAnsweredUtc,
+                        deleteAfterUtc:=cleanupDeleteAfterUtc,
+                        saveItem:=False)
+                End If
+            Catch ex As System.Exception
+                Debug.WriteLine($"[AutoPilot] Failed to stamp cleanup metadata on scheduled task result: {ex.Message}")
+            End Try
+
+            If Not _apActive Then
+                Dim mainSendingMailboxAddress As String = mainLocalChatMailboxAddress
+
+                If String.IsNullOrWhiteSpace(mainSendingMailboxAddress) Then
+                    mainSendingMailboxAddress = GetLocalChatMainMailboxSmtpAddress()
+                End If
+
+                If String.IsNullOrWhiteSpace(mainSendingMailboxAddress) Then
+                    Throw New InvalidOperationException("Local Chat scheduled e-mail delivery requires the main mailbox to be available.")
+                End If
+
+                Dim ns = Application.GetNamespace("MAPI")
+                Dim sendingAccount As Account = Nothing
+
+                For i As Integer = 1 To ns.Accounts.Count
+                    Dim acct As Account = ns.Accounts(i)
+                    If acct IsNot Nothing AndAlso
+                       Not String.IsNullOrWhiteSpace(acct.SmtpAddress) AndAlso
+                       acct.SmtpAddress.Trim().Equals(mainSendingMailboxAddress, StringComparison.OrdinalIgnoreCase) Then
+                        sendingAccount = acct
+                        Exit For
+                    End If
+                Next
+
+                If sendingAccount Is Nothing Then
+                    Throw New InvalidOperationException(
+                        $"Main mailbox '{mainSendingMailboxAddress}' is not available as an Outlook sending account.")
+                End If
+
+                newMail.SendUsingAccount = sendingAccount
+
+            ElseIf _apConfig IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(_apConfig.MonitoredMailbox) Then
                 Try
                     Dim ns = Application.GetNamespace("MAPI")
                     For i As Integer = 1 To ns.Accounts.Count
@@ -1609,7 +1701,7 @@ Partial Public Class ThisAddIn
             End If
 
             newMail.Send()
-            Try : MoveLastSentToInkyReplies() : Catch : End Try
+            Try : MoveLastSentToInkyReplies(cleanupGroupId, cleanupIsEligible, cleanupAnsweredUtc, cleanupDeleteAfterUtc, newMail.Subject, newMail.To) : Catch : End Try
             ApDashboardLog($"📅 Result e-mail sent to: {String.Join(", ", task.DeliverTo)}", "info")
 
         Catch ex As System.Exception

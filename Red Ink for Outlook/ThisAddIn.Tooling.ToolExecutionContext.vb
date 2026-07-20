@@ -186,6 +186,55 @@ Partial Public Class ThisAddIn
         Public Property LogPrefix As String
         Public Property ExternalLogSink As Action(Of String, String)
 
+        Private _lastVisibleLogMessage As String = ""
+        Private _lastVisibleLogLevel As String = ""
+
+        Private Function TryRegisterVisibleLog(message As String, level As String) As Boolean
+            Dim normalizedMessage As String = If(message, "").Trim()
+            Dim normalizedLevel As String = If(level, "step").Trim().ToLowerInvariant()
+
+            If normalizedMessage = "" Then
+                Return False
+            End If
+
+            If String.Equals(_lastVisibleLogMessage, normalizedMessage, StringComparison.Ordinal) AndAlso
+               String.Equals(_lastVisibleLogLevel, normalizedLevel, StringComparison.Ordinal) Then
+                Return False
+            End If
+
+            _lastVisibleLogMessage = normalizedMessage
+            _lastVisibleLogLevel = normalizedLevel
+            Return True
+        End Function
+
+        Private Sub AppendVisibleLogInternal(message As String, level As String)
+            If Not TryRegisterVisibleLog(message, level) Then
+                Return
+            End If
+
+            If LogWindowForm IsNot Nothing AndAlso Not LogWindowForm.IsDisposed Then
+                Try
+                    LogWindowForm.AppendLog(message, level)
+                Catch ex As Exception
+                    ToolingFileLogger.LogWarn("Failed to append to LogWindow.", ex:=ex)
+                End Try
+            End If
+
+            If ExternalLogSink IsNot Nothing Then
+                Try
+                    ExternalLogSink.Invoke(message, level)
+                Catch ex As Exception
+                    ToolingFileLogger.LogWarn("Failed to forward log entry.", ex:=ex)
+                End Try
+            End If
+        End Sub
+
+        Public Sub MirrorVisibleLog(message As String, Optional level As String = "step")
+            Dim normalizedLevel As String = If(level, "step").Trim().ToLowerInvariant()
+            Dim visibleMessage As String = If(message, "")
+
+            AppendVisibleLogInternal(visibleMessage, normalizedLevel)
+        End Sub
 
         Public Sub Log(message As String, Optional level As String = "step")
             Dim normalizedPrefix As String = If(LogPrefix, "").Trim()
@@ -228,21 +277,7 @@ Partial Public Class ThisAddIn
             Dim visibleMessage As String =
                 If(isSubAgent, "  [sub-agent] " & humanMessage, humanMessage)
 
-            If LogWindowForm IsNot Nothing AndAlso Not LogWindowForm.IsDisposed Then
-                Try
-                    LogWindowForm.AppendLog(visibleMessage, normalizedLevel)
-                Catch ex As Exception
-                    ToolingFileLogger.LogWarn("Failed to append to LogWindow.", ex:=ex)
-                End Try
-            End If
-
-            If ExternalLogSink IsNot Nothing Then
-                Try
-                    ExternalLogSink.Invoke(visibleMessage, normalizedLevel)
-                Catch ex As Exception
-                    ToolingFileLogger.LogWarn("Failed to forward log entry.", ex:=ex)
-                End Try
-            End If
+            AppendVisibleLogInternal(visibleMessage, normalizedLevel)
         End Sub
 
         Public Sub LogWarn(message As String,

@@ -100,6 +100,23 @@ Partial Public Class ThisAddIn
         Public Property IncludeHiddenSystem As Boolean = False
     End Class
 
+    Private Function BuildAutoPilotTempWorkspaceState() As ChatAgentWorkspaceState
+        If String.IsNullOrWhiteSpace(_apCurrentTempDir) OrElse Not Directory.Exists(_apCurrentTempDir) Then
+            Return Nothing
+        End If
+
+        Return New ChatAgentWorkspaceState() With {
+            .RootPath = Path.GetFullPath(_apCurrentTempDir),
+            .PersistUntilRevoked = False,
+            .AllowRead = True,
+            .AllowWrite = True,
+            .AllowMoveCopyRename = True,
+            .AllowDelete = True,
+            .SaveDroppedFilesToWorkspace = False,
+            .IncludeHiddenSystem = True
+        }
+    End Function
+
     ' ═══════════════════════════════════════════════════════════════════════════
     '  FILE MANAGEMENT
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -888,6 +905,13 @@ Partial Public Class ThisAddIn
     End Function
 
     Private Function EnsureChatAgentTempDir() As String
+        If _apActive AndAlso
+           Not String.IsNullOrWhiteSpace(_apCurrentTempDir) AndAlso
+           Directory.Exists(_apCurrentTempDir) Then
+
+            Return _apCurrentTempDir
+        End If
+
         If String.IsNullOrWhiteSpace(_chatAgentTempDir) OrElse Not Directory.Exists(_chatAgentTempDir) Then
             _chatAgentTempDir = Path.Combine(Path.GetTempPath(), CA_TempPrefix & Guid.NewGuid().ToString("N"))
             Directory.CreateDirectory(_chatAgentTempDir)
@@ -1040,10 +1064,8 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
-    Private Function GetChatAgentWorkspaceTools() As List(Of ModelConfig)
+    Private Function BuildAgentWorkspaceToolsCore() As List(Of ModelConfig)
         Dim tools As New List(Of ModelConfig)()
-
-        If Not IsChatAgentWorkspaceConnected() Then Return tools
 
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = CA_Tool_WorkspaceRead,
@@ -1171,6 +1193,18 @@ Partial Public Class ThisAddIn
 
     End Function
 
+    Private Function GetChatAgentWorkspaceTools() As List(Of ModelConfig)
+        If Not IsChatAgentWorkspaceConnected() Then
+            Return New List(Of ModelConfig)()
+        End If
+
+        Return BuildAgentWorkspaceToolsCore()
+    End Function
+
+    Private Function GetAutoPilotAgentWorkspaceTools() As List(Of ModelConfig)
+        Return BuildAgentWorkspaceToolsCore()
+    End Function
+
     Friend Function IsChatAgentWorkspaceTool(toolName As String) As Boolean
         Select Case toolName
             Case CA_Tool_WorkspaceList,
@@ -1220,12 +1254,12 @@ Partial Public Class ThisAddIn
         End Try
 
         Try
-            If Not _chatAgentActive OrElse _apActive Then
+            If Not ((_chatAgentActive AndAlso Not _apActive) OrElse _apActive OrElse HasActiveScheduledTaskWorkspace()) Then
                 response.Success = False
-                response.ErrorMessage = "Workspace tools are available only in Local Chat Agent mode."
+                response.ErrorMessage = "Workspace tools are available only in Local Chat Agent mode, during AutoPilot processing, or during scheduled-task execution."
             ElseIf Not IsChatAgentWorkspaceConnected() Then
                 response.Success = False
-                response.ErrorMessage = "No agent workspace is connected."
+                response.ErrorMessage = "No active workspace is available."
             Else
                 Select Case toolCall.ToolName
                     Case CA_Tool_WorkspaceList

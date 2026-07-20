@@ -1337,6 +1337,40 @@ Partial Public Class ThisAddIn
 
         Return ""
     End Function
+    Private Function GetLocalChatMainMailboxSmtpAddress() As String
+        Try
+            Dim ns As Microsoft.Office.Interop.Outlook.NameSpace = Application.GetNamespace("MAPI")
+            Dim defaultStore As Microsoft.Office.Interop.Outlook.Store = Nothing
+
+            Try
+                defaultStore = ns.DefaultStore
+            Catch
+            End Try
+
+            If defaultStore Is Nothing Then Return ""
+
+            For i As Integer = 1 To ns.Accounts.Count
+                Try
+                    Dim acct As Microsoft.Office.Interop.Outlook.Account = ns.Accounts(i)
+                    If acct Is Nothing Then Continue For
+
+                    Dim deliveryStore As Microsoft.Office.Interop.Outlook.Store = Nothing
+                    Try : deliveryStore = acct.DeliveryStore : Catch : End Try
+
+                    If deliveryStore IsNot Nothing AndAlso
+                       deliveryStore.StoreID.Equals(defaultStore.StoreID, StringComparison.OrdinalIgnoreCase) AndAlso
+                       Not String.IsNullOrWhiteSpace(acct.SmtpAddress) Then
+                        Return acct.SmtpAddress.Trim()
+                    End If
+                Catch
+                End Try
+            Next
+        Catch
+        End Try
+
+        Return ""
+    End Function
+
     Private Function GetSchedulerCallerOwnerAddress() As String
         If _apCurrentMailInfo IsNot Nothing AndAlso
            Not String.IsNullOrWhiteSpace(_apCurrentMailInfo.SenderEmail) Then
@@ -1533,6 +1567,19 @@ Partial Public Class ThisAddIn
                     Dim isLocalChatOrigin As Boolean =
                         (Not _apActive AndAlso INI_WebServerBlock <> 4)
 
+                    Dim mainLocalChatMailboxAddress As String = ""
+                    If isLocalChatOrigin AndAlso INI_AutoPilotSchedulerLocalChat Then
+                        mainLocalChatMailboxAddress = GetLocalChatMainMailboxSmtpAddress()
+
+                        If String.IsNullOrWhiteSpace(mainLocalChatMailboxAddress) Then
+                            response.Success = False
+                            response.ErrorCode = "scheduler_localchat_main_mailbox_required"
+                            response.ErrorMessage = "Local Chat scheduled e-mail delivery requires the main mailbox to be available."
+                            response.Response = "Error: Local Chat scheduled e-mail delivery requires the main mailbox to be available."
+                            Return response
+                        End If
+                    End If
+
                     Dim rawDeliverTo As Object = Nothing
                     If args.ContainsKey("deliver_to") Then
                         rawDeliverTo = args("deliver_to")
@@ -1567,6 +1614,10 @@ Partial Public Class ThisAddIn
                         rawDeliverTo = Nothing
                     End If
 
+                    If isLocalChatOrigin AndAlso INI_AutoPilotSchedulerLocalChat Then
+                        rawDeliverTo = Nothing
+                    End If
+
                     Dim deliverToError As String = ""
                     If Not TryNormalizeSchedulerDeliverToForCaller(
                         rawDeliverTo,
@@ -1584,6 +1635,14 @@ Partial Public Class ThisAddIn
 
                     task.ExecutionMode = ResolveScheduledTaskExecutionMode(isLocalChatOrigin, task.DeliverTo)
                     task.CreatedBy = schedulerOwnerAddress
+
+                    If isLocalChatOrigin AndAlso
+                       task.ExecutionMode.Equals(AP_TaskExecutionModeEmail, StringComparison.OrdinalIgnoreCase) Then
+
+                        task.DeliverTo = New List(Of String) From {
+                            mainLocalChatMailboxAddress
+                        }
+                    End If
 
 
                     ' Store attachments from current mail if requested
@@ -1622,7 +1681,7 @@ Partial Public Class ThisAddIn
                             "⚠ This task will run only while the local webserver is running, and each due execution will first ask the user for approval."
                     ElseIf Not _apActive Then
                         apWarning = vbCrLf &
-                            "⚠ This task will run while the local webserver is running and will send the result by e-mail to the mailbox recorded for this task."
+                            "⚠ This task will run while the local webserver is running and will send the result by e-mail only from and to the main mailbox."
                     End If
 
                     response.Response = $"Task created successfully." & vbCrLf &
@@ -1711,6 +1770,19 @@ Partial Public Class ThisAddIn
                         task.ExecutionMode.Equals(AP_TaskExecutionModeBrowserPrompt, StringComparison.OrdinalIgnoreCase) OrElse
                         (Not _apActive AndAlso INI_WebServerBlock <> 4)
 
+                    Dim mainLocalChatMailboxAddress As String = ""
+                    If isLocalChatOrigin AndAlso INI_AutoPilotSchedulerLocalChat Then
+                        mainLocalChatMailboxAddress = GetLocalChatMainMailboxSmtpAddress()
+
+                        If String.IsNullOrWhiteSpace(mainLocalChatMailboxAddress) Then
+                            response.Success = False
+                            response.ErrorCode = "scheduler_localchat_main_mailbox_required"
+                            response.ErrorMessage = "Local Chat scheduled e-mail delivery requires the main mailbox to be available."
+                            response.Response = "Error: Local Chat scheduled e-mail delivery requires the main mailbox to be available."
+                            Return response
+                        End If
+                    End If
+
                     Dim rawDeliverTo As Object = Nothing
                     If args.ContainsKey("deliver_to") Then
                         rawDeliverTo = args("deliver_to")
@@ -1748,6 +1820,10 @@ Partial Public Class ThisAddIn
                         rawDeliverTo = Nothing
                     End If
 
+                    If isLocalChatOrigin AndAlso INI_AutoPilotSchedulerLocalChat Then
+                        rawDeliverTo = Nothing
+                    End If
+
                     Dim deliverToError As String = ""
                     If Not TryNormalizeSchedulerDeliverToForCaller(
                         rawDeliverTo,
@@ -1765,6 +1841,14 @@ Partial Public Class ThisAddIn
 
                     task.ExecutionMode = ResolveScheduledTaskExecutionMode(isLocalChatOrigin, task.DeliverTo)
                     task.CreatedBy = schedulerOwnerAddress
+
+                    If isLocalChatOrigin AndAlso
+                       task.ExecutionMode.Equals(AP_TaskExecutionModeEmail, StringComparison.OrdinalIgnoreCase) Then
+
+                        task.DeliverTo = New List(Of String) From {
+                            mainLocalChatMailboxAddress
+                        }
+                    End If
 
                     ' Store new attachments from current mail if requested
                     Dim storeNames As List(Of String) = Nothing

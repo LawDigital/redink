@@ -45,6 +45,7 @@ Namespace Agents
         Private pnlButtons As FlowLayoutPanel
         Private outer As TableLayoutPanel
         Private chkAuthorMode As CheckBox
+        Private chkAuthorCentral As CheckBox
         Private _dialogOwnerScope As System.IDisposable = Nothing
 
         Private Class Entry
@@ -74,9 +75,9 @@ Namespace Agents
             Me.AutoScaleMode = AutoScaleMode.Dpi
             Me.AutoScaleDimensions = New SizeF(96.0F, 96.0F)
             Me.Font = New Font("Segoe UI", 9.0F, FontStyle.Regular, GraphicsUnit.Point)
-            Me.Width = 860
+            Me.Width = 980
             Me.Height = 620
-            Me.MinimumSize = New Size(680, 440)
+            Me.MinimumSize = New Size(820, 440)
 
             Try
                 Dim bmp As New Bitmap(SharedLibrary.SharedMethods.GetLogoBitmap(SharedLibrary.SharedMethods.LogoType.Standard))
@@ -144,6 +145,19 @@ Namespace Agents
                     ElseIf Not chkAuthorMode.Checked AndAlso SkillAuthorMode.IsActive Then
                         SkillAuthorMode.Disable()
                     End If
+                    Me.chkAuthorCentral.Enabled = chkAuthorMode.Checked
+                End Sub
+
+            Me.chkAuthorCentral = New CheckBox() With {
+                .Text = "Also allow writing to the shared/central resource folder",
+                .AutoSize = True,
+                .Checked = SkillAuthorMode.AllowCentralWrites,
+                .Enabled = SkillAuthorMode.IsActive,
+                .Margin = New Padding(0, 8, 12, 0)
+            }
+            AddHandler Me.chkAuthorCentral.CheckedChanged,
+                Sub(s, e)
+                    SkillAuthorMode.AllowCentralWrites = chkAuthorCentral.Checked
                 End Sub
 
             Me.btnClose = New Button() With {.Text = "Close", .DialogResult = DialogResult.OK}
@@ -153,7 +167,7 @@ Namespace Agents
                 .Dock = DockStyle.Fill,
                 .FlowDirection = FlowDirection.RightToLeft,
                 .AutoSize = True,
-                .WrapContents = False,
+                .WrapContents = True,
                 .Margin = New Padding(0, 8, 0, 0)
             }
             Me.pnlButtons.Controls.Add(Me.btnClose)
@@ -161,6 +175,7 @@ Namespace Agents
             Me.pnlButtons.Controls.Add(Me.btnOpenFolder)
             Me.pnlButtons.Controls.Add(Me.btnRefresh)
             Me.pnlButtons.Controls.Add(Me.chkAuthorMode)
+            Me.pnlButtons.Controls.Add(Me.chkAuthorCentral)
 
             Me.outer.Controls.Add(Me.lblTitle, 0, 0)
             Me.outer.Controls.Add(Me.txtFilter, 0, 1)

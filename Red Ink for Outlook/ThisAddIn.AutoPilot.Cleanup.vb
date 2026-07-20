@@ -49,6 +49,10 @@ Partial Public Class ThisAddIn
     Private Const AP_CleanupDeleteAfterUtcProperty As String =
         "http://schemas.microsoft.com/mapi/string/{00020386-0000-0000-C000-000000000046}/X-RedInk-AutoDeleteAfterUtc"
 
+    ' When True, an auto-delete cleanup pass runs immediately at AutoPilot startup.
+    ' Default False: cleanup runs only on the periodic timer.
+    Private Const AP_RunAutoDeleteCleanupOnStartup As Boolean = False
+
     Private Const AP_AutoDeleteTimerIntervalSeconds As Integer = 6 * 60 * 60
     Private Const AP_AutoDeleteUiYieldItemInterval As Integer = 100
     Private Const AP_AutoDeleteUiYieldFolderInterval As Integer = 10
@@ -362,6 +366,97 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
+
+    ''' <summary>
+    ''' Schedules an auto-reply/out-of-office mail for auto-deletion by stamping it with
+    ''' the cleanup group ID of its originating AutoPilot conversation. Such mails are not
+    ''' processed, but should still be removed by the retention timer alongside the group.
+    ''' </summary>
+    Friend Sub TagAutoReplyOrOofForCleanup(oofMail As MailItem)
+        If oofMail Is Nothing Then Return
+        If _apConfig Is Nothing OrElse _apConfig.AutoDeleteAfterHours <= 0 Then Return
+
+        Dim groupId = TryGetCleanupGroupIdFromConversation(oofMail)
+        If String.IsNullOrWhiteSpace(groupId) Then Return
+
+        Dim deleteAfterUtc = GetAutoDeleteCutoffUtc()
+        If Not deleteAfterUtc.HasValue Then Return
+
+        StampCleanupMetadata(
+            oofMail,
+            groupId,
+            isEligible:=True,
+            answeredUtc:=DateTime.UtcNow,
+            deleteAfterUtc:=deleteAfterUtc,
+            saveItem:=True)
+
+        ApDashboardLog(
+            $"🗑 Auto-delete scheduled for auto-reply/OOF in group {groupId} in {_apConfig.AutoDeleteAfterHours}h.",
+            "step")
+    End Sub
+
+    ''' <summary>
+    ''' Finds an existing cleanup group ID for a mail by inspecting the item itself and then
+    ''' walking its conversation thread for a sibling that already carries a group ID.
+    ''' </summary>
+    Private Function TryGetCleanupGroupIdFromConversation(mi As MailItem) As String
+        If mi Is Nothing Then Return Nothing
+
+        ' 1. The item itself may already carry a group id.
+        Dim ownGroupId = GetCleanupGroupId(mi)
+        If Not String.IsNullOrWhiteSpace(ownGroupId) Then Return ownGroupId
+
+        ' 2. Walk the conversation thread to find a sibling with a cleanup group id.
+        Dim conversation As Conversation = Nothing
+        Try
+            conversation = mi.GetConversation()
+        Catch
+            ' GetConversation can fail on some store types
+        End Try
+
+        If conversation IsNot Nothing Then
+            Try
+                Dim rootItems As SimpleItems = conversation.GetRootItems()
+                If rootItems IsNot Nothing Then
+                    For Each rootItem As Object In rootItems
+                        Dim found = FindCleanupGroupIdInConversationNode(conversation, rootItem, 0)
+                        If Not String.IsNullOrWhiteSpace(found) Then Return found
+                    Next
+                End If
+            Catch
+                ' Conversation API can throw on certain store types
+            End Try
+        End If
+
+        Return Nothing
+    End Function
+
+    ''' <summary>Recursively searches conversation tree nodes for an existing cleanup group ID.</summary>
+    Private Function FindCleanupGroupIdInConversationNode(conv As Conversation,
+                                                          item As Object,
+                                                          depth As Integer) As String
+        If depth > AP_MaxThreadDepth Then Return Nothing
+
+        Try
+            Dim nodeMail = TryCast(item, MailItem)
+            If nodeMail IsNot Nothing Then
+                Dim gid = GetCleanupGroupId(nodeMail)
+                If Not String.IsNullOrWhiteSpace(gid) Then Return gid
+            End If
+
+            Dim children As SimpleItems = conv.GetChildren(item)
+            If children IsNot Nothing Then
+                For Each child As Object In children
+                    Dim found = FindCleanupGroupIdInConversationNode(conv, child, depth + 1)
+                    If Not String.IsNullOrWhiteSpace(found) Then Return found
+                Next
+            End If
+        Catch
+            ' Ignore individual node errors
+        End Try
+
+        Return Nothing
+    End Function
 
     Friend Sub MarkMailGroupAsAnsweredAndEligible(originalMail As MailItem)
         If originalMail Is Nothing Then Return

@@ -50,7 +50,7 @@ Namespace Agents
         Public Shared Sub Initialize(syncContext As SynchronizationContext, Optional userDataDir As String = Nothing)
             _uiSync = syncContext
             _userDataDir = If(String.IsNullOrWhiteSpace(userDataDir),
-                              Path.Combine(Path.GetTempPath(), "RedInk_JsSandbox"),
+                              SharedLibrary.SharedMethods.GetWebView2UserDataFolder(),
                               userDataDir)
         End Sub
 
@@ -567,11 +567,31 @@ Namespace Agents
                                        s.IsZoomControlEnabled = False
                                        s.IsBuiltInErrorPageEnabled = False
                                        ConfigureNetworkPolicy(allowNetwork)
+                                       AddHandler _wv.CoreWebView2.ProcessFailed, AddressOf OnSandboxProcessFailed
                                        _wv.CoreWebView2.NavigateToString("<!doctype html><html><head><meta charset=""utf-8""><title>sandbox</title></head><body></body></html>")
                                    End If
                                    _initialized = True
                                End Function).ConfigureAwait(False)
         End Function
+
+        ''' <summary>
+        ''' Handles a WebView2 render/browser process crash. Tears down the pooled control so the
+        ''' next RunAsync call re-initializes cleanly instead of blocking forever on a dead instance.
+        ''' </summary>
+        Private Shared Sub OnSandboxProcessFailed(sender As Object, e As CoreWebView2ProcessFailedEventArgs)
+            SharedLibrary.SharedMethods.LogWebView2ProcessFailed("JsSandbox", e.ProcessFailedKind.ToString(), e.ExitCode.ToString())
+            Try
+                If _wv IsNot Nothing Then
+                    If _hostForm IsNot Nothing AndAlso _hostForm.Controls.Contains(_wv) Then
+                        _hostForm.Controls.Remove(_wv)
+                    End If
+                    _wv.Dispose()
+                End If
+            Catch
+            End Try
+            _wv = Nothing
+            _initialized = False
+        End Sub
 
         Private Shared Sub ConfigureNetworkPolicy(allow As Boolean)
             Try

@@ -1117,7 +1117,7 @@ Partial Public Class ThisAddIn
         Dim CBCInstruct As String = $"with '{CellByCellPrefix}' or '{CellByCellPrefix2} if the instruction should be executed cell-by-cell"
         Dim TextInstruct As String = $"use '{TextPrefix}' or '{TextPrefix2}' if the instruction should apply cell-by-cell, but only to text cells"
         Dim BatchInstruct As String = $"use '{BatchPrefix}' if to process a directory of files"
-        Dim BubblesInstruct As String = $"use '{BubblesPrefix}' for inserting comments only"
+        Dim BubblesInstruct As String = $"use '{BubblesPrefix}' for inserting comments only; without it, you can still ask for values/formulas and comments together"
         Dim PaneInstruct As String = $"use '{PanePrefix}' for using the pane"
         Dim ExtInstruct As String = $"; insert '{ExtTrigger}' or '{ExtTriggerFixed}' (multiple times) for including the text of (a) file(s) (txt, docx, pdf), {ExtDirTrigger} for a directory of text files, or '{ExtWSTrigger}' to add more worksheet(s)"
         Dim AddonInstruct As String = $"; add '{ColorTrigger}' to check for colorcodes"

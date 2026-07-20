@@ -676,7 +676,26 @@ Partial Public Class ThisAddIn
         Dim toolName As String = If(toolCall.ToolName, "").Trim()
         If toolName = "" Then Return ""
 
+        ' Append-style operations are legitimately repeatable (each call mutates document
+        ' state), so they must never collapse into a duplicate-replay. A unique salt keeps
+        ' their signature distinct without affecting idempotent ops like replace/insert_*.
+        If IsRepeatableAppendCall(toolCall) Then
+            Return toolName.ToLowerInvariant() & "|append|" & Guid.NewGuid().ToString("N")
+        End If
+
         Return toolName.ToLowerInvariant() & "|" & BuildToolArgumentsSignature(toolCall.Arguments)
+    End Function
+
+    Private Function IsRepeatableAppendCall(toolCall As ToolCall) As Boolean
+        If toolCall Is Nothing OrElse toolCall.Arguments Is Nothing Then Return False
+
+        Dim opValue As Object = Nothing
+        If Not toolCall.Arguments.TryGetValue("op", opValue) OrElse opValue Is Nothing Then
+            Return False
+        End If
+
+        Return System.Convert.ToString(opValue, Globalization.CultureInfo.InvariantCulture).
+            Trim().Equals("append", StringComparison.OrdinalIgnoreCase)
     End Function
 
     Private Function IsDuplicateSuccessGuardedTool(toolName As String) As Boolean

@@ -166,16 +166,11 @@ Namespace Agents
                             hits.Add(BuildHit(idx, text, m.Index, m.Length, m.Value))
                         Next
                     Else
-                        Dim pos As Integer = 0
-                        While pos < text.Length
-                            Dim f As Integer = text.IndexOf(query, pos, cmp)
-                            If f < 0 Then Exit While
-
-                            hits.Add(BuildHit(idx, text, f, query.Length, text.Substring(f, query.Length)))
-                            If hits.Count >= maxHits Then Exit While
-
-                            pos = f + System.Math.Max(1, query.Length)
-                        End While
+                        Dim matches As List(Of Integer()) = FindAllInText(text, query, ignoreCase, maxHits - hits.Count)
+                        For Each mm As Integer() In matches
+                            hits.Add(BuildHit(idx, text, mm(0), mm(1), text.Substring(mm(0), mm(1))))
+                            If hits.Count >= maxHits Then Exit For
+                        Next
                     End If
 
                     If hits.Count >= maxHits Then Exit For
@@ -206,35 +201,33 @@ Namespace Agents
                 Return Err_("missing_find", "find is required for op '" & op & "'.")
             End If
 
+            ' Matching is per-W.Paragraph, so a 'find' that spans more than one paragraph
+            ' can never match. Reject it early with an actionable message instead of a
+            ' misleading 'no_match', and instruct the caller to split the operation.
+            If op <> "append" AndAlso ContainsParagraphBreak(find) Then
+                Return Err_("multi_paragraph_find",
+                            "The 'find' text spans more than one paragraph. word_markup matches within a single paragraph. " &
+                            "Split this into one operation per paragraph: replace the first paragraph, then use insert_after / additional replace calls for the remaining paragraphs.")
+            End If
+
             Using doc As WordprocessingDocument = WordprocessingDocument.Open(p, isEditable:=True)
                 Dim body As W.Body = doc.MainDocumentPart.Document.Body
                 Dim mutated As Integer = 0
 
                 If op = "append" Then
-                    Dim para As New W.Paragraph()
-                    Dim run As W.Run = MakeRun(text)
+                    For Each ln As String In SplitLines(text)
+                        body.AppendChild(MakeMarkdownParagraph(ln, body, asMarkup, author))
+                    Next
 
-                    If asMarkup Then
-                        Dim ins As New W.InsertedRun() With {
-                            .Id = NextChangeId(body).ToString(),
-                            .Author = author,
-                            .Date = DateTime.UtcNow
-                        }
-                        ins.AppendChild(run)
-                        para.AppendChild(ins)
-                    Else
-                        para.AppendChild(run)
-                    End If
-
-                    body.AppendChild(para)
                     mutated = 1
                 Else
                     For Each para As W.Paragraph In body.Descendants(Of W.Paragraph)().ToList()
                         Dim pt As String = GetParagraphText(para)
-                        Dim idx As Integer = pt.IndexOf(find, StringComparison.Ordinal)
-                        If idx < 0 Then Continue For
+                        Dim mStart As Integer
+                        Dim mLen As Integer
+                        If Not TryFindInText(pt, find, mStart, mLen) Then Continue For
 
-                        ApplyTextOpToParagraph(para, find, text, op, asMarkup, author, body)
+                        ApplyTextOpToParagraph(para, mStart, mLen, text, op, asMarkup, author, body)
                         mutated += 1
 
                         If onlyFirst Then Exit For
@@ -256,23 +249,35 @@ Namespace Agents
             })
         End Function
 
+        ''' <summary>
+        ''' Returns True when <paramref name="value"/> contains an explicit paragraph
+        ''' break, i.e. text that would necessarily straddle more than one W.Paragraph.
+        ''' </summary>
+        Private Shared Function ContainsParagraphBreak(value As String) As Boolean
+            If String.IsNullOrEmpty(value) Then Return False
+            Return value.IndexOfAny(New Char() {ChrW(10), ChrW(13)}) >= 0
+        End Function
+
         Private Shared Sub ApplyTextOpToParagraph(para As W.Paragraph,
-                                                   find As String,
+                                                   matchStart As Integer,
+                                                   matchLength As Integer,
                                                    newText As String,
                                                    op As String,
                                                    asMarkup As Boolean,
                                                    author As String,
                                                    body As W.Body)
-            ' Naive strategy: rebuild W.Paragraph from its plain text. Preserves the W.Paragraph's pPr;
-            ' loses inline W.Run formatting that splits across the matched substring. Acceptable for
-            ' agent-level operations and matches Claude Cowork's "Edit W.Paragraph" behavior.
+            ' Rebuild the W.Paragraph from its plain text. matchStart/matchLength are offsets
+            ' into GetParagraphText(para) produced by whitespace-normalized matching, so 'mid'
+            ' is the ACTUAL text in the paragraph, not the model-supplied 'find'. Preserves the
+            ' paragraph's pPr; loses inline run formatting that splits across the matched span.
             Dim pt As String = GetParagraphText(para)
-            Dim idx As Integer = pt.IndexOf(find, StringComparison.Ordinal)
-            If idx < 0 Then Return
+            If matchStart < 0 OrElse matchStart > pt.Length Then Return
+            If matchLength < 0 Then matchLength = 0
+            If matchStart + matchLength > pt.Length Then matchLength = pt.Length - matchStart
 
-            Dim before As String = pt.Substring(0, idx)
-            Dim mid As String = pt.Substring(idx, find.Length)
-            Dim after As String = pt.Substring(idx + find.Length)
+            Dim before As String = pt.Substring(0, matchStart)
+            Dim mid As String = pt.Substring(matchStart, matchLength)
+            Dim after As String = pt.Substring(matchStart + matchLength)
 
             Dim pPr As W.ParagraphProperties = para.Elements(Of W.ParagraphProperties)().FirstOrDefault()
             para.RemoveAllChildren()
@@ -285,77 +290,38 @@ Namespace Agents
                 para.AppendChild(MakeRun(before))
             End If
 
+            Dim last As W.Paragraph = para
+
             Select Case op
                 Case "replace"
-                    If asMarkup Then
-                        If mid.Length > 0 Then
-                            Dim del As New W.DeletedRun() With {
-                                .Id = NextChangeId(body).ToString(),
-                                .Author = author,
-                                .Date = DateTime.UtcNow
-                            }
-                            del.AppendChild(MakeRun(mid, deletedText:=True))
-                            para.AppendChild(del)
-                        End If
-
-                        If newText.Length > 0 Then
-                            Dim ins As New W.InsertedRun() With {
-                                .Id = NextChangeId(body).ToString(),
-                                .Author = author,
-                                .Date = DateTime.UtcNow
-                            }
-                            ins.AppendChild(MakeRun(newText))
-                            para.AppendChild(ins)
-                        End If
-                    Else
-                        If newText.Length > 0 Then
-                            para.AppendChild(MakeRun(newText))
-                        End If
+                    If asMarkup AndAlso mid.Length > 0 Then
+                        Dim del As New W.DeletedRun() With {
+                            .Id = NextChangeId(body).ToString(),
+                            .Author = author,
+                            .Date = DateTime.UtcNow
+                        }
+                        del.AppendChild(MakeRun(mid, deletedText:=True))
+                        para.AppendChild(del)
                     End If
+
+                    Dim allowBlockOnFirst As Boolean = (before.Length = 0 AndAlso after.Length = 0)
+                    last = AppendMarkdownContent(para, newText, asMarkup, author, body, allowBlockOnFirst)
+                    AppendPlainRun(last, after)
 
                 Case "insert_before"
-                    If asMarkup AndAlso newText.Length > 0 Then
-                        Dim ins As New W.InsertedRun() With {
-                            .Id = NextChangeId(body).ToString(),
-                            .Author = author,
-                            .Date = DateTime.UtcNow
-                        }
-                        ins.AppendChild(MakeRun(newText))
-                        para.AppendChild(ins)
-                    ElseIf newText.Length > 0 Then
-                        para.AppendChild(MakeRun(newText))
-                    End If
-
-                    If mid.Length > 0 Then
-                        para.AppendChild(MakeRun(mid))
-                    End If
+                    last = AppendMarkdownContent(para, newText, asMarkup, author, body, False)
+                    AppendPlainRun(last, mid)
+                    AppendPlainRun(last, after)
 
                 Case "insert_after"
-                    If mid.Length > 0 Then
-                        para.AppendChild(MakeRun(mid))
-                    End If
-
-                    If asMarkup AndAlso newText.Length > 0 Then
-                        Dim ins As New W.InsertedRun() With {
-                            .Id = NextChangeId(body).ToString(),
-                            .Author = author,
-                            .Date = DateTime.UtcNow
-                        }
-                        ins.AppendChild(MakeRun(newText))
-                        para.AppendChild(ins)
-                    ElseIf newText.Length > 0 Then
-                        para.AppendChild(MakeRun(newText))
-                    End If
+                    AppendPlainRun(para, mid)
+                    last = AppendMarkdownContent(para, newText, asMarkup, author, body, False)
+                    AppendPlainRun(last, after)
 
                 Case Else
-                    If mid.Length > 0 Then
-                        para.AppendChild(MakeRun(mid))
-                    End If
+                    AppendPlainRun(para, mid)
+                    AppendPlainRun(last, after)
             End Select
-
-            If after.Length > 0 Then
-                para.AppendChild(MakeRun(after))
-            End If
         End Sub
 
         ' --------------------------------------------------------------- comments
@@ -403,10 +369,11 @@ Namespace Agents
 
                 For Each para As W.Paragraph In main.Document.Body.Descendants(Of W.Paragraph)().ToList()
                     Dim pt As String = GetParagraphText(para)
-                    Dim idx As Integer = pt.IndexOf(find, StringComparison.Ordinal)
-                    If idx < 0 Then Continue For
+                    Dim mStart As Integer
+                    Dim mLen As Integer
+                    If Not TryFindInText(pt, find, mStart, mLen) Then Continue For
 
-                    AttachCommentRangeToParagraph(para, find, newId)
+                    AttachCommentRangeToParagraph(para, mStart, mLen, newId)
                     attached = True
                     Exit For
                 Next
@@ -527,7 +494,9 @@ Namespace Agents
 
                 For Each para As W.Paragraph In doc.MainDocumentPart.Document.Body.Descendants(Of W.Paragraph)().ToList()
                     Dim pt As String = GetParagraphText(para)
-                    If pt.IndexOf(find, StringComparison.Ordinal) < 0 Then Continue For
+                    Dim fmtStart As Integer
+                    Dim fmtLen As Integer
+                    If Not TryFindInText(pt, find, fmtStart, fmtLen) Then Continue For
 
                     Dim pPr As W.ParagraphProperties = para.Elements(Of W.ParagraphProperties)().FirstOrDefault()
                     If pPr Is Nothing Then
@@ -732,11 +701,119 @@ Namespace Agents
         Private Shared Function GetParagraphText(p As W.Paragraph) As String
             Dim sb As New StringBuilder()
 
-            For Each t As W.Text In p.Descendants(Of W.Text)()
-                sb.Append(t.Text)
+            For Each el As OpenXmlElement In p.Descendants()
+                If TypeOf el Is W.Text Then
+                    sb.Append(DirectCast(el, W.Text).Text)
+                ElseIf TypeOf el Is W.TabChar Then
+                    sb.Append(vbTab)
+                ElseIf TypeOf el Is W.Break OrElse TypeOf el Is W.CarriageReturn Then
+                    sb.Append(vbLf)
+                End If
             Next
 
             Return sb.ToString()
+        End Function
+
+        ' --------------------------------------------------------------- resilient matching
+        '
+        ' Model-supplied 'find'/'query' rarely byte-matches the paragraph text: runs get
+        ' split, whitespace collapses, NBSP/smart quotes/dashes differ. These helpers build a
+        ' whitespace- and punctuation-normalized projection of the text while keeping a map
+        ' back to the ORIGINAL character offsets, so callers still operate on real positions.
+
+        Private Shared Function MapCharForMatch(c As Char) As Char
+            If Char.IsWhiteSpace(c) OrElse c = ChrW(&HA0) OrElse c = ChrW(&H202F) Then
+                Return " "c
+            End If
+
+            Select Case c
+                Case ChrW(&H2018), ChrW(&H2019), ChrW(&H201A), ChrW(&H2032), "`"c, "´"c
+                    Return "'"c
+                Case ChrW(&H201C), ChrW(&H201D), ChrW(&H201E), ChrW(&H2033)
+                    Return """"c
+                Case ChrW(&H2013), ChrW(&H2014), ChrW(&H2212)
+                    Return "-"c
+                Case Else
+                    Return c
+            End Select
+        End Function
+
+        ' Builds a normalized string. When map isNot Nothing, map(i) is the original index of
+        ' normalized char i. Consecutive whitespace collapses to a single space.
+        Private Shared Function BuildNormalized(text As String,
+                                                ignoreCase As Boolean,
+                                                Optional ByRef map As List(Of Integer) = Nothing) As String
+            Dim sb As New StringBuilder()
+            Dim wantMap As Boolean = (map IsNot Nothing)
+            Dim prevWasSpace As Boolean = False
+
+            If text Is Nothing Then Return String.Empty
+
+            For i As Integer = 0 To text.Length - 1
+                Dim mapped As Char = MapCharForMatch(text(i))
+
+                If mapped = " "c Then
+                    If prevWasSpace Then Continue For
+                    prevWasSpace = True
+                Else
+                    prevWasSpace = False
+                    If ignoreCase Then mapped = Char.ToLowerInvariant(mapped)
+                End If
+
+                sb.Append(mapped)
+                If wantMap Then map.Add(i)
+            Next
+
+            Return sb.ToString()
+        End Function
+
+        ' Returns (origStart, origLength) pairs of every match of 'needle' inside 'haystack'.
+        Private Shared Function FindAllInText(haystack As String,
+                                              needle As String,
+                                              ignoreCase As Boolean,
+                                              maxHits As Integer) As List(Of Integer())
+            Dim results As New List(Of Integer())()
+            If String.IsNullOrEmpty(haystack) OrElse String.IsNullOrEmpty(needle) Then Return results
+
+            Dim map As New List(Of Integer)()
+            Dim normHay As String = BuildNormalized(haystack, ignoreCase, map)
+            Dim normNeedle As String = BuildNormalized(needle, ignoreCase).Trim()
+            If normNeedle.Length = 0 Then Return results
+
+            Dim pos As Integer = 0
+            While pos <= normHay.Length - normNeedle.Length
+                Dim f As Integer = normHay.IndexOf(normNeedle, pos, StringComparison.Ordinal)
+                If f < 0 Then Exit While
+
+                Dim origStart As Integer = map(f)
+                Dim origEnd As Integer = map(f + normNeedle.Length - 1)
+                results.Add(New Integer() {origStart, origEnd - origStart + 1})
+
+                If maxHits > 0 AndAlso results.Count >= maxHits Then Exit While
+                pos = f + normNeedle.Length
+            End While
+
+            Return results
+        End Function
+
+        ' First match; tries case-sensitive first, then case-insensitive fallback.
+        Private Shared Function TryFindInText(haystack As String,
+                                              needle As String,
+                                              ByRef matchStart As Integer,
+                                              ByRef matchLength As Integer) As Boolean
+            matchStart = -1
+            matchLength = 0
+
+            Dim hit As List(Of Integer()) = FindAllInText(haystack, needle, False, 1)
+            If hit.Count = 0 Then
+                hit = FindAllInText(haystack, needle, True, 1)
+            End If
+
+            If hit.Count = 0 Then Return False
+
+            matchStart = hit(0)(0)
+            matchLength = hit(0)(1)
+            Return True
         End Function
 
         Private Shared Function MakeRun(text As String, Optional deletedText As Boolean = False) As W.Run
@@ -750,6 +827,178 @@ Namespace Agents
             End If
 
             Return r
+        End Function
+
+        Private Shared Function SplitLines(text As String) As String()
+            If text Is Nothing Then Return New String() {}
+            Return text.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf).Split(CChar(vbLf))
+        End Function
+
+        Private Shared Sub AppendPlainRun(para As W.Paragraph, text As String)
+            If Not String.IsNullOrEmpty(text) Then
+                para.AppendChild(MakeRun(text))
+            End If
+        End Sub
+
+        Private Shared Function MakeFormattedRun(text As String, bold As Boolean, italic As Boolean) As W.Run
+            Dim r As New W.Run()
+
+            If bold OrElse italic Then
+                Dim rPr As New W.RunProperties()
+                If bold Then rPr.AppendChild(New W.Bold())
+                If italic Then rPr.AppendChild(New W.Italic())
+                r.AppendChild(rPr)
+            End If
+
+            r.AppendChild(New W.Text(text) With {.Space = SpaceProcessingModeValues.Preserve})
+            Return r
+        End Function
+
+        ' Splits a single line into runs, honouring **bold**/__bold__ and *italic*/_italic_.
+        Private Shared Function ParseInlineRuns(text As String) As List(Of W.Run)
+            Dim runs As New List(Of W.Run)()
+
+            If String.IsNullOrEmpty(text) Then
+                runs.Add(MakeFormattedRun(String.Empty, False, False))
+                Return runs
+            End If
+
+            Dim rx As New Regex("(\*\*|__)(.+?)\1|(\*|_)(.+?)\3")
+            Dim pos As Integer = 0
+
+            For Each m As Match In rx.Matches(text)
+                If m.Index > pos Then
+                    runs.Add(MakeFormattedRun(text.Substring(pos, m.Index - pos), False, False))
+                End If
+
+                If m.Groups(2).Success Then
+                    runs.Add(MakeFormattedRun(m.Groups(2).Value, True, False))
+                Else
+                    runs.Add(MakeFormattedRun(m.Groups(4).Value, False, True))
+                End If
+
+                pos = m.Index + m.Length
+            Next
+
+            If pos < text.Length Then
+                runs.Add(MakeFormattedRun(text.Substring(pos), False, False))
+            End If
+
+            If runs.Count = 0 Then
+                runs.Add(MakeFormattedRun(text, False, False))
+            End If
+
+            Return runs
+        End Function
+
+        ' Detects a block-level Markdown marker and returns the remaining content.
+        Private Shared Function DetectBlock(line As String, ByRef styleId As String) As String
+            styleId = Nothing
+            If line Is Nothing Then Return String.Empty
+
+            Dim heading As Match = Regex.Match(line, "^(#{1,6})\s+(.*)$")
+            If heading.Success Then
+                styleId = "Heading" & heading.Groups(1).Value.Length.ToString()
+                Return heading.Groups(2).Value
+            End If
+
+            Dim bullet As Match = Regex.Match(line, "^\s*[-*+]\s+(.*)$")
+            If bullet.Success Then
+                styleId = "ListParagraph"
+                Return bullet.Groups(1).Value
+            End If
+
+            Dim numbered As Match = Regex.Match(line, "^\s*\d+[.)]\s+(.*)$")
+            If numbered.Success Then
+                styleId = "ListParagraph"
+                Return numbered.Groups(1).Value
+            End If
+
+            Return line
+        End Function
+
+        Private Shared Sub AppendInlineRunsWrapped(para As W.Paragraph,
+                                                   text As String,
+                                                   asMarkup As Boolean,
+                                                   author As String,
+                                                   body As W.Body)
+            Dim runs As List(Of W.Run) = ParseInlineRuns(text)
+
+            If asMarkup Then
+                Dim ins As New W.InsertedRun() With {
+                    .Id = NextChangeId(body).ToString(),
+                    .Author = author,
+                    .Date = DateTime.UtcNow
+                }
+                For Each r As W.Run In runs
+                    ins.AppendChild(r)
+                Next
+                para.AppendChild(ins)
+            Else
+                For Each r As W.Run In runs
+                    para.AppendChild(r)
+                Next
+            End If
+        End Sub
+
+        Private Shared Function MakeMarkdownParagraph(line As String,
+                                                      body As W.Body,
+                                                      asMarkup As Boolean,
+                                                      author As String) As W.Paragraph
+            Dim para As New W.Paragraph()
+            Dim styleId As String = Nothing
+            Dim content As String = DetectBlock(line, styleId)
+
+            If styleId IsNot Nothing Then
+                Dim pPr As New W.ParagraphProperties()
+                pPr.AppendChild(New W.ParagraphStyleId() With {.Val = styleId})
+                para.AppendChild(pPr)
+            End If
+
+            AppendInlineRunsWrapped(para, content, asMarkup, author, body)
+            Return para
+        End Function
+
+        ' Appends Markdown content that may span several lines. The first line is written into
+        ' 'para'; each subsequent line becomes a new sibling W.Paragraph inserted right after the
+        ' previous one. Returns the W.Paragraph that received the last line (for trailing text).
+        Private Shared Function AppendMarkdownContent(para As W.Paragraph,
+                                                      content As String,
+                                                      asMarkup As Boolean,
+                                                      author As String,
+                                                      body As W.Body,
+                                                      allowBlockOnFirst As Boolean) As W.Paragraph
+            If content Is Nothing Then Return para
+
+            Dim lines As String() = SplitLines(content)
+            If lines.Length = 0 Then Return para
+
+            Dim current As W.Paragraph = para
+
+            For i As Integer = 0 To lines.Length - 1
+                If i = 0 Then
+                    Dim styleId As String = Nothing
+                    Dim text0 As String = DetectBlock(lines(0), styleId)
+
+                    If allowBlockOnFirst AndAlso styleId IsNot Nothing Then
+                        Dim pPr As W.ParagraphProperties = current.Elements(Of W.ParagraphProperties)().FirstOrDefault()
+                        If pPr Is Nothing Then
+                            pPr = current.PrependChild(New W.ParagraphProperties())
+                        End If
+                        pPr.RemoveAllChildren(Of W.ParagraphStyleId)()
+                        pPr.PrependChild(New W.ParagraphStyleId() With {.Val = styleId})
+                        AppendInlineRunsWrapped(current, text0, asMarkup, author, body)
+                    Else
+                        AppendInlineRunsWrapped(current, lines(0), asMarkup, author, body)
+                    End If
+                Else
+                    Dim newPara As W.Paragraph = MakeMarkdownParagraph(lines(i), body, asMarkup, author)
+                    current.InsertAfterSelf(newPara)
+                    current = newPara
+                End If
+            Next
+
+            Return current
         End Function
 
         Private Shared Function NextChangeId(body As W.Body) As Integer
@@ -785,14 +1034,17 @@ Namespace Agents
             Return maxId + 1
         End Function
 
-        Private Shared Sub AttachCommentRangeToParagraph(para As W.Paragraph, find As String, commentId As Integer)
+        Private Shared Sub AttachCommentRangeToParagraph(para As W.Paragraph, matchStart As Integer, matchLength As Integer, commentId As Integer)
+            ' matchStart/matchLength are offsets into GetParagraphText(para) produced by
+            ' whitespace-normalized matching, so 'mid' is the ACTUAL anchored text.
             Dim pt As String = GetParagraphText(para)
-            Dim idx As Integer = pt.IndexOf(find, StringComparison.Ordinal)
-            If idx < 0 Then Return
+            If matchStart < 0 OrElse matchStart > pt.Length Then Return
+            If matchLength < 0 Then matchLength = 0
+            If matchStart + matchLength > pt.Length Then matchLength = pt.Length - matchStart
 
-            Dim before As String = pt.Substring(0, idx)
-            Dim mid As String = pt.Substring(idx, find.Length)
-            Dim after As String = pt.Substring(idx + find.Length)
+            Dim before As String = pt.Substring(0, matchStart)
+            Dim mid As String = pt.Substring(matchStart, matchLength)
+            Dim after As String = pt.Substring(matchStart + matchLength)
             Dim pPr As W.ParagraphProperties = para.Elements(Of W.ParagraphProperties)().FirstOrDefault()
 
             para.RemoveAllChildren()
@@ -954,7 +1206,8 @@ Namespace Agents
                 .ToolErrorHandling = "skip",
                 .ModelDescription = "Word (write, no markup)",
                 .ToolDefinition = "{""name"":""" & ToolWrite & """,""description"":""Modify text in a .docx WITHOUT tracked changes. Ops: replace | insert_before | insert_after | append (no 'find' required for append)."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string""},""op"":{""type"":""string"",""enum"":[""replace"",""insert_before"",""insert_after"",""append""]},""find"":{""type"":""string""},""text"":{""type"":""string""},""only_first"":{""type"":""boolean"",""description"":""Default true.""}},""required"":[""path"",""text""]}}",
-                .ToolInstructionsPrompt = ToolWrite & ": Edit a .docx without revision marks."
+                .ToolInstructionsPrompt = ToolWrite & ": Edit a .docx without revision marks. " &
+                    "Prefer the Outlook and Autopilot tools (like process_word_document) when they can accomplish the task; only fall back to word_* tools when those tools are not suitable, or when a skill or the user explicitly asks to use word_* tools."
             }
         End Function
 
@@ -966,7 +1219,8 @@ Namespace Agents
                 .ToolErrorHandling = "skip",
                 .ModelDescription = "Word (markup / tracked changes)",
                 .ToolDefinition = "{""name"":""" & ToolMarkup & """,""description"":""Modify text in a .docx using tracked changes (Word revision marks). Same ops as word_write."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string""},""op"":{""type"":""string"",""enum"":[""replace"",""insert_before"",""insert_after"",""append""]},""find"":{""type"":""string""},""text"":{""type"":""string""},""author"":{""type"":""string""},""only_first"":{""type"":""boolean""}},""required"":[""path"",""text""]}}",
-                .ToolInstructionsPrompt = ToolMarkup & ": Edit a .docx with revision marks (tracked changes)."
+                .ToolInstructionsPrompt = ToolMarkup & ": Edit a .docx with revision marks (tracked changes)." &
+                "Prefer the Outlook and Autopilot tools when they can accomplish the task; only fall back to word_* tools when those tools are not suitable, or when a skill or the user explicitly asks to use word_* tools."
             }
         End Function
 
@@ -978,7 +1232,8 @@ Namespace Agents
                 .ToolErrorHandling = "skip",
                 .ModelDescription = "Word (comment add)",
                 .ToolDefinition = "{""name"":""" & ToolCommentAdd & """,""description"":""Attach a Word comment to the first W.Paragraph containing 'find'. Returns the new comment id."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string""},""find"":{""type"":""string""},""text"":{""type"":""string""},""author"":{""type"":""string""},""initials"":{""type"":""string""}},""required"":[""path"",""find"",""text""]}}",
-                .ToolInstructionsPrompt = ToolCommentAdd & ": Add a Word bubble comment to a matched span."
+                .ToolInstructionsPrompt = ToolCommentAdd & ": Add a Word bubble comment to a matched span." &
+                                "Prefer the Outlook and Autopilot tools when they can accomplish the task; only fall back to word_* tools when those tools are not suitable, or when a skill or the user explicitly asks to use word_* tools."
             }
         End Function
 
