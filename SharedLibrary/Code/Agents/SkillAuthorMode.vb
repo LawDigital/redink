@@ -38,6 +38,12 @@ Namespace Agents
 
         Public Shared Sub Enable()
             Interlocked.Increment(_persistent)
+            ' Make sure the local .inky tree (root + skills/ + agents/) exists so new
+            ' resources and Inky.md can be created even on a fresh setup.
+            Try
+                AgentResources.EnsureLocalResourceDirectories()
+            Catch
+            End Try
         End Sub
 
         ' When False (default), author-mode writes are confined to the LOCAL resource

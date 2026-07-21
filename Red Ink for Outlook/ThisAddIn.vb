@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 20.7.2026
+' 21.7.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -60,7 +60,7 @@ Partial Public Class ThisAddIn
     Public Const AN6 As String = "Inky"
     Public Const AN4 As String = "redink_"
 
-    Public Shared Version As String = "V.200726" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.210726" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -521,7 +521,7 @@ Partial Public Class ThisAddIn
         If _uiContext Is Nothing OrElse SynchronizationContext.Current Is _uiContext Then
             Return System.Threading.Tasks.Task.CompletedTask
         End If
-        Dim tcs As New TaskCompletionSource(Of Object)()
+        Dim tcs As New TaskCompletionSource(Of Object)(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously)
         _uiContext.Post(
             Sub(state As Object)
                 tcs.SetResult(Nothing)
@@ -536,7 +536,7 @@ Partial Public Class ThisAddIn
     Private Function SwitchToUi(uiAction As System.Action) _
         As System.Threading.Tasks.Task
 
-        Dim tcs As New System.Threading.Tasks.TaskCompletionSource(Of Object)()
+        Dim tcs As New System.Threading.Tasks.TaskCompletionSource(Of Object)(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously)
 
         mainThreadControl.BeginInvoke(New MethodInvoker(
         Sub()
@@ -557,7 +557,7 @@ Partial Public Class ThisAddIn
     Private Function SwitchToUi(Of T)(uiFunc As System.Func(Of T)) _
         As System.Threading.Tasks.Task(Of T)
 
-        Dim tcs As New System.Threading.Tasks.TaskCompletionSource(Of T)()
+        Dim tcs As New System.Threading.Tasks.TaskCompletionSource(Of T)(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously)
 
         mainThreadControl.BeginInvoke(New MethodInvoker(
         Sub()
@@ -704,7 +704,7 @@ Partial Public Class ThisAddIn
         uiFunc As System.Func(Of System.Threading.Tasks.Task(Of T))) _
         As System.Threading.Tasks.Task(Of T)
 
-        Dim tcs As New System.Threading.Tasks.TaskCompletionSource(Of T)()
+        Dim tcs As New System.Threading.Tasks.TaskCompletionSource(Of T)(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously)
 
         mainThreadControl.BeginInvoke(New MethodInvoker(
         Sub()

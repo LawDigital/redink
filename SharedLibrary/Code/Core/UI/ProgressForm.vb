@@ -162,10 +162,19 @@ Namespace SharedLibrary
             ProgressBarModule.CancelOperation = True
         End Sub
 
+
+
         ''' <summary>
-        ''' Stops the UI timer and sets the cancel flag when the form is closed.
+        ''' Lifts the ownerless progress dialog above the host window. It runs on a
+        ''' dedicated background STA thread, so TopMost alone is defeated by Windows'
+        ''' foreground lock; the AllowSetForegroundWindow + SetForegroundWindow
+        ''' handshake raises it deterministically without a cross-thread owner.
         ''' </summary>
-        ''' <param name="e">Form closed event arguments.</param>
+        Protected Overrides Sub OnShown(e As System.EventArgs)
+            MyBase.OnShown(e)
+            SharedMethods.ForceDialogToForeground(Me)
+        End Sub
+
         Protected Overrides Sub OnFormClosed(e As System.Windows.Forms.FormClosedEventArgs)
             uiTimer.Stop()
             ProgressBarModule.CancelOperation = True

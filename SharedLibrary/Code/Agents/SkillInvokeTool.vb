@@ -145,7 +145,9 @@ Namespace Agents
 
             idx("skills") = skillsArr
             idx("agents") = agentsArr
-            idx("note") = "To modify an existing resource, edit the exact 'file' path shown here with text_read/text_write. Do not invent new paths or new folders."
+            idx("local_root") = If(AgentResources.ConfiguredLocalPath, "")
+            idx("create_hint") = "To create a NEW skill, write local_root + '\skills\<name>\SKILL.md'. For a NEW agent, write local_root + '\agents\<name>\AGENT.md' (or '\agents\<name>.md'). Parent folders are created automatically."
+            idx("note") = "To modify an existing resource, edit the exact 'file' path shown here with text_read/text_write. Do not invent new paths for EXISTING resources."
             Return idx
         End Function
 

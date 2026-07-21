@@ -89,6 +89,66 @@ Namespace SharedLibrary
         End Function
 
         ''' <summary>
+        ''' Resolves the ambient dialog owner but returns it ONLY when its window
+        ''' belongs to the current (calling) thread. A modal dialog shown with a
+        ''' cross-thread owner attaches the two threads' input queues; on close,
+        ''' Windows must synchronously re-enable and re-activate the owner window on
+        ''' its thread, which can deadlock the host if that thread is simultaneously
+        ''' blocked marshalling work back to the caller. Rejecting a cross-thread
+        ''' owner (falling back to an ownerless, TopMost dialog) removes that hazard
+        ''' deterministically without changing the same-thread behavior callers rely
+        ''' on for correct Z-order.
+        ''' </summary>
+        Public Shared Function ResolveSameThreadDialogOwner() As IWin32Window
+            Dim owner As IWin32Window = ResolveDialogOwner()
+            Return IfOwnerOnCurrentThread(owner)
+        End Function
+
+
+        ''' <summary>
+        ''' Forces an ownerless, TopMost dialog to the foreground reliably, including
+        ''' when it was created on a background/STA thread where Windows' foreground
+        ''' lock would otherwise keep it behind the active Office window. Safe no-op
+        ''' on failure. Does NOT assign a cross-thread owner, so it cannot reintroduce
+        ''' the modal-close deadlock. Use this from a dialog's Shown handler instead
+        ''' of the TopMost=False/TopMost=True toggle, which drops the topmost band and
+        ''' can let an ownerless window fall behind the host.
+        ''' </summary>
+        Public Shared Sub ForceDialogToForeground(dialog As Form)
+            If dialog Is Nothing Then Return
+            Try
+                dialog.TopMost = True
+                NativeMethods.AllowSetForegroundWindow(-1)
+                NativeMethods.SetForegroundWindow(dialog.Handle)
+                dialog.Activate()
+                dialog.BringToFront()
+            Catch
+            End Try
+        End Sub
+
+        Public Shared Function IfOwnerOnCurrentThread(owner As IWin32Window) As IWin32Window
+            If owner Is Nothing Then Return Nothing
+
+            Dim h As IntPtr
+            Try
+                h = owner.Handle
+            Catch
+                Return Nothing
+            End Try
+            If h = IntPtr.Zero Then Return Nothing
+
+            Dim pid As Integer = 0
+            Dim ownerThreadId As Integer = NativeMethods.GetWindowThreadProcessId(h, pid)
+            If ownerThreadId = 0 Then Return Nothing
+
+            If ownerThreadId = NativeMethods.GetCurrentThreadId() Then
+                Return owner
+            End If
+
+            Return Nothing
+        End Function
+
+        ''' <summary>
         ''' RAII token returned by <see cref="PushDialogOwner"/>; pops the owner
         ''' from the thread-local stack on dispose. Tolerates being disposed more
         ''' than once and tolerates stack drift if a child also pushed/popped.
