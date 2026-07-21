@@ -1129,6 +1129,18 @@ Public Class frmAIChat
             ' Add active document content if present
             If Not String.IsNullOrEmpty(docText) Then
                 fullPrompt.AppendLine($"The user's document has the name '{Globals.ThisAddIn.Application.ActiveDocument.Name}' and has the following content: '{docText}'")
+
+                ' Provide read-only automatic paragraph/margin numbering for the active document.
+                ' Word does not expose these generated numbers via Content.Text, so we supply them
+                ' separately (numbered elements only; bullets are excluded by the builder).
+                Try
+                    Dim activeNumbering As String = ThisAddIn.BuildParagraphNumberingContext(Globals.ThisAddIn.Application.ActiveDocument.Content)
+                    If Not String.IsNullOrEmpty(activeNumbering) Then
+                        fullPrompt.AppendLine($"The following is read-only automatic numbering information for the document '{Globals.ThisAddIn.Application.ActiveDocument.Name}' (it is not part of the editable text shown above; the references to TEXTTOPROCESS below mean this document):")
+                        fullPrompt.AppendLine(activeNumbering)
+                    End If
+                Catch
+                End Try
             End If
 
             ' Add selection or cursor context if present
@@ -1148,6 +1160,35 @@ Public Class frmAIChat
 
                 fullPrompt.AppendLine("The following are the other open Word documents (each enclosed in <DOCUMENTn> tags, including their name so you can refer to them):")
                 fullPrompt.AppendLine(otherDocs)
+
+                ' Provide read-only automatic numbering for each other open Word document.
+                ' Mirrors the de-duplication/exclusion logic of GatherSelectedDocuments so the
+                ' numbering aligns with the documents whose content was just added above.
+                Try
+                    Dim appDocs As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
+                    Dim activeDoc As Microsoft.Office.Interop.Word.Document = Nothing
+                    Try
+                        activeDoc = appDocs.ActiveDocument
+                    Catch
+                        activeDoc = Nothing
+                    End Try
+
+                    Dim seenDocs As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+                    For Each d As Microsoft.Office.Interop.Word.Document In appDocs.Documents
+                        If activeDoc IsNot Nothing AndAlso Object.ReferenceEquals(d, activeDoc) Then Continue For
+
+                        Dim key As String = If(Not String.IsNullOrEmpty(d.FullName), d.FullName, d.Name)
+                        If seenDocs.Contains(key) Then Continue For
+                        seenDocs.Add(key)
+
+                        Dim otherNumbering As String = ThisAddIn.BuildParagraphNumberingContext(d.Content)
+                        If Not String.IsNullOrEmpty(otherNumbering) Then
+                            fullPrompt.AppendLine($"The following is read-only automatic numbering information for the open document '{d.Name}' (it is not part of the editable text; the references to TEXTTOPROCESS below mean this document):")
+                            fullPrompt.AppendLine(otherNumbering)
+                        End If
+                    Next
+                Catch
+                End Try
             End If
 
             ' Add loaded external context if present

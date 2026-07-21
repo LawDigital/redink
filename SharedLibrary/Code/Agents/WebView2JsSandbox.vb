@@ -196,7 +196,7 @@ Namespace Agents
                 Return
             End If
 
-            Dim tcs As New TaskCompletionSource(Of Boolean)()
+            Dim tcs As New TaskCompletionSource(Of Boolean)(TaskCreationOptions.RunContinuationsAsynchronously)
             Dim handler As EventHandler(Of CoreWebView2NavigationCompletedEventArgs) = Nothing
 
             handler =
@@ -227,7 +227,7 @@ Namespace Agents
                                                            waitForSelector As String,
                                                            timeoutMs As Integer,
                                                            cancellationToken As CancellationToken) As Task(Of String)
-            Dim tcs As New TaskCompletionSource(Of String)()
+            Dim tcs As New TaskCompletionSource(Of String)(TaskCreationOptions.RunContinuationsAsynchronously)
             Dim handler As EventHandler(Of CoreWebView2NavigationCompletedEventArgs) = Nothing
 
             handler =
@@ -622,7 +622,7 @@ Namespace Agents
         ' --------------------------------------------------------------- UI marshalling
 
         Private Shared Function RunOnUiAsync(action As Action) As Task
-            Dim tcs As New TaskCompletionSource(Of Boolean)()
+            Dim tcs As New TaskCompletionSource(Of Boolean)(TaskCreationOptions.RunContinuationsAsynchronously)
             _uiSync.Post(Sub()
                              Try : action() : tcs.SetResult(True)
                              Catch ex As Exception : tcs.SetException(ex)
@@ -632,7 +632,7 @@ Namespace Agents
         End Function
 
         Private Shared Function RunOnUiAsync(Of T)(func As Func(Of Task(Of T))) As Task(Of T)
-            Dim tcs As New TaskCompletionSource(Of T)()
+            Dim tcs As New TaskCompletionSource(Of T)(TaskCreationOptions.RunContinuationsAsynchronously)
             _uiSync.Post(Async Sub()
                              Try : tcs.SetResult(Await func().ConfigureAwait(True))
                              Catch ex As Exception : tcs.SetException(ex)
@@ -642,7 +642,7 @@ Namespace Agents
         End Function
 
         Private Shared Function RunOnUiAsync(func As Func(Of Task)) As Task
-            Dim tcs As New TaskCompletionSource(Of Boolean)()
+            Dim tcs As New TaskCompletionSource(Of Boolean)(TaskCreationOptions.RunContinuationsAsynchronously)
             _uiSync.Post(Async Sub()
                              Try : Await func().ConfigureAwait(True) : tcs.SetResult(True)
                              Catch ex As Exception : tcs.SetException(ex)

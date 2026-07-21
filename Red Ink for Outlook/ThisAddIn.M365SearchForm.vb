@@ -2036,24 +2036,28 @@ Public Class M365SearchTestForm
         OpenInOutlook = 1
     End Enum
 
-    Private Function ShowHtmlPreviewDialogAsync(hit As M365SearchHit,
+    Private Async Function ShowHtmlPreviewDialogAsync(hit As M365SearchHit,
                                             message As M365Message) As Task(Of PreviewDialogChoice)
         Dim html As String = BuildPreviewDialogHtml(hit, message)
-        Dim tcs As New TaskCompletionSource(Of PreviewDialogChoice)()
+        Dim tcs As New TaskCompletionSource(Of PreviewDialogChoice)(TaskCreationOptions.RunContinuationsAsynchronously)
 
-        SharedMethods.ShowHTMLCustomMessageBox(
-        html,
-        "Microsoft 365",
-        extraButtonText:="Open in Outlook",
-        extraButtonAction:=Sub()
-                               tcs.TrySetResult(PreviewDialogChoice.OpenInOutlook)
-                           End Sub,
-        CloseAfterExtra:=True,
-        onClose:=Sub()
-                     tcs.TrySetResult(PreviewDialogChoice.ClosePreview)
-                 End Sub)
+        UiPost(Sub()
+                   Try
+                       Dim result As PreviewDialogChoice = PreviewDialogChoice.ClosePreview
+                       SharedMethods.ShowHTMLCustomMessageBox(
+                           html,
+                           "Microsoft 365",
+                           extraButtonText:="Open in Outlook",
+                           extraButtonAction:=Sub() result = PreviewDialogChoice.OpenInOutlook,
+                           CloseAfterExtra:=True,
+                           nonModal:=True)
+                       tcs.TrySetResult(result)
+                   Catch ex As Exception
+                       tcs.TrySetException(ex)
+                   End Try
+               End Sub)
 
-        Return tcs.Task
+        Return Await tcs.Task.ConfigureAwait(False)
     End Function
 
     Private Function BuildPreviewDialogHtml(hit As M365SearchHit,

@@ -34,6 +34,14 @@ Namespace SharedLibrary
         Public Shared Function GetWindowThreadProcessId(hWnd As IntPtr, ByRef lpdwProcessId As Integer) As Integer
         End Function
 
+        <Runtime.InteropServices.DllImport("kernel32.dll")>
+        Public Shared Function GetCurrentThreadId() As Integer
+        End Function
+
+        <Runtime.InteropServices.DllImport("user32.dll")>
+        Public Shared Function AllowSetForegroundWindow(dwProcessId As Integer) As Boolean
+        End Function
+
     End Class
 
 End Namespace
