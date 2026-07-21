@@ -115,6 +115,44 @@ Namespace Agents
         End Function
 
         ''' <summary>
+        ''' Ensures the configured LOCAL resource root and its skills/ and agents/
+        ''' subdirectories exist so that new skills, agents, and Inky.md can be created
+        ''' even when the .inky tree was never set up. Best-effort: returns True when the
+        ''' tree is present after the call, False when no local path is configured or
+        ''' creation failed. Rescans the index when it created anything.
+        ''' </summary>
+        Public Shared Function EnsureLocalResourceDirectories() As Boolean
+            Dim root As String
+            SyncLock _syncRoot
+                root = _configuredLocalPath
+            End SyncLock
+
+            If String.IsNullOrWhiteSpace(root) Then Return False
+
+            Dim createdSomething As Boolean = False
+            Try
+                For Each resourceDir In New String() {
+                    root,
+                    System.IO.Path.Combine(root, "skills"),
+                    System.IO.Path.Combine(root, "agents")}
+
+                    If Not System.IO.Directory.Exists(resourceDir) Then
+                        System.IO.Directory.CreateDirectory(resourceDir)
+                        createdSomething = True
+                    End If
+                Next
+            Catch
+                Return System.IO.Directory.Exists(root)
+            End Try
+
+            If createdSomething Then
+                Refresh()
+            End If
+
+            Return System.IO.Directory.Exists(root)
+        End Function
+
+        ''' <summary>
         ''' If <paramref name="writtenPath"/> lies under a configured resource root
         ''' (skills/ or agents/, local or central), rescans the in-memory index so an
         ''' edited SKILL.md/AGENT.md (and its cached body) is picked up in the same

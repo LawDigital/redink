@@ -700,10 +700,14 @@ Namespace SharedLibrary
 
                 inputForm.Opacity = 1
 
+                Dim __browserOwner As System.Windows.Forms.IWin32Window = Nothing
                 If outlookHwnd <> IntPtr.Zero Then
-                    Result = inputForm.ShowDialog(New WindowWrapper(outlookHwnd))
+                    __browserOwner = SharedMethods.IfOwnerOnCurrentThread(New WindowWrapper(outlookHwnd))
+                End If
+                If __browserOwner IsNot Nothing Then
+                    Result = inputForm.ShowDialog(__browserOwner)
                 Else
-                    Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+                    Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
                     If __owner IsNot Nothing Then
                         Result = inputForm.ShowDialog(__owner)
                     Else
@@ -712,7 +716,7 @@ Namespace SharedLibrary
                 End If
             Else
                 inputForm.Opacity = 1
-                Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+                Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
                 If __owner IsNot Nothing Then
                     Result = inputForm.ShowDialog(__owner)
                 Else
@@ -1043,10 +1047,7 @@ Namespace SharedLibrary
 
             AddHandler messageForm.Shown,
                 Sub(sender, e)
-                    messageForm.TopMost = False
-                    messageForm.TopMost = True
-                    messageForm.Activate()
-                    messageForm.BringToFront()
+                    SharedMethods.ForceDialogToForeground(messageForm)
                 End Sub
 
             If nonModal Then
@@ -1063,7 +1064,7 @@ Namespace SharedLibrary
                 messageForm.Dispose()
             Else
                 ' Show modal (original behavior)
-                Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+                Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
                 If __owner IsNot Nothing Then
                     messageForm.ShowDialog(__owner)
                 Else
@@ -1293,12 +1294,9 @@ Namespace SharedLibrary
 
                     AddHandler messageForm.Shown,
                             Sub(sender, e)
-                                messageForm.TopMost = False  ' Reset first.
-                                messageForm.TopMost = True   ' Then set again.
-                                messageForm.Activate()
-                                messageForm.BringToFront()
+                                SharedMethods.ForceDialogToForeground(messageForm)
                             End Sub
-                    Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+                    Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
                     If __owner IsNot Nothing Then
                         messageForm.ShowDialog(__owner)
                     Else
@@ -1316,14 +1314,11 @@ Namespace SharedLibrary
 
                 AddHandler messageForm.Shown,
                         Sub(sender, e)
-                            messageForm.TopMost = False  ' Reset first.
-                            messageForm.TopMost = True   ' Then set again.
-                            messageForm.Activate()
-                            messageForm.BringToFront()
+                            SharedMethods.ForceDialogToForeground(messageForm)
                         End Sub
 
                 messageForm.Opacity = 1
-                Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+                Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
                 If __owner IsNot Nothing Then
                     messageForm.ShowDialog(__owner)
                 Else
@@ -1568,10 +1563,7 @@ Namespace SharedLibrary
 
                 AddHandler RTFMessageForm.Shown,
                     Sub(sender, e)
-                        RTFMessageForm.TopMost = False
-                        RTFMessageForm.TopMost = True
-                        RTFMessageForm.Activate()
-                        RTFMessageForm.BringToFront()
+                        SharedMethods.ForceDialogToForeground(RTFMessageForm)
                     End Sub
 
                 RTFMessageForm.Opacity = 1
@@ -1588,14 +1580,11 @@ Namespace SharedLibrary
 
                 AddHandler RTFMessageForm.Shown,
                     Sub(sender, e)
-                        RTFMessageForm.TopMost = False
-                        RTFMessageForm.TopMost = True
-                        RTFMessageForm.Activate()
-                        RTFMessageForm.BringToFront()
+                        SharedMethods.ForceDialogToForeground(RTFMessageForm)
                     End Sub
 
                 RTFMessageForm.Opacity = 1
-                Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+                Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
                 If __owner IsNot Nothing Then
                     RTFMessageForm.ShowDialog(__owner)
                 Else
@@ -1798,14 +1787,11 @@ Namespace SharedLibrary
 
             AddHandler HTMLMessageForm.Shown,
                 Sub(sender, e)
-                    HTMLMessageForm.TopMost = False
-                    HTMLMessageForm.TopMost = True
-                    HTMLMessageForm.Activate()
-                    HTMLMessageForm.BringToFront()
+                    SharedMethods.ForceDialogToForeground(HTMLMessageForm)
                 End Sub
 
             HTMLMessageForm.Opacity = 1
-            Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+            Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
             If __owner IsNot Nothing Then
                 HTMLMessageForm.ShowDialog(__owner)
             Else
@@ -1980,10 +1966,7 @@ Namespace SharedLibrary
 
             AddHandler HTMLMessageForm.Shown,
                 Sub(sender, e)
-                    HTMLMessageForm.TopMost = False
-                    HTMLMessageForm.TopMost = True
-                    HTMLMessageForm.Activate()
-                    HTMLMessageForm.BringToFront()
+                    SharedMethods.ForceDialogToForeground(HTMLMessageForm)
                 End Sub
 
             HTMLMessageForm.Opacity = 1
@@ -2156,10 +2139,7 @@ Namespace SharedLibrary
 
             AddHandler HTMLMessageForm.Shown,
                 Sub(sender, e)
-                    HTMLMessageForm.TopMost = False
-                    HTMLMessageForm.TopMost = True
-                    HTMLMessageForm.Activate()
-                    HTMLMessageForm.BringToFront()
+                    SharedMethods.ForceDialogToForeground(HTMLMessageForm)
                 End Sub
 
             HTMLMessageForm.Opacity = 1
@@ -2915,20 +2895,27 @@ Namespace SharedLibrary
 
             AddHandler styledForm.Shown,
                     Sub(sender, e)
-                        styledForm.TopMost = False  ' Reset first.
-                        styledForm.TopMost = True   ' Then set again.
-                        styledForm.Activate()
-                        styledForm.BringToFront()
+                        SharedMethods.ForceDialogToForeground(styledForm)
                     End Sub
 
             If parentWindowHwnd <> IntPtr.Zero Then
-                styledForm.ShowDialog(New WindowWrapper(parentWindowHwnd))
+                Dim __ownerHwnd As System.Windows.Forms.IWin32Window =
+                    SharedMethods.IfOwnerOnCurrentThread(New WindowWrapper(parentWindowHwnd))
+                If __ownerHwnd IsNot Nothing Then
+                    styledForm.ShowDialog(__ownerHwnd)
+                Else
+                    styledForm.ShowDialog()
+                End If
             ElseIf Getfocus Then
                 Dim officeHwnd As IntPtr = GetOfficeApplicationHwnd()
+                Dim __ownerOffice As System.Windows.Forms.IWin32Window = Nothing
                 If officeHwnd <> IntPtr.Zero Then
-                    styledForm.ShowDialog(New WindowWrapper(officeHwnd))
+                    __ownerOffice = SharedMethods.IfOwnerOnCurrentThread(New WindowWrapper(officeHwnd))
+                End If
+                If __ownerOffice IsNot Nothing Then
+                    styledForm.ShowDialog(__ownerOffice)
                 Else
-                    Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+                    Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
                     If __owner IsNot Nothing Then
                         styledForm.ShowDialog(__owner)
                     Else
@@ -2936,7 +2923,7 @@ Namespace SharedLibrary
                     End If
                 End If
             Else
-                Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+                Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
                 If __owner IsNot Nothing Then
                     styledForm.ShowDialog(__owner)
                 Else
