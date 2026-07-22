@@ -3,28 +3,46 @@
 '
 ' =============================================================================
 ' File: SharedMethods.SandboxedReaders.vb
-' Purpose: Sandboxed (COM-free) text extraction from Office documents and
-'          embedded mail files. Uses ZIP + XML parsing only — no Office interop.
+' Purpose: Centralised, dependency-free ("sandboxed") text extraction routines for
+'          common document and mail formats. Implements ZIP+XML parsing for OpenXML
+'          packages (.docx, .xlsx, .pptx), RFC‑compliant parsing for .eml, and a
+'          minimal OLE/MAPI reader for .msg files — all without Office interop or
+'          third‑party binary libraries. Outputs are formatted to remain compatible
+'          with the project's historical `Extract*` helpers so downstream callers
+'          and LLM pipelines receive the same plain‑text layout.
 '
-' Output Compatibility:
-'  - DOCX: paragraph-per-line plain text (matches ReadWordDocument / ExtractWordText output)
-'  - XLSX: "{addr}\tFORMULA:={formula}\tVALUE: {value}" per cell with "=== Sheet: {name} ==="
-'           headers (matches ExtractExcelText output format exactly)
-'  - PPTX: "=== Slide {n} ===" + shape text + "--- Notes ---" per slide
-'           (matches ExtractPowerPointText output format exactly)
-'  - EML:  structured header + body text (matches ParseEmlAsText output)
-'  - MSG:  structured text via callback, or heuristic UTF-16LE extraction fallback
+' Key responsibilities:
+'  - DOCX: paragraph‑per‑line plain text, with optional headers/footers/notes and
+'          descriptive table sections for robust LL model consumption; old version is
+'          contained below, a new richer version with heading numbering is separate
+'  - XLSX: produces per‑cell lines of the form
+'          "{addr}\tFORMULA:={formula}\tVALUE: {value}" and "=== Sheet: {name} ==="
+'          headers to match legacy extractor output.
+'  - PPTX: slide headers "=== Slide {n} ===", shape text lines and "--- Notes ---".
+'  - EML: RFC 2822 header parsing, MIME boundary handling, inline attachment extraction.
+'  - MSG: lightweight OLE Compound File + MAPI property reader with safe fallbacks.
 '
-' Supported Formats:
-'  - .docx  — WordprocessingML (OpenXML ZIP → word/document.xml)
-'  - .xlsx  — SpreadsheetML (OpenXML ZIP → shared strings + sheet XML)
-'  - .pptx  — PresentationML (OpenXML ZIP → slide XML via DrawingML)
-'  - .msg   — Outlook message (callback for MAPI, with heuristic fallback)
-'  - .eml   — RFC 2822 mail (plain text parsing with MIME boundary handling)
+' Design notes:
+'  - Security: intentionally avoids COM and unmanaged dependencies to reduce attack
+'    surface when extracting content from untrusted files. Legacy formats (e.g.
+'    binary .doc) are disabled by default and gated by configuration.
+'  - Compatibility: strives to preserve the exact output shapes expected by other
+'    components (format strings, section headers) to enable drop‑in replacements.
+'  - Resilience: defensive parsing, graceful fallbacks, bounded recursion for nested
+'    attachments, and temporary work directories that are cleaned up on completion.
+'  - Performance: stream / XmlDocument usage tuned for typical document sizes; large
+'    binary streams are processed via temporary files to limit memory pressure.
 '
 ' External Dependencies:
-'  - System.IO.Compression (ZipArchive)
-'  - System.Xml (XmlDocument / XmlNamespaceManager)
+'  - System.IO.Compression (ZipArchive/ZipFile)
+'  - System.Xml (XmlDocument, XmlNamespaceManager)
+'  - System.Text / System.IO
+'
+' Output compatibility and conventions:
+'  - Keep output strings stable (headers, separators, cell formatting) to match
+'    `ExtractWordText`, `ExtractExcelText`, and `ExtractPowerPointText`.
+'  - Error messages are returned as plain text beginning with "Error:" to allow
+'    callers to detect failures without throwing exceptions in common flows.
 ' =============================================================================
 
 Option Strict On
@@ -47,112 +65,16 @@ Namespace SharedLibrary
         '  DOCX — Sandboxed
         ' ═══════════════════════════════════════════════════════════════════════
 
-        Private Const SB_WordNs As String = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-
-        ''' <summary>
-        ''' Extracts plain text from a .docx file without COM interop.
-        ''' Output: one line per paragraph from the main body.
-        ''' When <see cref="DocxIncludeHeaderFooterFootnotes"/> is <c>True</c>, headers, footers,
-        ''' footnotes and endnotes are appended as delimited sections.
-        ''' </summary>
-        ''' <param name="docxPath">Absolute path to the .docx file.</param>
-        ''' <returns>Extracted plain text, or an error string on failure.</returns>
-        Public Shared Function oldReadDocxSandboxed(docxPath As String) As String
-            If String.IsNullOrWhiteSpace(docxPath) OrElse Not File.Exists(docxPath) Then
-                Return "Error: File not found."
-            End If
-
-            Dim tempDir As String = Path.Combine(Path.GetTempPath(), "ri_docx_" & Guid.NewGuid().ToString("N"))
-            Try
-                ZipFile.ExtractToDirectory(docxPath, tempDir)
-
-                Dim wordDir = Path.Combine(tempDir, "word")
-                Dim documentXmlPath = Path.Combine(wordDir, "document.xml")
-                If Not File.Exists(documentXmlPath) Then Return "Error: Not a valid .docx file (missing word/document.xml)."
-
-                Dim xmlDoc As New XmlDocument()
-                xmlDoc.PreserveWhitespace = True
-                xmlDoc.Load(documentXmlPath)
-
-                Dim nsMgr As New XmlNamespaceManager(xmlDoc.NameTable)
-                nsMgr.AddNamespace("w", SB_WordNs)
-
-                Dim sb As New StringBuilder(4096)
-
-                ' ── Main body text ──
-                ' Collect footnote/endnote reference IDs inline so we can insert markers
-                Dim paragraphs = xmlDoc.SelectNodes("//w:body/w:p", nsMgr)
-                If paragraphs IsNot Nothing Then
-                    For Each para As XmlNode In paragraphs
-                        Dim paraText As New StringBuilder()
-                        Dim runs = para.SelectNodes(".//w:r", nsMgr)
-                        If runs IsNot Nothing Then
-                            For Each run As XmlNode In runs
-                                ' Check for footnote / endnote references within this run
-                                If DocxIncludeHeaderFooterFootnotes Then
-                                    Dim fnRef = run.SelectSingleNode("w:footnoteReference", nsMgr)
-                                    If fnRef IsNot Nothing Then
-                                        Dim fnId = fnRef.Attributes?("w:id")?.Value
-                                        If Not String.IsNullOrWhiteSpace(fnId) AndAlso fnId <> "0" Then
-                                            paraText.Append($" [Footnote {fnId}]")
-                                        End If
-                                    End If
-                                    Dim enRef = run.SelectSingleNode("w:endnoteReference", nsMgr)
-                                    If enRef IsNot Nothing Then
-                                        Dim enId = enRef.Attributes?("w:id")?.Value
-                                        If Not String.IsNullOrWhiteSpace(enId) AndAlso enId <> "0" Then
-                                            paraText.Append($" [Endnote {enId}]")
-                                        End If
-                                    End If
-                                End If
-
-                                ' Collect <w:t> text nodes from this run
-                                Dim tNodes = run.SelectNodes("w:t", nsMgr)
-                                If tNodes IsNot Nothing Then
-                                    For Each tNode As XmlNode In tNodes
-                                        paraText.Append(tNode.InnerText)
-                                    Next
-                                End If
-                            Next
-                        End If
-
-                        If paraText.Length > 0 Then
-                            sb.AppendLine(paraText.ToString())
-                        Else
-                            ' Empty paragraph = blank line (matches COM Content.Text behavior)
-                            sb.AppendLine()
-                        End If
-                    Next
-                End If
-
-                ' ── Optional: headers, footers, footnotes, endnotes ──
-                If DocxIncludeHeaderFooterFootnotes AndAlso Directory.Exists(wordDir) Then
-                    ' Headers
-                    ExtractDocxSubParts(wordDir, "header*.xml", "Header", sb)
-
-                    ' Footers
-                    ExtractDocxSubParts(wordDir, "footer*.xml", "Footer", sb)
-
-                    ' Footnotes (skip id="0" = separator, id="-1" = continuation separator)
-                    ExtractDocxNotes(wordDir, "footnotes.xml", "w:footnote", "Footnote", sb)
-
-                    ' Endnotes (skip id="0" and id="-1")
-                    ExtractDocxNotes(wordDir, "endnotes.xml", "w:endnote", "Endnote", sb)
-                End If
-
-                Dim result = sb.ToString().TrimEnd()
-                Return If(String.IsNullOrWhiteSpace(result), "Error: No text content found in .docx.", result)
-
-            Catch ex As Exception
-                Return $"Error reading .docx: {ex.Message}"
-            Finally
-                Try : If Directory.Exists(tempDir) Then Directory.Delete(tempDir, True)
-                Catch : End Try
-            End Try
+        Public Shared Function ReadDocxSandboxed(docxPath As String) As String
+            Return DocxTextExtractor.ReadDocxSandboxed(docxPath)
         End Function
 
 
-        Public Shared Function ReadDocxSandboxed(docxPath As String) As String
+        ' The following is a previous version
+
+        Private Const SB_WordNs As String = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+        Public Shared Function oldReadDocxSandboxed(docxPath As String) As String
             If System.String.IsNullOrWhiteSpace(docxPath) OrElse Not System.IO.File.Exists(docxPath) Then
                 Return "Error: File not found."
             End If
