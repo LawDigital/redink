@@ -728,7 +728,7 @@ Namespace SharedLibrary
 
                                                       If confirmResult <> 1 Then Return
 
-                                                      ClearStoredLicense(True)
+                                                      ClearStoredLicense()
                                                       licenseExplicitlyCleared = True
                                                       dialogResult = False
                                                       isCurrentlyActivated = False

@@ -3888,7 +3888,6 @@ Namespace SharedLibrary
             Dim BrandedVersion As String = If(String.IsNullOrWhiteSpace(INI_LogoPath_Cached & INI_LogoPathMedium_Cached & INI_LogoPathLarge_Cached), "", If(String.IsNullOrWhiteSpace(context.INI_BrandingName), "Branded version", $"Branded version For {context.INI_BrandingName}"))
 
             ' Calculate height based on text content
-            'Dim ExpireText As String = $"{vbCrLf}{vbCrLf}(your {If(String.IsNullOrEmpty(LicenseStatus), "(undefined license type)", LicenseStatus)} For {LicenseUsers} user(s) expires On {LicensedTill.ToString("dd-MMM-yyyy")})"
             Dim ExpireText As String = vbCrLf & vbCrLf & GetLicenseStatusShort()
             Dim testRichTextBox As New System.Windows.Forms.RichTextBox() With {
                             .Font = standardFont,
@@ -4014,27 +4013,13 @@ Namespace SharedLibrary
                         .Text = resetButtonText,
                         .Size = New System.Drawing.Size(stackedButtonWidth, buttonHeight),
                         .Location = New System.Drawing.Point(buttonsLeft, licenseButton.Bottom + buttonSpacing),
-                        .Enabled = Not LicenseFromConfig AndAlso Not IsBetaVersion() AndAlso Not LicenseStatus = "Beta Test License"
+                        .Enabled = Not LicenseFromConfig
                     }
             AddHandler resetLicenseButton.Click, Sub(sender, e)
                                                      Try
 
-                                                         ' Reset license information in My.Settings
-                                                         'My.Settings.LicenseStatus = ""
-                                                         'My.Settings.LicenseUsers = 1
-                                                         'My.Settings.LicensedTill = Date.MinValue
-                                                         'My.Settings.Save()
-
-                                                         ' Reset global license variables
-                                                         'LicenseStatus = ""
-                                                         'LicenseUsers = 1
-                                                         'LicensedTill = Date.MinValue
-
                                                          ' Close the current About window
                                                          aboutForm.Close()
-
-                                                         ' Show the license configuration form
-                                                         'ShowLicenseEntryForm(context)
 
                                                          ShowLicenseStatusDialog()
 
