@@ -732,52 +732,6 @@ Namespace SharedLibrary
             Return sb.ToString()
         End Function
 
-        ''' <summary>
-        ''' Performs OCR on a PDF by invoking an LLM call with the PDF path as a binary object input.
-        ''' </summary>
-        ''' <param name="pdfPath">Path to the PDF file to OCR.</param>
-        ''' <param name="context">Shared context containing model and API configuration.</param>
-        ''' <param name="askUser">If False, suppresses all UI dialogs (for non-interactive callers like AutoPilot).</param>
-        ''' <param name="additionalInstruction">Additional instructions to include in the system prompt for OCR processing.</param>
-        ''' <returns>OCR result text, or an empty string if OCR is not available or fails.</returns>
-        Private Shared Async Function oldPerformOCR(ByVal pdfPath As String,
-                                                 context As ISharedContext,
-                                                 Optional askUser As Boolean = True,
-                                                 Optional additionalInstruction As String = Nothing) As Task(Of String)
-            If Not IsOcrAvailable(context) Then
-                If askUser Then
-                    ShowCustomMessageBox("OCR is not available with your current model configuration.")
-                End If
-                Return ""
-            End If
-
-            Dim scope = CaptureModelConfigScope(context)
-
-            Try
-                Dim useSecondAPI As Boolean = False
-                Dim timeOut = context.INI_Timeout
-
-                If Not String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) AndAlso
-                   GetSpecialTaskModel(context, context.INI_AlternateModelPath, "OCR") Then
-
-                    useSecondAPI = True
-                    timeOut = context.INI_Timeout_2
-                End If
-
-                Dim systemPrompt As String = context.SP_InsertClipboard
-                If Not String.IsNullOrWhiteSpace(additionalInstruction) Then
-                    systemPrompt &= Environment.NewLine & Environment.NewLine & additionalInstruction.Trim()
-                End If
-
-                Dim result As String =
-                    Await LLM(context, systemPrompt, "", "", "", timeOut * 2, useSecondAPI, Not askUser, "", pdfPath)
-
-                Return If(result, "")
-
-            Finally
-                RestoreModelConfigScope(context, scope)
-            End Try
-        End Function
 
 
         Private Shared Async Function PerformOCR(ByVal pdfPath As String,

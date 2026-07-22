@@ -72,6 +72,12 @@ Namespace SharedLibrary
         Private Const ApiTimeoutMs As Integer = 10000
         Private Const ApiRetryCount As Integer = 3
 
+        ' Hard upper bound on the total wall-clock time the license API may block the
+        ' calling (host UI) thread across all retry attempts and backoff waits.
+        ' When exceeded, the call returns an empty response so callers fall back to the
+        ' existing offline-grace path instead of freezing the host.
+        Private Const ApiTotalBudgetMs As Integer = 6000
+
         ' Private License
         Private Const PrivateReconfirmIntervalDays As Integer = 30
         Private Const PrivateReconfirmDismissMax As Integer = 3
