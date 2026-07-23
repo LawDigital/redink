@@ -737,15 +737,16 @@ Partial Public Class ThisAddIn
                     RenderInline(childNode, range, Nothing, String.Empty)
 
                 Case "h1", "h2", "h3", "h4", "h5", "h6"
-                    ' 1) Determine built-in heading style.
+                    ' 1) Determine built-in heading style and its relative size factor.
                     Dim style As WdBuiltinStyle = WdBuiltinStyle.wdStyleNormal ' Default for 'p'
+                    Dim headingSizeFactor As Single = 1.0F
                     Select Case childNode.Name.ToLower()
-                        Case "h1" : style = WdBuiltinStyle.wdStyleHeading1
-                        Case "h2" : style = WdBuiltinStyle.wdStyleHeading2
-                        Case "h3" : style = WdBuiltinStyle.wdStyleHeading3
-                        Case "h4" : style = WdBuiltinStyle.wdStyleHeading4
-                        Case "h5" : style = WdBuiltinStyle.wdStyleHeading5
-                        Case "h6" : style = WdBuiltinStyle.wdStyleHeading6
+                        Case "h1" : style = WdBuiltinStyle.wdStyleHeading1 : headingSizeFactor = 1.5F
+                        Case "h2" : style = WdBuiltinStyle.wdStyleHeading2 : headingSizeFactor = 1.3F
+                        Case "h3" : style = WdBuiltinStyle.wdStyleHeading3 : headingSizeFactor = 1.15F
+                        Case "h4" : style = WdBuiltinStyle.wdStyleHeading4 : headingSizeFactor = 1.1F
+                        Case "h5" : style = WdBuiltinStyle.wdStyleHeading5 : headingSizeFactor = 1.05F
+                        Case "h6" : style = WdBuiltinStyle.wdStyleHeading6 : headingSizeFactor = 1.0F
                     End Select
 
                     Dim txt As String = HtmlEntity.DeEntitize(childNode.InnerText)
@@ -765,8 +766,22 @@ Partial Public Class ThisAddIn
                     Dim paraRg As Word.Range = range.Duplicate
                     paraRg.Start = paraStart
                     paraRg.End = range.End
-                    ' 5) Apply heading style.
+                    ' 5) Apply heading style, then scale the font size proportionally to the
+                    '    document's own body (Normal) size so headings are not oversized by the
+                    '    template's absolute built-in heading sizes.
                     paraRg.Style = style
+                    Try
+                        Dim baseSize As Single = 0.0F
+                        Dim normalStyle As Word.Style =
+                            CType(paraRg.Document.Styles(Word.WdBuiltinStyle.wdStyleNormal), Word.Style)
+                        If normalStyle IsNot Nothing Then baseSize = normalStyle.Font.Size
+
+                        If baseSize > 0.0F AndAlso baseSize <> CSng(Word.WdConstants.wdUndefined) Then
+                            paraRg.Font.Size = CSng(System.Math.Round(baseSize * headingSizeFactor, MidpointRounding.AwayFromZero))
+                        End If
+                    Catch ex As System.Exception
+                        Debug.WriteLine($"Heading size scaling skipped: {ex.Message}")
+                    End Try
 
                     ' 6) Add hyperlink when present.
                     If href <> String.Empty Then

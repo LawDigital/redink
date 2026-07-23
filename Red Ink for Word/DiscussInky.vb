@@ -4335,6 +4335,20 @@ Public Class DiscussInky
                         Return
                     End If
 
+                    ' Guard against an empty/whitespace response so the chat does not render a
+                    ' bare persona line. Surface it as a system message and restore the prompt.
+                    If String.IsNullOrWhiteSpace(answer) Then
+                        RemoveAssistantThinking()
+                        AppendSystemMessage("The model returned an empty response. Please try again.")
+                        Ui(Sub() _txtInput.Text = restoreUserText)
+
+                        If _history.Count > 0 AndAlso _history(_history.Count - 1).Role = "user" Then
+                            _history.RemoveAt(_history.Count - 1)
+                        End If
+
+                        Return
+                    End If
+
                     ' Process InkyMemory updates from LLM response (if enabled)
                     If _chkInkyMemory.Checked Then
                         answer = SharedMethods.ProcessInkyMemoryResponse(answer, _context.INI_InkyMemoryCap)
@@ -4368,6 +4382,20 @@ Public Class DiscussInky
             stdAnswer = If(stdAnswer, "").Trim()
 
             If Await TryHandleKnowledgeCompactionOpportunityAsync(stdAnswer, userText, toolTriggerDetected) Then
+                Return
+            End If
+
+            ' Guard against an empty/whitespace response so the chat does not render a
+            ' bare persona line. Surface it as a system message and restore the prompt.
+            If String.IsNullOrWhiteSpace(stdAnswer) Then
+                RemoveAssistantThinking()
+                AppendSystemMessage("The model returned an empty response. Please try again.")
+                Ui(Sub() _txtInput.Text = restoreUserText)
+
+                If _history.Count > 0 AndAlso _history(_history.Count - 1).Role = "user" Then
+                    _history.RemoveAt(_history.Count - 1)
+                End If
+
                 Return
             End If
 

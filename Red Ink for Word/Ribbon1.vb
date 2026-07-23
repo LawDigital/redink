@@ -257,6 +257,7 @@ Public Class Ribbon1
             New TalkToMeRibbonCommandEntry With {.Name = "stamp_pdf_exhibits", .Category = "Word Helpers", .Button = RI_Stamper, .Execute = AddressOf RunStamperCommand},
             New TalkToMeRibbonCommandEntry With {.Name = "split_pdf_with_ai", .Category = "Word Helpers", .Button = RI_SplitPDF, .Execute = AddressOf RunSplitPdfCommand},
             New TalkToMeRibbonCommandEntry With {.Name = "convert_markdown", .Category = "Word Helpers", .Button = RI_Markdown, .Execute = AddressOf RunMarkdownCommand},
+            New TalkToMeRibbonCommandEntry With {.Name = "reset_spacing", .Category = "Word Helpers", .Button = RI_ResetSpacing, .Execute = AddressOf RunResetSpacingCommand},
             New TalkToMeRibbonCommandEntry With {.Name = "remove_content_controls", .Category = "Word Helpers", .Button = RI_ContentControls, .Execute = AddressOf RunContentControlsCommand},
             New TalkToMeRibbonCommandEntry With {.Name = "remove_ri_reference", .Category = "Word Helpers", .Button = RI_Remove, .Execute = AddressOf RunRemoveCommand},
             New TalkToMeRibbonCommandEntry With {.Name = "clipboard_to_text", .Category = "Word Helpers", .Button = RI_InsertClipboard, .Execute = AddressOf RunInsertClipboardCommand},
@@ -860,6 +861,10 @@ Public Class Ribbon1
         ExecuteLoggedCommand("Markdown_Word invoked", Sub() Globals.ThisAddIn.ConvertMarkdownToWord())
     End Sub
 
+    Private Sub RunResetSpacingCommand()
+        ExecuteLoggedCommand("ResetSpacing_Word invoked", Sub() SharedMethods.ResetSelectedTextParagraphSpacing())
+    End Sub
+
     Private Sub RunFindHiddenCommand()
         ExecuteLoggedCommand("FindHidden_Word invoked", Sub() Globals.ThisAddIn.FindHiddenPrompts())
     End Sub
@@ -1162,6 +1167,10 @@ Public Class Ribbon1
 
     Private Sub RI_Markdown_Click(sender As Object, e As Microsoft.Office.Tools.Ribbon.RibbonControlEventArgs) Handles RI_Markdown.Click
         RunMarkdownCommand()
+    End Sub
+
+    Private Sub RI_ResetSpacing_Click(sender As Object, e As Microsoft.Office.Tools.Ribbon.RibbonControlEventArgs) Handles RI_ResetSpacing.Click
+        RunResetSpacingCommand()
     End Sub
 
     Private Sub RI_FindHidden_Click(sender As Object, e As Microsoft.Office.Tools.Ribbon.RibbonControlEventArgs) Handles RI_FindHidden.Click

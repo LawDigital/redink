@@ -2399,7 +2399,6 @@ Partial Public Class ThisAddIn
             ' Clean and rebuild context menu
             If OtherPrompt.StartsWith("cleanmenu", StringComparison.OrdinalIgnoreCase) Then
                 RemoveOldContextMenu()
-                RemoveVeryOldContextMenu()
                 MenusAdded = False
                 AddContextMenu()
                 Return

@@ -1373,6 +1373,25 @@ Public Class frmAIChat
             ' STEP 9: Process LLM Response
             ' ──────────────────────────────────────────────────────────────
 
+            ' Guard against an empty/whitespace response so the chat does not
+            ' render a bare "Inky:" line. Surface it as an error and restore
+            ' the prompt so the user can resend without retyping.
+            If String.IsNullOrWhiteSpace(aiResponseOriginal) Then
+                Await UpdateUIAsync(Sub()
+                                        RemoveLastLineFromChatHistory()
+                                        RemoveAssistantThinking()
+                                        ReportCommandExecutionError("The model returned an empty response. Please try again.")
+                                        txtUserInput.Text = promptToRestore
+                                    End Sub)
+
+                ' Remove the user turn we optimistically added so history stays consistent.
+                If _chatHistory.Count > 0 AndAlso _chatHistory(_chatHistory.Count - 1).Role = "user" Then
+                    _chatHistory.RemoveAt(_chatHistory.Count - 1)
+                End If
+
+                Return
+            End If
+
             ' Process InkyMemory updates from LLM response (if enabled)
             If chkInkyMemory.Checked Then
                 aiResponseOriginal = SharedMethods.ProcessInkyMemoryResponse(

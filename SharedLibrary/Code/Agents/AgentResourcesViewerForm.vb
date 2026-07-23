@@ -230,25 +230,27 @@ Namespace Agents
             Try
                 AgentResources.Refresh()
 
-                For Each sk In AgentResources.Skills
+                For Each sk In AgentResources.AllSkills
                     entries.Add(New Entry With {
                         .Display = "[Skill]  " & sk.Name & "  (" & If(sk.IsLocal, "local", "central") & ")" &
+                                   If(sk.Enabled, "", "  [disabled]") &
                                    If(String.IsNullOrWhiteSpace(sk.Description), "", " — " & sk.Description.Trim()),
                         .Path = sk.FilePath,
                         .Description = If(sk.Description, "")
                     })
                 Next
 
-                For Each ag In AgentResources.Agents
+                For Each ag In AgentResources.AllAgents
                     entries.Add(New Entry With {
                         .Display = "[Agent] " & ag.Name & "  (" & If(ag.IsLocal, "local", "central") & ")" &
+                                   If(ag.Enabled, "", "  [disabled]") &
                                    If(String.IsNullOrWhiteSpace(ag.Description), "", " — " & ag.Description.Trim()),
                         .Path = ag.FilePath,
                         .Description = If(ag.Description, "")
                     })
                 Next
 
-                Me.lblTitle.Text = $"Discovered skills and agents: {AgentResources.Skills.Count} skills, {AgentResources.Agents.Count} agents (local entries override central)"
+                Me.lblTitle.Text = $"Discovered skills and agents: {AgentResources.AllSkills.Count} skills, {AgentResources.AllAgents.Count} agents (local entries override central)"
             Catch ex As Exception
                 Debug.WriteLine("[AgentResourcesViewerForm] ReloadEntries ERROR: " & ex.Message)
                 Me.lblTitle.Text = "Discovered skills and agents:"

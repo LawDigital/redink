@@ -145,9 +145,42 @@ Namespace Agents
 
             idx("skills") = skillsArr
             idx("agents") = agentsArr
-            idx("local_root") = If(AgentResources.ConfiguredLocalPath, "")
-            idx("create_hint") = "To create a NEW skill, write local_root + '\skills\<name>\SKILL.md'. For a NEW agent, write local_root + '\agents\<name>\AGENT.md' (or '\agents\<name>.md'). Parent folders are created automatically."
-            idx("note") = "To modify an existing resource, edit the exact 'file' path shown here with text_read/text_write. Do not invent new paths for EXISTING resources."
+
+            Dim localRoot As String = If(AgentResources.ConfiguredLocalPath, "")
+            Dim centralRoot As String = If(AgentResources.ConfiguredCentralPath, "")
+            Dim allowCentral As Boolean = SkillAuthorMode.AllowCentralWrites
+
+            idx("local_root") = localRoot
+            idx("central_root") = centralRoot
+            idx("central_writes_allowed") = allowCentral
+
+            ' Deterministic target root for NEW resources: local is always writable;
+            ' central is only writable when the user explicitly enabled central writes.
+            Dim newResourceRoot As String =
+                If(allowCentral AndAlso Not String.IsNullOrWhiteSpace(centralRoot), centralRoot, localRoot)
+            idx("new_resource_root") = newResourceRoot
+
+            idx("create_hint") =
+                "ALWAYS write NEW resources under new_resource_root using ABSOLUTE paths — never a relative path, " &
+                "because a relative path resolves into the temporary workspace, not the resource tree. " &
+                "New skill: new_resource_root + '\skills\<name>\SKILL.md'. " &
+                "New agent: new_resource_root + '\agents\<name>\AGENT.md' (or new_resource_root + '\agents\<name>.md'). " &
+                "Parent folders are created automatically."
+
+            idx("root_choice_hint") =
+                If(String.IsNullOrWhiteSpace(centralRoot),
+                   "Only a local resource root is configured; create and edit everything under local_root.",
+                   If(allowCentral,
+                      "Both a local and a central root are configured and central writing is ENABLED. " &
+                      "Create NEW shared resources under central_root; create user-private resources under local_root. " &
+                      "When unsure, prefer local_root.",
+                      "Both a local and a central root are configured but central writing is DISABLED. " &
+                      "Create ALL new resources under local_root. Never write under central_root."))
+
+            idx("note") =
+                "To modify an EXISTING resource, edit the exact 'file' path shown for it (each entry carries its 'origin' = local or central). " &
+                "Do not invent new paths for existing resources, and do not copy a central resource into local_root unless the user asks to fork it."
+
             Return idx
         End Function
 
