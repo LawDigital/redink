@@ -1208,23 +1208,37 @@ Partial Public Class ThisAddIn
         splash.Show()
         splash.Refresh()
 
-        RemoveMenu = True
-        MenusAdded = False
-        AddContextMenu()
-
-        Try
-            If Globals.Ribbons.Ribbon1 IsNot Nothing Then
-                Globals.Ribbons.Ribbon1.ApplyRibbonVisibilityConfiguration()
-            End If
-        Catch
-            ' non-critical
-        End Try
-
-        splash.Close()
+        ' The Word context menus (CommandBars popups) are built once at startup and are
+        ' structurally static - their menu items never change, only the behaviour of the
+        ' OnAction VBA macros, which read the current INI values at click time. Tearing
+        ' them down and rebuilding all ~40 CommandBars popups here (on the message pump,
+        ' right after the modal settings dialog) is what non-deterministically corrupts
+        ' Word's COM state and fail-fasts the process (exit code 0xC0000409). We therefore
+        ' do NOT rebuild the context menus after a settings change; we only refresh the
+        ' ribbon, which is managed WinForms UI and safe to update.
+        mainThreadControl.BeginInvoke(
+            Sub()
+                Try
+                    Try
+                        If Globals.Ribbons.Ribbon1 IsNot Nothing Then
+                            Globals.Ribbons.Ribbon1.ApplyRibbonVisibilityConfiguration()
+                        End If
+                    Catch ex As System.Exception
+                        System.Diagnostics.Debug.WriteLine("ShowSettings menu refresh: ApplyRibbonVisibilityConfiguration failed: " & ex.Message)
+                    End Try
+                Catch ex As System.Exception
+                    ' Final safety net: never let anything escape the deferred UI callback.
+                    System.Diagnostics.Debug.WriteLine("ShowSettings menu refresh failed: " & ex.Message)
+                Finally
+                    Try
+                        splash.Close()
+                        splash.Dispose()
+                    Catch
+                        ' ignore close/dispose errors
+                    End Try
+                End Try
+            End Sub)
 
     End Sub
-
-
-
 
 End Class

@@ -469,6 +469,11 @@ Public Class Ribbon1
         Globals.ThisAddIn.CompareSelectedTextRangesOutlook()
     End Sub
 
+    Private Sub RI_ResetSpacing_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_ResetSpacing.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "ResetSpacing_Outlook invoked")
+        SharedMethods.ResetSelectedTextParagraphSpacing()
+    End Sub
+
 End Class
 
 Public Class Ribbon2

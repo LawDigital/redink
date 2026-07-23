@@ -366,19 +366,80 @@ Namespace SharedLibrary
                     Next
                 End If
 
-                ' Headings (h1–h6): override only family/color/line-height
+                ' Headings (h1–h6): emit the target document's own heading Formatvorlagen
+                ' (Überschrift 1..6 / Heading 1..6) font, size, weight and color, so pasted
+                ' headings match what the user defined instead of the HTML importer's oversized
+                ' browser-default heading sizing. Reads the built-in heading styles directly.
                 Dim headings As HtmlAgilityPack.HtmlNodeCollection = doc.DocumentNode.SelectNodes("//h1 | //h2 | //h3 | //h4 | //h5 | //h6")
                 If headings IsNot Nothing Then
                     For Each h As HtmlAgilityPack.HtmlNode In headings
-                        Dim current As String = h.GetAttributeValue("style", "")
-                        If Not System.String.IsNullOrWhiteSpace(current) Then
-                            current = System.Text.RegularExpressions.Regex.Replace(current, "font-family\s*:\s*[^;]+;?", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim()
+                        ' Resolve the built-in heading style for this level.
+                        Dim headingLevel As Integer = 1
+                        Integer.TryParse(h.Name.Substring(1), headingLevel)
+
+                        Dim headingCss As String = String.Empty
+                        Try
+                            Dim builtin As Microsoft.Office.Interop.Word.WdBuiltinStyle
+                            Select Case headingLevel
+                                Case 1 : builtin = Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleHeading1
+                                Case 2 : builtin = Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleHeading2
+                                Case 3 : builtin = Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleHeading3
+                                Case 4 : builtin = Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleHeading4
+                                Case 5 : builtin = Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleHeading5
+                                Case Else : builtin = Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleHeading6
+                            End Select
+
+                            Dim hStyle As Microsoft.Office.Interop.Word.Style =
+                                CType(range.Document.Styles.Item(builtin), Microsoft.Office.Interop.Word.Style)
+                            Dim hFont As Microsoft.Office.Interop.Word.Font = hStyle.Font
+
+                            ' Font family (fall back to body family when undefined).
+                            Dim hFontName As String = hFont.Name
+                            If String.IsNullOrWhiteSpace(hFontName) OrElse
+                               hFontName = CStr(Microsoft.Office.Interop.Word.WdConstants.wdUndefined) Then
+                                hFontName = fontName
+                            End If
+                            headingCss &= $"font-family:'{hFontName}';"
+
+                            ' Font size (only when the style defines a concrete size).
+                            Dim hFontSize As Single = hFont.Size
+                            If hFontSize > 0 AndAlso hFontSize < 1000 Then
+                                headingCss &= $" font-size:{hFontSize.ToString(System.Globalization.CultureInfo.InvariantCulture)}pt;"
+                            End If
+
+                            ' Weight.
+                            If hFont.Bold = -1 Then
+                                headingCss &= " font-weight:bold;"
+                            ElseIf hFont.Bold = 0 Then
+                                headingCss &= " font-weight:normal;"
+                            End If
+
+                            ' Italic.
+                            If hFont.Italic = -1 Then headingCss &= " font-style:italic;"
+
+                            ' Color (skip when host default color is requested or color is automatic).
+                            If Not UseHostDefaultFontColor AndAlso
+                               hFont.Color <> Microsoft.Office.Interop.Word.WdColor.wdColorAutomatic Then
+                                Dim hBgr As Integer = CInt(hFont.Color) And &HFFFFFF
+                                Dim hr As Integer = (hBgr And &HFF)
+                                Dim hg As Integer = ((hBgr >> 8) And &HFF)
+                                Dim hb As Integer = ((hBgr >> 16) And &HFF)
+                                headingCss &= System.String.Format(" color:#{0:X2}{1:X2}{2:X2};", hr, hg, hb)
+                            End If
+                        Catch ex As System.Exception
+                            System.Diagnostics.Debug.WriteLine($"Heading style read failed (h{headingLevel}): {ex.Message}")
+                            headingCss = String.Empty
+                        End Try
+
+                        ' Fall back to the previous behavior (body family/color/line-height)
+                        ' when the heading style could not be read.
+                        Dim merged As String
+                        If System.String.IsNullOrWhiteSpace(headingCss) Then
+                            merged = cssBody
+                        Else
+                            merged = $"line-height:{lineHeightCss}; {headingCss}"
                         End If
-                        Dim merged As String = cssBody
-                        If Not System.String.IsNullOrWhiteSpace(current) Then
-                            If Not merged.EndsWith(";", System.StringComparison.Ordinal) Then merged &= ";"
-                            merged &= " " & current
-                        End If
+
                         h.SetAttributeValue("style", merged.Trim())
                     Next
                 End If
@@ -478,6 +539,38 @@ Namespace SharedLibrary
 
                     System.Threading.Thread.Sleep(100)
                     range = range.Application.Selection.Range
+
+                    ' --- 7b) Strip automatic heading numbering that the pasted heading
+                    '     Formatvorlagen (Überschrift 1..6) may carry, when the source markdown
+                    '     contained no such numbers. Genuine numbered lists (<ol>/<li>) are
+                    '     body-text paragraphs and keep their numbering; only paragraphs whose
+                    '     outline level is an actual heading level are cleared. This is fully
+                    '     deterministic and locale-independent (no style-name matching).
+                    Try
+                        Dim insertedStart As Object = origRange.Start
+                        Dim insertedEnd As Object = range.Application.Selection.Range.End
+                        Dim insertedRng As Microsoft.Office.Interop.Word.Range =
+                            range.Document.Range(insertedStart, insertedEnd)
+
+                        For Each hpara As Microsoft.Office.Interop.Word.Paragraph In insertedRng.Paragraphs
+                            Try
+                                Dim isHeadingLevel As Boolean =
+                                    (hpara.OutlineLevel <> Microsoft.Office.Interop.Word.WdOutlineLevel.wdOutlineLevelBodyText)
+
+                                Dim hasAutoNumbering As Boolean =
+                                    (hpara.Range.ListFormat.ListType <> Microsoft.Office.Interop.Word.WdListType.wdListNoNumbering)
+
+                                If isHeadingLevel AndAlso hasAutoNumbering Then
+                                    hpara.Range.ListFormat.RemoveNumbers(
+                                        Microsoft.Office.Interop.Word.WdNumberType.wdNumberParagraph)
+                                End If
+                            Catch exPara As System.Exception
+                                System.Diagnostics.Debug.WriteLine($"Heading numbering strip (paragraph) skipped: {exPara.Message}")
+                            End Try
+                        Next
+                    Catch exNum As System.Exception
+                        System.Diagnostics.Debug.WriteLine($"Heading numbering strip skipped: {exNum.Message}")
+                    End Try
 
                     ' --- 8) Optionally remove last newline character ---
                     '     Only delete if the trailing character is actually a paragraph mark,
@@ -1047,6 +1140,151 @@ Namespace SharedLibrary
             selection.SetRange(startPosition, endPosition)
         End Sub
 
+
+        ''' <summary>
+        ''' Resets paragraph spacing in the current active Word selection to single line spacing
+        ''' with no space before or after paragraphs, leaving all other formatting unchanged.
+        ''' If there is no text selection, the entire current story/document is selected first.
+        ''' Works both in Word and in an Outlook mail editor that uses WordEditor.
+        ''' </summary>
+        Public Shared Sub ResetSelectedTextParagraphSpacing()
+            Try
+                Dim selection As Microsoft.Office.Interop.Word.Selection = TryGetActiveOutlookEditorSelection()
+
+                If selection Is Nothing Then
+                    selection = TryGetActiveWordSelection()
+                End If
+
+                If selection Is Nothing OrElse selection.Range Is Nothing Then
+                    Return
+                End If
+
+                If selection.Start = selection.End Then
+                    selection.WholeStory()
+                End If
+
+                If selection.Range Is Nothing OrElse selection.Range.Start = selection.Range.End Then
+                    Return
+                End If
+
+                For Each para As Microsoft.Office.Interop.Word.Paragraph In selection.Range.Paragraphs
+                    para.SpaceBeforeAuto = 0
+                    para.SpaceAfterAuto = 0
+                    para.SpaceBefore = 0.0F
+                    para.SpaceAfter = 0.0F
+                    para.LineSpacingRule = Microsoft.Office.Interop.Word.WdLineSpacing.wdLineSpaceSingle
+                    para.LineSpacing = selection.Application.LinesToPoints(1.0F)
+                Next
+            Catch ex As System.Exception
+                System.Windows.Forms.MessageBox.Show("ResetSelectedTextParagraphSpacing Error: " & ex.Message)
+            End Try
+        End Sub
+
+        ''' <summary>
+        ''' Returns the active selection from an Outlook compose inspector's WordEditor, if available.
+        ''' Uses reflection so SharedLibrary does not take a direct dependency on Outlook interop.
+        ''' </summary>
+        Private Shared Function TryGetActiveOutlookEditorSelection() As Microsoft.Office.Interop.Word.Selection
+            Try
+                Dim outlookAppObj As Object = Nothing
+
+                Try
+                    outlookAppObj = System.Runtime.InteropServices.Marshal.GetActiveObject("Outlook.Application")
+                Catch
+                    outlookAppObj = Nothing
+                End Try
+
+                If outlookAppObj Is Nothing Then
+                    Return Nothing
+                End If
+
+                Dim inspectorObj As Object = Nothing
+                Try
+                    inspectorObj = outlookAppObj.GetType().InvokeMember(
+                        "ActiveInspector",
+                        System.Reflection.BindingFlags.InvokeMethod Or
+                        System.Reflection.BindingFlags.Public Or
+                        System.Reflection.BindingFlags.Instance,
+                        Nothing,
+                        outlookAppObj,
+                        Nothing,
+                        System.Globalization.CultureInfo.InvariantCulture)
+                Catch
+                    inspectorObj = Nothing
+                End Try
+
+                If inspectorObj Is Nothing Then
+                    Return Nothing
+                End If
+
+                Dim wordEditorObj As Object = Nothing
+                Try
+                    wordEditorObj = inspectorObj.GetType().InvokeMember(
+                        "WordEditor",
+                        System.Reflection.BindingFlags.GetProperty Or
+                        System.Reflection.BindingFlags.Public Or
+                        System.Reflection.BindingFlags.Instance,
+                        Nothing,
+                        inspectorObj,
+                        Nothing,
+                        System.Globalization.CultureInfo.InvariantCulture)
+                Catch
+                    wordEditorObj = Nothing
+                End Try
+
+                Dim wordDoc As Microsoft.Office.Interop.Word.Document =
+                    TryCast(wordEditorObj, Microsoft.Office.Interop.Word.Document)
+
+                If wordDoc Is Nothing Then
+                    Return Nothing
+                End If
+
+                Dim selection As Microsoft.Office.Interop.Word.Selection = Nothing
+                Try
+                    selection = wordDoc.Application.Selection
+                Catch
+                    selection = Nothing
+                End Try
+
+                If selection Is Nothing OrElse selection.Range Is Nothing Then
+                    Return Nothing
+                End If
+
+                Return selection
+
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine("TryGetActiveOutlookEditorSelection Error: " & ex.Message)
+                Return Nothing
+            End Try
+        End Function
+
+        ''' <summary>
+        ''' Returns the active selection from the running Word application, if available.
+        ''' </summary>
+        Private Shared Function TryGetActiveWordSelection() As Microsoft.Office.Interop.Word.Selection
+            Try
+                Dim wordAppObj As Object = Nothing
+
+                Try
+                    wordAppObj = System.Runtime.InteropServices.Marshal.GetActiveObject("Word.Application")
+                Catch
+                    wordAppObj = Nothing
+                End Try
+
+                Dim wordApp As Microsoft.Office.Interop.Word.Application =
+                    TryCast(wordAppObj, Microsoft.Office.Interop.Word.Application)
+
+                If wordApp Is Nothing OrElse wordApp.Selection Is Nothing OrElse wordApp.Selection.Range Is Nothing Then
+                    Return Nothing
+                End If
+
+                Return wordApp.Selection
+
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine("TryGetActiveWordSelection Error: " & ex.Message)
+                Return Nothing
+            End Try
+        End Function
 
     End Class
 End Namespace

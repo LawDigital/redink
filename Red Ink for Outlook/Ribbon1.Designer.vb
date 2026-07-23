@@ -73,6 +73,7 @@ Partial Class Ribbon1
         Me.RI_Clipboard = Me.Factory.CreateRibbonButton
         Me.RI_HelpMe = Me.Factory.CreateRibbonButton
         Me.RI_CompareSelected = Me.Factory.CreateRibbonButton
+        Me.RI_ResetSpacing = Me.Factory.CreateRibbonButton
         Me.Settings = Me.Factory.CreateRibbonButton
         Me.Group2 = Me.Factory.CreateRibbonGroup
         Me.RI_PrimLang2 = Me.Factory.CreateRibbonButton
@@ -115,6 +116,7 @@ Partial Class Ribbon1
         Me.Menu1.Items.Add(Me.RI_Answers)
         Me.Menu1.Items.Add(Me.RI_Freestyle)
         Me.Menu1.Items.Add(Me.RI_CompareSelected)
+        Me.Menu1.Items.Add(Me.RI_ResetSpacing)
         Me.Menu1.Items.Add(Me.RI_Clipboard)
         Me.Menu1.Items.Add(Me.RI_DefineMyStyle)
         Me.Menu1.Items.Add(Me.RI_HelpMe)
@@ -261,6 +263,14 @@ Partial Class Ribbon1
         Me.RI_CompareSelected.OfficeImageId = "ReviewCompareTwoVersions"
         Me.RI_CompareSelected.ScreenTip = "This will allow you to compare two selected portions of text within Outlook"
         Me.RI_CompareSelected.ShowImage = True
+        '
+        'RI_ResetSpacing
+        '
+        Me.RI_ResetSpacing.Label = "Reset Spacing"
+        Me.RI_ResetSpacing.Name = "RI_ResetSpacing"
+        Me.RI_ResetSpacing.OfficeImageId = "SizeToControlHeight"
+        Me.RI_ResetSpacing.ScreenTip = "Resets paragraph spacing before and after the selected paragraphs"
+        Me.RI_ResetSpacing.ShowImage = True
         '
         'RI_Clipboard
         '
@@ -411,6 +421,7 @@ Partial Class Ribbon1
     Friend WithEvents RI_DefineMyStyle As RibbonButton
     Friend WithEvents RI_HelpMe As RibbonButton
     Friend WithEvents RI_CompareSelected As RibbonButton
+    Friend WithEvents RI_ResetSpacing As RibbonButton
 End Class
 
 Partial Class ThisRibbonCollection

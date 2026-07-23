@@ -598,45 +598,4 @@ Partial Public Class ThisAddIn
         Next
     End Sub
 
-    ''' <summary>
-    ''' Removes very old version Red Ink context menus from relevant Word context menus.
-    ''' </summary>
-    ''' <remarks>
-    ''' Handles cleanup of legacy menu items identified by OldRIMenu constant.
-    ''' Used during version migration to ensure backward compatibility.
-    ''' </remarks>
-    Public Sub RemoveVeryOldContextMenu()
-        Dim application As Word.Application = Globals.ThisAddIn.Application
-
-        ' Array of relevant context menus
-        Dim contextMenus As String() = {
-            "Text", "Spelling", "Grammar", "Grammar (2)", "Linked Text", "Lists", "Headings", "Rotate Text", "Table Text",
-            "Footnotes", "Endnotes", "Frames", "Fields", "Form Fields", "Display Fields", "Field Display List Numbers", "Field AutoText",
-            "Comment", "Track Changes", "Track Changes Indicator", "Hyperlink Context Menu",
-            "Table Cells", "Whole Table", "Linked Table", "Table Lists", "Table Pictures",
-            "Inline Picture", "Floating Picture", "OLE Object", "ActiveX Control", "Inline ActiveX Control",
-            "Business Card", "Equation Popup", "WordArt Context Menu",
-            "Drop Caps", "Font Popup", "Font Paragraph", "Format consistency",
-            "Format Inspector Popup in Normal Mode", "Format Inspector Popup in Compare Mode", "AutoSignature Popup"
-        }
-
-        ' Iterate through all CommandBars
-        For Each cb As CommandBar In application.CommandBars
-            If cb.Type = MsoBarType.msoBarTypePopup Then
-                ' Check if the context menu is relevant
-                If contextMenus.Contains(cb.Name) Then
-                    ' Remove the legacy context menu if it exists
-                    For Each ctrl As CommandBarControl In cb.Controls
-                        If ctrl.Type = MsoControlType.msoControlPopup AndAlso ctrl.Caption = OldRIMenu Then
-                            Try
-                                ctrl.Delete()
-                            Catch ex As System.Exception
-                                ' Silently handle errors (e.g., menu already deleted, protected menu)
-                            End Try
-                        End If
-                    Next
-                End If
-            End If
-        Next
-    End Sub
 End Class

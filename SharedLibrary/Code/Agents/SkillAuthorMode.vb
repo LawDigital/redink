@@ -57,6 +57,14 @@ Namespace Agents
             End Get
             Set(value As Boolean)
                 Volatile.Write(_allowCentralWrites, If(value, 1, 0))
+                ' Make sure the central resource tree (root + skills/ + agents/) exists so
+                ' new resources can be created there once central writing is permitted.
+                If value Then
+                    Try
+                        AgentResources.EnsureCentralResourceDirectories()
+                    Catch
+                    End Try
+                End If
             End Set
         End Property
 

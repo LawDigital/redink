@@ -151,6 +151,89 @@ Partial Public Class ThisAddIn
     Dim paraCount As Integer
 
     ''' <summary>
+    ''' Tracks whether the user has pressed Esc during the current table-processing batch.
+    ''' Set by the background Esc-poll thread and cleared when the user chooses to continue.
+    ''' </summary>
+    Private _tableAbortRequested As Boolean = False
+
+    ''' <summary>
+    ''' Signals the background Esc-poll thread to stop.
+    ''' </summary>
+    Private _tableEscPollStop As Boolean = False
+
+    ''' <summary>
+    ''' Reference to the background Esc-poll thread (if running).
+    ''' </summary>
+    Private _tableEscPollThread As System.Threading.Thread = Nothing
+
+    ''' <summary>
+    ''' Starts a background thread that continuously polls the Esc key for the duration of a
+    ''' table-processing batch and latches <see cref="_tableAbortRequested"/> when pressed.
+    ''' Polling in the background (rather than a one-shot check) reliably catches the same Esc
+    ''' keystroke that cancels the currently running per-cell LLM call.
+    ''' </summary>
+    Private Sub StartTableEscPoll()
+        _tableAbortRequested = False
+        _tableEscPollStop = False
+
+        _tableEscPollThread = New System.Threading.Thread(
+            Sub()
+                Dim escLatched As Boolean = False
+                While Not _tableEscPollStop
+                    System.Threading.Thread.Sleep(100)
+                    Dim state As Integer = GetAsyncKeyState(VK_ESCAPE)
+                    If (state And &H8000) <> 0 Then
+                        ' Debounce: require a key release before latching again.
+                        If Not escLatched Then
+                            escLatched = True
+                            _tableAbortRequested = True
+                        End If
+                    Else
+                        escLatched = False
+                    End If
+                End While
+            End Sub)
+        _tableEscPollThread.IsBackground = True
+        _tableEscPollThread.Start()
+    End Sub
+
+    ''' <summary>
+    ''' Stops the background Esc-poll thread started by <see cref="StartTableEscPoll"/>.
+    ''' </summary>
+    Private Sub StopTableEscPoll()
+        _tableEscPollStop = True
+        _tableEscPollThread = Nothing
+    End Sub
+
+    ''' <summary>
+    ''' When an Esc abort has been latched, asks the user whether to abort the entire batch or
+    ''' continue with the remaining cells and text sections. Returns True only when the user
+    ''' confirms aborting the whole process.
+    ''' </summary>
+    ''' <returns>True if the user chose to abort the entire process; otherwise False.</returns>
+    Private Function ConfirmAbortIfRequested() As Boolean
+        System.Windows.Forms.Application.DoEvents()
+
+        If Not _tableAbortRequested Then Return False
+
+        Dim answer As Integer = ShowCustomYesNoBox(
+            "Processing was interrupted (Esc). Do you want to abort the entire table processing, or continue with the remaining cells and text sections?",
+            "Abort everything",
+            "Continue",
+            $"{AN} Table Processing")
+
+        If answer = 2 Then
+            ' User chose to continue: clear the latched abort and resume.
+            _tableAbortRequested = False
+            Return False
+        End If
+
+        ' Any other choice (Abort or window closed) aborts the whole process.
+        _tableAbortRequested = True
+        Return True
+    End Function
+
+    ''' <summary>
     ''' Entry point for processing selected text. Validates prerequisites (system prompt, selection), opens an undo scope,
     ''' handles table-aware processing (cell-by-cell or whole table), and delegates to TrueProcessSelectedText.
     ''' </summary>
@@ -303,6 +386,8 @@ Partial Public Class ThisAddIn
 
                     If userdialog = 2 Then
 
+                        _tableAbortRequested = False
+
                         SelectedAlternateModels = Nothing
 
                         MarkupMethod = 2
@@ -340,37 +425,50 @@ Partial Public Class ThisAddIn
                             Dim sel As Word.Selection = application.Selection
                             Dim selCRange As Word.Range = sel.Range
 
-                            ' Loop only the cells the user actually selected
-                            For Each cell As Word.Cell In sel.Cells
-                                ' Make a working copy of the cell's range, minus its end-of-cell marker
-                                Dim cellRange As Word.Range = cell.Range.Duplicate
-                                cellRange.End -= 1
+                            StartTableEscPoll()
 
-                                ' Compute the overlap of selRange & cellRange
-                                Dim intersection As Word.Range = selCRange.Duplicate
-                                intersection.Start = System.Math.Max(cellRange.Start, selCRange.Start)
-                                intersection.End = System.Math.Min(cellRange.End, selCRange.End)
+                            Try
+                                ' Loop only the cells the user actually selected
+                                For Each cell As Word.Cell In sel.Cells
 
-                                ' If there is any overlap, process only that text
-                                If intersection.Start < intersection.End Then
-                                    ' Keep UI responsive
-                                    System.Windows.Forms.Application.DoEvents()
+                                    ' Allow the user to abort the entire process
+                                    If ConfirmAbortIfRequested() Then Exit For
 
-                                    ' Show exactly what's being processed
-                                    intersection.Select()
+                                    ' Make a working copy of the cell's range, minus its end-of-cell marker
+                                    Dim cellRange As Word.Range = cell.Range.Duplicate
+                                    cellRange.End -= 1
 
-                                    ' Async processing call
-                                    Dim result = Await TrueProcessSelectedText(
-                                        SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline,
-                                        InPlace, DoMarkup, MarkupMethod, PutInClipboard,
-                                        PutInBubbles, SelectionMandatory, UseSecondAPI,
-                                        FormattingCap, DoTPMarkup, TPMarkupname, False,
-                                        FileObject, DoPane, 0, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True, SelectedTools:=SelectedTools)
+                                    ' Compute the overlap of selRange & cellRange
+                                    Dim intersection As Word.Range = selCRange.Duplicate
+                                    intersection.Start = System.Math.Max(cellRange.Start, selCRange.Start)
+                                    intersection.End = System.Math.Min(cellRange.End, selCRange.End)
 
-                                    ' Throttle so Word doesn't lock up
-                                    Await System.Threading.Tasks.Task.Delay(500)
-                                End If
-                            Next
+                                    ' If there is any overlap and actual text, process only that text
+                                    If intersection.Start < intersection.End AndAlso Not String.IsNullOrWhiteSpace(intersection.Text) Then
+                                        ' Keep UI responsive
+                                        System.Windows.Forms.Application.DoEvents()
+
+                                        ' Show exactly what's being processed
+                                        intersection.Select()
+
+                                        ' Async processing call
+                                        Dim result = Await TrueProcessSelectedText(
+                                            SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline,
+                                            InPlace, DoMarkup, MarkupMethod, PutInClipboard,
+                                            PutInBubbles, SelectionMandatory, UseSecondAPI,
+                                            FormattingCap, DoTPMarkup, TPMarkupname, False,
+                                            FileObject, DoPane, 0, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True, SelectedTools:=SelectedTools)
+
+                                        ' If the cell was cancelled with Esc, offer to abort the whole process
+                                        If ConfirmAbortIfRequested() Then Exit For
+
+                                        ' Throttle so Word doesn't lock up
+                                        Await System.Threading.Tasks.Task.Delay(50)
+                                    End If
+                                Next
+                            Finally
+                                StopTableEscPoll()
+                            End Try
 
                         Else
 
@@ -383,21 +481,14 @@ Partial Public Class ThisAddIn
 
                             Dim lastPos As Integer = selRange.Start
 
-                            Dim splash As New SLib.SplashScreen("Processing table(s)... press 'Esc' to abort")
-                            splash.Show()
-                            splash.Refresh()
+                            StartTableEscPoll()
 
                             Dim IsExit As Boolean = False
 
                             For Each tbl As Microsoft.Office.Interop.Word.Table In tableList
 
-                                System.Windows.Forms.Application.DoEvents()
-
-                                If (GetAsyncKeyState(VK_ESCAPE) And &H8000) <> 0 Then
-                                    Exit For
-                                End If
-
-                                If (GetAsyncKeyState(VK_ESCAPE) And 1) <> 0 Or IsExit Then
+                                If ConfirmAbortIfRequested() Then
+                                    IsExit = True
                                     Exit For
                                 End If
 
@@ -413,10 +504,14 @@ Partial Public Class ThisAddIn
                                     ' Double-check you haven't snagged any table content
                                     If textChunk.Tables.Count = 0 Then
                                         ' Also verify it's not empty
-                                        If textChunk.Start < textChunk.End Then
+                                        If textChunk.Start < textChunk.End AndAlso Not String.IsNullOrWhiteSpace(textChunk.Text) Then
                                             textChunk.Select()
                                             Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, False, FileObject, DoPane, ChunkSize * -1, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True, SelectedTools:=SelectedTools)
-                                            Await System.Threading.Tasks.Task.Delay(500)
+                                            If ConfirmAbortIfRequested() Then
+                                                IsExit = True
+                                                Exit For
+                                            End If
+                                            Await System.Threading.Tasks.Task.Delay(50)
                                         End If
                                     Else
 
@@ -424,10 +519,14 @@ Partial Public Class ThisAddIn
                                             textChunk.Start += 1
                                         Loop While textChunk.Tables.Count <> 0 And Not textChunk.Start = textChunk.End
 
-                                        If textChunk.Tables.Count = 0 AndAlso textChunk.Start < textChunk.End Then
+                                        If textChunk.Tables.Count = 0 AndAlso textChunk.Start < textChunk.End AndAlso Not String.IsNullOrWhiteSpace(textChunk.Text) Then
                                             textChunk.Select()
                                             Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, False, FileObject, DoPane, ChunkSize * -1, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True, SelectedTools:=SelectedTools)
-                                            Await System.Threading.Tasks.Task.Delay(500)
+                                            If ConfirmAbortIfRequested() Then
+                                                IsExit = True
+                                                Exit For
+                                            End If
+                                            Await System.Threading.Tasks.Task.Delay(50)
                                         End If
 
                                     End If
@@ -435,34 +534,36 @@ Partial Public Class ThisAddIn
 
                                 ' Process the table itself (cells)
                                 For Each row As Microsoft.Office.Interop.Word.Row In tbl.Rows
-                                    System.Windows.Forms.Application.DoEvents()
 
-                                    If (GetAsyncKeyState(VK_ESCAPE) And &H8000) <> 0 Then
+                                    If ConfirmAbortIfRequested() Then
+                                        IsExit = True
                                         Exit For
                                     End If
 
-                                    If (GetAsyncKeyState(VK_ESCAPE) And 1) <> 0 Or IsExit Then
-                                        Exit For
-                                    End If
                                     For Each cell As Microsoft.Office.Interop.Word.Cell In row.Cells
-                                        System.Windows.Forms.Application.DoEvents()
 
-                                        If (GetAsyncKeyState(VK_ESCAPE) And &H8000) <> 0 Then
+                                        If ConfirmAbortIfRequested() Then
+                                            IsExit = True
                                             Exit For
                                         End If
 
-                                        If (GetAsyncKeyState(VK_ESCAPE) And 1) <> 0 Or IsExit Then
-                                            Exit For
-                                        End If
                                         Dim cellRange As Range = cell.Range
                                         cellRange.End -= 1  ' Exclude cell marker
-                                        If cellRange.Start < cellRange.End Then
+                                        If cellRange.Start < cellRange.End AndAlso Not String.IsNullOrWhiteSpace(cellRange.Text) Then
                                             cellRange.Select()
                                             Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, False, FileObject, DoPane, 0, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True, SelectedTools:=SelectedTools)
-                                            Await System.Threading.Tasks.Task.Delay(500)
+                                            If ConfirmAbortIfRequested() Then
+                                                IsExit = True
+                                                Exit For
+                                            End If
+                                            Await System.Threading.Tasks.Task.Delay(50)
                                         End If
                                     Next
+
+                                    If IsExit Then Exit For
                                 Next
+
+                                If IsExit Then Exit For
 
                                 ' Move lastPos to end of this table
                                 lastPos = tblEnd + 1
@@ -493,7 +594,7 @@ Partial Public Class ThisAddIn
                                 End If
                             End If
 
-                            splash.Close()
+                            StopTableEscPoll()
                         End If
 
                     ElseIf userdialog = 1 Then
@@ -2671,45 +2772,71 @@ Partial Public Class ThisAddIn
         Dim app As Word.Application = Globals.ThisAddIn.Application
         Dim sel As Word.Selection = app.Selection
 
-        ' Snapshot basic paragraph style + format for each paragraph in selection
-        Dim srcParas As Word.Paragraphs = sel.Range.Paragraphs
-        Dim savedStyles As New List(Of Object)()
-        Dim savedFormats As New List(Of Word.ParagraphFormat)()
+        ' Capture a single representative "base" paragraph style + format from the current
+        ' selection. This is the body style we want to preserve for plain paragraphs that the
+        ' Markdown conversion leaves at the document default. It must NOT be forced back onto
+        ' paragraphs that the conversion legitimately turns into headings or list items.
+        Dim baseStyle As Object = Nothing
+        Dim baseFormat As Word.ParagraphFormat = Nothing
+        Try
+            Dim firstPara As Word.Paragraph = sel.Range.Paragraphs(1)
+            Try
+                baseStyle = firstPara.Range.Style
+            Catch
+                baseStyle = Nothing
+            End Try
+            Try
+                baseFormat = firstPara.Range.ParagraphFormat.Duplicate
+            Catch
+                baseFormat = Nothing
+            End Try
+        Catch
+        End Try
 
-        For Each p As Word.Paragraph In srcParas
-            Try
-                savedStyles.Add(p.Range.Style)
-            Catch
-                savedStyles.Add(Nothing)
-            End Try
-            Try
-                savedFormats.Add(p.Range.ParagraphFormat.Duplicate)
-            Catch
-                savedFormats.Add(Nothing)
-            End Try
-        Next
+        ' Resolve the document's default paragraph style name so we can distinguish paragraphs
+        ' the conversion left "unstyled" (document default) from those it promoted to a heading,
+        ' a list style, etc. Only default, non-list paragraphs receive the base style/format.
+        Dim defaultStyleName As String = Nothing
+        Try
+            defaultStyleName = CType(app.ActiveDocument.Styles(Word.WdBuiltinStyle.wdStyleNormal), Word.Style).NameLocal
+        Catch
+            defaultStyleName = Nothing
+        End Try
 
         ' Perform the conversion
         Dim selectedText As String = sel.Text
         Dim trailingCR As Boolean = (selectedText.EndsWith(vbCrLf) OrElse selectedText.EndsWith(vbLf) OrElse selectedText.EndsWith(vbCr))
         InsertTextWithMarkdown(sel, selectedText, trailingCR, True)
 
-        ' Re-apply captured style + paragraph format (best-effort)
+        ' Re-apply the captured base style + format ONLY to paragraphs that the conversion left
+        ' at the document default style AND without list formatting. Paragraphs that received a
+        ' heading style, a list style, or automatic list numbering keep what the conversion
+        ' produced, so titles and numbered/bulleted lists are no longer reset.
         Dim newParas As Word.Paragraphs = sel.Range.Paragraphs
-        Dim applyCount As Integer = System.Math.Min(savedFormats.Count, newParas.Count)
 
-        For i As Integer = 1 To applyCount
-            Dim p As Word.Paragraph = newParas(i)
+        For Each p As Word.Paragraph In newParas
             Try
-                If savedStyles(i - 1) IsNot Nothing Then
-                    p.Range.Style = savedStyles(i - 1)
-                End If
-            Catch
-            End Try
-            Try
-                If savedFormats(i - 1) IsNot Nothing Then
-                    p.Range.ParagraphFormat = savedFormats(i - 1)
-                End If
+                Dim hasListFormat As Boolean = False
+                Try
+                    hasListFormat = (p.Range.ListFormat.ListType <> Word.WdListType.wdListNoNumbering)
+                Catch
+                    hasListFormat = False
+                End Try
+
+                Dim isDefaultStyle As Boolean = False
+                Try
+                    Dim curStyleName As String = CType(p.Range.Style, Word.Style).NameLocal
+                    isDefaultStyle = (defaultStyleName IsNot Nothing AndAlso
+                                      String.Equals(curStyleName, defaultStyleName, StringComparison.Ordinal))
+                Catch
+                    isDefaultStyle = False
+                End Try
+
+                ' Skip conversion-produced structure (headings/lists); restore base only to plain paragraphs.
+                If hasListFormat OrElse Not isDefaultStyle Then Continue For
+
+                If baseStyle IsNot Nothing Then p.Range.Style = baseStyle
+                If baseFormat IsNot Nothing Then p.Range.ParagraphFormat = baseFormat
             Catch
             End Try
         Next

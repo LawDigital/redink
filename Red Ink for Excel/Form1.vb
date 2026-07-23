@@ -581,8 +581,27 @@ Public Class frmAIChat
                                 End Sub)
 
             ' Call the LLM function asynchronously
-            Dim aiResponse As String = Await SharedMethods.LLM(_context, SystemPrompt, fullPrompt.ToString(), "", "", 0, _useSecondApi, True)
-            aiResponse = aiResponse.TrimEnd()
+            Dim aiResponseOriginal As String = Await SharedMethods.LLM(_context, SystemPrompt, fullPrompt.ToString(), "", "", 0, _useSecondApi, True)
+
+            ' Guard against an empty/whitespace response so the chat does not render a
+            ' bare "Inky:" line. Surface it as an error and restore the prompt so the
+            ' user can resend without retyping.
+            If String.IsNullOrWhiteSpace(aiResponseOriginal) Then
+                Await UpdateUIAsync(Sub()
+                                        RemoveLastLineFromChatHistory()
+                                        AppendToChatHistory(Environment.NewLine & $"{AN5}: The model returned an empty response. Please try again." & Environment.NewLine)
+                                        txtUserInput.Text = userPrompt
+                                    End Sub)
+
+                ' Remove the user turn we optimistically added so history stays consistent.
+                If _chatHistory.Count > 0 AndAlso _chatHistory(_chatHistory.Count - 1).Role = "user" Then
+                    _chatHistory.RemoveAt(_chatHistory.Count - 1)
+                End If
+
+                Return
+            End If
+
+            Dim aiResponse As String = aiResponseOriginal.TrimEnd()
             aiResponse = aiResponse.Replace($"{vbCrLf}* ", vbCrLf & ChrW(8226) & " ").Replace($"{vbCr}* ", vbCr & ChrW(8226) & " ").Replace($"{vbLf}* ", vbLf & ChrW(8226) & " ")
             aiResponse = aiResponse.Replace($"  *  ", "  " & ChrW(8226) & "  ")
             aiResponse = RemoveMarkdownFormatting(aiResponse)

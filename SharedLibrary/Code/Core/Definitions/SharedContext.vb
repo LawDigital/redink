@@ -359,6 +359,9 @@ Namespace SharedLibrary
             ' Clients permitted to use the Configuration Wizard for central INI editing
             Property INI_CentralConfigClients As String
 
+            ' Password to turn on Central Config ability
+            Property INI_CentralConfigPW As String
+
             Property INI_AutoPilot As String
             ' Privacy protection for external search/web queries
             Property INI_EnablePrivacyForSearch As Boolean
@@ -712,6 +715,7 @@ Namespace SharedLibrary
         Public Property INI_UpdateIniSilentLog As Boolean Implements ISharedContext.INI_UpdateIniSilentLog
 
         Public Property INI_CentralConfigClients As String Implements ISharedContext.INI_CentralConfigClients
+        Public Property INI_CentralConfigPW As String Implements ISharedContext.INI_CentralConfigPW
         Public Property Ignore As String Implements ISharedContext.Ignore
         Public Property Location As String Implements ISharedContext.Location
 

@@ -1463,10 +1463,15 @@ Partial Public Class ThisAddIn
         Dim splash As New SplashScreen("Updating menu following your changes ...")
         splash.Show()
         splash.Refresh()
-        RemoveMenu = True
-        MenusAdded = False
-        AddContextMenu()
 
+        ' The Excel context menus (CommandBars popups) are built once at startup and are
+        ' structurally static - their menu items never change, only the behaviour of the
+        ' OnAction VBA macros, which read the current INI values at click time. Tearing
+        ' them down and rebuilding the CommandBars popups after a settings change is
+        ' unnecessary and, on the Word side, was the cause of a non-deterministic COM
+        ' fail-fast (exit code 0xC0000409). We therefore do NOT rebuild the context menus
+        ' after a settings change; we only refresh the ribbon, which is managed WinForms
+        ' UI and safe to update.
         Try
             If Globals.Ribbons.Ribbon1 IsNot Nothing Then
                 Globals.Ribbons.Ribbon1.ApplyRibbonVisibilityConfiguration()

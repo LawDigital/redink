@@ -267,7 +267,8 @@ Namespace SharedLibrary
 
 
             Dim activeIniPath As String = GetActiveConfigFilePath(context)
-            If Not IniImportManager.CanUseImportFeature(context, activeIniPath, "") Then
+            Dim canUseImportButtons As Boolean = IniImportManager.CanUseImportFeature(context, activeIniPath, "") AndAlso Not context.INI_NoLocalConfig
+            If Not canUseImportButtons Then
                 getMoreStuffButton.Enabled = False
                 loadProviderSettingsButton.Enabled = False
                 loadOtherSettingsButton.Enabled = False
@@ -295,7 +296,11 @@ Namespace SharedLibrary
             settingsForm.Controls.Add(expertConfigButton)
 
             Dim expertConfigButtonToolTip As New System.Windows.Forms.ToolTip()
-            expertConfigButtonToolTip.SetToolTip(expertConfigButton, $"Will accept the current settings and in a separate window let you amend all configuration variables from '{AN2}.ini'.")
+            If context.INI_NoLocalConfig Then
+                expertConfigButtonToolTip.SetToolTip(expertConfigButton, $"Will allow you to enter into the Expert mode if you have the necessary permissions (parameters 'CentralConfigClients' or 'CentralConfigPW').")
+            Else
+                expertConfigButtonToolTip.SetToolTip(expertConfigButton, $"Will accept the current settings and in a separate window let you amend all configuration variables from '{AN2}.ini'.")
+            End If
 
             Dim saveConfigButton As New System.Windows.Forms.Button()
             saveConfigButton.Text = "Save Config"
@@ -399,6 +404,26 @@ Namespace SharedLibrary
                 settingsForm.Controls.Add(helperButton)
             End If
             Dim CapturedContext As ISharedContext = context
+            Dim originalNoLocalConfigValue As Boolean = context.INI_NoLocalConfig
+            Dim temporaryNoLocalConfigSessionUnlocked As Boolean = False
+
+            Dim updateNoLocalConfigDependentButtons As System.Action =
+                Sub()
+                    Dim canUseImportButtonsNow As Boolean = False
+
+                    Try
+                        Dim currentActiveIniPath As String = GetActiveConfigFilePath(CapturedContext)
+                        canUseImportButtonsNow = IniImportManager.CanUseImportFeature(CapturedContext, currentActiveIniPath, "") AndAlso Not CapturedContext.INI_NoLocalConfig
+                    Catch
+                        canUseImportButtonsNow = False
+                    End Try
+
+                    getMoreStuffButton.Enabled = canUseImportButtonsNow
+                    loadProviderSettingsButton.Enabled = canUseImportButtonsNow
+                    loadOtherSettingsButton.Enabled = canUseImportButtonsNow
+                    downloadSampleFilesButton.Enabled = canUseImportButtonsNow
+                    saveConfigButton.Enabled = Not CapturedContext.INI_NoLocalConfig
+                End Sub
 
             AddHandler getMoreStuffButton.Click, Sub(sender, e)
                                                      Try
@@ -491,10 +516,44 @@ Namespace SharedLibrary
                                                              Dim boolValue As Boolean = DirectCast(control, System.Windows.Forms.CheckBox).Checked
                                                              SetSettingValue(settingKey, boolValue.ToString(), CapturedContext)
                                                          Else
-                                                             MessageBox.Show($"Error in ShowSettingsWindow - unsupported control type for setting '{settingKey}' in ShowSettingsWindow (ExpertConfig).", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                                                             ShowCustomMessageBox($"Error in ShowSettingsWindow - unsupported control type for setting '{settingKey}' in ShowSettingsWindow (ExpertConfig).")
                                                          End If
                                                      Next
-                                                     ShowExpertConfiguration(CapturedContext, settingsForm)
+
+                                                     If CapturedContext.INI_NoLocalConfig AndAlso Not temporaryNoLocalConfigSessionUnlocked Then
+                                                         If Not IsClientAllowedToExpertConfig(CapturedContext) Then
+                                                             Dim expectedPassword As String = ResolveCentralConfigPasswordForExpertConfig(CapturedContext)
+                                                             If String.IsNullOrWhiteSpace(expectedPassword) Then
+                                                                 ShowCustomMessageBox("Expert Config is blocked because no central configuration password or client is configured (use parameters 'CentralConfigClients' or 'CentralConfigPW').")
+                                                                 Exit Sub
+                                                             End If
+
+                                                             Dim enteredPassword As String = ShowPasswordPrompt(settingsForm, "Enter the central configuration password to open Expert Config:", "Expert Config")
+                                                             If enteredPassword Is Nothing Then
+                                                                 Exit Sub
+                                                             End If
+
+                                                             If Not String.Equals(RemoveCR(enteredPassword).Trim(), expectedPassword, StringComparison.Ordinal) Then
+                                                                 ShowCustomMessageBox("Incorrect password.")
+                                                                 Exit Sub
+                                                             End If
+                                                         End If
+                                                         temporaryNoLocalConfigSessionUnlocked = True
+                                                         expertConfigButtonToolTip.SetToolTip(expertConfigButton, $"Will accept the current settings and in a separate window let you amend all configuration variables from '{AN2}.ini'.")
+                                                     End If
+
+                                                     If temporaryNoLocalConfigSessionUnlocked Then
+                                                         CapturedContext.INI_NoLocalConfig = False
+                                                         updateNoLocalConfigDependentButtons()
+                                                     End If
+
+                                                     ShowExpertConfiguration(CapturedContext, settingsForm, temporaryNoLocalConfigSessionUnlocked, originalNoLocalConfigValue)
+
+                                                     If temporaryNoLocalConfigSessionUnlocked Then
+                                                         CapturedContext.INI_NoLocalConfig = False
+                                                         updateNoLocalConfigDependentButtons()
+                                                     End If
+
                                                      RefreshFormValues(settingControls, labelControls, CapturedContext, Settings)
                                                      switchButton.Enabled = CapturedContext.INI_SecondAPI
                                                      CapturedContext.MenusAdded = False
@@ -513,7 +572,17 @@ Namespace SharedLibrary
                                                            MessageBox.Show($"Error in ShowSettingsWindow - unsupported control type for setting '{settingKey}' in ShowSettingsWindow (Save).", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
                                                        End If
                                                    Next
+
+                                                   If temporaryNoLocalConfigSessionUnlocked Then
+                                                       CapturedContext.INI_NoLocalConfig = originalNoLocalConfigValue
+                                                   End If
+
                                                    UpdateAppConfig(CapturedContext)
+
+                                                   If temporaryNoLocalConfigSessionUnlocked Then
+                                                       CapturedContext.INI_NoLocalConfig = False
+                                                       updateNoLocalConfigDependentButtons()
+                                                   End If
 
                                                    ' Immediately apply the running background state without a restart
                                                    KnowledgeStoreIdleService.SetEnabled(CapturedContext.INI_KnowledgeStoreBackgroundIndexing)
@@ -683,6 +752,10 @@ Namespace SharedLibrary
                                                End Try
                                            End If
 
+                                           If temporaryNoLocalConfigSessionUnlocked Then
+                                               CapturedContext.INI_NoLocalConfig = originalNoLocalConfigValue
+                                           End If
+
                                            ' Immediately apply the running background state without a restart
                                            KnowledgeStoreIdleService.SetEnabled(CapturedContext.INI_KnowledgeStoreBackgroundIndexing)
 
@@ -691,6 +764,9 @@ Namespace SharedLibrary
                                        End Sub
 
             AddHandler cancelButton.Click, Sub(sender, e)
+                                               If temporaryNoLocalConfigSessionUnlocked Then
+                                                   CapturedContext.INI_NoLocalConfig = originalNoLocalConfigValue
+                                               End If
                                                settingsForm.Close()
                                            End Sub
 
@@ -702,7 +778,213 @@ Namespace SharedLibrary
             )
 
             settingsForm.ShowDialog()
+
+            If temporaryNoLocalConfigSessionUnlocked Then
+                CapturedContext.INI_NoLocalConfig = originalNoLocalConfigValue
+            End If
         End Sub
+
+        ''' <summary>
+        ''' Checks whether the current machine is allowed to launch the Configuration Wizard
+        ''' based on the CentralConfigClients INI key (same pattern as IsClientAllowedToUpdate).
+        ''' </summary>
+        Public Shared Function IsClientAllowedToExpertConfig(context As ISharedContext) As Boolean
+            Try
+                Dim centralConfigClients As String = ""
+                Try
+                    centralConfigClients = GetSettingValue("CentralConfigClients", context)
+                Catch
+                    ' Key does not exist yet on context; treat as empty = allow all
+                End Try
+
+                If String.IsNullOrWhiteSpace(centralConfigClients) Then
+                    ' Fall back: read directly from the active INI file
+                    Try
+                        Dim iniPath As String = GetActiveConfigFilePath(context)
+                        If File.Exists(iniPath) Then
+                            For Each line In File.ReadAllLines(iniPath)
+                                Dim trimmed = line.Trim()
+                                If trimmed.StartsWith("CentralConfigClients", StringComparison.OrdinalIgnoreCase) Then
+                                    Dim parts = trimmed.Split({"="c}, 2)
+                                    If parts.Length = 2 Then
+                                        centralConfigClients = parts(1).Trim()
+                                    End If
+                                    Exit For
+                                End If
+                            Next
+                        End If
+                    Catch
+                    End Try
+                End If
+
+                If String.IsNullOrWhiteSpace(centralConfigClients) Then
+                    Return True
+                End If
+
+                Dim currentClient As String = GetCurrentClientIdentifier()
+                If String.IsNullOrWhiteSpace(currentClient) Then
+                    Return True
+                End If
+
+                Dim allowedClients = centralConfigClients.Split(","c).
+                    Select(Function(c) c.Trim()).
+                    Where(Function(c) Not String.IsNullOrWhiteSpace(c)).
+                    ToList()
+
+                If allowedClients.Count = 0 Then
+                    Return True
+                End If
+
+                Return allowedClients.Any(Function(c) c.Equals(currentClient, StringComparison.OrdinalIgnoreCase))
+
+            Catch
+                Return True
+            End Try
+        End Function
+
+        Private Shared Function ResolveCentralConfigPasswordForExpertConfig(context As ISharedContext) As String
+            Dim password As String = RemoveCR(If(context.INI_CentralConfigPW, "")).Trim()
+
+            If String.IsNullOrWhiteSpace(password) Then
+                Return ""
+            End If
+
+            If Not String.IsNullOrWhiteSpace(context.Codebasis) Then
+                password = RemoveCR(RealAPIKey(password, False, False, context)).Trim()
+            End If
+
+            Return password
+        End Function
+
+        Private Shared Function ShowPasswordPrompt(ownerForm As Form, prompt As String, title As String) As String
+            Using passwordForm As New System.Windows.Forms.Form()
+                Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
+                Dim workArea As System.Drawing.Rectangle = Screen.FromPoint(Cursor.Position).WorkingArea
+                Dim dialogWidth As Integer = Math.Min(Math.Max(220, CInt(workArea.Width * 0.15)), Math.Max(220, workArea.Width - 80))
+
+                passwordForm.Text = title
+                passwordForm.FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedDialog
+                passwordForm.StartPosition = System.Windows.Forms.FormStartPosition.CenterParent
+                passwordForm.MaximizeBox = False
+                passwordForm.MinimizeBox = False
+                passwordForm.ShowInTaskbar = False
+                passwordForm.TopMost = True
+                passwordForm.Font = standardFont
+                passwordForm.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font
+                passwordForm.AutoSize = True
+                passwordForm.AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink
+
+                Try
+                    Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
+                    passwordForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+                Catch
+                End Try
+
+                Dim mainLayout As New System.Windows.Forms.TableLayoutPanel() With {
+                    .Dock = System.Windows.Forms.DockStyle.Fill,
+                    .AutoSize = True,
+                    .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
+                    .ColumnCount = 1,
+                    .RowCount = 3,
+                    .Padding = New System.Windows.Forms.Padding(20),
+                    .MaximumSize = New System.Drawing.Size(dialogWidth + 40, 0)
+                }
+                mainLayout.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
+
+                Dim promptLabel As New System.Windows.Forms.Label() With {
+                    .Text = prompt,
+                    .AutoSize = True,
+                    .MaximumSize = New System.Drawing.Size(dialogWidth, 0),
+                    .Margin = New System.Windows.Forms.Padding(0, 0, 0, 12)
+                }
+                mainLayout.Controls.Add(promptLabel, 0, 0)
+
+                Dim passwordRow As New System.Windows.Forms.TableLayoutPanel() With {
+                    .Dock = System.Windows.Forms.DockStyle.Top,
+                    .AutoSize = True,
+                    .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
+                    .ColumnCount = 2,
+                    .RowCount = 1,
+                    .Margin = New System.Windows.Forms.Padding(0)
+                }
+                passwordRow.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
+                passwordRow.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.AutoSize))
+
+                Dim passwordTextBox As New System.Windows.Forms.TextBox() With {
+                    .UseSystemPasswordChar = True,
+                    .Anchor = System.Windows.Forms.AnchorStyles.Left Or System.Windows.Forms.AnchorStyles.Right,
+                    .Margin = New System.Windows.Forms.Padding(0, 0, 10, 0),
+                    .Width = Math.Max(260, dialogWidth - 90)
+                }
+                passwordRow.Controls.Add(passwordTextBox, 0, 0)
+
+                Dim showPasswordCheckBox As New System.Windows.Forms.CheckBox() With {
+                    .Text = "Show",
+                    .AutoSize = True,
+                    .Anchor = System.Windows.Forms.AnchorStyles.Left,
+                    .Margin = New System.Windows.Forms.Padding(0, 2, 0, 0)
+                }
+                AddHandler showPasswordCheckBox.CheckedChanged,
+                    Sub()
+                        passwordTextBox.UseSystemPasswordChar = Not showPasswordCheckBox.Checked
+                    End Sub
+                passwordRow.Controls.Add(showPasswordCheckBox, 1, 0)
+
+                mainLayout.Controls.Add(passwordRow, 0, 1)
+
+                Dim buttonFlow As New System.Windows.Forms.FlowLayoutPanel() With {
+                    .FlowDirection = System.Windows.Forms.FlowDirection.RightToLeft,
+                    .Dock = System.Windows.Forms.DockStyle.Top,
+                    .AutoSize = True,
+                    .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
+                    .WrapContents = False,
+                    .Margin = New System.Windows.Forms.Padding(0, 16, 0, 0)
+                }
+
+                Dim okButton As New System.Windows.Forms.Button() With {
+                    .Text = "OK",
+                    .AutoSize = True
+                }
+
+                Dim cancelButton As New System.Windows.Forms.Button() With {
+                    .Text = "Cancel",
+                    .AutoSize = True
+                }
+
+                AddHandler okButton.Click,
+                    Sub()
+                        passwordForm.DialogResult = System.Windows.Forms.DialogResult.OK
+                        passwordForm.Close()
+                    End Sub
+
+                AddHandler cancelButton.Click,
+                    Sub()
+                        passwordForm.DialogResult = System.Windows.Forms.DialogResult.Cancel
+                        passwordForm.Close()
+                    End Sub
+
+                buttonFlow.Controls.Add(cancelButton)
+                buttonFlow.Controls.Add(okButton)
+                mainLayout.Controls.Add(buttonFlow, 0, 2)
+
+                passwordForm.AcceptButton = okButton
+                passwordForm.CancelButton = cancelButton
+                passwordForm.Controls.Add(mainLayout)
+
+                Dim result As System.Windows.Forms.DialogResult
+                If ownerForm IsNot Nothing Then
+                    result = passwordForm.ShowDialog(ownerForm)
+                Else
+                    result = passwordForm.ShowDialog()
+                End If
+
+                If result = System.Windows.Forms.DialogResult.OK Then
+                    Return passwordTextBox.Text
+                End If
+
+                Return Nothing
+            End Using
+        End Function
 
         ''' <summary>
         ''' Unloads an Excel COM add-in from the currently running Excel instance (if available).
@@ -1123,6 +1405,8 @@ Namespace SharedLibrary
                     Return context.INI_NoLocalConfig.ToString()
                 Case "CentralConfigClients"
                     Return context.INI_CentralConfigClients
+                Case "CentralConfigPW"
+                    Return context.INI_CentralConfigPW
                 Case "ForceDrawioLocal"
                     Return context.INI_ForceDrawioLocal.ToString()
                 Case "AllowLegacyDocFiles"
@@ -1518,6 +1802,8 @@ Namespace SharedLibrary
                     context.INI_NoLocalConfig = Boolean.Parse(value)
                 Case "CentralConfigClients"
                     context.INI_CentralConfigClients = value
+                Case "CentralConfigPW"
+                    context.INI_CentralConfigPW = value
                 Case "ForceDrawioLocal"
                     context.INI_ForceDrawioLocal = Boolean.Parse(value)
                 Case "AllowLegacyDocFiles"
@@ -1893,6 +2179,7 @@ Namespace SharedLibrary
                     {"ContextMenu", context.INI_ContextMenu.ToString()},
                     {"NoLocalConfig", context.INI_NoLocalConfig.ToString()},
                     {"CentralConfigClients", context.INI_CentralConfigClients},
+                    {"CentralConfigPW", context.INI_CentralConfigPW},
                     {"ForceDrawioLocal", context.INI_ForceDrawioLocal.ToString()},
                     {"AllowLegacyDocFiles", context.INI_AllowLegacyDocFiles.ToString()},
                     {"EnablePrivacyForSearch", context.INI_EnablePrivacyForSearch.ToString()},
@@ -2829,7 +3116,7 @@ Namespace SharedLibrary
                 .Text = "Configuration Wizard",
                 .AutoSize = True,
                 .Margin = New Padding(10),
-                .Enabled = ConfigWizardEngine.IsClientAllowedToUseWizard(context)
+                .Enabled = True
             }
             Dim wizardToolTip As New System.Windows.Forms.ToolTip()
             wizardToolTip.SetToolTip(btnWizard, "Opens a guided wizard to configure groups of settings (licensing, models, paths, etc.) with descriptions and validation.")
@@ -3272,7 +3559,7 @@ Namespace SharedLibrary
         ''' </summary>
         ''' <param name="context">Shared context whose configuration values are displayed and (optionally) updated.</param>
         ''' <param name="ownerform">Owner form for the modal dialog.</param>
-        Public Shared Sub ShowExpertConfiguration(ByRef context As ISharedContext, ownerform As Form)
+        Public Shared Sub ShowExpertConfiguration(ByRef context As ISharedContext, ownerform As Form, Optional temporaryNoLocalConfigOverride As Boolean = False, Optional originalNoLocalConfigValue As Boolean = False)
             ' Dictionary to store variable names and their current values
             Dim variableValues As New Dictionary(Of String, Object)
 
@@ -3386,6 +3673,7 @@ Namespace SharedLibrary
             variableValues.Add("ContextMenu", context.INI_ContextMenu)
             variableValues.Add("NoLocalConfig", context.INI_NoLocalConfig)
             variableValues.Add("CentralConfigClients", context.INI_CentralConfigClients)
+            variableValues.Add("CentralConfigPW", context.INI_CentralConfigPW)
             variableValues.Add("ForceDrawioLocal", context.INI_ForceDrawioLocal)
             variableValues.Add("AllowLegacyDocFiles", context.INI_AllowLegacyDocFiles)
             variableValues.Add("EnablePrivacyForSearch", context.INI_EnablePrivacyForSearch)
@@ -3785,6 +4073,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("ContextMenu") Then context.INI_ContextMenu = CBool(updatedValues("ContextMenu"))
                 If updatedValues.ContainsKey("NoLocalConfig") Then context.INI_NoLocalConfig = CBool(updatedValues("NoLocalConfig"))
                 If updatedValues.ContainsKey("CentralConfigClients") Then context.INI_CentralConfigClients = CStr(updatedValues("CentralConfigClients"))
+                If updatedValues.ContainsKey("CentralConfigPW") Then context.INI_CentralConfigPW = CStr(updatedValues("CentralConfigPW"))
                 If updatedValues.ContainsKey("ForceDrawioLocal") Then context.INI_ForceDrawioLocal = CBool(updatedValues("ForceDrawioLocal"))
                 If updatedValues.ContainsKey("AllowLegacyDocFiles") Then context.INI_AllowLegacyDocFiles = CBool(updatedValues("AllowLegacyDocFiles"))
                 If updatedValues.ContainsKey("EnablePrivacyForSearch") Then context.INI_EnablePrivacyForSearch = CBool(updatedValues("EnablePrivacyForSearch"))
@@ -3864,6 +4153,10 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_Assemble_Plan") Then context.SP_Assemble_Plan = CStr(updatedValues("SP_Assemble_Plan"))
                 If updatedValues.ContainsKey("SP_Assemble_Execute") Then context.SP_Assemble_Execute = CStr(updatedValues("SP_Assemble_Execute"))
                 If updatedValues.ContainsKey("SP_Assemble_Summarize") Then context.SP_Assemble_Summarize = CStr(updatedValues("SP_Assemble_Summarize"))
+
+                If temporaryNoLocalConfigOverride Then
+                    context.INI_NoLocalConfig = originalNoLocalConfigValue
+                End If
 
                 ' Call UpdateAppConfig after all updates
                 UpdateAppConfig(context)
