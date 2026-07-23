@@ -343,6 +343,7 @@ Namespace SharedLibrary
 
                 context.INI_UpdateIniClients = If(configDict.ContainsKey("UpdateIniClients"), configDict("UpdateIniClients"), "")
                 context.INI_CentralConfigClients = If(configDict.ContainsKey("CentralConfigClients"), configDict("CentralConfigClients"), "")
+                context.INI_CentralConfigPW = If(configDict.ContainsKey("CentralConfigPW"), configDict("CentralConfigPW"), "")
 
                 context.INI_UpdateIniIgnoreOverride = If(configDict.ContainsKey("UpdateIniIgnoreOverride"), configDict("UpdateIniIgnoreOverride"), "")
                 context.INI_UpdateIniSilentMode = If(configDict.ContainsKey("UpdateIniSilentMode"), CInt(configDict("UpdateIniSilentMode")), DEFAULT_UPDATE_INI_SILENT_MODE)

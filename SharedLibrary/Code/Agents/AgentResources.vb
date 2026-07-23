@@ -33,6 +33,7 @@ Namespace Agents
         Public Property Model As String                 ' optional, e.g. "researchmodel" (special-task-model key)
         Public Property Network As Boolean = False      ' opt-in for tools that touch the network (js.run, fetch)
         Public Property TimeoutSeconds As Integer = 0   ' 0 = use default
+        Public Property Enabled As Boolean = True       ' opt-out: frontmatter "enabled: false" hides it from the model
         Public Property Frontmatter As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
         Public Property FilePath As String              ' path to the .md file
         Public Property DirectoryPath As String             ' directory holding the resource
@@ -112,6 +113,44 @@ Namespace Agents
             list.Add(System.IO.Path.Combine(root, "skills"))
             list.Add(System.IO.Path.Combine(root, "agents"))
             Return list
+        End Function
+
+
+        ''' <summary>
+        ''' Ensures the configured CENTRAL resource root and its skills/ and agents/
+        ''' subdirectories exist so that new skills and agents can be created there when
+        ''' central writing is explicitly permitted. Mirrors
+        ''' <see cref="EnsureLocalResourceDirectories"/>. Best-effort.
+        ''' </summary>
+        Public Shared Function EnsureCentralResourceDirectories() As Boolean
+            Dim root As String
+            SyncLock _syncRoot
+                root = _configuredCentralPath
+            End SyncLock
+
+            If String.IsNullOrWhiteSpace(root) Then Return False
+
+            Dim createdSomething As Boolean = False
+            Try
+                For Each resourceDir In New String() {
+                    root,
+                    System.IO.Path.Combine(root, "skills"),
+                    System.IO.Path.Combine(root, "agents")}
+
+                    If Not System.IO.Directory.Exists(resourceDir) Then
+                        System.IO.Directory.CreateDirectory(resourceDir)
+                        createdSomething = True
+                    End If
+                Next
+            Catch
+                Return System.IO.Directory.Exists(root)
+            End Try
+
+            If createdSomething Then
+                Refresh()
+            End If
+
+            Return System.IO.Directory.Exists(root)
         End Function
 
         ''' <summary>
@@ -201,14 +240,32 @@ Namespace Agents
         Private Shared _inkyMd As String
         Private Shared _initialized As Boolean
 
+        ''' <summary>Skills offered to the model — excludes entries with frontmatter "enabled: false".</summary>
         Public Shared ReadOnly Property Skills As IReadOnlyList(Of SkillDescriptor)
+            Get
+                EnsureInitialized()
+                Return _skills.Where(Function(s) s IsNot Nothing AndAlso s.Enabled).ToList()
+            End Get
+        End Property
+
+        ''' <summary>Agents offered to the model — excludes entries with frontmatter "enabled: false".</summary>
+        Public Shared ReadOnly Property Agents As IReadOnlyList(Of AgentDescriptor)
+            Get
+                EnsureInitialized()
+                Return _agents.Where(Function(a) a IsNot Nothing AndAlso a.Enabled).ToList()
+            End Get
+        End Property
+
+        ''' <summary>All discovered skills including disabled ones — for management/inspection only.</summary>
+        Public Shared ReadOnly Property AllSkills As IReadOnlyList(Of SkillDescriptor)
             Get
                 EnsureInitialized()
                 Return _skills
             End Get
         End Property
 
-        Public Shared ReadOnly Property Agents As IReadOnlyList(Of AgentDescriptor)
+        ''' <summary>All discovered agents including disabled ones — for management/inspection only.</summary>
+        Public Shared ReadOnly Property AllAgents As IReadOnlyList(Of AgentDescriptor)
             Get
                 EnsureInitialized()
                 Return _agents
@@ -341,7 +398,7 @@ Namespace Agents
             If Not System.IO.Directory.Exists(skillsDir) Then Return list
 
             For Each subDir In System.IO.Directory.EnumerateDirectories(skillsDir)
-                Dim md = FindMarkdownFile(subDir, {"SKILL.md", "skill.md"})
+                Dim md = ResolveResourceMarkdown(subDir, {"SKILL.md", "skill.md"})
                 If md Is Nothing Then Continue For
                 Try
                     Dim sk As New SkillDescriptor()
@@ -423,6 +480,29 @@ Namespace Agents
             Return Nothing
         End Function
 
+        ''' <summary>
+        ''' Resolves the markdown descriptor inside a resource folder in a directory-name
+        ''' agnostic way: first tries the canonical names (e.g. SKILL.md/AGENT.md), then
+        ''' a file named after the folder (&lt;dirname&gt;.md), and finally falls back to the
+        ''' single .md file when the folder contains exactly one.
+        ''' </summary>
+        Private Shared Function ResolveResourceMarkdown(dir As String, canonicalNames As String()) As String
+            Dim canonical = FindMarkdownFile(dir, canonicalNames)
+            If canonical IsNot Nothing Then Return canonical
+
+            Dim named = Path.Combine(dir, Path.GetFileName(dir) & ".md")
+            If File.Exists(named) Then Return named
+
+            Try
+                Dim mdFiles = System.IO.Directory.EnumerateFiles(dir, "*.md", SearchOption.TopDirectoryOnly).ToList()
+                If mdFiles.Count = 1 Then Return mdFiles(0)
+            Catch
+            End Try
+
+            Return Nothing
+        End Function
+
+
         Private Shared Function FindMarkdownFile(dir As String, names As String()) As String
             For Each n In names
                 Dim p = Path.Combine(dir, n)
@@ -474,6 +554,7 @@ Namespace Agents
             If fm.TryGetValue("description", v) Then target.Description = v
             If fm.TryGetValue("model", v) Then target.Model = v
             If fm.TryGetValue("network", v) Then target.Network = ParseBool(v)
+            If fm.TryGetValue("enabled", v) Then target.Enabled = ParseBool(v)
             If fm.TryGetValue("timeout", v) Then
                 Dim n As Integer
                 If Integer.TryParse(v, n) Then target.TimeoutSeconds = n

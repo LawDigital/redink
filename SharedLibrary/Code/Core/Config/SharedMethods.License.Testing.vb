@@ -81,7 +81,6 @@ Namespace SharedLibrary
                 AddTestButton(buttonPanel, "📊 Show Current License Status", Sub() TestShowCurrentStatus(lblStatus))
                 AddTestButton(buttonPanel, "🗑️ Clear All License Data", Sub() TestClearAllData(lblStatus))
                 AddTestButton(buttonPanel, "📝 Set License State", Sub() TestSetLicenseState(lblStatus))
-                AddTestButton(buttonPanel, "📜 Set Legacy License", Sub() TestSetLegacyLicenseInteractive(lblStatus))
                 AddTestButton(buttonPanel, "🔐 Set Private License", Sub() TestSetPrivateLicense(lblStatus))
                 AddTestButton(buttonPanel, "💼 Set Pro License", Sub() TestSetProLicense(lblStatus))
                 AddTestButton(buttonPanel, "🌐 Test API Call", Sub() TestApiCall(lblStatus))
@@ -150,13 +149,6 @@ Namespace SharedLibrary
                 sb.AppendLine($"License_State: {My.Settings.License_State}")
                 sb.AppendLine($"License_AutoActivationWarningShown: {My.Settings.License_AutoActivationWarningShown}")
                 sb.AppendLine($"License_StartupCount: {My.Settings.License_StartupCount}")
-                sb.AppendLine($"License_LastMigrationPrompt: {My.Settings.License_LastMigrationPrompt:d}")
-                sb.AppendLine($"License_LegacyMigrationStarted: {My.Settings.License_LegacyMigrationStarted:d}")
-                sb.AppendLine()
-                sb.AppendLine("--- Legacy Settings ---")
-                sb.AppendLine($"LicenseStatus: {My.Settings.LicenseStatus}")
-                sb.AppendLine($"LicensedTill: {My.Settings.LicensedTill:d}")
-                sb.AppendLine($"LicenseUsers: {My.Settings.LicenseUsers}")
             Catch ex As Exception
                 sb.AppendLine($"Error reading settings: {ex.Message}")
             End Try
@@ -170,7 +162,7 @@ Namespace SharedLibrary
             Dim result = MessageBox.Show("This will clear ALL license data. Continue?",
                                           "Confirm Clear", MessageBoxButtons.YesNo, MessageBoxIcon.Warning)
             If result = DialogResult.Yes Then
-                ClearStoredLicense(True)
+                ClearStoredLicense()
                 LogLicenseEvent("TEST", "All license data cleared", alwaysLog:=True)
                 lbl.Text = "All license data cleared"
                 lbl.ForeColor = Color.DarkGreen
@@ -200,32 +192,6 @@ Namespace SharedLibrary
             End If
         End Sub
 
-        Private Shared Sub TestSetLegacyLicenseInteractive(lbl As Label)
-            Dim status = ShowInputBox("Enter License Status", "Enter the legacy license status (e.g., 'Yearly License'):", "Yearly License")
-            If status Is Nothing Then
-                lbl.Text = "Legacy license cancelled"
-                lbl.ForeColor = Color.DarkOrange
-                Return
-            End If
-
-            Dim daysStr = ShowInputBox("Enter Days Until Expiry", "Enter days from now until expiry (negative for expired):", "30")
-            If daysStr Is Nothing Then
-                lbl.Text = "Legacy license cancelled"
-                lbl.ForeColor = Color.DarkOrange
-                Return
-            End If
-
-            Dim days As Integer
-            If Not Integer.TryParse(daysStr, days) Then days = 30
-
-            Dim validUntil = Date.Now.AddDays(days)
-            My.Settings.LicenseStatus = status
-            My.Settings.LicensedTill = validUntil
-            My.Settings.Save()
-            LogLicenseEvent("TEST", $"Legacy license set: {status} until {validUntil:d}", alwaysLog:=True)
-            lbl.Text = $"Legacy: {status} until {validUntil:d}"
-            lbl.ForeColor = Color.DarkGreen
-        End Sub
 
         Private Shared Sub TestSetPrivateLicense(lbl As Label)
             ' First, ask what scenario to set up
@@ -315,9 +281,6 @@ Namespace SharedLibrary
                     _currentLicenseState = LicenseState.PrivateExpired
             End Select
 
-            ' Update legacy fields for compatibility
-            My.Settings.LicenseStatus = "Private License"
-            My.Settings.LicensedTill = My.Settings.License_ValidUntil
             My.Settings.Save()
 
             LogLicenseEvent("TEST", $"Private license scenario set: {selected}", alwaysLog:=True)
@@ -481,7 +444,6 @@ Namespace SharedLibrary
 
             Dim expiryDate = Date.Now.AddDays(days)
             My.Settings.License_ValidUntil = expiryDate
-            My.Settings.LicensedTill = expiryDate
             My.Settings.Save()
 
             LogLicenseEvent("TEST", $"Expiry set to: {expiryDate:d}", alwaysLog:=True)

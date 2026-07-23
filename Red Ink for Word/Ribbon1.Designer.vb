@@ -125,6 +125,7 @@ Partial Class Ribbon1
         Me.RI_Stamper = Me.Factory.CreateRibbonButton
         Me.RI_SplitPDF = Me.Factory.CreateRibbonButton
         Me.RI_Markdown = Me.Factory.CreateRibbonButton
+        Me.RI_ResetSpacing = Me.Factory.CreateRibbonButton
         Me.RI_ContentControls = Me.Factory.CreateRibbonButton
         Me.RI_Remove = Me.Factory.CreateRibbonButton
         Me.RI_InsertClipboard = Me.Factory.CreateRibbonButton
@@ -711,6 +712,7 @@ Partial Class Ribbon1
         Me.Menu2.Items.Add(Me.RI_Stamper)
         Me.Menu2.Items.Add(Me.RI_SplitPDF)
         Me.Menu2.Items.Add(Me.RI_Markdown)
+        Me.Menu2.Items.Add(Me.RI_ResetSpacing)
         Me.Menu2.Items.Add(Me.RI_ContentControls)
         Me.Menu2.Items.Add(Me.RI_Remove)
         Me.Menu2.Items.Add(Me.RI_InsertClipboard)
@@ -828,6 +830,14 @@ Partial Class Ribbon1
         Me.RI_Markdown.OfficeImageId = "ApplyCssStyles"
         Me.RI_Markdown.ScreenTip = "Converts selected text from Markdown to Word formatted text"
         Me.RI_Markdown.ShowImage = True
+        '
+        'RI_ResetSpacing
+        '
+        Me.RI_ResetSpacing.Label = "Reset Spacing"
+        Me.RI_ResetSpacing.Name = "RI_ResetSpacing"
+        Me.RI_ResetSpacing.OfficeImageId = "SizeToControlHeight"
+        Me.RI_ResetSpacing.ScreenTip = "Resets paragraph spacing before and after the selected paragraphs"
+        Me.RI_ResetSpacing.ShowImage = True
         '
         'RI_ContentControls
         '
@@ -1309,6 +1319,7 @@ Partial Class Ribbon1
     Friend WithEvents RI_WebAgent As RibbonButton
     Friend WithEvents RI_EditWebAgent As RibbonButton
     Friend WithEvents RI_Markdown As RibbonButton
+    Friend WithEvents RI_ResetSpacing As RibbonButton
     Friend WithEvents RI_FindHidden As RibbonButton
     Friend WithEvents RI_ContentControls As RibbonButton
     Friend WithEvents RI_HelpMe As RibbonButton

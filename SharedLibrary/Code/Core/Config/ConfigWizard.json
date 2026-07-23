@@ -1714,11 +1714,18 @@
           "description": "Enable this to prevent users from downloading the Word or Excel helper add-ins from Settings. This is useful in locked-down environments. Example: True. [NoHelperDownload]"
         },
         {
-          "key": "CentralConfigClients",
-          "label": "Central Config Clients",
-          "type": "string",
-          "default": "",
-          "description": "Comma-separated Windows client names that are allowed to manage or write central configuration files (use ''Client Name'' button below to identify your Windows client name). Leave empty to allow all clients. Example: DSKTOP01,ADMDSKTP01. [CentralConfigClients]"
+            "key": "CentralConfigClients",
+            "label": "Central Config Clients",
+            "type": "string",
+            "default": "",
+            "description": "Comma-separated Windows client names that are allowed to manage or write central configuration files (use ''Client Name'' button below to identify your Windows client name). Leave empty to allow all clients. Example: DSKTOP01,ADMDSKTP01. [CentralConfigClients]"
+        },
+        {
+            "key": "CentralConfigPW",
+            "label": "Central Config Password",
+            "type": "string",
+            "default": "",
+            "description": "The password with which a user can temporarily access Expert Config and the other features of Settings if NoLocalConfig is true. If there is an encryption key in the registry, the password will first be decrypted with it (hence, it must have been encrypted with it using it, like an API key). [CentralConfigPW]"
         }
       ]
     },

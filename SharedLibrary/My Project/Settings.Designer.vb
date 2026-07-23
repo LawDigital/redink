@@ -351,64 +351,6 @@ Namespace My
         End Property
         
         <Global.System.Configuration.UserScopedSettingAttribute(),  _
-         Global.System.Diagnostics.DebuggerNonUserCodeAttribute()>  _
-        Public Property LicensedTill() As Date
-            Get
-                Return CType(Me("LicensedTill"),Date)
-            End Get
-            Set
-                Me("LicensedTill") = value
-            End Set
-        End Property
-        
-        <Global.System.Configuration.UserScopedSettingAttribute(),  _
-         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
-         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
-        Public Property LicenseStatus() As String
-            Get
-                Return CType(Me("LicenseStatus"),String)
-            End Get
-            Set
-                Me("LicenseStatus") = value
-            End Set
-        End Property
-        
-        <Global.System.Configuration.UserScopedSettingAttribute(),  _
-         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
-         Global.System.Configuration.DefaultSettingValueAttribute("1")>  _
-        Public Property LicenseUsers() As Integer
-            Get
-                Return CType(Me("LicenseUsers"),Integer)
-            End Get
-            Set
-                Me("LicenseUsers") = value
-            End Set
-        End Property
-        
-        <Global.System.Configuration.UserScopedSettingAttribute(),  _
-         Global.System.Diagnostics.DebuggerNonUserCodeAttribute()>  _
-        Public Property LastBetaWarningDate() As Date
-            Get
-                Return CType(Me("LastBetaWarningDate"),Date)
-            End Get
-            Set
-                Me("LastBetaWarningDate") = value
-            End Set
-        End Property
-        
-        <Global.System.Configuration.UserScopedSettingAttribute(),  _
-         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
-         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
-        Public Property BetaWarningStartCount() As Integer
-            Get
-                Return CType(Me("BetaWarningStartCount"),Integer)
-            End Get
-            Set
-                Me("BetaWarningStartCount") = value
-            End Set
-        End Property
-        
-        <Global.System.Configuration.UserScopedSettingAttribute(),  _
          Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
          Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
         Public Property GracePeriodWarningStartcount() As Integer
@@ -691,17 +633,6 @@ Namespace My
         End Property
         
         <Global.System.Configuration.UserScopedSettingAttribute(),  _
-         Global.System.Diagnostics.DebuggerNonUserCodeAttribute()>  _
-        Public Property License_LastMigrationPrompt() As Date
-            Get
-                Return CType(Me("License_LastMigrationPrompt"),Date)
-            End Get
-            Set
-                Me("License_LastMigrationPrompt") = value
-            End Set
-        End Property
-        
-        <Global.System.Configuration.UserScopedSettingAttribute(),  _
          Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
          Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
         Public Property License_StartupCount() As Integer
@@ -722,17 +653,6 @@ Namespace My
             End Get
             Set
                 Me("License_ApiConfirmed") = value
-            End Set
-        End Property
-        
-        <Global.System.Configuration.UserScopedSettingAttribute(),  _
-         Global.System.Diagnostics.DebuggerNonUserCodeAttribute()>  _
-        Public Property License_LegacyMigrationStarted() As Date
-            Get
-                Return CType(Me("License_LegacyMigrationStarted"),Date)
-            End Get
-            Set
-                Me("License_LegacyMigrationStarted") = value
             End Set
         End Property
         

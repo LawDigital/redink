@@ -453,10 +453,7 @@ Namespace SharedLibrary
 
         ' License constants
         Public Const PrivateLicenseYears As Integer = 3
-        Public Const TestingPeriod As Integer = 6  ' months
-        Public Const MaxLicenseYearsInFuture As Integer = 5
         Public Const LicenseCheckDisabledYears As Integer = 100
-        Public Const BetaEndDate As Date = #12/31/2025#
         Public Const GracePeriodDays As Integer = 5  ' Days after license expiry where add-in still works 
         Public Const GracePeriodWarningIntervals As Integer = 5 ' Show warning every X startup during grace period
         Public Const SK As String = NewHomeURL
@@ -464,87 +461,13 @@ Namespace SharedLibrary
         ' Warning day thresholds (descending order for checking)
         Public Shared ReadOnly LicenseWarningDays As Integer() = {30, 15, 10, 5, 3, 2, 1}
         Public Const LicenseWarningInterval As Integer = 5  ' Show warning every X add-in starts
-        Public Const BetaWarningNoUpgradeDays As Integer = 7 ' Constants for beta warning when no upgrade available
-        Public Const BetaWarningInterval As Integer = 5  ' Show warning every X add-in starts 
-        Public Const BetaWarningDays As Integer = 3  ' Show warning after every X days 
 
         ' Global license variables (shared across all add-ins)
-        Public Shared LicensedTill As Date = Date.MaxValue
         Public Shared LicenseStatus As String = ""
-        Public Shared LicenseUsers As Integer = 1
         Public Shared LicenseContact As String = ""
         Public Shared LicenseNoWarning As Boolean = False
         Public Shared LicenseCheckDisabled As Boolean = False
         Public Shared LicenseFromConfig As Boolean = False
-
-        ' License type definitions
-        Public Class LicenseTypeInfo
-            Public Property Name As String
-            Public Property Description As String
-            Public Property FixedEndDate As Date?
-            Public Property DefaultEndDate As Date?
-            Public Property UserDefinedEndDate As Boolean
-            Public Property FixedUsers As Integer?
-            Public Property DefaultUsers As Integer?
-        End Class
-
-        Public Shared Function GetLicenseTypes(versionDate As Date) As List(Of LicenseTypeInfo)
-            Dim types As New List(Of LicenseTypeInfo)
-
-            ' 1. Private License - fixed term 5 years from version date, 1 user
-            types.Add(New LicenseTypeInfo() With {
-                .Name = "Private License",
-                .Description = "Free license for private, non-professional use only. " &
-                               "Limited to a single user on personal devices. " &
-                               "Not for use in business, corporate, or professional contexts or by organizations. " &
-                               $"Valid for {PrivateLicenseYears} years from the version release date.",
-                .FixedEndDate = versionDate.AddYears(PrivateLicenseYears),
-                .UserDefinedEndDate = False,
-                .FixedUsers = 1,
-                .DefaultUsers = Nothing
-            })
-
-            ' 2. Testing Pro License 
-            types.Add(New LicenseTypeInfo() With {
-                .Name = "Testing Pro License",
-                .Description = "Special license for non-productive testing for professional purposes or by or within organizations. " &
-                               "Up to five users. Valid for six months since first use (once per organization). " &
-                               "Only valid if you informed info@redink.ai of your use. ",
-                .FixedEndDate = Nothing,
-                .DefaultEndDate = Date.Now.AddMonths(TestingPeriod),
-                .UserDefinedEndDate = True,
-                .FixedUsers = 5,
-                .DefaultUsers = Nothing
-            })
-
-            ' 3. Launch Pro License - fixed term end of January 2026, default 1 user
-            types.Add(New LicenseTypeInfo() With {
-                .Name = "Transition Pro License",
-                .Description = "Special transitional professional license for early adopters. " &
-                               "Unlimited number of users. Valid until January 31, 2026, thereafter a Pro License is required. " &
-                               "Only valid if you informed info@redink.ai of your use. ",
-                .FixedEndDate = New Date(2026, 1, 31),
-                .UserDefinedEndDate = False,
-                .FixedUsers = Nothing,
-                .DefaultUsers = 1
-            })
-
-            ' 3. Business License - user-defined term and users
-            types.Add(New LicenseTypeInfo() With {
-                .Name = "Pro License",
-                .Description = "Pro License" &
-                               "Terms and number of users as per your license agreement. " &
-                               $"More info on {NewHomeURL}.",
-                .FixedEndDate = Nothing,
-                .DefaultEndDate = Nothing,
-                .UserDefinedEndDate = True,
-                .FixedUsers = Nothing,
-                .DefaultUsers = 1
-            })
-
-            Return types
-        End Function
-
 
     End Class
 
