@@ -123,6 +123,14 @@ Namespace SharedLibrary
         Private Shared _iniUpdateContext As ISharedContext
 
         ''' <summary>
+        ''' Indicates that the user temporarily unlocked the expert/central configuration in the
+        ''' current settings session (e.g. via the central configuration password) even though
+        ''' NoLocalConfig is active. When True, <see cref="CheckForIniUpdates"/> may offer to check
+        ''' for INI updates even if the client is not in the allowed update client list.
+        ''' </summary>
+        Public Shared NoLocalConfigSessionUnlocked As Boolean = False
+
+        ''' <summary>
         ''' Defines the security level for silent (unattended) updates.
         ''' </summary>
         Public Enum SilentUpdateSecurityLevel
@@ -243,8 +251,24 @@ Namespace SharedLibrary
 
                 ' Check if this client is allowed to perform updates
                 If Not IsClientAllowedToUpdate() Then
-                    Debug.WriteLine("INI Update: This client is not authorized to perform updates")
-                    Return False
+                    If NoLocalConfigSessionUnlocked Then
+                        ' The user unlocked the expert/central configuration in this session, so allow an
+                        ' explicit, user-approved check even though this client is not in the allowed list.
+                        Dim overrideAnswer As Integer = ShowCustomYesNoBox(
+                            "Your client is not allowed to check for or apply INI configuration updates. " &
+                            "However, because you unlocked the expert configuration with the central configuration password, " &
+                            "you may still check for an INI update now. Do you want to check for updates?",
+                            "Yes, check for INI updates", "No")
+                        If overrideAnswer <> 1 Then
+                            Debug.WriteLine("INI Update: Client not authorized; user declined the override check")
+                            Return False
+                        End If
+                        LogIniUpdateEvent("Client Check",
+                            "Client not authorized, but expert configuration was unlocked in this session - user chose to check for updates")
+                    Else
+                        Debug.WriteLine("INI Update: This client is not authorized to perform updates")
+                        Return False
+                    End If
                 End If
 
                 ' Check registry for silent update permission - override silent mode if not permitted

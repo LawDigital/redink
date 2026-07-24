@@ -253,6 +253,7 @@ Namespace SharedLibrary
                 Dim origRange As Microsoft.Office.Interop.Word.Range = range.Duplicate()
                 origRange.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseStart)
 
+                System.Diagnostics.Debug.WriteLine("InsertTextWithFormat: UseHotDefaultFontColor=" & UseHostDefaultFontColor & "   NoTrailingCR=" & NoTrailingCR)
                 System.Diagnostics.Debug.WriteLine("PreFinalHTML=" & formattedText)
 
                 formattedText = FixMarkTagsForWord(formattedText)
@@ -298,11 +299,25 @@ Namespace SharedLibrary
 
                 formattedText = doc.DocumentNode.OuterHtml
 
-                ' --- 2) Read font and paragraph properties from the first character of the range ---
-                '     A collapsed range at a paragraph boundary can inherit font properties from the
-                '     *following* paragraph. Reading from the first concrete character avoids this.
+                ' --- 2) Read font and paragraph properties from a concrete character of the range ---
+                '     Two distinct cases must be handled:
+                '     * Non-empty selection (about to be replaced): read the FIRST character of the
+                '       selection (forward), matching the text that will be overwritten.
+                '     * Collapsed insertion point (e.g. a follow-up pipeline round continuing on the
+                '       same line): reading the character AFTER the cursor would pick up the trailing
+                '       paragraph mark / default run (often Times New Roman) instead of the preceding
+                '       text just inserted. Read the character BEFORE the cursor so the continuation
+                '       inherits the font of the text it follows (e.g. Aptos).
                 Dim fontSourceRange As Microsoft.Office.Interop.Word.Range = range.Duplicate()
-                If fontSourceRange.Characters.Count > 0 Then
+                If fontSourceRange.Start = fontSourceRange.End Then
+                    ' Collapsed: prefer the character before the cursor; fall back to the one after.
+                    If fontSourceRange.Start > 0 Then
+                        fontSourceRange.SetRange(fontSourceRange.Start - 1, fontSourceRange.Start)
+                    Else
+                        fontSourceRange.SetRange(fontSourceRange.Start, fontSourceRange.Start + 1)
+                    End If
+                ElseIf fontSourceRange.Characters.Count > 0 Then
+                    ' Non-empty selection: read from the first concrete character.
                     fontSourceRange.SetRange(fontSourceRange.Start, fontSourceRange.Start + 1)
                 End If
 
@@ -417,14 +432,16 @@ Namespace SharedLibrary
                             ' Italic.
                             If hFont.Italic = -1 Then headingCss &= " font-style:italic;"
 
-                            ' Color (skip when host default color is requested or color is automatic).
-                            If Not UseHostDefaultFontColor AndAlso
-                               hFont.Color <> Microsoft.Office.Interop.Word.WdColor.wdColorAutomatic Then
-                                Dim hBgr As Integer = CInt(hFont.Color) And &HFFFFFF
-                                Dim hr As Integer = (hBgr And &HFF)
-                                Dim hg As Integer = ((hBgr >> 8) And &HFF)
-                                Dim hb As Integer = ((hBgr >> 16) And &HFF)
-                                headingCss &= System.String.Format(" color:#{0:X2}{1:X2}{2:X2};", hr, hg, hb)
+                            ' Color (skip when host default color is requested).
+                            ' The built-in heading styles usually carry a *theme* color, so the
+                            ' style's Font.Color only exposes a theme-index token (not a real RGB).
+                            ' Resolve it against the document's theme color scheme and apply the
+                            ' style's TintAndShade, mirroring how Word itself derives the shown RGB.
+                            If Not UseHostDefaultFontColor Then
+                                Dim headingColorHex As String = ResolveFontColorHex(hFont, range.Document)
+                                If Not System.String.IsNullOrEmpty(headingColorHex) Then
+                                    headingCss &= $" color:{headingColorHex};"
+                                End If
                             End If
                         Catch ex As System.Exception
                             System.Diagnostics.Debug.WriteLine($"Heading style read failed (h{headingLevel}): {ex.Message}")
@@ -572,6 +589,24 @@ Namespace SharedLibrary
                         System.Diagnostics.Debug.WriteLine($"Heading numbering strip skipped: {exNum.Message}")
                     End Try
 
+                    ' --- 7c) Reset the trailing insertion point back to the captured body font. ---
+                    '     PasteAndFormat leaves the paragraph mark at the end of the inserted
+                    '     content carrying the formatting of the last pasted run (e.g. a heading).
+                    '     A subsequent insertion reads its font from exactly this position, so it
+                    '     would otherwise inherit that stale formatting. Collapse to the end and
+                    '     restore the body font so the next round matches again.
+                    Try
+                        Dim tailRange As Microsoft.Office.Interop.Word.Range = range.Application.Selection.Range.Duplicate()
+                        tailRange.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
+                        tailRange.Font.Name = fontName
+                        tailRange.Font.Size = fontSize
+                        If Not UseHostDefaultFontColor Then
+                            tailRange.Font.Color = CType(fontColor, Microsoft.Office.Interop.Word.WdColor)
+                        End If
+                    Catch exTail As System.Exception
+                        System.Diagnostics.Debug.WriteLine($"Trailing font reset skipped: {exTail.Message}")
+                    End Try
+
                     ' --- 8) Optionally remove last newline character ---
                     '     Only delete if the trailing character is actually a paragraph mark,
                     '     not real content. PasteAndFormat does not always append a trailing CR.
@@ -701,6 +736,183 @@ Namespace SharedLibrary
                 Case Else : Return "yellow"
             End Select
         End Function
+
+        ''' <summary>
+        ''' Resolves the concrete RGB of a <see cref="Microsoft.Office.Interop.Word.Font"/> to a
+        ''' CSS hex string, handling both direct RGB colors and theme colors. Theme colors are
+        ''' resolved against the document's theme color scheme and adjusted by the font's
+        ''' <c>TintAndShade</c>, matching how Word derives the displayed color. Returns an empty
+        ''' string when the color is automatic/undefined so the caller can fall back to the host
+        ''' default color.
+        ''' </summary>
+        ''' <param name="font">The font whose color should be resolved.</param>
+        ''' <param name="document">The document providing the theme color scheme.</param>
+        ''' <returns>A CSS hex color string (for example, <c>#0F4761</c>) or an empty string.</returns>
+        Private Shared Function ResolveFontColorHex(font As Microsoft.Office.Interop.Word.Font,
+                                                    document As Microsoft.Office.Interop.Word.Document) As String
+            Try
+                Dim themeColor As Microsoft.Office.Interop.Word.WdThemeColorIndex = font.TextColor.ObjectThemeColor
+
+                Dim r As Integer
+                Dim g As Integer
+                Dim b As Integer
+
+                If themeColor = Microsoft.Office.Interop.Word.WdThemeColorIndex.wdNotThemeColor Then
+                    ' Direct (non-theme) color: TextColor.RGB already holds the concrete RGB.
+                    Dim rgb As Integer = font.TextColor.RGB
+                    If rgb = CInt(Microsoft.Office.Interop.Word.WdColor.wdColorAutomatic) OrElse
+                       rgb = CInt(Microsoft.Office.Interop.Word.WdConstants.wdUndefined) OrElse
+                       rgb < 0 Then
+                        Return System.String.Empty
+                    End If
+                    r = (rgb And &HFF)
+                    g = ((rgb >> 8) And &HFF)
+                    b = ((rgb >> 16) And &HFF)
+                Else
+                    ' Theme color: look up the base RGB in the document's theme color scheme.
+                    Dim schemeIndex As Microsoft.Office.Core.MsoThemeColorSchemeIndex =
+                        MapThemeColorToSchemeIndex(themeColor)
+                    If schemeIndex = CType(0, Microsoft.Office.Core.MsoThemeColorSchemeIndex) Then
+                        Return System.String.Empty
+                    End If
+
+                    Dim baseRgb As Integer =
+                        document.DocumentTheme.ThemeColorScheme.Colors(schemeIndex).RGB
+
+                    ' Theme scheme RGB is stored as R + G*256 + B*65536 (same layout as Word RGB).
+                    r = (baseRgb And &HFF)
+                    g = ((baseRgb >> 8) And &HFF)
+                    b = ((baseRgb >> 16) And &HFF)
+
+                    ' Apply the tint/shade the style requests (HSL luminance adjustment).
+                    ApplyTintAndShade(r, g, b, font.TextColor.TintAndShade)
+                End If
+
+                Return System.String.Format("#{0:X2}{1:X2}{2:X2}", r, g, b)
+
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine($"ResolveFontColorHex failed: {ex.Message}")
+                Return System.String.Empty
+            End Try
+        End Function
+
+        ''' <summary>
+        ''' Maps a Word <see cref="Microsoft.Office.Interop.Word.WdThemeColorIndex"/> to the
+        ''' corresponding <see cref="Microsoft.Office.Core.MsoThemeColorSchemeIndex"/> used by the
+        ''' document theme color scheme.
+        ''' </summary>
+        ''' <param name="themeColor">The Word theme color index.</param>
+        ''' <returns>The matching Office theme color scheme index, or 0 when unmapped.</returns>
+        Private Shared Function MapThemeColorToSchemeIndex(
+            themeColor As Microsoft.Office.Interop.Word.WdThemeColorIndex) As Microsoft.Office.Core.MsoThemeColorSchemeIndex
+
+            Select Case themeColor
+                Case Microsoft.Office.Interop.Word.WdThemeColorIndex.wdThemeColorMainDark1,
+                     Microsoft.Office.Interop.Word.WdThemeColorIndex.wdThemeColorText1
+                    Return Microsoft.Office.Core.MsoThemeColorSchemeIndex.msoThemeDark1
+                Case Microsoft.Office.Interop.Word.WdThemeColorIndex.wdThemeColorMainLight1,
+                     Microsoft.Office.Interop.Word.WdThemeColorIndex.wdThemeColorBackground1
+                    Return Microsoft.Office.Core.MsoThemeColorSchemeIndex.msoThemeLight1
+                Case Microsoft.Office.Interop.Word.WdThemeColorIndex.wdThemeColorMainDark2,
+                     Microsoft.Office.Interop.Word.WdThemeColorIndex.wdThemeColorText2
+                    Return Microsoft.Office.Core.MsoThemeColorSchemeIndex.msoThemeDark2
+                Case Microsoft.Office.Interop.Word.WdThemeColorIndex.wdThemeColorMainLight2,
+                     Microsoft.Office.Interop.Word.WdThemeColorIndex.wdThemeColorBackground2
+                    Return Microsoft.Office.Core.MsoThemeColorSchemeIndex.msoThemeLight2
+                Case Microsoft.Office.Interop.Word.WdThemeColorIndex.wdThemeColorAccent1
+                    Return Microsoft.Office.Core.MsoThemeColorSchemeIndex.msoThemeAccent1
+                Case Microsoft.Office.Interop.Word.WdThemeColorIndex.wdThemeColorAccent2
+                    Return Microsoft.Office.Core.MsoThemeColorSchemeIndex.msoThemeAccent2
+                Case Microsoft.Office.Interop.Word.WdThemeColorIndex.wdThemeColorAccent3
+                    Return Microsoft.Office.Core.MsoThemeColorSchemeIndex.msoThemeAccent3
+                Case Microsoft.Office.Interop.Word.WdThemeColorIndex.wdThemeColorAccent4
+                    Return Microsoft.Office.Core.MsoThemeColorSchemeIndex.msoThemeAccent4
+                Case Microsoft.Office.Interop.Word.WdThemeColorIndex.wdThemeColorAccent5
+                    Return Microsoft.Office.Core.MsoThemeColorSchemeIndex.msoThemeAccent5
+                Case Microsoft.Office.Interop.Word.WdThemeColorIndex.wdThemeColorAccent6
+                    Return Microsoft.Office.Core.MsoThemeColorSchemeIndex.msoThemeAccent6
+                Case Microsoft.Office.Interop.Word.WdThemeColorIndex.wdThemeColorHyperlink
+                    Return Microsoft.Office.Core.MsoThemeColorSchemeIndex.msoThemeHyperlink
+                Case Microsoft.Office.Interop.Word.WdThemeColorIndex.wdThemeColorHyperlinkFollowed
+                    Return Microsoft.Office.Core.MsoThemeColorSchemeIndex.msoThemeFollowedHyperlink
+                Case Else
+                    Return CType(0, Microsoft.Office.Core.MsoThemeColorSchemeIndex)
+            End Select
+        End Function
+
+        ''' <summary>
+        ''' Applies Word's <c>TintAndShade</c> to an RGB triple by adjusting the HSL luminance,
+        ''' mirroring the transformation Word uses to derive lighter/darker theme color variants.
+        ''' </summary>
+        ''' <param name="r">Red channel (0-255), modified in place.</param>
+        ''' <param name="g">Green channel (0-255), modified in place.</param>
+        ''' <param name="b">Blue channel (0-255), modified in place.</param>
+        ''' <param name="tintAndShade">The Word TintAndShade value (-1.0 to 1.0).</param>
+        Private Shared Sub ApplyTintAndShade(ByRef r As Integer, ByRef g As Integer, ByRef b As Integer, tintAndShade As Single)
+            If tintAndShade = 0.0F Then Return
+
+            Dim rd As Double = r / 255.0
+            Dim gd As Double = g / 255.0
+            Dim bd As Double = b / 255.0
+
+            Dim maxC As Double = System.Math.Max(rd, System.Math.Max(gd, bd))
+            Dim minC As Double = System.Math.Min(rd, System.Math.Min(gd, bd))
+
+            Dim h As Double = 0.0
+            Dim s As Double = 0.0
+            Dim l As Double = (maxC + minC) / 2.0
+
+            If maxC <> minC Then
+                Dim d As Double = maxC - minC
+                s = If(l > 0.5, d / (2.0 - maxC - minC), d / (maxC + minC))
+                If maxC = rd Then
+                    h = (gd - bd) / d + (If(gd < bd, 6.0, 0.0))
+                ElseIf maxC = gd Then
+                    h = (bd - rd) / d + 2.0
+                Else
+                    h = (rd - gd) / d + 4.0
+                End If
+                h /= 6.0
+            End If
+
+            ' TintAndShade > 0 lightens toward white, < 0 darkens toward black.
+            If tintAndShade > 0.0F Then
+                l = l * (1.0 - tintAndShade) + tintAndShade
+            Else
+                l = l * (1.0 + tintAndShade)
+            End If
+
+            Dim r2 As Double
+            Dim g2 As Double
+            Dim b2 As Double
+
+            If s = 0.0 Then
+                r2 = l : g2 = l : b2 = l
+            Else
+                Dim q As Double = If(l < 0.5, l * (1.0 + s), l + s - l * s)
+                Dim p As Double = 2.0 * l - q
+                r2 = HueToRgb(p, q, h + 1.0 / 3.0)
+                g2 = HueToRgb(p, q, h)
+                b2 = HueToRgb(p, q, h - 1.0 / 3.0)
+            End If
+
+            r = CInt(System.Math.Round(System.Math.Max(0.0, System.Math.Min(1.0, r2)) * 255.0))
+            g = CInt(System.Math.Round(System.Math.Max(0.0, System.Math.Min(1.0, g2)) * 255.0))
+            b = CInt(System.Math.Round(System.Math.Max(0.0, System.Math.Min(1.0, b2)) * 255.0))
+        End Sub
+
+        ''' <summary>
+        ''' Helper for HSL-to-RGB conversion (single channel).
+        ''' </summary>
+        Private Shared Function HueToRgb(p As Double, q As Double, t As Double) As Double
+            If t < 0.0 Then t += 1.0
+            If t > 1.0 Then t -= 1.0
+            If t < 1.0 / 6.0 Then Return p + (q - p) * 6.0 * t
+            If t < 1.0 / 2.0 Then Return q
+            If t < 2.0 / 3.0 Then Return p + (q - p) * (2.0 / 3.0 - t) * 6.0
+            Return p
+        End Function
+
 
 
         ''' <summary>
