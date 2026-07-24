@@ -539,6 +539,7 @@ Namespace SharedLibrary
                                                              End If
                                                          End If
                                                          temporaryNoLocalConfigSessionUnlocked = True
+                                                         NoLocalConfigSessionUnlocked = True
                                                          expertConfigButtonToolTip.SetToolTip(expertConfigButton, $"Will accept the current settings and in a separate window let you amend all configuration variables from '{AN2}.ini'.")
                                                      End If
 
@@ -782,6 +783,7 @@ Namespace SharedLibrary
             If temporaryNoLocalConfigSessionUnlocked Then
                 CapturedContext.INI_NoLocalConfig = originalNoLocalConfigValue
             End If
+            NoLocalConfigSessionUnlocked = False
         End Sub
 
         ''' <summary>
