@@ -59,6 +59,7 @@ Partial Public Class ThisAddIn
     Public Const AN5 As String = "RI"
     Public Const AN6 As String = "Inky"
     Public Const AN4 As String = "redink_"
+    Public Const AN3 As String = "redink"
 
     Public Shared Version As String = "V.250726" & SharedMethods.VersionQualifier
 

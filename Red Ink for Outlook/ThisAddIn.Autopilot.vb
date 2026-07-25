@@ -276,6 +276,16 @@ Partial Public Class ThisAddIn
     ''' <summary>UTC time of the last recorded error for the heartbeat status report.</summary>
     Private _apLastErrorUtc As DateTime = DateTime.MinValue
 
+    ''' <summary>UTC time at which the currently-processing job started (DateTime.MinValue when idle).</summary>
+    Private _apCurrentJobStartUtc As DateTime = DateTime.MinValue
+
+    ''' <summary>UTC time of the last observed progress signal for the current job (tool call, log step, or LLM turn).
+    ''' Used to distinguish a slow-but-progressing job from a hung one.</summary>
+    Private _apCurrentJobLastActivityUtc As DateTime = DateTime.MinValue
+
+    ''' <summary>Seconds without any observed progress after which the current job is flagged as potentially stalled.</summary>
+    Private Const AP_JobStallThresholdSeconds As Integer = 20 * 60  ' 20 minutes
+
     ''' <summary>Cached HelpMeInky manual text, loaded once per AutoPilot session.</summary>
     Private _apHelpMeManualCache As String = Nothing
     Private _apHelpMeManualCacheLoaded As Boolean = False
@@ -1217,6 +1227,10 @@ Partial Public Class ThisAddIn
                         _apCurrentProcessingEntryId = entryId
                         _apActiveJobLastNotifiedUtc = DateTime.MinValue
 
+                        ' Start the job-liveness clocks for hang/stall detection in the heartbeat.
+                        _apCurrentJobStartUtc = DateTime.UtcNow
+                        _apCurrentJobLastActivityUtc = DateTime.UtcNow
+
                         Dim pending = _apMailQueue.Count
                         If pending > 0 Then
                             ApDashboardLog($"⏳ {pending} mail(s) queued behind current processing", "step")
@@ -1258,6 +1272,8 @@ Partial Public Class ThisAddIn
                             _apCurrentProcessingCategory = Nothing
                             _apCurrentProcessingEntryId = Nothing
                             _apActiveJobLastNotifiedUtc = DateTime.MinValue
+                            _apCurrentJobStartUtc = DateTime.MinValue
+                            _apCurrentJobLastActivityUtc = DateTime.MinValue
                             ' Clean up notification and catch-up tracking AFTER processing is complete
                             _apQueueNotifiedEntryIds.TryRemove(entryId, dummy)
                             Dim dummyCatchUp As Boolean
@@ -3755,6 +3771,8 @@ Partial Public Class ThisAddIn
                                Optional mirrorToLocalToolingLog As Boolean = False)
         Debug.WriteLine($"[AutoPilot] [{level}] {message}")
 
+        MarkAutoPilotJobActivity()
+
         Try
             If _apDashboard IsNot Nothing Then
                 Dim dateTag = DateTime.Now.ToString("dd-MMM", Globalization.CultureInfo.InvariantCulture)
@@ -3828,6 +3846,19 @@ Partial Public Class ThisAddIn
     End Sub
 
     ''' <summary>
+    ''' Records a progress signal for the currently-processing job so the heartbeat can
+    ''' distinguish a slow-but-advancing job from a hung one. Best-effort; must never throw.
+    ''' </summary>
+    Private Sub MarkAutoPilotJobActivity()
+        Try
+            If Not String.IsNullOrEmpty(_apCurrentProcessingEntryId) Then
+                _apCurrentJobLastActivityUtc = DateTime.UtcNow
+            End If
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>
     ''' Writes an atomic JSON heartbeat/status report into the configured log directory
     ''' (<c>INI_LogPath</c>) so an external monitor can detect whether AutoPilot is alive.
     ''' The file is refreshed on the notification timer cadence; a stale file (older than a
@@ -3853,12 +3884,39 @@ Partial Public Class ThisAddIn
             payload("sessionReplyCount") = _apSessionReplyCount
             payload("currentlyProcessing") = Not String.IsNullOrEmpty(_apCurrentProcessingEntryId)
             payload("currentCategory") = If(_apCurrentProcessingCategory, "")
+
+            ' ── Current-job liveness (hang / overrun detection) ──
+            Dim jobActive As Boolean = Not String.IsNullOrEmpty(_apCurrentProcessingEntryId) AndAlso
+                                       _apCurrentJobStartUtc <> DateTime.MinValue
+            payload("jobStallThresholdSeconds") = AP_JobStallThresholdSeconds
+            If jobActive Then
+                Dim nowUtc As DateTime = DateTime.UtcNow
+                Dim elapsedSeconds As Double = (nowUtc - _apCurrentJobStartUtc).TotalSeconds
+                Dim sinceActivitySeconds As Double =
+                    If(_apCurrentJobLastActivityUtc = DateTime.MinValue,
+                       elapsedSeconds,
+                       (nowUtc - _apCurrentJobLastActivityUtc).TotalSeconds)
+                Dim estimateSeconds As Double = GetCategoryEstimate(
+                    If(_apCurrentProcessingCategory, AP_Cat_TextOnly))
+
+                payload("jobElapsedSeconds") = Math.Round(elapsedSeconds, 1)
+                payload("jobEstimateSeconds") = Math.Round(estimateSeconds, 1)
+                payload("jobSecondsSinceActivity") = Math.Round(sinceActivitySeconds, 1)
+                payload("jobStalled") = (sinceActivitySeconds >= AP_JobStallThresholdSeconds)
+                payload("jobOverrun") = (estimateSeconds > 0 AndAlso elapsedSeconds > (estimateSeconds * 5))
+            Else
+                payload("jobElapsedSeconds") = 0
+                payload("jobEstimateSeconds") = 0
+                payload("jobSecondsSinceActivity") = 0
+                payload("jobStalled") = False
+                payload("jobOverrun") = False
+            End If
             payload("hasError") = Not String.IsNullOrEmpty(_apLastError)
             payload("lastError") = If(_apLastError, "")
             payload("lastErrorUtc") = If(_apLastErrorUtc = DateTime.MinValue, "",
                                          _apLastErrorUtc.ToString("o", Globalization.CultureInfo.InvariantCulture))
 
-            Dim fileName As String = $"{AN2}-autopilot-status-{Environment.MachineName}.json"
+            Dim fileName As String = $"{AN3}-autopilot-status-{Environment.MachineName}.json"
             Dim fullPath As String = Path.Combine(logDir, fileName)
             Dim tempPath As String = fullPath & ".tmp"
 
@@ -3975,6 +4033,8 @@ Partial Public Class ThisAddIn
                                        wasSuccessful As Boolean, resultExcerpt As String,
                                        elapsed As TimeSpan,
                                        Optional urls As List(Of String) = Nothing)
+        MarkAutoPilotJobActivity()
+
         If _apCurrentToolCallLog Is Nothing Then Return
 
         _apCurrentToolCallLog.Add(New AutoPilotToolCallEntry() With {
