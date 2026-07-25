@@ -1135,6 +1135,55 @@
                     "validation": ">0",
                     "default": "50",
                     "description": "Maximum number of tool-execution iterations Red Ink may perform in one tooling or agent session before it aborts the loop. Increase this only for complex workflows because each iteration can add cost and runtime. Example: 50. [ToolingMaximumIterations]"
+                },
+                {
+                    "key": "LogPath",
+                    "label": "Anonymous Log Directory",
+                    "type": "path",
+                    "default": "",
+                    "description": "Directory path where Red Ink writes anonymous log files during normal use. These logs can later be analyzed from Freestyle via a short command. Example: %APPDATA%\\RedInk\\Logs. [LogPath]"
+                },
+                {
+                    "key": "PythonAgentPath",
+                    "label": "Python Agent Executable",
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional external agent executable used for Python execution in agentic loops. Format: FullPathToExecutable;SignerNameOrSHA. The part after ';' may contain the digital signer name to verify, a SHA to verify before execution, or be left blank. Example: C:\\Tools\\redink-python-agent.exe;CN=Contoso Code Signing. [PythonAgentPath]"
+                },
+                {
+                    "key": "InkyMemoryCap",
+                    "label": "InkyMemory Item Cap",
+                    "type": "integer",
+                    "default": "50",
+                    "description": "Maximum number of persistent InkyMemory items that Red Ink should inject from the local memory file into chats. Lower values reduce prompt size; use 0 to disable loading memory items. Example: 50. [InkyMemoryCap]"
+                },
+                {
+                    "key": "BrandingName",
+                    "label": "Branding Name",
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional branding name used instead of the default product name in selected UI surfaces. Leave empty to keep the standard branding. Example: Contoso Assistant. [BrandingName]"
+                },
+                {
+                    "key": "LogoPath",
+                    "label": "Logo Path",
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional custom logo path or URL for the standard logo variant. Supports local paths, UNC paths and URLs. Leave empty to use the embedded default logo. Example: https://intranet.example.com/redink-logo.png. [LogoPath]"
+                },
+                {
+                    "key": "LogoPathMedium",
+                    "label": "Logo Path (Medium)",
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional custom logo path or URL for the medium logo variant. Supports local paths, UNC paths and URLs. Leave empty to use the embedded default logo. Example: https://intranet.example.com/redink-logo-medium.png. [LogoPathMedium]"
+                },
+                {
+                    "key": "LogoPathLarge",
+                    "label": "Logo Path (Large)",
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional custom logo path or URL for the large logo variant. Supports local paths, UNC paths and URLs. Leave empty to use the embedded default logo. Example: https://intranet.example.com/redink-logo-large.png. [LogoPathLarge]"
                 }
             ]
     },
@@ -1473,13 +1522,6 @@
           "type": "string",
           "condition": "ISearch == True",
           "description": "Text pattern found immediately to the right of a result URL in the search engine HTML. Red Ink uses it together with ResponseMask1 to isolate the link. Example: &. [ISearch_ResponseMask2]"
-        },
-        {
-          "key": "ISearch_ResponseURLStart",
-          "label": "Response URL Prefix",
-          "type": "string",
-          "condition": "ISearch == True",
-          "description": "Optional prefix that result URLs must start with to be accepted by Red Ink when filtering search engine hits. Leave empty to accept any URL. Example: https://. [ISearch_ResponseURLStart]"
         },
         {
           "key": "ISearch_Tries",

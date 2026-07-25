@@ -1401,6 +1401,8 @@ Namespace SharedLibrary
                     Return context.INI_UsageRestrictions
                 Case "LogPath"
                     Return context.INI_LogPath
+                Case "PythonAgentPath"
+                    Return context.INI_PythonAgentPath
                 Case "ContextMenu"
                     Return context.INI_ContextMenu.ToString()
                 Case "NoLocalConfig"
@@ -2089,6 +2091,7 @@ Namespace SharedLibrary
                     {"APIKeyPrefix", context.INI_APIKeyPrefix},
                     {"UsageRestrictions", context.INI_UsageRestrictions},
                     {"LogPath", context.INI_LogPath},
+                    {"PythonAgentPath", context.INI_PythonAgentPath},
                     {"Language1", context.INI_Language1},
                     {"Language2", context.INI_Language2},
                     {"DoubleS", context.INI_DoubleS.ToString()},
@@ -3626,6 +3629,7 @@ Namespace SharedLibrary
             variableValues.Add("AutoPilotSchedulerLocalChat", context.INI_AutoPilotSchedulerLocalChat)
             variableValues.Add("UsageRestrictions", context.INI_UsageRestrictions)
             variableValues.Add("LogPath", context.INI_LogPath)
+            variableValues.Add("PythonAgentPath", context.INI_PythonAgentPath)
             variableValues.Add("Language1", context.INI_Language1)
             variableValues.Add("Language2", context.INI_Language2)
             variableValues.Add("KeepFormat1", context.INI_KeepFormat1)
@@ -3926,6 +3930,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("AutoPilotSchedulerLocalChat") Then context.INI_AutoPilotSchedulerLocalChat = CBool(updatedValues("AutoPilotSchedulerLocalChat"))
                 If updatedValues.ContainsKey("UsageRestrictions") Then context.INI_UsageRestrictions = CStr(updatedValues("UsageRestrictions"))
                 If updatedValues.ContainsKey("LogPath") Then context.INI_LogPath = CStr(updatedValues("LogPath"))
+                If updatedValues.ContainsKey("PythonAgentPath") Then context.INI_PythonAgentPath = CStr(updatedValues("PythonAgentPath"))
                 If updatedValues.ContainsKey("Language1") Then context.INI_Language1 = CStr(updatedValues("Language1"))
                 If updatedValues.ContainsKey("Language2") Then context.INI_Language2 = CStr(updatedValues("Language2"))
                 If updatedValues.ContainsKey("KeepFormat1") Then context.INI_KeepFormat1 = CBool(updatedValues("KeepFormat1"))
