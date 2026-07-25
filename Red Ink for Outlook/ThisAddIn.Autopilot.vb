@@ -267,6 +267,15 @@ Partial Public Class ThisAddIn
     ''' <summary>Guard to prevent overlapping notification checks.</summary>
     Private _apNotificationCheckRunning As Integer = 0
 
+    ''' <summary>Interval (seconds) at which the heartbeat status file is refreshed. Mirrors the notification timer cadence.</summary>
+    Private Const AP_HeartbeatIntervalSeconds As Integer = 15
+
+    ''' <summary>Last error message recorded for the heartbeat status report (Nothing when no error has occurred).</summary>
+    Private _apLastError As String = Nothing
+
+    ''' <summary>UTC time of the last recorded error for the heartbeat status report.</summary>
+    Private _apLastErrorUtc As DateTime = DateTime.MinValue
+
     ''' <summary>Cached HelpMeInky manual text, loaded once per AutoPilot session.</summary>
     Private _apHelpMeManualCache As String = Nothing
     Private _apHelpMeManualCacheLoaded As Boolean = False
@@ -348,6 +357,7 @@ Partial Public Class ThisAddIn
         End If
 
         WebGrounding = ""
+        WriteAutoPilotHeartbeat("stopped")
         ApDashboardLog("AutoPilot stopped.", "info")
         ApDashboardMarkComplete()
         ShowCustomMessageBox($"{AN6} AutoPilot has been stopped.", AN)
@@ -635,6 +645,12 @@ Partial Public Class ThisAddIn
             Nothing,
             dueTime:=TimeSpan.FromSeconds(15),
             period:=TimeSpan.FromSeconds(15))
+
+        ' Emit an initial heartbeat immediately so the external monitor sees "running"
+        ' without waiting for the first timer tick.
+        _apLastError = Nothing
+        _apLastErrorUtc = DateTime.MinValue
+        WriteAutoPilotHeartbeat("running")
 
     End Sub
 
@@ -1159,6 +1175,7 @@ Partial Public Class ThisAddIn
         If Interlocked.CompareExchange(_apNotificationCheckRunning, 1, 0) <> 0 Then Return
 
         Try
+            WriteAutoPilotHeartbeat("running")
             Dim ct = _apCts?.Token
             If ct Is Nothing OrElse ct.Value.IsCancellationRequested Then Return
             Await SendQueuePositionNotificationsAsync(ct.Value)
@@ -1256,6 +1273,7 @@ Partial Public Class ThisAddIn
         Catch ex As OperationCanceledException
             ApDashboardLog("AutoPilot cancelled.", "step")
         Catch ex As System.Exception
+            RecordAutoPilotError("Pump error: " & ex.Message)
             ApDashboardLog("AutoPilot pump error: " & ex.Message, "error")
         End Try
     End Function
@@ -2268,6 +2286,7 @@ Partial Public Class ThisAddIn
         Catch ex As OperationCanceledException
             Throw
         Catch ex As System.Exception
+            RecordAutoPilotError("Processing error: " & ex.Message)
             ApDashboardLog("ERROR: " & ex.Message, "error")
             Debug.WriteLine("AutoPilot ProcessIncomingMailAsync error: " & ex.ToString())
         Finally
@@ -3793,6 +3812,67 @@ Partial Public Class ThisAddIn
             My.Settings.Save()
         Catch ex As System.Exception
             Debug.WriteLine($"[AutoPilot] Failed to save last processed time: {ex.Message}")
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Records the most recent error for inclusion in the heartbeat status report.
+    ''' Best-effort and must never throw.
+    ''' </summary>
+    Private Sub RecordAutoPilotError(message As String)
+        Try
+            _apLastError = message
+            _apLastErrorUtc = DateTime.UtcNow
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Writes an atomic JSON heartbeat/status report into the configured log directory
+    ''' (<c>INI_LogPath</c>) so an external monitor can detect whether AutoPilot is alive.
+    ''' The file is refreshed on the notification timer cadence; a stale file (older than a
+    ''' few multiples of <see cref="AP_HeartbeatIntervalSeconds"/>) indicates that AutoPilot
+    ''' is no longer running. Best-effort and must never throw.
+    ''' </summary>
+    ''' <param name="status">High-level lifecycle state, e.g. "running" or "stopped".</param>
+    Private Sub WriteAutoPilotHeartbeat(status As String)
+        Try
+            Dim logDir As String = _context.INI_LogPath
+            If String.IsNullOrWhiteSpace(logDir) Then Return
+
+            Dim payload As New Newtonsoft.Json.Linq.JObject()
+            payload("schemaVersion") = 1
+            payload("product") = AN6
+            payload("machine") = Environment.MachineName
+            payload("user") = Environment.UserName
+            payload("status") = status
+            payload("active") = _apActive
+            payload("timestampUtc") = DateTime.UtcNow.ToString("o", Globalization.CultureInfo.InvariantCulture)
+            payload("heartbeatIntervalSeconds") = AP_HeartbeatIntervalSeconds
+            payload("queueLength") = _apMailQueue.Count
+            payload("sessionReplyCount") = _apSessionReplyCount
+            payload("currentlyProcessing") = Not String.IsNullOrEmpty(_apCurrentProcessingEntryId)
+            payload("currentCategory") = If(_apCurrentProcessingCategory, "")
+            payload("hasError") = Not String.IsNullOrEmpty(_apLastError)
+            payload("lastError") = If(_apLastError, "")
+            payload("lastErrorUtc") = If(_apLastErrorUtc = DateTime.MinValue, "",
+                                         _apLastErrorUtc.ToString("o", Globalization.CultureInfo.InvariantCulture))
+
+            Dim fileName As String = $"{AN2}-autopilot-status-{Environment.MachineName}.json"
+            Dim fullPath As String = Path.Combine(logDir, fileName)
+            Dim tempPath As String = fullPath & ".tmp"
+
+            Directory.CreateDirectory(logDir)
+            File.WriteAllText(tempPath, payload.ToString(Newtonsoft.Json.Formatting.Indented), New UTF8Encoding(False))
+
+            ' Atomic replace so an external reader never observes a partially written file.
+            If File.Exists(fullPath) Then
+                File.Replace(tempPath, fullPath, Nothing)
+            Else
+                File.Move(tempPath, fullPath)
+            End If
+        Catch ex As System.Exception
+            Debug.WriteLine($"[AutoPilot] WriteAutoPilotHeartbeat error: {ex.Message}")
         End Try
     End Sub
 
