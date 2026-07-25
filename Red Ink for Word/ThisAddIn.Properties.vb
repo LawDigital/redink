@@ -2443,6 +2443,15 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_PythonAgentPath As String
+        Get
+            Return _context.INI_PythonAgentPath
+        End Get
+        Set(value As String)
+            _context.INI_PythonAgentPath = value
+        End Set
+    End Property
+
     Public Shared Property INI_LicenseCounterPath As String
         Get
             Return _context.INI_LicenseCounterPath

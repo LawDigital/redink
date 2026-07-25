@@ -448,6 +448,8 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Code\Agents\AgentToolRouter.vb" />
+    <Compile Include="Code\Agents\PythonExecuteToolConfig.vb" />
+    <Compile Include="Code\Agents\RedinkPythonAgentClient.vb" />
     <Compile Include="Code\Agents\HostToolRegistration.vb" />
     <Compile Include="Code\Agents\InkyPromptBuilder.vb" />
     <Compile Include="Code\Agents\ISubAgentHost.vb" />
@@ -456,6 +458,10 @@
     <Compile Include="Code\Agents\LanguageContract.vb" />
     <Compile Include="Code\Agents\MemoryTools.vb" />
     <Compile Include="Code\Agents\PathPolicy.vb" />
+    <Compile Include="Code\Agents\PythonExecuteTool.vb" />
+    <Compile Include="Code\Agents\PythonExecuteToolCore.vb" />
+    <Compile Include="Code\Agents\RedinkPythonAgentHostService.vb" />
+    <Compile Include="Code\Agents\RedInkPythonAgentWebGet.vb" />
     <Compile Include="Code\Agents\SessionMemoryViewerForm.vb">
       <SubType>Form</SubType>
     </Compile>

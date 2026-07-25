@@ -95,6 +95,11 @@ Partial Public Class ThisAddIn
         Try
             cancellationToken.ThrowIfCancellationRequested()
 
+            ' ── python_execute: secure sandboxed Python execution ──
+            If toolCall.ToolName.Equals(Agents.PythonExecuteTool.ToolName, StringComparison.OrdinalIgnoreCase) Then
+                Return Await ExecutePythonExecuteTool(toolCall, context, cancellationToken)
+            End If
+
             ' ── workspace_extract_text: read any supported file via GetFileContent (unified extractor) ──
             If toolCall.ToolName.Equals(SharedLibrary.Agents.WorkspaceTools.ToolExtractText, StringComparison.OrdinalIgnoreCase) Then
                 Dim relPath As String = GetToolArgumentString(toolCall.Arguments, "path")

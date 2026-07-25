@@ -654,6 +654,7 @@
   <ItemGroup>
     <AppDesigner Include="My Project\" />
     <Compile Include="BridgeSubs.vb" />
+    <Compile Include="ThisAddIn.Processing.Tooling.PythonExecute.vb" />
     <Compile Include="DrawioEditorForm.vb">
       <SubType>Form</SubType>
     </Compile>

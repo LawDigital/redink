@@ -524,6 +524,7 @@
     <Compile Include="ThisAddIn.Tooling.M365.vb" />
     <Compile Include="ThisAddIn.Tooling.Memory.vb" />
     <Compile Include="ThisAddIn.Tooling.Parameterhandling.vb" />
+    <Compile Include="ThisAddIn.Tooling.PythonExecute.vb" />
     <Compile Include="ThisAddIn.Tooling.ToolExecution.vb" />
     <Compile Include="ThisAddIn.Tooling.PromptBuilding.vb" />
     <Compile Include="ThisAddIn.Tooling.ToolExecutionContext.vb" />

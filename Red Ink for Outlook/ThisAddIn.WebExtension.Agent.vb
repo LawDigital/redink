@@ -213,6 +213,85 @@ Partial Public Class ThisAddIn
         CleanupChatAgentTempDir()
     End Sub
 
+    ''' <summary>
+    ''' Resolves a registered session file by name (uploaded or produced) and returns its
+    ''' current temp path, hydrating it from its source if necessary. Returns Nothing when
+    ''' the file cannot be located or materialized.
+    ''' </summary>
+    Private Function ResolveSessionFilePath(fileName As String) As String
+        If String.IsNullOrWhiteSpace(fileName) Then Return Nothing
+
+        Dim trimmedName = fileName.Trim()
+
+        ' The browser chips are rendered from _chatAgentFiles (GetAgentFileListForBrowser),
+        ' so resolve against that list first. _apCurrentAttachments (used by FindAttachment)
+        ' is only populated during an active tooling run and is often Nothing here.
+        Dim att As AutoPilotAttachmentInfo = Nothing
+        If _chatAgentFiles IsNot Nothing Then
+            att = _chatAgentFiles.FirstOrDefault(
+                Function(a) a IsNot Nothing AndAlso
+                            Not String.IsNullOrWhiteSpace(a.OriginalFileName) AndAlso
+                            a.OriginalFileName.Equals(trimmedName, StringComparison.OrdinalIgnoreCase))
+        End If
+
+        If att Is Nothing Then
+            att = FindAttachment(trimmedName)
+        End If
+
+        att = EnsureSessionAttachmentAvailable(att)
+
+        If att Is Nothing OrElse String.IsNullOrWhiteSpace(att.TempFilePath) OrElse Not File.Exists(att.TempFilePath) Then
+            Return Nothing
+        End If
+
+        Return att.TempFilePath
+    End Function
+
+    ''' <summary>
+    ''' Opens a registered session file (uploaded or produced) in the OS default application.
+    ''' Returns False when the file cannot be located.
+    ''' </summary>
+    Private Function ChatAgentOpenFileInDefaultApp(fileName As String) As Boolean
+        Dim path = ResolveSessionFilePath(fileName)
+        If String.IsNullOrWhiteSpace(path) Then Return False
+
+        Try
+            Dim psi As New ProcessStartInfo(path) With {.UseShellExecute = True}
+            Process.Start(psi)
+            Return True
+        Catch ex As Exception
+            ToolingFileLogger.LogWarn("Failed to open session file in default application.", ex:=ex)
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Resolves a registered session file by name (uploaded or produced) and copies it to
+    ''' Desktop\Inky\, returning the saved path. Works for any file surfaced as a browser chip.
+    ''' </summary>
+    Private Function ChatAgentDownloadFileToDesktop(fileName As String) As String
+        Dim path = ResolveSessionFilePath(fileName)
+        If String.IsNullOrWhiteSpace(path) Then Return Nothing
+
+        Dim desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
+        Dim outputDir = System.IO.Path.Combine(desktopPath, "Inky")
+        Directory.CreateDirectory(outputDir)
+
+        Dim destName = System.IO.Path.GetFileName(path)
+        Dim destPath = System.IO.Path.Combine(outputDir, destName)
+
+        Dim counter = 1
+        While File.Exists(destPath)
+            destPath = System.IO.Path.Combine(
+                outputDir,
+                System.IO.Path.GetFileNameWithoutExtension(destName) & $"_{counter}" & System.IO.Path.GetExtension(destName))
+            counter += 1
+        End While
+
+        File.Copy(path, destPath, overwrite:=False)
+        Return destPath
+    End Function
+
     Private Function EnsureSessionAttachmentAvailable(att As AutoPilotAttachmentInfo) As AutoPilotAttachmentInfo
         If att Is Nothing Then Return Nothing
 
@@ -922,7 +1001,8 @@ Partial Public Class ThisAddIn
 
     Private Function RegisterSessionFile(filePath As String,
                                          statusMessage As String,
-                                         Optional sourcePath As String = Nothing) As AutoPilotAttachmentInfo
+                                         Optional sourcePath As String = Nothing,
+                                         Optional isToolOutput As Boolean = False) As AutoPilotAttachmentInfo
         If String.IsNullOrWhiteSpace(filePath) OrElse Not File.Exists(filePath) Then Return Nothing
 
         Dim fileName = Path.GetFileName(filePath)
@@ -953,7 +1033,7 @@ Partial Public Class ThisAddIn
             .CreatedTime = fi.CreationTimeUtc,
             .LastModifiedTime = fi.LastWriteTimeUtc,
             .OutputFiles = New List(Of String)(),
-            .IsToolOutput = False
+            .IsToolOutput = isToolOutput
         }
 
         _chatAgentFiles.Add(att)
@@ -1257,6 +1337,18 @@ Partial Public Class ThisAddIn
             If Not ((_chatAgentActive AndAlso Not _apActive) OrElse _apActive OrElse HasActiveScheduledTaskWorkspace()) Then
                 response.Success = False
                 response.ErrorMessage = "Workspace tools are available only in Local Chat Agent mode, during AutoPilot processing, or during scheduled-task execution."
+            ElseIf Not IsChatAgentWorkspaceConnected() AndAlso
+                   toolCall.ToolName.Equals(CA_Tool_WorkspaceSaveSessionFile, StringComparison.OrdinalIgnoreCase) Then
+                ' No workspace is connected, so there is nothing to save into. This is not a hard
+                ' failure: session outputs are already delivered to the Desktop output folder and
+                ' remain available as session files. Return a soft, self-correcting result so the
+                ' tooling loop can finalize cleanly instead of aborting (this tool uses abort).
+                response.Success = True
+                response.Response = ToWorkspaceJson(New With {
+                    .saved = False,
+                    .reason = "no_workspace_connected",
+                    .message = "No workspace is connected, so no file was saved to a workspace. The produced file is already delivered to the Desktop output folder and remains available as a session file; no further action is needed."
+                })
             ElseIf Not IsChatAgentWorkspaceConnected() Then
                 response.Success = False
                 response.ErrorMessage = "No active workspace is available."

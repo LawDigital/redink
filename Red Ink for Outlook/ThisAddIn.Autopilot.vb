@@ -3396,11 +3396,19 @@ Partial Public Class ThisAddIn
 
         ' 2. Fallback: scan for files in tempDir that are (a) not in the original
         '    upload set, AND (b) not in the already-surfaced set from prior turns.
+        '    Registered tool outputs (IsToolOutput=True) are produced artifacts, not
+        '    user uploads, so they must remain eligible for delivery even though they
+        '    are present in originalAttachments (they are registered as session chips).
         If Directory.Exists(tempDir) Then
             Dim originalPaths As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
             If originalAttachments IsNot Nothing Then
                 For Each att In originalAttachments
-                    If att.TempFilePath IsNot Nothing Then originalPaths.Add(Path.GetFullPath(att.TempFilePath))
+                    ' Registered tool outputs (IsToolOutput=True) are produced artifacts, not user
+                    ' uploads, so they must remain eligible for Desktop delivery even though they are
+                    ' registered as session chips. Only exclude genuine uploads here.
+                    If att.TempFilePath IsNot Nothing AndAlso Not att.IsToolOutput Then
+                        originalPaths.Add(Path.GetFullPath(att.TempFilePath))
+                    End If
                 Next
             End If
             For Each filePath In Directory.GetFiles(tempDir, "*.*", SearchOption.AllDirectories)

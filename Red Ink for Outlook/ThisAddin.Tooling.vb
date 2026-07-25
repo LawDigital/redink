@@ -4147,6 +4147,11 @@ Partial Public Class ThisAddIn
 
         LogAgentToolCallStatistic(toolCall.ToolName)
 
+        ' ── python_execute: secure sandboxed Python execution ──
+        If toolCall.ToolName.Equals(SharedLibrary.Agents.PythonExecuteTool.ToolName, StringComparison.OrdinalIgnoreCase) Then
+            Return Await ExecutePythonExecuteTool(toolCall, context, cancellationToken)
+        End If
+
         ' ── workspace_extract_text: unified file reader for Local Chat agent (no staging) ──
         If ((_chatAgentActive AndAlso Not _apActive) OrElse _apActive) AndAlso
            toolCall.ToolName.Equals(SharedLibrary.Agents.WorkspaceTools.ToolExtractText, StringComparison.OrdinalIgnoreCase) Then
@@ -4700,6 +4705,14 @@ __AfterDispatch:
         End If
 
         tools.AddRange(GetInternalKnowledgeTools())
+
+        ' python_execute: secure sandboxed Python execution.
+        ' Only advertised when the executor path is set, the exe is available, and
+        ' (when requested) its authenticity has been verified.
+        Dim pythonExecuteTool As ModelConfig = Nothing
+        If TryConfigureAndBuildPythonExecuteTool(pythonExecuteTool) Then
+            tools.Add(pythonExecuteTool)
+        End If
 
         ' M365 tools are interactive-only. Show them for Local Chat Agent source
         ' selection and execution, but never for AutoPilot.

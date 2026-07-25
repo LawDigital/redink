@@ -175,6 +175,14 @@ Partial Public Class ThisAddIn
 
         tools.AddRange(GetInternalKnowledgeTools())
 
+        ' python_execute: secure sandboxed Python execution.
+        ' Only advertised when INI_PythonAgentPath is set, the exe is available, and
+        ' (when requested via the packed path) its authenticity has been verified.
+        Dim pythonExecuteTool As ModelConfig = Nothing
+        If TryConfigureAndBuildPythonExecuteTool(pythonExecuteTool) Then
+            tools.Add(pythonExecuteTool)
+        End If
+
         tools.AddRange(SharedLibrary.SharedLibrary.M365ToolService.GetTools(_context, InternalToolSuffix))
 
         ' Agent layer: session memory, skill loader, and discovered skills/agents (lazy registry-backed).
