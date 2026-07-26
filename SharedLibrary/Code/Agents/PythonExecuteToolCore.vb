@@ -140,7 +140,7 @@ Namespace Agents
 
         Public Shared ReadOnly Property ToolInstructionsPrompt As System.String
             Get
-                Return "Use python_execute for calculations, parsing, structured transformations, deterministic data processing, document editing, and generating output artifacts from self-contained Python code. When a task involves several steps or several files, combine them all into a single script and call python_execute once; do not issue multiple python_execute calls for one logical task. Access every input file through redink_pythonagent.agent_api.input_path(name), passing the same relative name you listed in input_files (for example: from redink_pythonagent import agent_api; doc = docx.Document(agent_api.input_path('Schreiben.docx'))). Never open an input by a bare filename or absolute path; staged inputs are not in the working directory and a bare open will fail with a not-found error. Write every produced document to a path obtained from agent_api.output_path(name); do not write to arbitrary or absolute paths. Publish a direct JSON result with agent_api.publish_result(...) or text with agent_api.publish_result_text(...); use output_path(...) for large or binary documents. The worker has no direct network access. Depending on how the host is configured for this task, it may additionally have access to host-mediated capabilities such as language-model assistance and web retrieval/search; when such a capability is not enabled, any attempt to use it fails with a typed host error, so treat these as optional and check availability at runtime rather than assuming them. Only explicitly supplied input files are visible. Execution and all relays are time- and size-bounded. Raw stdout, stderr, tracebacks, and arbitrary exception text remain human diagnostics; structured safe errors are returned to the model."
+                Return "Use python_execute for calculations, parsing, structured transformations, deterministic data processing, document editing, and generating output artifacts from self-contained Python code. When js_run is available and sufficient for the task, prefer js_run instead because it is usually faster; use python_execute when Python-specific libraries, richer file handling, or more complex processing are needed. When a task involves several steps or several files, combine them all into a single script and call python_execute once; do not issue multiple python_execute calls for one logical task. Access every input file through redink_pythonagent.agent_api.input_path(name), passing the same relative name you listed in input_files (for example: from redink_pythonagent import agent_api; doc = docx.Document(agent_api.input_path('Schreiben.docx'))). Never open an input by a bare filename or absolute path; staged inputs are not in the working directory and a bare open will fail with a not-found error. Write every produced document to a path obtained from agent_api.output_path(name); do not write to arbitrary or absolute paths. Anything written to stdout/stderr (for example via print(...)) is NOT returned to you; it is retained only as a human diagnostic. To make any value observable to you, publish a direct JSON result with agent_api.publish_result(...) or text with agent_api.publish_result_text(...); use output_path(...) for large or binary documents. A run that publishes neither a result nor an output file returns no observable outcome even when it exits successfully, so always publish a result or an output file for every task. The worker has no direct network access. Depending on how the host is configured for this task, it may additionally have access to host-mediated capabilities such as language-model assistance and web retrieval/search; when such a capability is not enabled, any attempt to use it fails with a typed host error, so treat these as optional and check availability at runtime rather than assuming them. Only explicitly supplied input files are visible. Execution and all relays are time- and size-bounded. Raw stdout, stderr, tracebacks, and arbitrary exception text remain human diagnostics; structured safe errors are returned to the model."
             End Get
         End Property
 
@@ -148,7 +148,7 @@ Namespace Agents
             Get
                 Dim definition As New Newtonsoft.Json.Linq.JObject(
                 New Newtonsoft.Json.Linq.JProperty("name", ToolName),
-                New Newtonsoft.Json.Linq.JProperty("description", "Executes a self-contained Python script in a sandboxed, network-isolated process. It may return an explicit bounded JSON/text result, create validated output documents, and, depending on host configuration for the task, may additionally have access to optional host-mediated capabilities such as language-model assistance and web retrieval/search. Use for calculations, parsing, transformations, document editing, and file generation. The worker has no direct network access and sees only files explicitly passed in."),
+                New Newtonsoft.Json.Linq.JProperty("description", "Executes a self-contained Python script in a sandboxed, network-isolated process. It may return an explicit bounded JSON/text result, create validated output documents, and, depending on host configuration for the task, may additionally have access to optional host-mediated capabilities such as language-model assistance and web retrieval/search. Use for calculations, parsing, transformations, document editing, and file generation. When js_run is available and sufficient for a deterministic task, prefer js_run because it is usually faster. The worker has no direct network access and sees only files explicitly passed in."),
                 New Newtonsoft.Json.Linq.JProperty("parameters", New Newtonsoft.Json.Linq.JObject(
                     New Newtonsoft.Json.Linq.JProperty("type", "object"),
                     New Newtonsoft.Json.Linq.JProperty("properties", New Newtonsoft.Json.Linq.JObject(
@@ -312,9 +312,9 @@ Namespace Agents
 
                 SafeLog(logStep, "Running secure Python script...")
                 Try
-                    SafeLog(logStep, "Validating secure Python executable...")
+                    SafeLog(logDiag, "Validating secure Python executable...")
                     Dim executable As System.String = RedInkPythonAgentClient.ValidateExecutableConfiguration(configuration)
-                    SafeLog(logStep, "Secure Python executable verified.")
+                    SafeLog(logDiag, "Secure Python executable verified.")
                     SafeLog(logDiag, "Verified PythonAgent executable: " & executable)
                     SafeLog(logDiag, "Python request source bytes: " & codeBytes.ToString(System.Globalization.CultureInfo.InvariantCulture))
                     execution = client.CreateExecution(configuration, callRoot, code, resolvedInputFiles, limits, options.HostServiceHandler, progress)
@@ -936,29 +936,29 @@ Namespace Agents
                 End If
                 Select Case value.EventCode
                     Case "BROKER_STARTED"
-                        SafeLog(Me.LogStepValue, "Preparing secure Python execution...")
+                        SafeLog(Me.LogDiagValue, "Preparing secure Python execution...")
                     Case "REQUEST_VALIDATED"
-                        SafeLog(Me.LogStepValue, "Python request validated.")
+                        SafeLog(Me.LogDiagValue, "Python request validated.")
                     Case "INPUT_STAGING_STARTED"
-                        SafeLog(Me.LogStepValue, "Preparing sandbox input files...")
+                        SafeLog(Me.LogDiagValue, "Preparing sandbox input files...")
                     Case "INPUT_STAGING_COMPLETED"
-                        SafeLog(Me.LogStepValue, "Sandbox input files prepared.")
+                        SafeLog(Me.LogDiagValue, "Sandbox input files prepared.")
                     Case "RUNTIME_VERIFICATION_STARTED"
-                        SafeLog(Me.LogStepValue, "Verifying secure Python runtime...")
+                        SafeLog(Me.LogDiagValue, "Verifying secure Python runtime...")
                     Case "RUNTIME_VERIFICATION_COMPLETED"
-                        SafeLog(Me.LogStepValue, "Secure Python runtime verified.")
+                        SafeLog(Me.LogDiagValue, "Secure Python runtime verified.")
                     Case "EXECUTE_SANDBOX_STARTING", "EXECUTE_SANDBOX_RUNNING"
-                        SafeLog(Me.LogStepValue, "Running Python script...")
+                        SafeLog(Me.LogDiagValue, "Running Python script...")
                     Case "PYTHON_PROGRESS"
-                        SafeLog(Me.LogStepValue, FormatProgress(value))
+                        SafeLog(Me.LogDiagValue, FormatProgress(value))
                     Case "VALIDATION_STARTED"
-                        SafeLog(Me.LogStepValue, "Validating Python output files...")
+                        SafeLog(Me.LogDiagValue, "Validating Python output files...")
                     Case "VALIDATION_COMPLETED"
-                        SafeLog(Me.LogStepValue, "Python output files validated.")
+                        SafeLog(Me.LogDiagValue, "Python output files validated.")
                     Case "PUBLICATION_STARTED"
-                        SafeLog(Me.LogStepValue, "Publishing Python output files...")
+                        SafeLog(Me.LogDiagValue, "Publishing Python output files...")
                     Case "PUBLICATION_COMPLETED"
-                        SafeLog(Me.LogStepValue, "Python output files published.")
+                        SafeLog(Me.LogDiagValue, "Python output files published.")
                     Case "CANCELLATION_REQUESTED", "SESSION_CANCELLED"
                         SafeLog(Me.LogWarnValue, "Python execution cancellation requested.")
                     Case "SESSION_TIMED_OUT"

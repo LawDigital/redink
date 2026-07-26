@@ -1852,13 +1852,16 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
-            ' If we hit max iterations and the last response was a tool call, force a final text response.
+            ' If we hit max iterations and the last response is either a pending tool call or is not
+            ' presentable user-facing text (e.g. a raw JSON/structured tool echo, or empty), force a
+            ' final text response so the user never receives raw protocol content.
             ' The tool results are already in INI_APICall_ToolResponses_2 from the last iteration.
             If iteration >= context.MaxIterations AndAlso
                Not context.IsCancelled AndAlso
-               ContainsToolCalls(currentResponse, context.ToolingModel.ToolCallDetectionPattern) Then
+               (ContainsToolCalls(currentResponse, context.ToolingModel.ToolCallDetectionPattern) OrElse
+                Not SharedLibrary.Agents.ToolCallSequencing.IsUserPresentableFinalText(currentResponse)) Then
 
-                context.Log("Forcing final response (max iterations reached with pending tool call)...")
+                context.Log("Forcing final response (max iterations reached with a pending tool call or non-user-facing content)...")
 
                 ' Disable tool definitions to prevent further tool calls
                 INI_APICall_ToolInstructions_2 = ""
@@ -1912,6 +1915,33 @@ Partial Public Class ThisAddIn
                 context.LogWarn($"Maximum iterations ({context.MaxIterations}) reached")
                 ShowCustomMessageBox($"Maximum tool iterations ({context.MaxIterations}) reached. The response may be incomplete.")
                 ToolingFileLogger.LogWarn("Maximum iterations reached.", details:=$"MaxIterations={context.MaxIterations}")
+
+                ' Guarantee user-understandable output: if the (possibly forced) final response is not
+                ' presentable user-facing text, summarize what was achieved as a blocked result instead
+                ' of returning raw tool/JSON content to the user.
+                If Not context.FinalizationBlocked AndAlso
+                   Not SharedLibrary.Agents.ToolCallSequencing.IsUserPresentableFinalText(currentResponse) Then
+
+                    context.FinalizationBlocked = True
+                    context.FinalizationBlockedReason = "max_iterations_no_user_facing_final"
+
+                    currentResponse = Await BuildBlockedToolingResultAsync(
+                        context,
+                        SharedLibrary.Agents.ToolCallSequencing.InvalidTextOnlyFinalizationCode,
+                        "The tool-assisted run reached its iteration limit before producing a user-facing result.",
+                        useSecondAPI,
+                        hideSplash,
+                        cancellationToken)
+
+                    If context.SequencingState IsNot Nothing Then
+                        context.SequencingState.FinalResponseOrigin = "host_generated"
+                        context.SequencingState.HasOpenToolWorkflow = False
+                    End If
+
+                    context.LogWarn(
+                        "Max-iteration final response was not user-facing; converted to a summarized blocked message.",
+                        details:=$"host={context.HostKind}")
+                End If
             End If
 
             If context.EmptyMainModelResponse AndAlso String.IsNullOrWhiteSpace(currentResponse) Then
