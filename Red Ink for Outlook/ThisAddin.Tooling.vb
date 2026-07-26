@@ -2204,14 +2204,22 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
-            ' If we hit max iterations and the last response was a tool call, force a final text response.
+            ' If we hit max iterations and the last response is either a pending tool call or
+            ' is not substantive user-facing text (e.g. raw JSON, a structured tool echo, or empty),
+            ' force a final text response so the user never receives raw protocol content.
             ' The tool results are already in INI_APICall_ToolResponses_2 from the last iteration.
-            If iteration >= context.MaxIterations AndAlso
-               Not context.IsCancelled AndAlso
-               Not cancellationToken.IsCancellationRequested AndAlso
-               ContainsToolCalls(currentResponse, context.ToolingModel.ToolCallDetectionPattern) Then
+            Dim maxIterationsNeedsUserFacingFinal As Boolean =
+                iteration >= context.MaxIterations AndAlso
+                Not context.IsCancelled AndAlso
+                Not cancellationToken.IsCancellationRequested AndAlso
+                (ContainsToolCalls(currentResponse, context.ToolingModel.ToolCallDetectionPattern) OrElse
+                 Not SharedLibrary.Agents.ToolCallSequencing.HasSubstantiveUserFacingText(
+                     SharedLibrary.Agents.ToolCallSequencing.StripTaskStatusBlocksFromUserFacingText(
+                         StripTaskStatus(If(currentResponse, "")))))
 
-                context.Log("Forcing final response (max iterations reached with pending tool call)...")
+            If maxIterationsNeedsUserFacingFinal Then
+
+                context.Log("Forcing final response (max iterations reached with a pending tool call or non-user-facing content)...")
 
                 ' Disable tool definitions to prevent further tool calls
                 INI_APICall_ToolInstructions_2 = ""
@@ -2390,6 +2398,35 @@ Partial Public Class ThisAddIn
                     ShowCustomMessageBox($"Maximum tool iterations ({context.MaxIterations}) reached. The response may be incomplete.")
                 End If
                 ToolingFileLogger.LogWarn("Maximum iterations reached.", details:=$"MaxIterations={context.MaxIterations}")
+
+                ' Guarantee user-understandable output: if the forced-final call did not yield
+                ' substantive user-facing prose, summarize what was achieved as a blocked result
+                ' instead of returning raw tool/JSON content to the user.
+                If Not context.FinalizationBlocked AndAlso
+                   Not SharedLibrary.Agents.ToolCallSequencing.HasSubstantiveUserFacingText(
+                       SharedLibrary.Agents.ToolCallSequencing.StripTaskStatusBlocksFromUserFacingText(
+                           StripTaskStatus(If(currentResponse, "")))) Then
+
+                    context.FinalizationBlocked = True
+                    context.FinalizationBlockedReason = "max_iterations_no_user_facing_final"
+
+                    currentResponse = Await BuildBlockedToolingResultAsync(
+                        context,
+                        SharedLibrary.Agents.ToolCallSequencing.InvalidTextOnlyFinalizationCode,
+                        "The tool-assisted run reached its iteration limit before producing a user-facing result.",
+                        useSecondAPI,
+                        hideSplash,
+                        cancellationToken)
+
+                    If context.SequencingState IsNot Nothing Then
+                        context.SequencingState.FinalResponseOrigin = "host_generated"
+                        context.SequencingState.HasOpenToolWorkflow = False
+                    End If
+
+                    context.LogWarn(
+                        "Max-iteration final response was not user-facing; converted to a summarized blocked message.",
+                        details:=$"host={context.HostKind}")
+                End If
             End If
 
             If context.EmptyMainModelResponse AndAlso String.IsNullOrWhiteSpace(currentResponse) Then
@@ -4147,6 +4184,33 @@ Partial Public Class ThisAddIn
 
         LogAgentToolCallStatistic(toolCall.ToolName)
 
+        ' ── python_execute: secure sandboxed Python execution ──
+        If toolCall.ToolName.Equals(SharedLibrary.Agents.PythonExecuteTool.ToolName, StringComparison.OrdinalIgnoreCase) Then
+            Dim pyResponse As ToolResponse = Await ExecutePythonExecuteTool(toolCall, context, cancellationToken)
+
+            If (_apActive OrElse _chatAgentActive) AndAlso _apCurrentToolCallLog IsNot Nothing Then
+                Dim pyParamSummary As String = BuildCondensedParamSummary(toolCall.Arguments)
+                Dim pyExcerpt As String = BuildResultExcerpt(pyResponse.Response, 80)
+                ApDashboardLog($"🔧 External tool: {toolCall.ToolName}{pyParamSummary}", "info")
+                If pyResponse.Success Then
+                    ApDashboardLog($"   ✓ {pyExcerpt}", "info")
+                Else
+                    ApDashboardLog($"   ✗ {If(pyResponse.ErrorMessage, pyExcerpt)}", "error")
+                End If
+                RecordAutoPilotToolCall(
+                    toolCall.ToolName,
+                    toolCall.ToolName,
+                    pyParamSummary,
+                    isInternalTool:=True,
+                    wasSuccessful:=pyResponse.Success,
+                    resultExcerpt:=pyExcerpt,
+                    elapsed:=DateTime.Now - pyResponse.Timestamp,
+                    urls:=Nothing)
+            End If
+
+            Return pyResponse
+        End If
+
         ' ── workspace_extract_text: unified file reader for Local Chat agent (no staging) ──
         If ((_chatAgentActive AndAlso Not _apActive) OrElse _apActive) AndAlso
            toolCall.ToolName.Equals(SharedLibrary.Agents.WorkspaceTools.ToolExtractText, StringComparison.OrdinalIgnoreCase) Then
@@ -4701,6 +4765,14 @@ __AfterDispatch:
 
         tools.AddRange(GetInternalKnowledgeTools())
 
+        ' python_execute: secure sandboxed Python execution.
+        ' Only advertised when the executor path is set, the exe is available, and
+        ' (when requested) its authenticity has been verified.
+        Dim pythonExecuteTool As ModelConfig = Nothing
+        If TryConfigureAndBuildPythonExecuteTool(pythonExecuteTool) Then
+            tools.Add(pythonExecuteTool)
+        End If
+
         ' M365 tools are interactive-only. Show them for Local Chat Agent source
         ' selection and execution, but never for AutoPilot.
         If (includeInteractiveM365Tools OrElse _chatAgentActive) AndAlso Not _apActive Then
@@ -4832,6 +4904,7 @@ __AfterDispatch:
            SharedLibrary.Agents.WordTools.IsWordTool(toolName) OrElse
            SharedLibrary.Agents.WordDocTools.IsWordDocTool(toolName) OrElse
            SharedLibrary.Agents.JsRunTool.IsJsTool(toolName) OrElse
+           SharedLibrary.Agents.PythonExecuteTool.IsPythonTool(toolName) OrElse
            toolName.Equals(SharedLibrary.Agents.SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) OrElse
            IsAutoPilotInternalTool(toolName) Then
             Return True

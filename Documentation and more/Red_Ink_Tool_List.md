@@ -27,6 +27,7 @@ Notes:
 | `text_write` | Writes, replaces, or appends a UTF-8 text file. | Yes | Yes | Yes |
 | `text_search` | Searches text files for substring or regex matches. | Yes | Yes | Yes |
 | `js_run` | Executes sandboxed JavaScript in a hidden WebView2 environment. | Yes | Yes | Yes |
+| `python_execute` | Executes sandboxed Python code through the configured secure Python agent and may return structured results or published output files.1) | Yes | Yes | Yes |
 | `skill_use` | Loads a skill's instructions and file inventory for guided execution. | Yes | Yes | No |
 | `m365_search` | Searches Microsoft 365 content such as mail, files, chats, events, and notes. | Yes | Yes | No |
 | `m365_get_mail` | Retrieves a mail message and its attachment text. | Yes | Yes | No |
@@ -45,6 +46,8 @@ Notes:
 | `word_format` | Applies paragraph or run formatting to matched text in a `.docx` file on disk. | Yes | Yes | Yes |
 | `word_apply_template` | Creates a document from a template with substitutions. | Yes | Yes | Yes |
 | `word_save_as` | Saves a `.docx` file to a new path. | Yes | Yes | Yes |
+
+1) Only available when the secure Python agent helper is configured and available.
 
 ## Workspace tools
 

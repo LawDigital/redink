@@ -1135,6 +1135,55 @@
                     "validation": ">0",
                     "default": "50",
                     "description": "Maximum number of tool-execution iterations Red Ink may perform in one tooling or agent session before it aborts the loop. Increase this only for complex workflows because each iteration can add cost and runtime. Example: 50. [ToolingMaximumIterations]"
+                },
+                {
+                    "key": "LogPath",
+                    "label": "Anonymous Log Directory",
+                    "type": "path",
+                    "default": "",
+                    "description": "Directory path where Red Ink writes anonymous log files during normal use. These logs can later be analyzed from Freestyle via a short command. Example: %APPDATA%\\RedInk\\Logs. [LogPath]"
+                },
+                {
+                    "key": "PythonAgentPath",
+                    "label": "Python Agent Executable",
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional external agent executable used for Python execution in agentic loops. Format: FullPathToExecutable;SignerNameOrSHA. The part after ';' may contain the digital signer name to verify, a SHA to verify before execution, or be left blank. Example: C:\\Tools\\redink-python-agent.exe;CN=Contoso Code Signing. [PythonAgentPath]"
+                },
+                {
+                    "key": "InkyMemoryCap",
+                    "label": "InkyMemory Item Cap",
+                    "type": "integer",
+                    "default": "50",
+                    "description": "Maximum number of persistent InkyMemory items that Red Ink should inject from the local memory file into chats. Lower values reduce prompt size; use 0 to disable loading memory items. Example: 50. [InkyMemoryCap]"
+                },
+                {
+                    "key": "BrandingName",
+                    "label": "Branding Name",
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional branding name used instead of the default product name in selected UI surfaces. Leave empty to keep the standard branding. Example: Contoso Assistant. [BrandingName]"
+                },
+                {
+                    "key": "LogoPath",
+                    "label": "Logo Path",
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional custom logo path or URL for the standard logo variant. Supports local paths, UNC paths and URLs. Leave empty to use the embedded default logo. Example: https://intranet.example.com/redink-logo.png. [LogoPath]"
+                },
+                {
+                    "key": "LogoPathMedium",
+                    "label": "Logo Path (Medium)",
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional custom logo path or URL for the medium logo variant. Supports local paths, UNC paths and URLs. Leave empty to use the embedded default logo. Example: https://intranet.example.com/redink-logo-medium.png. [LogoPathMedium]"
+                },
+                {
+                    "key": "LogoPathLarge",
+                    "label": "Logo Path (Large)",
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional custom logo path or URL for the large logo variant. Supports local paths, UNC paths and URLs. Leave empty to use the embedded default logo. Example: https://intranet.example.com/redink-logo-large.png. [LogoPathLarge]"
                 }
             ]
     },
@@ -1475,13 +1524,6 @@
           "description": "Text pattern found immediately to the right of a result URL in the search engine HTML. Red Ink uses it together with ResponseMask1 to isolate the link. Example: &. [ISearch_ResponseMask2]"
         },
         {
-          "key": "ISearch_ResponseURLStart",
-          "label": "Response URL Prefix",
-          "type": "string",
-          "condition": "ISearch == True",
-          "description": "Optional prefix that result URLs must start with to be accepted by Red Ink when filtering search engine hits. Leave empty to accept any URL. Example: https://. [ISearch_ResponseURLStart]"
-        },
-        {
           "key": "ISearch_Tries",
           "label": "Max Tries",
           "type": "integer",
@@ -1565,43 +1607,51 @@
       "id": "autopilot",
       "title": "AutoPilot and Other Restrictions",
       "description": "Controls which users may use AutoPilot, whether Draw.io must run in local-only mode and whether legacy .doc files may be processed.",
-      "fields": [
-        {
-          "key": "AutoPilot",
-          "label": "AP Allowed Users",
-          "type": "string",
-          "default": "",
-          "description": "Comma-separated Windows usernames allowed to use the AutoPilot function in Outlook (use ''Client Name'' button below to identify your Windows username). Use * if everyone should be allowed. Example: Peter.Pan,John.Doe or *. [AutoPilot]"
-        },
-        {
-          "key": "AutoPilotAutoStart",
-          "label": "AutoPilot Auto Start",
-          "type": "boolean",
-          "default": "False",
-          "description": "Enable this if AutoPilot should automatically start with the last saved configuration when Outlook launches. A 30-second countdown dialog allows the user to cancel or open the full setup instead. Example: True. [AutoPilotAutoStart]"
-        },
-        {
-          "key": "AutoPilotSchedulerLocalChat",
-          "label": "Permit Scheduler in Local Chat to Send Emails",
-          "type": "boolean",
-          "default": "False",
-          "description": "Enable this if Local Chat users should be able to create scheduling tasks that are performed by automatically sending an e-mail to the user (under the user's name to the user's mailbox). If this is not allowed, the tasks are executed in the Local Chat browser. Example: True. [AutoPilotSchedulerLocalChat]"
-        },
-        {
-          "key": "ForceDrawioLocal",
-          "label": "Force Draw.io Offline",
-          "type": "boolean",
-          "default": "True",
-          "description": "Enable this to force Draw.io to run only in the local/offline mode offered by Red Ink, which helps protect confidential information. Example: True. [ForceDrawioLocal]"
-        },
-        {
-          "key": "AllowLegacyDocFiles",
-          "label": "Allow Legacy .doc Files",
-          "type": "boolean",
-          "default": "False",
-          "description": "Controls whether legacy .doc (binary Word) files can be opened via COM Interop. Set this to False to block .doc processing for security hardening, which prevents OLE and macro-based attacks. When disabled, .doc files are rejected with a security message. Note that .docx files (OpenXML ZIP) are always permitted as they are processed via sandboxed XML parsing. Example: False. [AllowLegacyDocFiles]"
-        }
-      ]
+        "fields": [
+            {
+                "key": "AutoPilot",
+                "label": "AP Allowed Users",
+                "type": "string",
+                "default": "",
+                "description": "Comma-separated Windows usernames allowed to use the AutoPilot function in Outlook (use ''Client Name'' button below to identify your Windows username). Use * if everyone should be allowed. Example: Peter.Pan,John.Doe or *. [AutoPilot]"
+            },
+            {
+                "key": "AutoPilotAutoStart",
+                "label": "AutoPilot Auto Start",
+                "type": "boolean",
+                "default": "False",
+                "description": "Enable this if AutoPilot should automatically start with the last saved configuration when Outlook launches. A 30-second countdown dialog allows the user to cancel or open the full setup instead. Example: True. [AutoPilotAutoStart]"
+            },
+            {
+                "key": "MonitorLink",
+                "label": "Status Monitor Link",
+                "type": "string",
+                "validation": "Hyperlink",
+                "default": "",
+                "description": "Optional HTTP/HTTPS link to a status or monitoring page. When set, Red Ink shows it in the About window below the Local Chat link and includes it in AutoPilot holding responses. Example: https://ink.acme.com/status. [MonitorLink]"
+            },
+            {
+                "key": "AutoPilotSchedulerLocalChat",
+                "label": "Permit Scheduler in Local Chat to Send Emails",
+                "type": "boolean",
+                "default": "False",
+                "description": "Enable this if Local Chat users should be able to create scheduling tasks that are performed by automatically sending an e-mail to the user (under the user's name to the user's mailbox). If this is not allowed, the tasks are executed in the Local Chat browser. Example: True. [AutoPilotSchedulerLocalChat]"
+            },
+            {
+                "key": "ForceDrawioLocal",
+                "label": "Force Draw.io Offline",
+                "type": "boolean",
+                "default": "True",
+                "description": "Enable this to force Draw.io to run only in the local/offline mode offered by Red Ink, which helps protect confidential information. Example: True. [ForceDrawioLocal]"
+            },
+            {
+                "key": "AllowLegacyDocFiles",
+                "label": "Allow Legacy .doc Files",
+                "type": "boolean",
+                "default": "False",
+                "description": "Controls whether legacy .doc (binary Word) files can be opened via COM Interop. Set this to False to block .doc processing for security hardening, which prevents OLE and macro-based attacks. When disabled, .doc files are rejected with a security message. Note that .docx files (OpenXML ZIP) are always permitted as they are processed via sandboxed XML parsing. Example: False. [AllowLegacyDocFiles]"
+            }
+        ]
     },
     {
       "id": "updates",

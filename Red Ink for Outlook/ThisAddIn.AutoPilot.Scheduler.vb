@@ -1616,9 +1616,9 @@ Partial Public Class ThisAddIn
             htmlBody &= BuildAutoPilotFooter()
             newMail.HTMLBody = htmlBody
 
-            ' Add result attachments
+            ' Add result attachments (dangerous file types are zipped before delivery)
             If resultAttachments IsNot Nothing Then
-                For Each attachPath In resultAttachments
+                For Each attachPath In SanitizeOutgoingAttachmentsForDelivery(resultAttachments)
                     If File.Exists(attachPath) Then
                         newMail.Attachments.Add(attachPath, OlAttachmentType.olByValue, , Path.GetFileName(attachPath))
                     End If

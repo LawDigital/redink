@@ -234,6 +234,14 @@ Partial Public Class ThisAddIn
         tools.AddRange(SharedLibrary.Agents.WorkspaceTools.BuildAll())
         tools.AddRange(GetAutoPilotAgentWorkspaceTools())
 
+        ' python_execute: secure sandboxed Python execution.
+        ' Only advertised when INI_PythonAgentPath is set, the exe is available, and
+        ' (when requested) its authenticity has been verified.
+        Dim pythonExecuteTool As ModelConfig = Nothing
+        If TryConfigureAndBuildPythonExecuteTool(pythonExecuteTool) Then
+            tools.Add(pythonExecuteTool)
+        End If
+
         ' ── process_word_document ──
         tools.Add(New ModelConfig() With {
         .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ProcessWordDoc,
@@ -1481,6 +1489,8 @@ Partial Public Class ThisAddIn
                     response = Await ExecuteCompleteWordTablesTool(toolCall, context, cancellationToken)
                 Case AP_Tool_ReportInability
                     response = Await ExecuteReportInabilityTool(toolCall, context, cancellationToken)
+                Case Agents.PythonExecuteTool.ToolName
+                    response = Await ExecutePythonExecuteTool(toolCall, context, cancellationToken)
                 Case Else
                     Return Nothing
             End Select
