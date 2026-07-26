@@ -339,7 +339,7 @@ Namespace SharedLibrary
                     delLocalConfigToolTip.SetToolTip(delLocalConfigButton, $"This will deactivate the local configuration in '{AN2}.ini' (by renaming it to '.bak', overwriting any existing such file), and have the configuration file of your 'Word' add-in (if available) and otherwise the central one applied going forward.")
                 End If
             Else
-                delLocalConfigToolTip.SetToolTip(delLocalConfigButton, $"This will reset all parameters that are not mandatory by removing them from your local configuration file '{AN2}.ini'. A copy will be saved beforehand to '.bak', overwriting any existing such file.")
+                delLocalConfigToolTip.SetToolTip(delLocalConfigButton, $"This will reset all parameters that are not mandatory by removing them from your local configuration file '{AN2}.ini'. A copy will be saved beforehand to a timestamped '.bak' file.")
             End If
 
             Dim okButton As New System.Windows.Forms.Button()
@@ -378,34 +378,56 @@ Namespace SharedLibrary
                 RightSide = updateButton.Right
             End If
 
+            Dim CapturedContext As ISharedContext = context
+            Dim originalNoLocalConfigValue As Boolean = context.INI_NoLocalConfig
+            Dim temporaryNoLocalConfigSessionUnlocked As Boolean = False
+
             Dim FilePath As String = ""
             Dim IsExcel As Boolean = True
+            Dim helperSupported As Boolean = False
             If context.RDV.Contains("Word") Then
                 FilePath = ExpandEnvironmentVariables(HelperPaths("Word"))
                 IsExcel = False
+                helperSupported = True
             ElseIf context.RDV.Contains("Excel") Then
                 FilePath = ExpandEnvironmentVariables(HelperPaths("Excel"))
+                helperSupported = True
             End If
             Debug.WriteLine("Filepath=" & FilePath)
 
-            Dim helperButton As New System.Windows.Forms.Button()
-            If Not String.IsNullOrEmpty(FilePath) Then
-                If File.Exists(FilePath) Then
-                    helperButton.Text = "Remove Helper"
-                Else
-                    helperButton.Text = "Install Helper"
-                    If context.INI_NoHelperDownload Then
-                        helperButton.Enabled = False
+            ' The Python Agent (used to execute Python scripts in agentic mode) is available for Word and Outlook.
+            Dim pythonAgentSupported As Boolean = context.RDV.Contains("Word") OrElse context.RDV.Contains("Outlook")
+
+            ' Determines the button caption based on which helpers are supported and already installed.
+            Dim GetHelperButtonText As System.Func(Of String) =
+                Function()
+                    Dim helperName As String = If(IsExcel, "Excel Helper", "Word Helper")
+                    If helperSupported AndAlso pythonAgentSupported Then
+                        Return "Manage Helpers"
+                    ElseIf pythonAgentSupported Then
+                        Return If(IsPythonAgentInstalled(CapturedContext), "Remove Python Agent", "Install Python Agent")
+                    Else
+                        Return If(System.IO.File.Exists(FilePath), $"Remove {helperName}", $"Install {helperName}")
                     End If
+                End Function
+
+            Dim helperButton As New System.Windows.Forms.Button()
+            If helperSupported OrElse pythonAgentSupported Then
+                Dim helperInstalled As Boolean = helperSupported AndAlso System.IO.File.Exists(FilePath)
+                Dim pythonInstalled As Boolean = pythonAgentSupported AndAlso IsPythonAgentInstalled(CapturedContext)
+
+                helperButton.Text = GetHelperButtonText()
+
+                ' Installing requires a download; only block the button when nothing is installed that could be removed.
+                If context.INI_NoHelperDownload AndAlso Not (helperInstalled OrElse pythonInstalled) Then
+                    helperButton.Enabled = False
                 End If
+
                 Dim HelperButtonSize As System.Drawing.Size = TextRenderer.MeasureText(helperButton.Text, standardFont)
                 helperButton.Size = New System.Drawing.Size(HelperButtonSize.Width + 20, HelperButtonSize.Height + 10)
                 helperButton.Location = New System.Drawing.Point(RightSide + buttonSpacing, cancelButton.Top)
                 settingsForm.Controls.Add(helperButton)
             End If
-            Dim CapturedContext As ISharedContext = context
-            Dim originalNoLocalConfigValue As Boolean = context.INI_NoLocalConfig
-            Dim temporaryNoLocalConfigSessionUnlocked As Boolean = False
 
             Dim updateNoLocalConfigDependentButtons As System.Action =
                 Sub()
@@ -600,10 +622,8 @@ Namespace SharedLibrary
                                                                End If
                                                            End If
                                                        Else
-                                                           If ShowCustomYesNoBox($"Do you really want to reset your local configuration file by removing non-mandatory entries? The current configuration file '{AN2}.ini' will beforehand be saved to a '.bak' file overwriting any existing such file.", "Yes", "No") = 1 Then
-                                                               If RenameFileToBak(GetDefaultINIPath(CapturedContext.RDV)) Then
-                                                                   ResetLocalAppConfig(CapturedContext)
-                                                               End If
+                                                           If ShowCustomYesNoBox($"Do you really want to reset your local configuration file by removing non-mandatory entries? The current configuration file '{AN2}.ini' will beforehand be saved to a timestamped '.bak' file.", "Yes", "No") = 1 Then
+                                                               ResetLocalAppConfig(CapturedContext)
                                                            End If
                                                        End If
                                                        RefreshFormValues(settingControls, labelControls, CapturedContext, Settings)
@@ -612,52 +632,33 @@ Namespace SharedLibrary
                                                    End Sub
 
             AddHandler helperButton.Click, Async Sub(sender, e)
-                                               If helperButton.Text = "Remove Helper" Then
-                                                   If ShowCustomYesNoBox($"Do you really want to remove the helper file '{FilePath}' from your system? It will be unloaded and deleted. You can re-install it later.", "Yes", "No") = 1 Then
-                                                       If IsExcel Then UnloadExcelAddin(ExcelHelper) Else UnloadWordAddin(WordHelper)
-                                                       Try
-                                                           System.IO.File.Delete(FilePath)
-                                                       Catch ex As System.Exception
-                                                       End Try
-                                                       If System.IO.File.Exists(FilePath) Then
-                                                           ShowCustomMessageBox($"The helper file could not be deleted. Try to manually delete the file '{FilePath}' after having closed the application.")
-                                                       Else
-                                                           ShowCustomMessageBox("The helper file was successfully deleted.")
-                                                           helperButton.Text = "Install Helper"
-                                                           CapturedContext.MenusAdded = False
-                                                           RemoveMenu = True
-                                                       End If
-                                                   End If
-                                               Else
-                                                   If ShowCustomYesNoBox($"Do you really want to download the helper file from {AppsUrl} and have it installed to '{FilePath}'? Next time you start the application, it will be automatically loaded.", "Yes", "No") = 1 Then
-                                                       Dim DownloadUrl As String = ""
-                                                       If IsExcel Then DownloadUrl = ExcelHelperUrl Else DownloadUrl = WordHelperUrl
-                                                       Try
-                                                           Using client As New HttpClient()
-                                                               client.Timeout = TimeSpan.FromMinutes(10)
-                                                               client.DefaultRequestHeaders.AcceptEncoding.Clear()
-                                                               Using response As HttpResponseMessage = Await client.GetAsync(DownloadUrl, HttpCompletionOption.ResponseHeadersRead)
-                                                                   response.EnsureSuccessStatusCode()
-                                                                   Using fileStream As FileStream = New FileStream(FilePath, FileMode.Create, FileAccess.Write, FileShare.None)
-                                                                       Using httpStream As Stream = Await response.Content.ReadAsStreamAsync()
-                                                                           Dim buffer(8192) As Byte
-                                                                           Dim bytesRead As Integer
-                                                                           Do
-                                                                               bytesRead = Await httpStream.ReadAsync(buffer, 0, buffer.Length)
-                                                                               If bytesRead = 0 Then Exit Do
-                                                                               Await fileStream.WriteAsync(buffer, 0, bytesRead)
-                                                                           Loop
-                                                                       End Using
-                                                                   End Using
-                                                               End Using
-                                                           End Using
-                                                           ShowCustomMessageBox($"Download to '{FilePath}' completed. You must restart the application for it to be loaded.")
-                                                           helperButton.Text = "Remove Helper"
-                                                       Catch ex As System.Exception
-                                                           ShowCustomMessageBox($"Error when downloading from '{DownloadUrl}' to '{FilePath}'. You may have to download and install the helper file manually.")
-                                                       End Try
-                                                   End If
+                                               Dim performHelper As Boolean = False
+                                               Dim performPython As Boolean = False
+
+                                               If helperSupported AndAlso pythonAgentSupported Then
+                                                   Dim helperName As String = If(IsExcel, "Excel Helper", "Word Helper")
+                                                   Dim helperOption As String = If(System.IO.File.Exists(FilePath), $"Remove {helperName}", $"Install {helperName}")
+                                                   Dim pythonOption As String = "Manage Python Agent"
+                                                   Dim choice As String = ShowSelectionForm("Select the action you would like to perform:", $"{AN} Helpers", New String() {helperOption, pythonOption})
+                                                   If String.IsNullOrEmpty(choice) OrElse choice = "ESC" Then Return
+                                                   performHelper = (choice = helperOption)
+                                                   performPython = (choice = pythonOption)
+                                               ElseIf helperSupported Then
+                                                   performHelper = True
+                                               ElseIf pythonAgentSupported Then
+                                                   performPython = True
                                                End If
+
+                                               If performHelper Then
+                                                   Await ProcessHelperInstallRemove(FilePath, IsExcel, CapturedContext)
+                                               ElseIf performPython Then
+                                                   Await ProcessPythonAgentInstallRemove(CapturedContext)
+                                               End If
+
+                                               helperButton.Text = GetHelperButtonText()
+                                               Dim helperButtonSizeUpdated As System.Drawing.Size = TextRenderer.MeasureText(helperButton.Text, standardFont)
+                                               helperButton.Size = New System.Drawing.Size(helperButtonSizeUpdated.Width + 20, helperButtonSizeUpdated.Height + 10)
+
                                                RefreshFormValues(settingControls, labelControls, CapturedContext, Settings)
                                                switchButton.Enabled = CapturedContext.INI_SecondAPI
                                                CapturedContext.MenusAdded = False
@@ -1066,7 +1067,394 @@ Namespace SharedLibrary
             End Try
         End Sub
 
+        ''' <summary>
+        ''' Returns the resolved Python Agent executable path (first segment of <c>PythonAgentPath</c>, environment expanded).
+        ''' </summary>
+        Private Shared Function GetPythonAgentExePath(context As ISharedContext) As String
+            Dim raw As String = If(context.INI_PythonAgentPath, "")
+            If String.IsNullOrWhiteSpace(raw) Then Return ""
+            Dim firstSegment As String = raw.Split(";"c)(0).Trim()
+            If String.IsNullOrWhiteSpace(firstSegment) Then Return ""
+            Return ExpandEnvironmentVariables(firstSegment)
+        End Function
 
+        ''' <summary>
+        ''' Returns the directory that currently hosts the Python Agent executable, or an empty string if none is configured.
+        ''' </summary>
+        Private Shared Function GetPythonAgentDirectory(context As ISharedContext) As String
+            Dim exePath As String = GetPythonAgentExePath(context)
+            If String.IsNullOrEmpty(exePath) Then Return ""
+            Try
+                Return System.IO.Path.GetDirectoryName(exePath)
+            Catch
+                Return ""
+            End Try
+        End Function
+
+        ''' <summary>
+        ''' Indicates whether the Python Agent executable configured in <c>PythonAgentPath</c> currently exists on disk.
+        ''' </summary>
+        Public Shared Function IsPythonAgentInstalled(context As ISharedContext) As Boolean
+            Dim exePath As String = GetPythonAgentExePath(context)
+            Return Not String.IsNullOrEmpty(exePath) AndAlso System.IO.File.Exists(exePath)
+        End Function
+
+        ''' <summary>
+        ''' Sets or removes the <c>PythonAgentPath</c> entry in the active configuration file via
+        ''' <see cref="ConfigWizardEngine"/> (which creates a timestamped backup), then refreshes the
+        ''' in-memory configuration.
+        ''' </summary>
+        Private Shared Sub WritePythonAgentPathToIni(context As ISharedContext, value As String)
+            Try
+                Dim iniPath As String = GetActiveConfigFilePath(context)
+                If String.IsNullOrWhiteSpace(iniPath) OrElse Not System.IO.File.Exists(iniPath) Then
+                    iniPath = GetDefaultINIPath(context.RDV)
+                End If
+
+                If String.IsNullOrEmpty(value) Then
+                    ConfigWizardEngine.RemoveIniValues(iniPath, New String() {"PythonAgentPath"})
+                Else
+                    Dim edits As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase) From {
+                        {"PythonAgentPath", value}
+                    }
+                    ConfigWizardEngine.WriteIniValues(iniPath, edits)
+                End If
+
+                context.INI_PythonAgentPath = If(value, "")
+                context.INIloaded = False
+                InitializeConfig(context, False, True)
+            Catch ex As System.Exception
+                ShowCustomMessageBox($"Error updating the configuration file with the Python Agent path: {ex.Message}")
+            End Try
+        End Sub
+
+        ''' <summary>
+        ''' Installs or removes the VBA helper (Word/Excel) depending on whether it is currently present on disk.
+        ''' </summary>
+        Private Shared Async Function ProcessHelperInstallRemove(FilePath As String, IsExcel As Boolean, context As ISharedContext) As System.Threading.Tasks.Task
+            If System.IO.File.Exists(FilePath) Then
+                If ShowCustomYesNoBox($"Do you really want to remove the helper file '{FilePath}' from your system? It will be unloaded and deleted. You can re-install it later.", "Yes", "No") = 1 Then
+                    If IsExcel Then UnloadExcelAddin(ExcelHelper) Else UnloadWordAddin(WordHelper)
+                    Try
+                        System.IO.File.Delete(FilePath)
+                    Catch ex As System.Exception
+                    End Try
+                    If System.IO.File.Exists(FilePath) Then
+                        ShowCustomMessageBox($"The helper file could not be deleted. Try to manually delete the file '{FilePath}' after having closed the application.")
+                    Else
+                        ShowCustomMessageBox("The helper file was successfully deleted.")
+                        context.MenusAdded = False
+                        RemoveMenu = True
+                    End If
+                End If
+            Else
+                If ShowCustomYesNoBox($"Do you really want to download the helper file from {AppsUrl} and have it installed to '{FilePath}'? Next time you start the application, it will be automatically loaded.", "Yes", "No") = 1 Then
+                    Dim DownloadUrl As String = If(IsExcel, ExcelHelperUrl, WordHelperUrl)
+                    Try
+                        Using client As New HttpClient()
+                            client.Timeout = TimeSpan.FromMinutes(10)
+                            client.DefaultRequestHeaders.AcceptEncoding.Clear()
+                            Using response As HttpResponseMessage = Await client.GetAsync(DownloadUrl, HttpCompletionOption.ResponseHeadersRead)
+                                response.EnsureSuccessStatusCode()
+                                Using fileStream As FileStream = New FileStream(FilePath, FileMode.Create, FileAccess.Write, FileShare.None)
+                                    Using httpStream As Stream = Await response.Content.ReadAsStreamAsync()
+                                        Dim buffer(8192) As Byte
+                                        Dim bytesRead As Integer
+                                        Do
+                                            bytesRead = Await httpStream.ReadAsync(buffer, 0, buffer.Length)
+                                            If bytesRead = 0 Then Exit Do
+                                            Await fileStream.WriteAsync(buffer, 0, bytesRead)
+                                        Loop
+                                    End Using
+                                End Using
+                            End Using
+                        End Using
+                        ShowCustomMessageBox($"Download to '{FilePath}' completed. You must restart the application for it to be loaded.")
+                    Catch ex As System.Exception
+                        ShowCustomMessageBox($"Error when downloading from '{DownloadUrl}' to '{FilePath}'. You may have to download and install the helper file manually.")
+                    End Try
+                End If
+            End If
+        End Function
+
+        ''' <summary>
+        ''' Presents the Python Agent management sub-menu (install/update/remove/release notes) and dispatches the
+        ''' selected action. Install downloads and extracts the ZIP package into a user-chosen directory (default
+        ''' <c>%APPDATA%\Microsoft\Word</c>) and sets <c>PythonAgentPath</c> to the extracted executable followed by the
+        ''' signer marker (stored with the unexpanded environment variable). Update downloads the latest version and
+        ''' overwrites the existing files without changing the configuration. Remove deletes the deployed files and the
+        ''' INI entry. Release notes are downloaded and shown in the internal text editor.
+        ''' </summary>
+        Private Shared Async Function ProcessPythonAgentInstallRemove(context As ISharedContext) As System.Threading.Tasks.Task
+            Dim installed As Boolean = IsPythonAgentInstalled(context)
+
+            Const installOption As String = "Install Python Agent"
+            Const updateOption As String = "Update Python Agent (keep configuration)"
+            Const removeOption As String = "Remove Python Agent"
+            Const releaseNotesOption As String = "Show Current Release Notes (online)"
+
+            Dim options As New List(Of String)()
+            If installed Then
+                options.Add(updateOption)
+                options.Add(removeOption)
+            Else
+                options.Add(installOption)
+            End If
+            options.Add(releaseNotesOption)
+
+            Dim choice As String = ShowSelectionForm("Select the Python Agent action you would like to perform:", $"{AN} Python Agent", options)
+            If String.IsNullOrEmpty(choice) OrElse choice = "ESC" Then Return
+
+            If choice = installOption Then
+                Await InstallOrUpdatePythonAgent(context, False)
+            ElseIf choice = updateOption Then
+                Await InstallOrUpdatePythonAgent(context, True)
+            ElseIf choice = removeOption Then
+                RemovePythonAgent(context)
+            ElseIf choice = releaseNotesOption Then
+                Await ShowPythonAgentReleaseNotes()
+            End If
+        End Function
+
+        ''' <summary>
+        ''' Downloads and installs (or updates) the Python Agent. On install, the user chooses the target directory
+        ''' (default <c>%APPDATA%\Microsoft\Word</c>) and the configuration is updated. On update, the existing directory
+        ''' is reused, the files are overwritten and the configuration is left unchanged. A progress splash reports the
+        ''' individual steps (download, extract, copy).
+        ''' </summary>
+        Private Shared Async Function InstallOrUpdatePythonAgent(context As ISharedContext, isUpdate As Boolean) As System.Threading.Tasks.Task
+            Dim targetDir As String
+
+            If isUpdate Then
+                targetDir = GetPythonAgentDirectory(context)
+                If String.IsNullOrWhiteSpace(targetDir) Then targetDir = ExpandEnvironmentVariables(PythonAgentDefaultDir)
+                If ShowCustomYesNoBox($"Do you really want to update the {AN} Python Agent in '{targetDir}' by downloading the latest version from {PythonAgentUrl} and overwriting the existing files? Your configuration ('PythonAgentPath') will not be changed.", "Yes", "No") <> 1 Then Return
+            Else
+                targetDir = ExpandEnvironmentVariables(PythonAgentDefaultDir)
+                Using dlg As New FolderBrowserDialog()
+                    dlg.Description = "Select the folder into which the Python Agent should be installed (Cancel to use the default location)."
+                    dlg.ShowNewFolderButton = True
+                    Try
+                        If System.IO.Directory.Exists(targetDir) Then dlg.SelectedPath = targetDir
+                    Catch
+                    End Try
+                    If dlg.ShowDialog() = DialogResult.OK AndAlso Not String.IsNullOrWhiteSpace(dlg.SelectedPath) Then
+                        targetDir = dlg.SelectedPath
+                    End If
+                End Using
+
+                If ShowCustomYesNoBox($"Do you really want to download the {AN} Python Agent from {PythonAgentUrl} and install it to '{targetDir}'? It is used to execute Python scripts in agentic mode.", "Yes", "No") <> 1 Then Return
+            End If
+
+            Dim extractedExe As String = Await DownloadAndExtractPythonAgent(targetDir)
+
+            If String.IsNullOrEmpty(extractedExe) OrElse Not System.IO.File.Exists(extractedExe) Then
+                Dim actionWord As String = If(isUpdate, "updated", "installed")
+                ShowCustomMessageBox($"The Python Agent could not be {actionWord}. Either '{PythonAgentExe}' was not found in the downloaded package, or its signature could not be verified. See any preceding message for details.")
+                Return
+            End If
+
+            If isUpdate Then
+                ShowCustomMessageBox($"The Python Agent in '{targetDir}' was successfully updated to the latest version and its signature was verified as signed by '{PythonAgentSigner}'. Your configuration was left unchanged. You must restart the application for the update to become active.")
+            Else
+                Dim storableExe As String = System.IO.Path.Combine(ConvertToIniStorablePath(targetDir), System.IO.Path.GetFileName(extractedExe))
+                Dim packedValue As String = $"{storableExe}; signer={PythonAgentSigner}"
+                WritePythonAgentPathToIni(context, packedValue)
+                ShowCustomMessageBox($"The Python Agent was successfully installed to '{targetDir}' and its signature was verified as signed by '{PythonAgentSigner}'. Your configuration was updated. You must restart the application for it to become active.")
+            End If
+        End Function
+
+        ''' <summary>
+        ''' Downloads the Python Agent ZIP package, extracts it and flattens all files into <paramref name="targetDir"/>,
+        ''' reporting the individual steps through the shared progress splash. Returns the full (environment-expanded)
+        ''' path to the extracted executable, or an empty string on failure.
+        ''' </summary>
+        Private Shared Async Function DownloadAndExtractPythonAgent(targetDir As String) As System.Threading.Tasks.Task(Of String)
+            Dim extractedExe As String = ""
+            Dim tempZip As String = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"{AN2}-pythonagent-{System.Guid.NewGuid().ToString("N")}.zip")
+            Dim tempExtractDir As String = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"{AN2}-pythonagent-extract-{System.Guid.NewGuid().ToString("N")}")
+            Dim downloadOk As Boolean = False
+
+            ProgressBarModule.CancelOperation = False
+            ProgressBarModule.GlobalProgressMax = 4
+            ProgressBarModule.GlobalProgressValue = 0
+            ProgressBarModule.GlobalProgressLabel = "Downloading the Python Agent..."
+            ShowProgressBarInSeparateThread($"{AN} Python Agent", "Downloading the Python Agent...")
+
+            Try
+                If Not System.IO.Directory.Exists(targetDir) Then System.IO.Directory.CreateDirectory(targetDir)
+
+                Using client As New HttpClient()
+                    client.Timeout = TimeSpan.FromMinutes(10)
+                    client.DefaultRequestHeaders.AcceptEncoding.Clear()
+                    Using response As HttpResponseMessage = Await client.GetAsync(PythonAgentUrl, HttpCompletionOption.ResponseHeadersRead)
+                        response.EnsureSuccessStatusCode()
+                        Using fileStream As FileStream = New FileStream(tempZip, FileMode.Create, FileAccess.Write, FileShare.None)
+                            Using httpStream As Stream = Await response.Content.ReadAsStreamAsync()
+                                Dim buffer(8192) As Byte
+                                Dim bytesRead As Integer
+                                Do
+                                    bytesRead = Await httpStream.ReadAsync(buffer, 0, buffer.Length)
+                                    If bytesRead = 0 Then Exit Do
+                                    Await fileStream.WriteAsync(buffer, 0, bytesRead)
+                                Loop
+                            End Using
+                        End Using
+                    End Using
+                End Using
+                downloadOk = True
+            Catch ex As System.Exception
+                ShowCustomMessageBox($"Error when downloading the Python Agent from '{PythonAgentUrl}'. You may have to download and install it manually.")
+            End Try
+
+            If downloadOk Then
+                ProgressBarModule.GlobalProgressValue = 1
+                ProgressBarModule.GlobalProgressLabel = "Extracting the Python Agent..."
+                Try
+                    System.IO.Compression.ZipFile.ExtractToDirectory(tempZip, tempExtractDir)
+
+                    ProgressBarModule.GlobalProgressValue = 2
+                    ProgressBarModule.GlobalProgressLabel = "Copying the Python Agent files..."
+
+                    ' Flatten all extracted files into the target directory (the package files all belong in the same folder).
+                    For Each sourceFile As String In System.IO.Directory.GetFiles(tempExtractDir, "*.*", System.IO.SearchOption.AllDirectories)
+                        Dim fileName As String = System.IO.Path.GetFileName(sourceFile)
+                        Dim destPath As String = System.IO.Path.Combine(targetDir, fileName)
+                        System.IO.File.Copy(sourceFile, destPath, True)
+                        If fileName.Equals(PythonAgentExe, StringComparison.OrdinalIgnoreCase) Then
+                            extractedExe = destPath
+                        End If
+                    Next
+                Catch ex As System.Exception
+                    ShowCustomMessageBox($"Error when extracting the Python Agent to '{targetDir}': {ex.Message}")
+                End Try
+            End If
+
+            Try
+                If System.IO.File.Exists(tempZip) Then System.IO.File.Delete(tempZip)
+            Catch
+            End Try
+            Try
+                If System.IO.Directory.Exists(tempExtractDir) Then System.IO.Directory.Delete(tempExtractDir, True)
+            Catch
+            End Try
+
+            If String.IsNullOrEmpty(extractedExe) Then
+                Dim candidate As String = System.IO.Path.Combine(targetDir, PythonAgentExe)
+                If System.IO.File.Exists(candidate) Then extractedExe = candidate
+            End If
+
+            ' Verify the Authenticode signature and expected signer of the extracted executable
+            ' using the same trust check that the Python Agent runtime applies at execution time.
+            If Not String.IsNullOrEmpty(extractedExe) AndAlso System.IO.File.Exists(extractedExe) Then
+                ProgressBarModule.GlobalProgressValue = 3
+                ProgressBarModule.GlobalProgressLabel = "Verifying the Python Agent signature..."
+                If Not VerifyPythonAgentSigner(extractedExe) Then
+                    ' Signer or Authenticode trust check failed: remove the untrusted executable.
+                    Try
+                        System.IO.File.Delete(extractedExe)
+                    Catch
+                    End Try
+                    extractedExe = ""
+                End If
+            End If
+
+            ProgressBarModule.GlobalProgressValue = 4
+            ProgressBarModule.GlobalProgressLabel = "Finished."
+
+            ' Briefly leave the completed progress visible before the splash closes.
+            Await System.Threading.Tasks.Task.Delay(1000)
+
+            ProgressBarModule.CancelOperation = True
+
+            Return extractedExe
+        End Function
+
+        ''' <summary>
+        ''' Verifies that the extracted Python Agent executable has a valid Authenticode signature and that its signer
+        ''' organization matches <see cref="PythonAgentSigner"/>, reusing <see cref="Agents.RedInkAuthenticodeVerifier"/>
+        ''' (the same trust check applied by the Python Agent runtime). Returns <c>True</c> when trusted; otherwise shows
+        ''' an explanatory message and returns <c>False</c>.
+        ''' </summary>
+        Private Shared Function VerifyPythonAgentSigner(executableFullPath As String) As Boolean
+            Try
+                Dim verified As Agents.RedInkAuthenticodeVerificationResult = Agents.RedInkAuthenticodeVerifier.Verify(executableFullPath)
+                Dim actualSigner As String = System.Text.RegularExpressions.Regex.Replace(If(verified.SignerOrganization, "").Trim(), " +", " ")
+                Dim expectedSigner As String = System.Text.RegularExpressions.Regex.Replace(PythonAgentSigner.Trim(), " +", " ")
+
+                If System.StringComparer.OrdinalIgnoreCase.Equals(actualSigner, expectedSigner) Then
+                    Return True
+                End If
+
+                ShowCustomMessageBox($"The downloaded Python Agent was rejected because its signer '{actualSigner}' does not match the expected signer '{expectedSigner}'. The executable was not installed.")
+                Return False
+            Catch ex As System.Exception
+                ShowCustomMessageBox($"The downloaded Python Agent could not be verified (invalid or missing Authenticode signature): {ex.Message}. The executable was not installed.")
+                Return False
+            End Try
+        End Function
+
+        ''' <summary>
+        ''' Removes the deployed Python Agent files and the <c>PythonAgentPath</c> entry from the configuration.
+        ''' </summary>
+        Private Shared Sub RemovePythonAgent(context As ISharedContext)
+            Dim agentDir As String = GetPythonAgentDirectory(context)
+            If ShowCustomYesNoBox($"Do you really want to remove the {AN} Python Agent (used to execute Python scripts in agentic mode) from '{agentDir}'? The files '{String.Join("', '", PythonAgentRemovalFiles)}' will be deleted and the 'PythonAgentPath' entry will be removed from your configuration.", "Yes", "No") = 1 Then
+                Dim failed As New List(Of String)()
+                For Each fileName As String In PythonAgentRemovalFiles
+                    Dim fullPath As String = System.IO.Path.Combine(agentDir, fileName)
+                    Try
+                        If System.IO.File.Exists(fullPath) Then System.IO.File.Delete(fullPath)
+                    Catch ex As System.Exception
+                    End Try
+                    If System.IO.File.Exists(fullPath) Then failed.Add(fullPath)
+                Next
+
+                WritePythonAgentPathToIni(context, "")
+
+                If failed.Count > 0 Then
+                    ShowCustomMessageBox($"The Python Agent configuration was removed, but the following files could not be deleted. Try to delete them manually after closing the application: '{String.Join("', '", failed)}'.")
+                Else
+                    ShowCustomMessageBox("The Python Agent was successfully removed.")
+                End If
+            End If
+        End Sub
+
+        ''' <summary>
+        ''' Downloads the Python Agent release notes (a remote text file) and opens them in the internal text editor.
+        ''' </summary>
+        Private Shared Async Function ShowPythonAgentReleaseNotes() As System.Threading.Tasks.Task
+            Dim tempFile As String = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"{AN2}-pythonagent-releasenotes-{System.Guid.NewGuid().ToString("N")}.txt")
+            Dim downloadOk As Boolean = False
+            Try
+                Using client As New HttpClient()
+                    client.Timeout = TimeSpan.FromMinutes(5)
+                    Dim content As String = Await client.GetStringAsync(PythonAgentReleaseNotesUrl)
+                    System.IO.File.WriteAllText(tempFile, content, New System.Text.UTF8Encoding(True))
+                End Using
+                downloadOk = True
+            Catch ex As System.Exception
+                ShowCustomMessageBox($"Error when downloading the Python Agent release notes from '{PythonAgentReleaseNotesUrl}': {ex.Message}")
+            End Try
+
+            If downloadOk Then
+                ShowTextFileEditor(tempFile, $"{AN} Python Agent Release Notes")
+            End If
+        End Function
+
+        ''' <summary>
+        ''' Converts a full file-system path back into an INI-storable form by re-inserting the <c>%APPDATA%</c>
+        ''' environment variable when the path is located under the current user's Application Data folder. Any other
+        ''' path is returned unchanged. This is a deterministic transformation (no heuristics).
+        ''' </summary>
+        Private Shared Function ConvertToIniStorablePath(fullPath As String) As String
+            If String.IsNullOrWhiteSpace(fullPath) Then Return fullPath
+            Dim appData As String = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData)
+            If Not String.IsNullOrEmpty(appData) AndAlso fullPath.StartsWith(appData, StringComparison.OrdinalIgnoreCase) Then
+                Return "%APPDATA%" & fullPath.Substring(appData.Length)
+            End If
+            Return fullPath
+        End Function
 
         ''' <summary>
         ''' Refreshes the settings form UI by updating labels (including "{model}" / "{model2}" placeholders)
@@ -2471,6 +2859,11 @@ Namespace SharedLibrary
                     System.IO.Directory.CreateDirectory(targetDir)
                 End If
 
+                ' Create a timestamped backup before overwriting (same convention as the other INI writers)
+                If System.IO.File.Exists(DefaultPath) Then
+                    ConfigWizardEngine.CreateWizardBackup(DefaultPath)
+                End If
+
                 ' Delete existing file only if it exists
                 If System.IO.File.Exists(DefaultPath) Then
                     System.IO.File.Delete(DefaultPath)
@@ -2952,6 +3345,11 @@ Namespace SharedLibrary
 
                 ' Write the updated content to the temporary ini file
                 System.IO.File.WriteAllText(TempIniFilePath, updatedContent.ToString())
+
+                ' Create a timestamped backup before overwriting (same convention as the other INI writers)
+                If System.IO.File.Exists(IniFilePath) Then
+                    ConfigWizardEngine.CreateWizardBackup(IniFilePath)
+                End If
 
                 ' Replace the original file with the updated file
                 System.IO.File.Delete(IniFilePath)

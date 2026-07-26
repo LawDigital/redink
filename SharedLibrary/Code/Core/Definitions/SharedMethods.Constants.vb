@@ -196,6 +196,14 @@ Namespace SharedLibrary
 
         Public Shared RemoteDefaultsUrl As String = $"{AppsUrl}{AppsUrlDir}redink-defaultconfig.ini"
 
+        ' Python Agent (used to execute Python scripts in agentic mode; distributed as a ZIP package)
+        Public Shared PythonAgentUrl As String = $"{AppsUrl}{AppsUrlDir}redink-pythonagent.zip"
+        Public Shared PythonAgentReleaseNotesUrl As String = $"{AppsUrl}{AppsUrlDir}redink-pythonagent-releasenotes.txt"
+        Public Const PythonAgentExe As String = "redink-pythonagent.exe"
+        Public Const PythonAgentSigner As String = "VISCHER AG"
+        Public Const PythonAgentDefaultDir As String = "%APPDATA%\Microsoft\Word"
+        Public Shared ReadOnly PythonAgentRemovalFiles As System.String() = {"README.txt", "redink-pythonagent-licenses.zip", "redink-pythonagent.exe"}
+
         ' This is used by IniImportManager.vb (to check whether the host is trusted to import settings from remote sources; used for interactive mode)
 
         Public Shared ReadOnly TRUSTED_HOSTS_FOR_GETSETTINGS As System.String() = New System.String() {
