@@ -2083,8 +2083,8 @@ Partial Public Class ThisAddIn
         html.AppendLine("memoryEditLnk.addEventListener('click',async(e)=>{e.preventDefault();const r=await api('inky_editmemory');if(!r.ok)alert(r.error||'Could not open memory editor');});")
 
         ' Agent files display
-        html.AppendLine("function updateAgentFilesDisplay(files){if(!agentFilesEl)return;if(!files||files.length===0||!__advancedToolsEnabled){agentFilesEl.style.display='none';agentFilesEl.innerHTML='';return;}agentFilesEl.style.display='block';let h='📎 Agent files: ';for(const f of files){const size=Number(f&&f.size||0);const kb=(size/1024).toFixed(1);const name=String(f&&f.name||'');h+=`<span class=""file-tag""><span class=""file-tag-name"">${esc(name)} (${kb} KB)</span><button type=""button"" class=""file-tag-remove"" data-remove-file=""${esc(name)}"" title=""Remove this file"">×</button></span> `;}agentFilesEl.innerHTML=h;}")
-        html.AppendLine("agentFilesEl.addEventListener('click',async e=>{const btn=e.target&&e.target.closest&&e.target.closest('[data-remove-file]');if(!btn)return;e.preventDefault();if(__currentJobId)return;const fileName=btn.getAttribute('data-remove-file')||'';if(!fileName)return;btn.disabled=true;const r=await api('inky_agentremovefile',{Name:fileName});if(!r||!r.ok){btn.disabled=false;alert(r&&r.error||'Failed to remove file');return;}updateAgentFilesDisplay(r.files||[]);});")
+        html.AppendLine("function updateAgentFilesDisplay(files){if(!agentFilesEl)return;if(!files||files.length===0||!__advancedToolsEnabled){agentFilesEl.style.display='none';agentFilesEl.innerHTML='';return;}agentFilesEl.style.display='block';let h='📎 Agent files: ';for(const f of files){const size=Number(f&&f.size||0);const kb=(size/1024).toFixed(1);const name=String(f&&f.name||'');h+=`<span class=""file-tag""><span class=""file-tag-name"" data-open-file=""${esc(name)}"" title=""Open this file"" style=""cursor:pointer"">${esc(name)} (${kb} KB)</span><button type=""button"" class=""file-tag-download"" data-download-file=""${esc(name)}"" title=""Save a copy to the Desktop Inky folder"">⤓</button><button type=""button"" class=""file-tag-remove"" data-remove-file=""${esc(name)}"" title=""Remove this file"">×</button></span> `;}agentFilesEl.innerHTML=h;}")
+        html.AppendLine("agentFilesEl.addEventListener('click',async e=>{const openEl=e.target&&e.target.closest&&e.target.closest('[data-open-file]');if(openEl){e.preventDefault();const fileName=openEl.getAttribute('data-open-file')||'';if(!fileName)return;const r=await api('inky_agentopenfile',{Name:fileName});if(!r||!r.ok)alert(r&&r.error||'Failed to open file');return;}const dl=e.target&&e.target.closest&&e.target.closest('[data-download-file]');if(dl){e.preventDefault();const fileName=dl.getAttribute('data-download-file')||'';if(!fileName)return;dl.disabled=true;try{const r=await api('inky_agentdownloadfile',{Name:fileName});if(!r||!r.ok){alert(r&&r.error||'Failed to download file');return;}addTempAssistantBubble('Saved a copy to: '+esc(r.savedPath||''));}finally{dl.disabled=false;}return;}const btn=e.target&&e.target.closest&&e.target.closest('[data-remove-file]');if(!btn)return;e.preventDefault();if(__currentJobId)return;const fileName=btn.getAttribute('data-remove-file')||'';if(!fileName)return;btn.disabled=true;const r=await api('inky_agentremovefile',{Name:fileName});if(!r||!r.ok){btn.disabled=false;alert(r&&r.error||'Failed to remove file');return;}updateAgentFilesDisplay(r.files||[]);});")
         html.AppendLine("function updateAgentModelBtn(){if(!agentModelBtn)return;agentModelBtn.style.display=__agentModelAvailable?'flex':'none';agentModelBtn.classList.toggle('active',__agentModelActive);}")
         html.AppendLine("agentModelBtn.addEventListener('click',async()=>{if(__currentJobId)return;agentModelBtn.disabled=true;try{const r=await api('inky_toggleagentmodel');if(!r.ok){alert(r.error||'Failed to toggle agent model');return;}if(r.models&&r.models.length){modelSel.innerHTML='';for(const m of r.models){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}}updateModelTooltip();if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}syncAdvancedToolsUi({advancedToolsEnabled:r.advancedToolsEnabled===true,agentWorkspace:Object.prototype.hasOwnProperty.call(r,'agentWorkspace')?r.agentWorkspace:null,agentFiles:r.agentFiles||[],agentModelAvailable:__agentModelAvailable,agentModelActive:r.active===true});adjustModelSel();}finally{agentModelBtn.disabled=false;}});")
         html.AppendLine("function esc(s){return String(s||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('""','&quot;');}")
@@ -2433,6 +2433,42 @@ Partial Public Class ThisAddIn
                             })
                         Catch ex As Exception
                             Return JsonErr("Failed to add files: " & ex.Message)
+                        End Try
+
+                    Case "inky_agentdownloadfile"
+                        Try
+                            Dim fileName As String = j("Name")?.ToString()
+                            If String.IsNullOrWhiteSpace(fileName) Then
+                                Return JsonErr("No file name provided.")
+                            End If
+
+                            Dim savedPath As String = ChatAgentDownloadFileToDesktop(fileName)
+                            If String.IsNullOrWhiteSpace(savedPath) Then
+                                Return JsonErr("The file could not be found in the current agent session.")
+                            End If
+
+                            Return JsonOk(New With {
+                                .ok = True,
+                                .savedPath = savedPath
+                            })
+                        Catch ex As Exception
+                            Return JsonErr("Failed to download file: " & ex.Message)
+                        End Try
+
+                    Case "inky_agentopenfile"
+                        Try
+                            Dim fileName As String = j("Name")?.ToString()
+                            If String.IsNullOrWhiteSpace(fileName) Then
+                                Return JsonErr("No file name provided.")
+                            End If
+
+                            If Not ChatAgentOpenFileInDefaultApp(fileName) Then
+                                Return JsonErr("The file could not be found in the current agent session.")
+                            End If
+
+                            Return JsonOk(New With {.ok = True})
+                        Catch ex As Exception
+                            Return JsonErr("Failed to open file: " & ex.Message)
                         End Try
 
                     Case "inky_agentremovefile"

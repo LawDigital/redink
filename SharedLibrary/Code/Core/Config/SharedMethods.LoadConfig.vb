@@ -255,6 +255,7 @@ Namespace SharedLibrary
                 context.INI_APIKeyPrefix = If(configDict.ContainsKey("APIKeyPrefix"), configDict("APIKeyPrefix"), "")
                 context.INI_UsageRestrictions = If(configDict.ContainsKey("UsageRestrictions"), configDict("UsageRestrictions"), "")
                 context.INI_LogPath = If(configDict.ContainsKey("LogPath"), configDict("LogPath"), "")
+                context.INI_PythonAgentPath = If(configDict.ContainsKey("PythonAgentPath"), configDict("PythonAgentPath"), "")
                 context.INI_Language1 = If(configDict.ContainsKey("Language1"), configDict("Language1"), DEFAULT_LANGUAGE_1)
                 context.INI_Language2 = If(configDict.ContainsKey("Language2"), configDict("Language2"), DEFAULT_LANGUAGE_2)
                 context.INI_KeepFormatCap = If(configDict.ContainsKey("KeepFormatCap"), CInt(configDict("KeepFormatCap")), DEFAULT_KEEPFORMAT_CAP)
@@ -330,6 +331,7 @@ Namespace SharedLibrary
 
                 ' Other parameters.
 
+                context.INI_MonitorLink = If(configDict.ContainsKey("MonitorLink"), configDict("MonitorLink"), "")
                 context.INI_NoHelperDownload = ParseBoolean(configDict, "NoHelperDownload")
                 context.INI_LicenseCounterPath = If(configDict.ContainsKey("LicenseCounterPath"), configDict("LicenseCounterPath"), "")
                 context.INI_LicenseCounterMethod = If(configDict.ContainsKey("LicenseCounterMethod"), configDict("LicenseCounterMethod"), DEFAULT_LICENSECOUNTERMETHOD)

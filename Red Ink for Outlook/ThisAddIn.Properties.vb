@@ -594,6 +594,17 @@ Partial Public Class ThisAddIn
     End Property
 
 
+    Public Shared Property INI_MonitorLink As String
+        Get
+            Return _context.INI_MonitorLink
+        End Get
+        Set(value As String)
+            _context.INI_MonitorLink = value
+        End Set
+    End Property
+
+
+
     Public Shared Property INI_UsageRestrictions As String
         Get
             Return _context.INI_UsageRestrictions
@@ -2496,6 +2507,16 @@ Partial Public Class ThisAddIn
             _context.INI_NoHelperDownload = value
         End Set
     End Property
+
+    Public Shared Property INI_PythonAgentPath As String
+        Get
+            Return _context.INI_PythonAgentPath
+        End Get
+        Set(value As String)
+            _context.INI_PythonAgentPath = value
+        End Set
+    End Property
+
 
     Public Shared Property INI_LicenseCounterPath As String
         Get

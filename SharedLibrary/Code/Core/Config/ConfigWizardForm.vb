@@ -475,8 +475,20 @@ Namespace SharedLibrary
                 Next
             Next
 
+            ' Collect all branch-selector keys (UI-only template pickers, e.g. "_Provider").
+            ' These are never valid INI keys and must not be persisted to the file.
+            Dim branchFieldKeys As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+            For Each grp In _definition.Groups
+                If Not String.IsNullOrWhiteSpace(grp.BranchField) Then
+                    branchFieldKeys.Add(grp.BranchField)
+                End If
+            Next
+
             Dim changedValues As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
             For Each kvp In _currentValues
+                ' Skip branch-selector pseudo-keys so they are never written to the INI.
+                If branchFieldKeys.Contains(kvp.Key) Then Continue For
+
                 Dim origVal As String = ""
                 Dim hadOriginal As Boolean = _originalValues.ContainsKey(kvp.Key)
                 If hadOriginal Then origVal = _originalValues(kvp.Key)

@@ -125,6 +125,56 @@ Partial Public Class ThisAddIn
     ''' <summary>Maximum recursion depth for nested archives.</summary>
     Private Const AP_MaxArchiveDepth As Integer = 3
 
+    ''' <summary>
+    ''' Extensions that must not be sent as bare attachments. Files with these extensions
+    ''' are repackaged into a .zip before delivery so recipients' mail systems do not block
+    ''' or quarantine them. Matches the common executable/script set plus source files.
+    ''' </summary>
+    Private Shared ReadOnly AP_ZipBeforeSendExtensions As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
+        ".exe", ".com", ".bat", ".cmd", ".msi", ".scr", ".pif", ".cpl", ".jar",
+        ".ps1", ".psm1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".hta",
+        ".sh", ".zsh", ".py", ".pyw", ".rb", ".pl", ".php", ".reg", ".dll"
+    }
+
+    ''' <summary>
+    ''' Returns a delivery-safe copy of <paramref name="resultAttachments"/>. Any file whose
+    ''' extension is in <see cref="AP_ZipBeforeSendExtensions"/> is compressed into an individual
+    ''' .zip in a temporary directory and the .zip path is substituted for the original. All other
+    ''' files pass through unchanged. Failures fall back to the original path (best effort).
+    ''' </summary>
+    Private Function SanitizeOutgoingAttachmentsForDelivery(resultAttachments As List(Of String)) As List(Of String)
+        Dim sanitized As New List(Of String)()
+        If resultAttachments Is Nothing Then Return sanitized
+
+        For Each attachPath In resultAttachments
+            Try
+                If String.IsNullOrWhiteSpace(attachPath) OrElse Not File.Exists(attachPath) Then Continue For
+
+                Dim ext As String = Path.GetExtension(attachPath)
+                If Not AP_ZipBeforeSendExtensions.Contains(ext) Then
+                    sanitized.Add(attachPath)
+                    Continue For
+                End If
+
+                Dim zipDir As String = Path.Combine(Path.GetTempPath(), AP_TempPrefix & "zip_" & Guid.NewGuid().ToString("N"))
+                Directory.CreateDirectory(zipDir)
+                Dim zipPath As String = Path.Combine(zipDir, Path.GetFileNameWithoutExtension(attachPath) & ".zip")
+
+                Using archive = ZipFile.Open(zipPath, ZipArchiveMode.Create)
+                    archive.CreateEntryFromFile(attachPath, Path.GetFileName(attachPath), CompressionLevel.Optimal)
+                End Using
+
+                ApDashboardLog($"  📦 Zipped attachment for delivery: {Path.GetFileName(attachPath)} → {Path.GetFileName(zipPath)}", "info")
+                sanitized.Add(zipPath)
+            Catch ex As System.Exception
+                ApDashboardLog($"  ⚠ Failed to zip attachment '{Path.GetFileName(If(attachPath, ""))}', sending as-is: {ex.Message}", "warn")
+                sanitized.Add(attachPath)
+            End Try
+        Next
+
+        Return sanitized
+    End Function
+
 
     ''' <summary>Command prefix scanned in the first few lines of the latest e-mail body.</summary>
     Private Const AP_ModelCommandPrefix As String = "#model:"
@@ -134,9 +184,11 @@ Partial Public Class ThisAddIn
 
     Private Const SP_AutoPilot_HoldingResponse As String =
         "Thank you for your message. This is an automated acknowledgement — your request has not yet been processed. " &
-        "I will respond with a substantive reply once your request has been handled. " &
+        "I will respond with a substantive reply once your request has been handled. {StatusMessage}" &
         "If you need immediate assistance, you can also use the " & AN & " add-in's corresponding feature to have your tasks done right away. Use 'Help me, Inky' or the chatbot on https://redink.ai if you need instructions. Last but not least, a similar 'agent mode' is available in the Local Chat feature in the Outlook add-in if configured accordingly. " &
         "— " & AN6
+
+    Private Const SP_AutoPilot_HoldingResponseStatus As String = "To check the current system status, click on {MonitorLink}."
 
     Private Const AP_MaxToolIterations As Integer = 50
 
@@ -267,6 +319,25 @@ Partial Public Class ThisAddIn
     ''' <summary>Guard to prevent overlapping notification checks.</summary>
     Private _apNotificationCheckRunning As Integer = 0
 
+    ''' <summary>Interval (seconds) at which the heartbeat status file is refreshed. Mirrors the notification timer cadence.</summary>
+    Private Const AP_HeartbeatIntervalSeconds As Integer = 15
+
+    ''' <summary>Last error message recorded for the heartbeat status report (Nothing when no error has occurred).</summary>
+    Private _apLastError As String = Nothing
+
+    ''' <summary>UTC time of the last recorded error for the heartbeat status report.</summary>
+    Private _apLastErrorUtc As DateTime = DateTime.MinValue
+
+    ''' <summary>UTC time at which the currently-processing job started (DateTime.MinValue when idle).</summary>
+    Private _apCurrentJobStartUtc As DateTime = DateTime.MinValue
+
+    ''' <summary>UTC time of the last observed progress signal for the current job (tool call, log step, or LLM turn).
+    ''' Used to distinguish a slow-but-progressing job from a hung one.</summary>
+    Private _apCurrentJobLastActivityUtc As DateTime = DateTime.MinValue
+
+    ''' <summary>Seconds without any observed progress after which the current job is flagged as potentially stalled.</summary>
+    Private Const AP_JobStallThresholdSeconds As Integer = 20 * 60  ' 20 minutes
+
     ''' <summary>Cached HelpMeInky manual text, loaded once per AutoPilot session.</summary>
     Private _apHelpMeManualCache As String = Nothing
     Private _apHelpMeManualCacheLoaded As Boolean = False
@@ -348,6 +419,7 @@ Partial Public Class ThisAddIn
         End If
 
         WebGrounding = ""
+        WriteAutoPilotHeartbeat("stopped")
         ApDashboardLog("AutoPilot stopped.", "info")
         ApDashboardMarkComplete()
         ShowCustomMessageBox($"{AN6} AutoPilot has been stopped.", AN)
@@ -635,6 +707,12 @@ Partial Public Class ThisAddIn
             Nothing,
             dueTime:=TimeSpan.FromSeconds(15),
             period:=TimeSpan.FromSeconds(15))
+
+        ' Emit an initial heartbeat immediately so the external monitor sees "running"
+        ' without waiting for the first timer tick.
+        _apLastError = Nothing
+        _apLastErrorUtc = DateTime.MinValue
+        WriteAutoPilotHeartbeat("running")
 
     End Sub
 
@@ -1159,6 +1237,7 @@ Partial Public Class ThisAddIn
         If Interlocked.CompareExchange(_apNotificationCheckRunning, 1, 0) <> 0 Then Return
 
         Try
+            WriteAutoPilotHeartbeat("running")
             Dim ct = _apCts?.Token
             If ct Is Nothing OrElse ct.Value.IsCancellationRequested Then Return
             Await SendQueuePositionNotificationsAsync(ct.Value)
@@ -1199,6 +1278,10 @@ Partial Public Class ThisAddIn
                         ' Track the active job for progress notifications
                         _apCurrentProcessingEntryId = entryId
                         _apActiveJobLastNotifiedUtc = DateTime.MinValue
+
+                        ' Start the job-liveness clocks for hang/stall detection in the heartbeat.
+                        _apCurrentJobStartUtc = DateTime.UtcNow
+                        _apCurrentJobLastActivityUtc = DateTime.UtcNow
 
                         Dim pending = _apMailQueue.Count
                         If pending > 0 Then
@@ -1241,6 +1324,8 @@ Partial Public Class ThisAddIn
                             _apCurrentProcessingCategory = Nothing
                             _apCurrentProcessingEntryId = Nothing
                             _apActiveJobLastNotifiedUtc = DateTime.MinValue
+                            _apCurrentJobStartUtc = DateTime.MinValue
+                            _apCurrentJobLastActivityUtc = DateTime.MinValue
                             ' Clean up notification and catch-up tracking AFTER processing is complete
                             _apQueueNotifiedEntryIds.TryRemove(entryId, dummy)
                             Dim dummyCatchUp As Boolean
@@ -1256,6 +1341,7 @@ Partial Public Class ThisAddIn
         Catch ex As OperationCanceledException
             ApDashboardLog("AutoPilot cancelled.", "step")
         Catch ex As System.Exception
+            RecordAutoPilotError("Pump error: " & ex.Message)
             ApDashboardLog("AutoPilot pump error: " & ex.Message, "error")
         End Try
     End Function
@@ -2224,10 +2310,21 @@ Partial Public Class ThisAddIn
 
                 ' ── Approval or auto-send ──
                 If requiresApproval AndAlso Not _apConfig.IsUnattended Then
-                    Await SwitchToUi(Sub() SendReplyToSender(mi, SP_AutoPilot_HoldingResponse, Nothing, tagAsAutoReply:=True, isHoldingOnly:=True))
-                    _apHoldingOnlyEntryIds.TryAdd(entryId, True)
-                    ApDashboardLog("Holding response sent to: " & mailInfo.SenderEmail, "step")
+                    Dim holdingResponse As String = SP_AutoPilot_HoldingResponse.Replace("{StatusMessage}", "")
+                    Dim monitorLink As String = If(_context.INI_MonitorLink, "").Trim()
+                    Dim monitorUri As System.Uri = Nothing
 
+                    If System.Uri.TryCreate(monitorLink, System.UriKind.Absolute, monitorUri) AndAlso
+                       (String.Equals(monitorUri.Scheme, System.Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) OrElse
+                        String.Equals(monitorUri.Scheme, System.Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)) Then
+                        Dim statusMessage As String = SP_AutoPilot_HoldingResponseStatus.Replace("{MonitorLink}", monitorLink)
+                        holdingResponse = SP_AutoPilot_HoldingResponse.Replace("{StatusMessage}", " " & statusMessage)
+                    End If
+
+                    Await SwitchToUi(Sub() SendReplyToSender(mi, holdingResponse, Nothing, tagAsAutoReply:=True, isHoldingOnly:=True))
+                    _apHoldingOnlyEntryIds.TryAdd(entryId, True)
+
+                    ApDashboardLog("Holding response sent to: " & mailInfo.SenderEmail, "step")
                     Dim approved As Boolean = Await SwitchToUi(Function() ShowApprovalDialog(mailInfo, response, resultAttachments))
                     If approved Then
                         Await SwitchToUi(Sub() SendReplyToSender(mi, response, resultAttachments, tagAsAutoReply:=True, sourcesHtml:=sourcesHtml))
@@ -2268,6 +2365,7 @@ Partial Public Class ThisAddIn
         Catch ex As OperationCanceledException
             Throw
         Catch ex As System.Exception
+            RecordAutoPilotError("Processing error: " & ex.Message)
             ApDashboardLog("ERROR: " & ex.Message, "error")
             Debug.WriteLine("AutoPilot ProcessIncomingMailAsync error: " & ex.ToString())
         Finally
@@ -3361,11 +3459,19 @@ Partial Public Class ThisAddIn
 
         ' 2. Fallback: scan for files in tempDir that are (a) not in the original
         '    upload set, AND (b) not in the already-surfaced set from prior turns.
+        '    Registered tool outputs (IsToolOutput=True) are produced artifacts, not
+        '    user uploads, so they must remain eligible for delivery even though they
+        '    are present in originalAttachments (they are registered as session chips).
         If Directory.Exists(tempDir) Then
             Dim originalPaths As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
             If originalAttachments IsNot Nothing Then
                 For Each att In originalAttachments
-                    If att.TempFilePath IsNot Nothing Then originalPaths.Add(Path.GetFullPath(att.TempFilePath))
+                    ' Registered tool outputs (IsToolOutput=True) are produced artifacts, not user
+                    ' uploads, so they must remain eligible for Desktop delivery even though they are
+                    ' registered as session chips. Only exclude genuine uploads here.
+                    If att.TempFilePath IsNot Nothing AndAlso Not att.IsToolOutput Then
+                        originalPaths.Add(Path.GetFullPath(att.TempFilePath))
+                    End If
                 Next
             End If
             For Each filePath In Directory.GetFiles(tempDir, "*.*", SearchOption.AllDirectories)
@@ -3503,9 +3609,9 @@ Partial Public Class ThisAddIn
             htmlBody &= BuildAutoPilotFooter()
             reply.HTMLBody = htmlBody & originalThread
 
-            ' Add result attachments
+            ' Add result attachments (dangerous file types are zipped before delivery)
             If resultAttachments IsNot Nothing Then
-                For Each attachPath In resultAttachments
+                For Each attachPath In SanitizeOutgoingAttachmentsForDelivery(resultAttachments)
                     If File.Exists(attachPath) Then
                         reply.Attachments.Add(attachPath, OlAttachmentType.olByValue, , Path.GetFileName(attachPath))
                     End If
@@ -3736,6 +3842,8 @@ Partial Public Class ThisAddIn
                                Optional mirrorToLocalToolingLog As Boolean = False)
         Debug.WriteLine($"[AutoPilot] [{level}] {message}")
 
+        MarkAutoPilotJobActivity()
+
         Try
             If _apDashboard IsNot Nothing Then
                 Dim dateTag = DateTime.Now.ToString("dd-MMM", Globalization.CultureInfo.InvariantCulture)
@@ -3793,6 +3901,107 @@ Partial Public Class ThisAddIn
             My.Settings.Save()
         Catch ex As System.Exception
             Debug.WriteLine($"[AutoPilot] Failed to save last processed time: {ex.Message}")
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Records the most recent error for inclusion in the heartbeat status report.
+    ''' Best-effort and must never throw.
+    ''' </summary>
+    Private Sub RecordAutoPilotError(message As String)
+        Try
+            _apLastError = message
+            _apLastErrorUtc = DateTime.UtcNow
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Records a progress signal for the currently-processing job so the heartbeat can
+    ''' distinguish a slow-but-advancing job from a hung one. Best-effort; must never throw.
+    ''' </summary>
+    Private Sub MarkAutoPilotJobActivity()
+        Try
+            If Not String.IsNullOrEmpty(_apCurrentProcessingEntryId) Then
+                _apCurrentJobLastActivityUtc = DateTime.UtcNow
+            End If
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Writes an atomic JSON heartbeat/status report into the configured log directory
+    ''' (<c>INI_LogPath</c>) so an external monitor can detect whether AutoPilot is alive.
+    ''' The file is refreshed on the notification timer cadence; a stale file (older than a
+    ''' few multiples of <see cref="AP_HeartbeatIntervalSeconds"/>) indicates that AutoPilot
+    ''' is no longer running. Best-effort and must never throw.
+    ''' </summary>
+    ''' <param name="status">High-level lifecycle state, e.g. "running" or "stopped".</param>
+    Private Sub WriteAutoPilotHeartbeat(status As String)
+        Try
+            Dim logDir As String = _context.INI_LogPath
+            If String.IsNullOrWhiteSpace(logDir) Then Return
+
+            Dim payload As New Newtonsoft.Json.Linq.JObject()
+            payload("schemaVersion") = 1
+            payload("product") = AN6
+            payload("machine") = Environment.MachineName
+            payload("user") = Environment.UserName
+            payload("status") = status
+            payload("active") = _apActive
+            payload("timestampUtc") = DateTime.UtcNow.ToString("o", Globalization.CultureInfo.InvariantCulture)
+            payload("heartbeatIntervalSeconds") = AP_HeartbeatIntervalSeconds
+            payload("queueLength") = _apMailQueue.Count
+            payload("sessionReplyCount") = _apSessionReplyCount
+            payload("currentlyProcessing") = Not String.IsNullOrEmpty(_apCurrentProcessingEntryId)
+            payload("currentCategory") = If(_apCurrentProcessingCategory, "")
+
+            ' ── Current-job liveness (hang / overrun detection) ──
+            Dim jobActive As Boolean = Not String.IsNullOrEmpty(_apCurrentProcessingEntryId) AndAlso
+                                       _apCurrentJobStartUtc <> DateTime.MinValue
+            payload("jobStallThresholdSeconds") = AP_JobStallThresholdSeconds
+            If jobActive Then
+                Dim nowUtc As DateTime = DateTime.UtcNow
+                Dim elapsedSeconds As Double = (nowUtc - _apCurrentJobStartUtc).TotalSeconds
+                Dim sinceActivitySeconds As Double =
+                    If(_apCurrentJobLastActivityUtc = DateTime.MinValue,
+                       elapsedSeconds,
+                       (nowUtc - _apCurrentJobLastActivityUtc).TotalSeconds)
+                Dim estimateSeconds As Double = GetCategoryEstimate(
+                    If(_apCurrentProcessingCategory, AP_Cat_TextOnly))
+
+                payload("jobElapsedSeconds") = Math.Round(elapsedSeconds, 1)
+                payload("jobEstimateSeconds") = Math.Round(estimateSeconds, 1)
+                payload("jobSecondsSinceActivity") = Math.Round(sinceActivitySeconds, 1)
+                payload("jobStalled") = (sinceActivitySeconds >= AP_JobStallThresholdSeconds)
+                payload("jobOverrun") = (estimateSeconds > 0 AndAlso elapsedSeconds > (estimateSeconds * 5))
+            Else
+                payload("jobElapsedSeconds") = 0
+                payload("jobEstimateSeconds") = 0
+                payload("jobSecondsSinceActivity") = 0
+                payload("jobStalled") = False
+                payload("jobOverrun") = False
+            End If
+            payload("hasError") = Not String.IsNullOrEmpty(_apLastError)
+            payload("lastError") = If(_apLastError, "")
+            payload("lastErrorUtc") = If(_apLastErrorUtc = DateTime.MinValue, "",
+                                         _apLastErrorUtc.ToString("o", Globalization.CultureInfo.InvariantCulture))
+
+            Dim fileName As String = $"{AN3}-autopilot-status-{Environment.MachineName}.json"
+            Dim fullPath As String = Path.Combine(logDir, fileName)
+            Dim tempPath As String = fullPath & ".tmp"
+
+            Directory.CreateDirectory(logDir)
+            File.WriteAllText(tempPath, payload.ToString(Newtonsoft.Json.Formatting.Indented), New UTF8Encoding(False))
+
+            ' Atomic replace so an external reader never observes a partially written file.
+            If File.Exists(fullPath) Then
+                File.Replace(tempPath, fullPath, Nothing)
+            Else
+                File.Move(tempPath, fullPath)
+            End If
+        Catch ex As System.Exception
+            Debug.WriteLine($"[AutoPilot] WriteAutoPilotHeartbeat error: {ex.Message}")
         End Try
     End Sub
 
@@ -3895,6 +4104,8 @@ Partial Public Class ThisAddIn
                                        wasSuccessful As Boolean, resultExcerpt As String,
                                        elapsed As TimeSpan,
                                        Optional urls As List(Of String) = Nothing)
+        MarkAutoPilotJobActivity()
+
         If _apCurrentToolCallLog Is Nothing Then Return
 
         _apCurrentToolCallLog.Add(New AutoPilotToolCallEntry() With {

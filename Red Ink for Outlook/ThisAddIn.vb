@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 24.7.2026
+' 26.7.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -59,8 +59,9 @@ Partial Public Class ThisAddIn
     Public Const AN5 As String = "RI"
     Public Const AN6 As String = "Inky"
     Public Const AN4 As String = "redink_"
+    Public Const AN3 As String = "redink"
 
-    Public Shared Version As String = "V.240726" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.260726" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20

@@ -556,6 +556,65 @@ Namespace Agents
                 RegexOptions.CultureInvariant)
         End Function
 
+        ''' <summary>
+        ''' Determines whether a text is (in whole) a raw structured payload such as a JSON object
+        ''' or array. Used to prevent raw tool/protocol content from being surfaced to the user as a
+        ''' final answer. A leading Markdown code fence is tolerated. Returns True only when the entire
+        ''' remaining content parses as JSON, so ordinary prose that merely contains braces is not
+        ''' misclassified.
+        ''' </summary>
+        Public Shared Function LooksLikeRawStructuredPayload(text As String) As Boolean
+            Dim raw As String = If(text, "").Trim()
+            If raw = "" Then
+                Return False
+            End If
+
+            If raw.StartsWith("```", StringComparison.Ordinal) Then
+                Dim firstBreak As Integer = raw.IndexOf(vbLf, StringComparison.Ordinal)
+                If firstBreak >= 0 Then
+                    raw = raw.Substring(firstBreak + 1)
+                End If
+                If raw.EndsWith("```", StringComparison.Ordinal) Then
+                    raw = raw.Substring(0, raw.Length - 3)
+                End If
+                raw = raw.Trim()
+                If raw = "" Then
+                    Return False
+                End If
+            End If
+
+            Dim firstChar As Char = raw(0)
+            If firstChar <> "{"c AndAlso firstChar <> "["c Then
+                Return False
+            End If
+
+            Try
+                JToken.Parse(raw)
+                Return True
+            Catch
+                Return False
+            End Try
+        End Function
+
+        ''' <summary>
+        ''' Host-agnostic gate deciding whether a final response is safe to present to the end user.
+        ''' A response is presentable only when, after stripping the TASK_STATUS footer, it contains
+        ''' substantive natural-language text and is not merely a raw structured (JSON) payload.
+        ''' </summary>
+        Public Shared Function IsUserPresentableFinalText(text As String) As Boolean
+            Dim stripped As String = StripTaskStatusBlocksFromUserFacingText(If(text, ""))
+
+            If Not HasSubstantiveUserFacingText(stripped) Then
+                Return False
+            End If
+
+            If LooksLikeRawStructuredPayload(stripped) Then
+                Return False
+            End If
+
+            Return True
+        End Function
+
 
         Public Shared Function ParseStrictTaskStatus(text As String) As TaskStatusParseResult
             Dim result As New TaskStatusParseResult() With {
