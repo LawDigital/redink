@@ -1,4 +1,5 @@
-﻿' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
 ' File: SharedMethods.Settings.vb
@@ -297,6 +298,9 @@ Namespace SharedLibrary
 
             Dim expertConfigButtonToolTip As New System.Windows.Forms.ToolTip()
             If context.INI_NoLocalConfig Then
+                ' With no local configuration enforced, Expert Config only makes sense when central-configuration access
+                ' is configured (a 'CentralConfigClients' entry or a 'CentralConfigPW' password).
+                expertConfigButton.Enabled = IsCentralConfigUnlockConfigured(context)
                 expertConfigButtonToolTip.SetToolTip(expertConfigButton, $"Will allow you to enter into the Expert mode if you have the necessary permissions (parameters 'CentralConfigClients' or 'CentralConfigPW').")
             Else
                 expertConfigButtonToolTip.SetToolTip(expertConfigButton, $"Will accept the current settings and in a separate window let you amend all configuration variables from '{AN2}.ini'.")
@@ -381,6 +385,7 @@ Namespace SharedLibrary
             Dim CapturedContext As ISharedContext = context
             Dim originalNoLocalConfigValue As Boolean = context.INI_NoLocalConfig
             Dim temporaryNoLocalConfigSessionUnlocked As Boolean = False
+            Dim helperDownloadSessionUnlocked As Boolean = False
 
             Dim FilePath As String = ""
             Dim IsExcel As Boolean = True
@@ -418,9 +423,12 @@ Namespace SharedLibrary
 
                 helperButton.Text = GetHelperButtonText()
 
-                ' Installing requires a download; only block the button when nothing is installed that could be removed.
+                ' Installing requires a download. When NoHelperDownload enforces central control and nothing is installed
+                ' that could merely be removed, the button is only enabled if central-configuration access is configured
+                ' (a 'CentralConfigClients' entry or a 'CentralConfigPW' password). On click, the same unlock as Expert
+                ' Config is applied: explicitly allowed clients pass directly, otherwise the password is requested.
                 If context.INI_NoHelperDownload AndAlso Not (helperInstalled OrElse pythonInstalled) Then
-                    helperButton.Enabled = False
+                    helperButton.Enabled = IsCentralConfigUnlockConfigured(CapturedContext)
                 End If
 
                 Dim HelperButtonSize As System.Drawing.Size = TextRenderer.MeasureText(helperButton.Text, standardFont)
@@ -543,22 +551,8 @@ Namespace SharedLibrary
                                                      Next
 
                                                      If CapturedContext.INI_NoLocalConfig AndAlso Not temporaryNoLocalConfigSessionUnlocked Then
-                                                         If Not IsClientAllowedToExpertConfig(CapturedContext) Then
-                                                             Dim expectedPassword As String = ResolveCentralConfigPasswordForExpertConfig(CapturedContext)
-                                                             If String.IsNullOrWhiteSpace(expectedPassword) Then
-                                                                 ShowCustomMessageBox("Expert Config is blocked because no central configuration password or client is configured (use parameters 'CentralConfigClients' or 'CentralConfigPW').")
-                                                                 Exit Sub
-                                                             End If
-
-                                                             Dim enteredPassword As String = ShowPasswordPrompt(settingsForm, "Enter the central configuration password to open Expert Config:", "Expert Config")
-                                                             If enteredPassword Is Nothing Then
-                                                                 Exit Sub
-                                                             End If
-
-                                                             If Not String.Equals(RemoveCR(enteredPassword).Trim(), expectedPassword, StringComparison.Ordinal) Then
-                                                                 ShowCustomMessageBox("Incorrect password.")
-                                                                 Exit Sub
-                                                             End If
+                                                         If Not TryUnlockCentralConfig(CapturedContext, settingsForm, "Enter the central configuration password to open Expert Config:", "Expert Config") Then
+                                                             Exit Sub
                                                          End If
                                                          temporaryNoLocalConfigSessionUnlocked = True
                                                          NoLocalConfigSessionUnlocked = True
@@ -634,6 +628,17 @@ Namespace SharedLibrary
             AddHandler helperButton.Click, Async Sub(sender, e)
                                                Dim performHelper As Boolean = False
                                                Dim performPython As Boolean = False
+
+                                               ' When downloads are disabled (NoHelperDownload), require the same central-configuration unlock as Expert
+                                               ' Config before managing helpers. The unlock is enforced whenever central-configuration access is actually
+                                               ' configured (a 'CentralConfigClients' entry or a 'CentralConfigPW' password); if neither is configured, the
+                                               ' button was only enabled to allow removal of an already-installed helper, so no prompt is shown.
+                                               If CapturedContext.INI_NoHelperDownload AndAlso Not helperDownloadSessionUnlocked AndAlso IsCentralConfigUnlockConfigured(CapturedContext) Then
+                                                   If Not TryUnlockCentralConfig(CapturedContext, settingsForm, "Enter the central configuration password to download and manage helpers:", "Manage Helpers") Then
+                                                       Return
+                                                   End If
+                                                   helperDownloadSessionUnlocked = True
+                                               End If
 
                                                If helperSupported AndAlso pythonAgentSupported Then
                                                    Dim helperName As String = If(IsExcel, "Excel Helper", "Word Helper")
@@ -857,6 +862,110 @@ Namespace SharedLibrary
             End If
 
             Return password
+        End Function
+
+        ''' <summary>
+        ''' Returns the configured <c>CentralConfigClients</c> value, reading it from the in-memory context first and
+        ''' falling back to the active INI file. Returns an empty string when none is configured.
+        ''' </summary>
+        Private Shared Function GetConfiguredCentralConfigClients(context As ISharedContext) As String
+            Dim centralConfigClients As String = ""
+            Try
+                centralConfigClients = GetSettingValue("CentralConfigClients", context)
+            Catch
+            End Try
+
+            If String.IsNullOrWhiteSpace(centralConfigClients) Then
+                Try
+                    Dim iniPath As String = GetActiveConfigFilePath(context)
+                    If File.Exists(iniPath) Then
+                        For Each line In File.ReadAllLines(iniPath)
+                            Dim trimmed = line.Trim()
+                            If trimmed.StartsWith("CentralConfigClients", StringComparison.OrdinalIgnoreCase) Then
+                                Dim parts = trimmed.Split({"="c}, 2)
+                                If parts.Length = 2 Then
+                                    centralConfigClients = parts(1).Trim()
+                                End If
+                                Exit For
+                            End If
+                        Next
+                    End If
+                Catch
+                End Try
+            End If
+
+            Return If(centralConfigClients, "").Trim()
+        End Function
+
+        ''' <summary>
+        ''' Determines whether the current client is explicitly listed in <c>CentralConfigClients</c>. Unlike
+        ''' <see cref="IsClientAllowedToExpertConfig"/>, an empty client list is treated as "not authorized" so that a
+        ''' password (when configured) is still required.
+        ''' </summary>
+        Private Shared Function IsClientExplicitlyAllowed(context As ISharedContext) As Boolean
+            Dim centralConfigClients As String = GetConfiguredCentralConfigClients(context)
+            If String.IsNullOrWhiteSpace(centralConfigClients) Then
+                Return False
+            End If
+
+            Dim currentClient As String = GetCurrentClientIdentifier()
+            If String.IsNullOrWhiteSpace(currentClient) Then
+                Return False
+            End If
+
+            Dim allowedClients = centralConfigClients.Split(","c).
+                Select(Function(c) c.Trim()).
+                Where(Function(c) Not String.IsNullOrWhiteSpace(c)).
+                ToList()
+
+            Return allowedClients.Any(Function(c) c.Equals(currentClient, StringComparison.OrdinalIgnoreCase))
+        End Function
+
+        ''' <summary>
+        ''' Indicates whether central-configuration access is configured at all, i.e. either a
+        ''' <c>CentralConfigClients</c> entry or a <c>CentralConfigPW</c> password exists. Used to enable/disable the
+        ''' Expert Config and Manage Helpers actions when local configuration or helper downloads are centrally enforced.
+        ''' </summary>
+        Private Shared Function IsCentralConfigUnlockConfigured(context As ISharedContext) As Boolean
+            If Not String.IsNullOrWhiteSpace(GetConfiguredCentralConfigClients(context)) Then
+                Return True
+            End If
+
+            Return Not String.IsNullOrWhiteSpace(ResolveCentralConfigPasswordForExpertConfig(context))
+        End Function
+
+        ''' <summary>
+        ''' Applies the central-configuration unlock. Explicitly allowed clients pass directly; otherwise the configured
+        ''' <c>CentralConfigPW</c> password is requested. When neither a client nor a password is configured, the action
+        ''' is blocked. Shared by Expert Config and Manage Helpers.
+        ''' </summary>
+        ''' <param name="context">Shared context providing the central configuration settings.</param>
+        ''' <param name="ownerForm">Owner form used for the password prompt.</param>
+        ''' <param name="prompt">Prompt text shown in the password dialog.</param>
+        ''' <param name="title">Title shown in the password dialog.</param>
+        ''' <returns><c>True</c> if access is authorized; otherwise, <c>False</c>.</returns>
+        Private Shared Function TryUnlockCentralConfig(context As ISharedContext, ownerForm As Form, prompt As String, title As String) As Boolean
+            If IsClientExplicitlyAllowed(context) Then
+                Return True
+            End If
+
+            Dim expectedPassword As String = ResolveCentralConfigPasswordForExpertConfig(context)
+            If String.IsNullOrWhiteSpace(expectedPassword) Then
+                ShowCustomMessageBox("This action is blocked because no central configuration password or client is configured (use parameters 'CentralConfigClients' or 'CentralConfigPW').")
+                Return False
+            End If
+
+            Dim enteredPassword As String = ShowPasswordPrompt(ownerForm, prompt, title)
+            If enteredPassword Is Nothing Then
+                Return False
+            End If
+
+            If Not String.Equals(RemoveCR(enteredPassword).Trim(), expectedPassword, StringComparison.Ordinal) Then
+                ShowCustomMessageBox("Incorrect password.")
+                Return False
+            End If
+
+            Return True
         End Function
 
         Private Shared Function ShowPasswordPrompt(ownerForm As Form, prompt As String, title As String) As String
