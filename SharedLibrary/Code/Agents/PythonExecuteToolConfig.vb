@@ -1,4 +1,23 @@
-﻿Option Explicit On
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: PythonExecuteToolConfig.vb
+' Purpose: Parses packed `INI_PythonAgentPath` values into a normalized
+'          `RedInkPythonAgentConfiguration` for secure tool setup.
+'
+' Architecture / How it works:
+'  - Accepts a semicolon-delimited configuration string whose first segment is
+'    the executable path and whose later segments are optional key/value pairs.
+'  - Recognizes signer and SHA256 aliases, ignoring empty or malformed optional
+'    segments instead of failing the whole parse.
+'  - Returns a single `RedInkPythonAgentConfiguration` object consumed by tool
+'    registration and executable-trust validation.
+'  - Keeps parsing logic isolated so host projects can share one deterministic
+'    interpretation of the INI setting.
+' =============================================================================
+
+Option Explicit On
 Option Strict On
 Option Infer On
 

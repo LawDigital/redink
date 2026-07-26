@@ -1,4 +1,25 @@
-﻿Option Explicit On
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: PythonExecuteTool.vb
+' Purpose: Exposes the shared `python_execute` tool as a Red Ink `ModelConfig`
+'          and bridges host callers to the host-agnostic execution core.
+'
+' Architecture / How it works:
+'  - Maintains one configured `PythonExecuteToolCoreOptions` instance for the
+'    process and validates availability before registration or execution.
+'  - Builds the advertised tool metadata (`ToolName`, instructions, schema, and
+'    model description) from `PythonExecuteToolCore`.
+'  - Executes requests via `ExecuteAsync()` / `ExecuteDetailedAsync()`, with
+'    optional per-call overrides for allowed host operations and host-service
+'    handlers without mutating shared global configuration.
+'  - Produces consistent host-failure payloads for callers that need a safe JSON
+'    envelope even when execution cannot start or is cancelled.
+' =============================================================================
+
+
+Option Explicit On
 Option Strict On
 Option Infer On
 Imports SharedLibrary.SharedLibrary
@@ -10,6 +31,11 @@ Namespace Agents
     ' RedInkPythonAgentClient.vb and PythonExecuteToolCore.vb.
     Public NotInheritable Class PythonExecuteTool
         Public Const ToolName As System.String = "python_execute"
+
+        Public Shared Function IsPythonTool(name As System.String) As System.Boolean
+            Return Not System.String.IsNullOrWhiteSpace(name) AndAlso
+                   System.String.Equals(name, ToolName, System.StringComparison.OrdinalIgnoreCase)
+        End Function
 
         Private Shared ReadOnly ConfigurationLock As New System.Object()
         Private Shared ConfiguredOptions As Agents.PythonExecuteToolCoreOptions

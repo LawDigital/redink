@@ -1,4 +1,22 @@
-﻿Option Strict On
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: RedInkPythonAgentWebGet.vb
+' Purpose: Implements the host-agnostic `python_execute` `web.get` helper for
+'          safe page retrieval and supported document extraction.
+'
+' Architecture / How it works:
+'  - Validates that only absolute HTTP/HTTPS URLs are accepted and blocks known
+'    authenticated cloud-storage hosts that cannot be fetched anonymously.
+'  - Uses a lightweight HEAD request plus URL extension fallback to classify the
+'    target as HTML/page content or as a supported downloadable document.
+'  - Routes ordinary page retrieval through the host-provided HTML/WebView2
+'    retriever so page extraction stays host-controlled and consistent.
+'  - Downloads supported documents into a private temp folder, enforces size
+'    caps, extracts text with sandbox-safe readers, prefixes compact metadata,
+'    and deletes temp files on completion.
+' =============================================================================
 Option Explicit On
 Option Infer On
 

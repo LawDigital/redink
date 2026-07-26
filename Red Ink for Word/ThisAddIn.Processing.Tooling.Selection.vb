@@ -306,6 +306,7 @@ Partial Public Class ThisAddIn
            SharedLibrary.Agents.WordTools.IsWordTool(toolName) OrElse
            SharedLibrary.Agents.WordDocTools.IsWordDocTool(toolName) OrElse
            SharedLibrary.Agents.JsRunTool.IsJsTool(toolName) OrElse
+           SharedLibrary.Agents.PythonExecuteTool.IsPythonTool(toolName) OrElse
            toolName.Equals(SharedLibrary.Agents.SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) Then
             Return True
         End If

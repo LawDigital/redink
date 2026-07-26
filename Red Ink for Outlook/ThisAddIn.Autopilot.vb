@@ -125,6 +125,56 @@ Partial Public Class ThisAddIn
     ''' <summary>Maximum recursion depth for nested archives.</summary>
     Private Const AP_MaxArchiveDepth As Integer = 3
 
+    ''' <summary>
+    ''' Extensions that must not be sent as bare attachments. Files with these extensions
+    ''' are repackaged into a .zip before delivery so recipients' mail systems do not block
+    ''' or quarantine them. Matches the common executable/script set plus source files.
+    ''' </summary>
+    Private Shared ReadOnly AP_ZipBeforeSendExtensions As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
+        ".exe", ".com", ".bat", ".cmd", ".msi", ".scr", ".pif", ".cpl", ".jar",
+        ".ps1", ".psm1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".hta",
+        ".sh", ".zsh", ".py", ".pyw", ".rb", ".pl", ".php", ".reg", ".dll"
+    }
+
+    ''' <summary>
+    ''' Returns a delivery-safe copy of <paramref name="resultAttachments"/>. Any file whose
+    ''' extension is in <see cref="AP_ZipBeforeSendExtensions"/> is compressed into an individual
+    ''' .zip in a temporary directory and the .zip path is substituted for the original. All other
+    ''' files pass through unchanged. Failures fall back to the original path (best effort).
+    ''' </summary>
+    Private Function SanitizeOutgoingAttachmentsForDelivery(resultAttachments As List(Of String)) As List(Of String)
+        Dim sanitized As New List(Of String)()
+        If resultAttachments Is Nothing Then Return sanitized
+
+        For Each attachPath In resultAttachments
+            Try
+                If String.IsNullOrWhiteSpace(attachPath) OrElse Not File.Exists(attachPath) Then Continue For
+
+                Dim ext As String = Path.GetExtension(attachPath)
+                If Not AP_ZipBeforeSendExtensions.Contains(ext) Then
+                    sanitized.Add(attachPath)
+                    Continue For
+                End If
+
+                Dim zipDir As String = Path.Combine(Path.GetTempPath(), AP_TempPrefix & "zip_" & Guid.NewGuid().ToString("N"))
+                Directory.CreateDirectory(zipDir)
+                Dim zipPath As String = Path.Combine(zipDir, Path.GetFileNameWithoutExtension(attachPath) & ".zip")
+
+                Using archive = ZipFile.Open(zipPath, ZipArchiveMode.Create)
+                    archive.CreateEntryFromFile(attachPath, Path.GetFileName(attachPath), CompressionLevel.Optimal)
+                End Using
+
+                ApDashboardLog($"  📦 Zipped attachment for delivery: {Path.GetFileName(attachPath)} → {Path.GetFileName(zipPath)}", "info")
+                sanitized.Add(zipPath)
+            Catch ex As System.Exception
+                ApDashboardLog($"  ⚠ Failed to zip attachment '{Path.GetFileName(If(attachPath, ""))}', sending as-is: {ex.Message}", "warn")
+                sanitized.Add(attachPath)
+            End Try
+        Next
+
+        Return sanitized
+    End Function
+
 
     ''' <summary>Command prefix scanned in the first few lines of the latest e-mail body.</summary>
     Private Const AP_ModelCommandPrefix As String = "#model:"
@@ -134,9 +184,11 @@ Partial Public Class ThisAddIn
 
     Private Const SP_AutoPilot_HoldingResponse As String =
         "Thank you for your message. This is an automated acknowledgement — your request has not yet been processed. " &
-        "I will respond with a substantive reply once your request has been handled. " &
+        "I will respond with a substantive reply once your request has been handled. {StatusMessage}" &
         "If you need immediate assistance, you can also use the " & AN & " add-in's corresponding feature to have your tasks done right away. Use 'Help me, Inky' or the chatbot on https://redink.ai if you need instructions. Last but not least, a similar 'agent mode' is available in the Local Chat feature in the Outlook add-in if configured accordingly. " &
         "— " & AN6
+
+    Private Const SP_AutoPilot_HoldingResponseStatus As String = "To check the current system status, click on {MonitorLink}."
 
     Private Const AP_MaxToolIterations As Integer = 50
 
@@ -2258,10 +2310,21 @@ Partial Public Class ThisAddIn
 
                 ' ── Approval or auto-send ──
                 If requiresApproval AndAlso Not _apConfig.IsUnattended Then
-                    Await SwitchToUi(Sub() SendReplyToSender(mi, SP_AutoPilot_HoldingResponse, Nothing, tagAsAutoReply:=True, isHoldingOnly:=True))
-                    _apHoldingOnlyEntryIds.TryAdd(entryId, True)
-                    ApDashboardLog("Holding response sent to: " & mailInfo.SenderEmail, "step")
+                    Dim holdingResponse As String = SP_AutoPilot_HoldingResponse.Replace("{StatusMessage}", "")
+                    Dim monitorLink As String = If(_context.INI_MonitorLink, "").Trim()
+                    Dim monitorUri As System.Uri = Nothing
 
+                    If System.Uri.TryCreate(monitorLink, System.UriKind.Absolute, monitorUri) AndAlso
+                       (String.Equals(monitorUri.Scheme, System.Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) OrElse
+                        String.Equals(monitorUri.Scheme, System.Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)) Then
+                        Dim statusMessage As String = SP_AutoPilot_HoldingResponseStatus.Replace("{MonitorLink}", monitorLink)
+                        holdingResponse = SP_AutoPilot_HoldingResponse.Replace("{StatusMessage}", " " & statusMessage)
+                    End If
+
+                    Await SwitchToUi(Sub() SendReplyToSender(mi, holdingResponse, Nothing, tagAsAutoReply:=True, isHoldingOnly:=True))
+                    _apHoldingOnlyEntryIds.TryAdd(entryId, True)
+
+                    ApDashboardLog("Holding response sent to: " & mailInfo.SenderEmail, "step")
                     Dim approved As Boolean = Await SwitchToUi(Function() ShowApprovalDialog(mailInfo, response, resultAttachments))
                     If approved Then
                         Await SwitchToUi(Sub() SendReplyToSender(mi, response, resultAttachments, tagAsAutoReply:=True, sourcesHtml:=sourcesHtml))
@@ -3546,9 +3609,9 @@ Partial Public Class ThisAddIn
             htmlBody &= BuildAutoPilotFooter()
             reply.HTMLBody = htmlBody & originalThread
 
-            ' Add result attachments
+            ' Add result attachments (dangerous file types are zipped before delivery)
             If resultAttachments IsNot Nothing Then
-                For Each attachPath In resultAttachments
+                For Each attachPath In SanitizeOutgoingAttachmentsForDelivery(resultAttachments)
                     If File.Exists(attachPath) Then
                         reply.Attachments.Add(attachPath, OlAttachmentType.olByValue, , Path.GetFileName(attachPath))
                     End If

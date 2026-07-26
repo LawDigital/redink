@@ -4149,7 +4149,29 @@ Partial Public Class ThisAddIn
 
         ' ── python_execute: secure sandboxed Python execution ──
         If toolCall.ToolName.Equals(SharedLibrary.Agents.PythonExecuteTool.ToolName, StringComparison.OrdinalIgnoreCase) Then
-            Return Await ExecutePythonExecuteTool(toolCall, context, cancellationToken)
+            Dim pyResponse As ToolResponse = Await ExecutePythonExecuteTool(toolCall, context, cancellationToken)
+
+            If (_apActive OrElse _chatAgentActive) AndAlso _apCurrentToolCallLog IsNot Nothing Then
+                Dim pyParamSummary As String = BuildCondensedParamSummary(toolCall.Arguments)
+                Dim pyExcerpt As String = BuildResultExcerpt(pyResponse.Response, 80)
+                ApDashboardLog($"🔧 External tool: {toolCall.ToolName}{pyParamSummary}", "info")
+                If pyResponse.Success Then
+                    ApDashboardLog($"   ✓ {pyExcerpt}", "info")
+                Else
+                    ApDashboardLog($"   ✗ {If(pyResponse.ErrorMessage, pyExcerpt)}", "error")
+                End If
+                RecordAutoPilotToolCall(
+                    toolCall.ToolName,
+                    toolCall.ToolName,
+                    pyParamSummary,
+                    isInternalTool:=True,
+                    wasSuccessful:=pyResponse.Success,
+                    resultExcerpt:=pyExcerpt,
+                    elapsed:=DateTime.Now - pyResponse.Timestamp,
+                    urls:=Nothing)
+            End If
+
+            Return pyResponse
         End If
 
         ' ── workspace_extract_text: unified file reader for Local Chat agent (no staging) ──
@@ -4845,6 +4867,7 @@ __AfterDispatch:
            SharedLibrary.Agents.WordTools.IsWordTool(toolName) OrElse
            SharedLibrary.Agents.WordDocTools.IsWordDocTool(toolName) OrElse
            SharedLibrary.Agents.JsRunTool.IsJsTool(toolName) OrElse
+           SharedLibrary.Agents.PythonExecuteTool.IsPythonTool(toolName) OrElse
            toolName.Equals(SharedLibrary.Agents.SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) OrElse
            IsAutoPilotInternalTool(toolName) Then
             Return True

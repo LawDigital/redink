@@ -1,4 +1,24 @@
-﻿Option Explicit On
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: RedinkPythonAgentClient.vb
+' Purpose: Defines the secure Python agent client, execution protocol models,
+'          host-call contracts, limits, and safe result/error envelopes.
+'
+' Architecture / How it works:
+'  - Declares the shared contract types used between the host broker and the
+'    external Python worker: requests, responses, events, outputs, and errors.
+'  - Centralizes configuration, executable-trust expectations, execution-time
+'    options, and resource limits for secure worker startup and supervision.
+'  - `RedInkPythonAgentClient` stages input files and request JSON, launches the
+'    worker process, monitors heartbeat/events/host-calls, and parses the final
+'    bounded response payload.
+'  - Failures are normalized into typed execution/configuration/trust errors and
+'    safe result objects instead of exposing arbitrary process diagnostics.
+' =============================================================================
+
+Option Explicit On
 Option Strict On
 Option Infer On
 
@@ -77,8 +97,10 @@ Namespace Agents
     End Class
 
     Public NotInheritable Class RedInkPythonAgentLimits
-        Public Property OverallWallTimeSeconds As System.Int32 = 600
-        Public Property ExecuteWallTimeSeconds As System.Int32 = 180
+        Public Property OverallWallTimeSeconds As System.Int32 = 2400
+        Public Property StartupWallTimeSeconds As System.Int32 = 300
+        Public Property ExecuteWallTimeSeconds As System.Int32 = 1800
+        Public Property ExecutionInactivitySeconds As System.Int32 = 1800
         Public Property ValidatorWallTimeSeconds As System.Int32 = 300
         Public Property MemoryMiB As System.Int32 = 1536
         Public Property MaxOutputBytes As System.Int64 = 268435456L
@@ -385,9 +407,11 @@ Namespace Agents
             New Newtonsoft.Json.Linq.JProperty("sessionId", sessionId.ToString("D")),
             New Newtonsoft.Json.Linq.JProperty("nonce", nonce),
             New Newtonsoft.Json.Linq.JProperty("limits", New Newtonsoft.Json.Linq.JObject(
-                New Newtonsoft.Json.Linq.JProperty("overallWallTimeSeconds", limits.OverallWallTimeSeconds),
+                New Newtonsoft.Json.Linq.JProperty("startupWallTimeSeconds", limits.StartupWallTimeSeconds),
                 New Newtonsoft.Json.Linq.JProperty("executeWallTimeSeconds", limits.ExecuteWallTimeSeconds),
+                New Newtonsoft.Json.Linq.JProperty("executionInactivitySeconds", limits.ExecutionInactivitySeconds),
                 New Newtonsoft.Json.Linq.JProperty("validatorWallTimeSeconds", limits.ValidatorWallTimeSeconds),
+                New Newtonsoft.Json.Linq.JProperty("overallWallTimeSeconds", limits.OverallWallTimeSeconds),
                 New Newtonsoft.Json.Linq.JProperty("memoryMiB", limits.MemoryMiB),
                 New Newtonsoft.Json.Linq.JProperty("maxOutputBytes", limits.MaxOutputBytes),
                 New Newtonsoft.Json.Linq.JProperty("maxOutputFiles", limits.MaxOutputFiles),
@@ -823,7 +847,12 @@ Namespace Agents
         Private Shared Sub ValidateInputs(configuration As RedInkPythonAgentConfiguration, root As System.String, code As System.String, limits As RedInkPythonAgentLimits)
             If configuration Is Nothing OrElse limits Is Nothing Then Throw New System.ArgumentNullException()
             If System.String.IsNullOrWhiteSpace(root) OrElse System.String.IsNullOrWhiteSpace(code) Then Throw New RedInkPythonAgentConfigurationException("Root and code are required.")
-            If limits.OverallWallTimeSeconds < limits.ExecuteWallTimeSeconds Then Throw New RedInkPythonAgentConfigurationException("Overall timeout must cover execute timeout.")
+            If limits.StartupWallTimeSeconds < 1 OrElse limits.StartupWallTimeSeconds > 600 Then Throw New RedInkPythonAgentConfigurationException("StartupWallTimeSeconds is outside the supported range.")
+            If limits.ExecuteWallTimeSeconds < 1 OrElse limits.ExecuteWallTimeSeconds > 14400 Then Throw New RedInkPythonAgentConfigurationException("ExecuteWallTimeSeconds is outside the supported range.")
+            If limits.ExecutionInactivitySeconds < 1 OrElse limits.ExecutionInactivitySeconds > 7200 Then Throw New RedInkPythonAgentConfigurationException("ExecutionInactivitySeconds is outside the supported range.")
+            If limits.ValidatorWallTimeSeconds < 1 OrElse limits.ValidatorWallTimeSeconds > 1800 Then Throw New RedInkPythonAgentConfigurationException("ValidatorWallTimeSeconds is outside the supported range.")
+            If limits.OverallWallTimeSeconds < 1 OrElse limits.OverallWallTimeSeconds > 18000 Then Throw New RedInkPythonAgentConfigurationException("OverallWallTimeSeconds is outside the supported range.")
+            If limits.OverallWallTimeSeconds < limits.StartupWallTimeSeconds + limits.ExecuteWallTimeSeconds + limits.ValidatorWallTimeSeconds Then Throw New RedInkPythonAgentConfigurationException("Overall timeout must cover startup, execute and validation timeouts.")
             If limits.MaxResultBytes < 1L OrElse limits.MaxResultBytes > 134217728L Then Throw New RedInkPythonAgentConfigurationException("MaxResultBytes is outside the supported range.")
             If limits.MaxResultJsonDepth < 1 OrElse limits.MaxResultJsonDepth > 256 Then Throw New RedInkPythonAgentConfigurationException("MaxResultJsonDepth is outside the supported range.")
             If limits.MaxResultJsonNodes < 1 OrElse limits.MaxResultJsonNodes > 4000000 Then Throw New RedInkPythonAgentConfigurationException("MaxResultJsonNodes is outside the supported range.")

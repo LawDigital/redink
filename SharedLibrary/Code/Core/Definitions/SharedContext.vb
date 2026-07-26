@@ -106,6 +106,7 @@ Namespace SharedLibrary
 
             Property INI_AutoPilotAutoStart As Boolean
             Property INI_AutoPilotSchedulerLocalChat As Boolean
+            Property INI_MonitorLink As String
             Property INI_Language1 As String
             Property INI_Language2 As String
             Property INI_DefaultPrefix As String
@@ -472,6 +473,7 @@ Namespace SharedLibrary
         Public Property INI_UseHostColorOutlook As Boolean Implements ISharedContext.INI_UseHostColorOutlook
         Public Property INI_AutoPilotAutoStart As Boolean Implements ISharedContext.INI_AutoPilotAutoStart
         Public Property INI_AutoPilotSchedulerLocalChat As Boolean Implements ISharedContext.INI_AutoPilotSchedulerLocalChat
+        Public Property INI_MonitorLink As String Implements ISharedContext.INI_MonitorLink
         Public Property INI_UsageRestrictions As String Implements ISharedContext.INI_UsageRestrictions
         Public Property INI_LogPath As String Implements ISharedContext.INI_LogPath
         Public Property INI_PythonAgentPath As String Implements ISharedContext.INI_PythonAgentPath

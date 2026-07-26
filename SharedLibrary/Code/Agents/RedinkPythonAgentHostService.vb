@@ -1,4 +1,23 @@
-﻿Option Strict On
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: RedinkPythonAgentHostService.vb
+' Purpose: Defines safe host-service dispatch for `python_execute`, including
+'          typed host-call failures and delegate-based capability routing.
+'
+' Architecture / How it works:
+'  - `RedInkPythonAgentHostCallException` provides typed, model-safe host error
+'    signaling so raw host exceptions are not exposed back to the model.
+'  - `RedInkPythonAgentDelegatingHostServiceHandler` is a capability gate that
+'    only exposes operations whose delegates are explicitly wired by the host.
+'  - `HandleAsync()` dispatches by `RedInkPythonAgentHostOperation`, validates
+'    argument payload types, invokes the matching delegate, and converts runtime
+'    failures into deterministic safe response envelopes.
+'  - Unsupported or disabled operations always fail with
+'    `HOST_OPERATION_NOT_ALLOWED`, keeping sandbox capabilities aligned with the
+'    active tooling loop.
+' =============================================================================
 Option Explicit On
 Option Infer On
 

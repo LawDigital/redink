@@ -1607,43 +1607,51 @@
       "id": "autopilot",
       "title": "AutoPilot and Other Restrictions",
       "description": "Controls which users may use AutoPilot, whether Draw.io must run in local-only mode and whether legacy .doc files may be processed.",
-      "fields": [
-        {
-          "key": "AutoPilot",
-          "label": "AP Allowed Users",
-          "type": "string",
-          "default": "",
-          "description": "Comma-separated Windows usernames allowed to use the AutoPilot function in Outlook (use ''Client Name'' button below to identify your Windows username). Use * if everyone should be allowed. Example: Peter.Pan,John.Doe or *. [AutoPilot]"
-        },
-        {
-          "key": "AutoPilotAutoStart",
-          "label": "AutoPilot Auto Start",
-          "type": "boolean",
-          "default": "False",
-          "description": "Enable this if AutoPilot should automatically start with the last saved configuration when Outlook launches. A 30-second countdown dialog allows the user to cancel or open the full setup instead. Example: True. [AutoPilotAutoStart]"
-        },
-        {
-          "key": "AutoPilotSchedulerLocalChat",
-          "label": "Permit Scheduler in Local Chat to Send Emails",
-          "type": "boolean",
-          "default": "False",
-          "description": "Enable this if Local Chat users should be able to create scheduling tasks that are performed by automatically sending an e-mail to the user (under the user's name to the user's mailbox). If this is not allowed, the tasks are executed in the Local Chat browser. Example: True. [AutoPilotSchedulerLocalChat]"
-        },
-        {
-          "key": "ForceDrawioLocal",
-          "label": "Force Draw.io Offline",
-          "type": "boolean",
-          "default": "True",
-          "description": "Enable this to force Draw.io to run only in the local/offline mode offered by Red Ink, which helps protect confidential information. Example: True. [ForceDrawioLocal]"
-        },
-        {
-          "key": "AllowLegacyDocFiles",
-          "label": "Allow Legacy .doc Files",
-          "type": "boolean",
-          "default": "False",
-          "description": "Controls whether legacy .doc (binary Word) files can be opened via COM Interop. Set this to False to block .doc processing for security hardening, which prevents OLE and macro-based attacks. When disabled, .doc files are rejected with a security message. Note that .docx files (OpenXML ZIP) are always permitted as they are processed via sandboxed XML parsing. Example: False. [AllowLegacyDocFiles]"
-        }
-      ]
+        "fields": [
+            {
+                "key": "AutoPilot",
+                "label": "AP Allowed Users",
+                "type": "string",
+                "default": "",
+                "description": "Comma-separated Windows usernames allowed to use the AutoPilot function in Outlook (use ''Client Name'' button below to identify your Windows username). Use * if everyone should be allowed. Example: Peter.Pan,John.Doe or *. [AutoPilot]"
+            },
+            {
+                "key": "AutoPilotAutoStart",
+                "label": "AutoPilot Auto Start",
+                "type": "boolean",
+                "default": "False",
+                "description": "Enable this if AutoPilot should automatically start with the last saved configuration when Outlook launches. A 30-second countdown dialog allows the user to cancel or open the full setup instead. Example: True. [AutoPilotAutoStart]"
+            },
+            {
+                "key": "MonitorLink",
+                "label": "Status Monitor Link",
+                "type": "string",
+                "validation": "Hyperlink",
+                "default": "",
+                "description": "Optional HTTP/HTTPS link to a status or monitoring page. When set, Red Ink shows it in the About window below the Local Chat link and includes it in AutoPilot holding responses. Example: https://ink.acme.com/status. [MonitorLink]"
+            },
+            {
+                "key": "AutoPilotSchedulerLocalChat",
+                "label": "Permit Scheduler in Local Chat to Send Emails",
+                "type": "boolean",
+                "default": "False",
+                "description": "Enable this if Local Chat users should be able to create scheduling tasks that are performed by automatically sending an e-mail to the user (under the user's name to the user's mailbox). If this is not allowed, the tasks are executed in the Local Chat browser. Example: True. [AutoPilotSchedulerLocalChat]"
+            },
+            {
+                "key": "ForceDrawioLocal",
+                "label": "Force Draw.io Offline",
+                "type": "boolean",
+                "default": "True",
+                "description": "Enable this to force Draw.io to run only in the local/offline mode offered by Red Ink, which helps protect confidential information. Example: True. [ForceDrawioLocal]"
+            },
+            {
+                "key": "AllowLegacyDocFiles",
+                "label": "Allow Legacy .doc Files",
+                "type": "boolean",
+                "default": "False",
+                "description": "Controls whether legacy .doc (binary Word) files can be opened via COM Interop. Set this to False to block .doc processing for security hardening, which prevents OLE and macro-based attacks. When disabled, .doc files are rejected with a security message. Note that .docx files (OpenXML ZIP) are always permitted as they are processed via sandboxed XML parsing. Example: False. [AllowLegacyDocFiles]"
+            }
+        ]
     },
     {
       "id": "updates",

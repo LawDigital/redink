@@ -1,4 +1,31 @@
-﻿Option Explicit On
+﻿' Part of "Red Ink for Word"
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: ThisAddIn.Processing.Tooling.PythonExecute.vb
+' Purpose: Integrates the shared `python_execute` tool into the Word host,
+'          including configuration, output publication, and host-service
+'          bridging for Word tooling execution.
+'
+' Architecture / How it works:
+'  - Tool Registration:
+'      - `TryConfigureAndBuildPythonExecuteTool()` parses `INI_PythonAgentPath`,
+'        validates the configured executor, and builds the shared tool config.
+'  - File Handling:
+'      - Input files are resolved through `PathPolicy` into the allowed readable
+'        workspace/Desktop scope.
+'      - `PublishPythonAgentOutput()` writes validated outputs back through the
+'        Word host's writable workspace/Desktop path policy.
+'  - Tool Execution:
+'      - `ExecutePythonExecuteTool()` bridges Word `ToolCall` execution to the
+'        host-agnostic `PythonExecuteTool` core and returns a `ToolResponse`.
+'  - Host-Mediated Capabilities:
+'      - `BuildPythonHostServiceHandler()` selectively exposes LLM, `web.get`,
+'        and search capabilities based on the tools active in the current loop.
+' =============================================================================
+
+
+Option Explicit On
 Option Strict Off
 
 Imports System.Threading
@@ -97,7 +124,7 @@ Partial Public Class ThisAddIn
                 toolCall.Arguments,
                 cancellationToken,
                 Sub(message) context.Log(message, "step"),
-                Sub(message) context.Log(message, "step"),
+                Sub(message) context.Log(message, "diag"),
                 Sub(message) context.Log(message, "warn"),
                 Sub(message) context.Log(message, "diag"),
                 hostServiceHandler,

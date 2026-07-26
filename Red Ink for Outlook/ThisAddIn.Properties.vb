@@ -594,6 +594,17 @@ Partial Public Class ThisAddIn
     End Property
 
 
+    Public Shared Property INI_MonitorLink As String
+        Get
+            Return _context.INI_MonitorLink
+        End Get
+        Set(value As String)
+            _context.INI_MonitorLink = value
+        End Set
+    End Property
+
+
+
     Public Shared Property INI_UsageRestrictions As String
         Get
             Return _context.INI_UsageRestrictions

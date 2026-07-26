@@ -1,4 +1,26 @@
-﻿Option Explicit On
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: PythonExecuteToolCore.vb
+' Purpose: Implements the host-agnostic core of the `python_execute` tool:
+'          schema/instructions, request validation, option handling, and broker
+'          execution orchestration.
+'
+' Architecture / How it works:
+'  - `PythonExecuteToolCoreOptions` defines execution policy, size/time limits,
+'    allowed host operations, logging callbacks, and output publication hooks.
+'  - `PythonExecuteToolCoreResult` is the normalized return shape used by host
+'    adapters to convert execution outcomes into host-specific tool responses.
+'  - `ToolInstructionsPrompt` and `ToolDefinitionJson` define the model-facing
+'    contract for sandboxed Python execution and input/output handling.
+'  - `ExecuteAsync()` validates arguments and configuration, delegates to the
+'    Python agent client/broker, and converts failures into bounded safe result
+'    payloads rather than leaking raw exceptions.
+' =============================================================================
+
+
+Option Explicit On
 Option Strict On
 Option Infer On
 
@@ -16,9 +38,9 @@ Namespace Agents
         Public Property RootDirectory As System.String = System.String.Empty
         Public Property InputFileResolver As System.Func(Of System.String, RedInkPythonAgentInputFile)
         Public Property HostServiceHandler As IRedInkPythonAgentHostServiceHandler
-        Public Property DefaultTimeoutSeconds As System.Int32 = 30
+        Public Property DefaultTimeoutSeconds As System.Int32 = 1800
         Public Property MinimumTimeoutSeconds As System.Int32 = 5
-        Public Property MaximumTimeoutSeconds As System.Int32 = 180
+        Public Property MaximumTimeoutSeconds As System.Int32 = 14400
         Public Property MaximumCodeBytes As System.Int32 = 1048576
         Public Property MaximumStdinBytes As System.Int32 = 1048576
         Public Property MaximumInputFiles As System.Int32 = 100
@@ -34,8 +56,13 @@ Namespace Agents
         Public Property MaximumConcurrentHostCalls As System.Int32 = 2
         Public Property MaximumHostRequestBytes As System.Int32 = 67108864
         Public Property MaximumHostResponseBytes As System.Int32 = 134217728
-        Public Property DefaultHostCallTimeoutSeconds As System.Int32 = 60
-        Public Property MaximumHostCallTimeoutSeconds As System.Int32 = 180
+        Public Property DefaultHostCallTimeoutSeconds As System.Int32 = 300
+        Public Property MaximumHostCallTimeoutSeconds As System.Int32 = 3600
+        Public Property StartupWallTimeSeconds As System.Int32 = 300
+        Public Property ExecutionInactivitySeconds As System.Int32 = 1800
+        Public Property ValidatorWallTimeSeconds As System.Int32 = 300
+        Public Property OverallCleanupMarginSeconds As System.Int32 = 60
+        Public Property ProcessWaitShutdownMarginSeconds As System.Int32 = 30
         Public Property MemoryMiB As System.Int32 = 1536
         Public Property HeartbeatTimeout As System.TimeSpan = System.TimeSpan.FromSeconds(15)
         Public Property PollInterval As System.TimeSpan = System.TimeSpan.FromMilliseconds(100)
@@ -75,6 +102,11 @@ Namespace Agents
                 .MaximumHostResponseBytes = Me.MaximumHostResponseBytes,
                 .DefaultHostCallTimeoutSeconds = Me.DefaultHostCallTimeoutSeconds,
                 .MaximumHostCallTimeoutSeconds = Me.MaximumHostCallTimeoutSeconds,
+                .StartupWallTimeSeconds = Me.StartupWallTimeSeconds,
+                .ExecutionInactivitySeconds = Me.ExecutionInactivitySeconds,
+                .ValidatorWallTimeSeconds = Me.ValidatorWallTimeSeconds,
+                .OverallCleanupMarginSeconds = Me.OverallCleanupMarginSeconds,
+                .ProcessWaitShutdownMarginSeconds = Me.ProcessWaitShutdownMarginSeconds,
                 .MemoryMiB = Me.MemoryMiB,
                 .HeartbeatTimeout = Me.HeartbeatTimeout,
                 .PollInterval = Me.PollInterval,
@@ -263,7 +295,7 @@ Namespace Agents
                 Dim configuration As RedInkPythonAgentConfiguration = ResolveConfigurationRelativeToAssembly(options.AgentConfiguration)
                 Dim limits As RedInkPythonAgentLimits = CreateLimits(options, effectiveTimeout)
                 Dim executionOptions As New RedInkPythonAgentExecutionOptions() With {
-                .OverallTimeout = System.TimeSpan.FromSeconds(effectiveTimeout) + options.CancellationGracePeriod + options.HardKillWait + System.TimeSpan.FromSeconds(2),
+                .OverallTimeout = System.TimeSpan.FromSeconds(limits.OverallWallTimeSeconds) + System.TimeSpan.FromSeconds(options.ProcessWaitShutdownMarginSeconds),
                 .HeartbeatTimeout = options.HeartbeatTimeout,
                 .PollInterval = options.PollInterval,
                 .CancellationGracePeriod = options.CancellationGracePeriod,
@@ -280,7 +312,9 @@ Namespace Agents
 
                 SafeLog(logStep, "Running secure Python script...")
                 Try
+                    SafeLog(logStep, "Validating secure Python executable...")
                     Dim executable As System.String = RedInkPythonAgentClient.ValidateExecutableConfiguration(configuration)
+                    SafeLog(logStep, "Secure Python executable verified.")
                     SafeLog(logDiag, "Verified PythonAgent executable: " & executable)
                     SafeLog(logDiag, "Python request source bytes: " & codeBytes.ToString(System.Globalization.CultureInfo.InvariantCulture))
                     execution = client.CreateExecution(configuration, callRoot, code, resolvedInputFiles, limits, options.HostServiceHandler, progress)
@@ -477,9 +511,12 @@ Namespace Agents
             End Try
         End Sub
 
-        Private Shared Function CreateLimits(options As PythonExecuteToolCoreOptions, timeoutSeconds As System.Int32) As RedInkPythonAgentLimits
-            Dim validatorReserve As System.Int32 = System.Math.Max(1, System.Math.Min(30, timeoutSeconds \ 4))
-            Dim executeSeconds As System.Int32 = System.Math.Max(1, timeoutSeconds - validatorReserve)
+        Private Shared Function CreateLimits(options As PythonExecuteToolCoreOptions, executeSeconds As System.Int32) As RedInkPythonAgentLimits
+            Dim startupSeconds As System.Int32 = System.Math.Max(1, options.StartupWallTimeSeconds)
+            Dim inactivitySeconds As System.Int32 = System.Math.Max(1, options.ExecutionInactivitySeconds)
+            Dim validatorSeconds As System.Int32 = System.Math.Max(1, options.ValidatorWallTimeSeconds)
+            Dim cleanupMarginSeconds As System.Int32 = System.Math.Max(0, options.OverallCleanupMarginSeconds)
+            Dim overallSeconds As System.Int32 = startupSeconds + executeSeconds + validatorSeconds + cleanupMarginSeconds
             Dim operations As New System.Collections.Generic.List(Of System.String)()
             If options.HostServiceHandler IsNot Nothing Then
                 For Each operation As System.String In options.AllowedOperations
@@ -487,9 +524,11 @@ Namespace Agents
                 Next
             End If
             Return New RedInkPythonAgentLimits() With {
-            .OverallWallTimeSeconds = timeoutSeconds,
+            .OverallWallTimeSeconds = overallSeconds,
+            .StartupWallTimeSeconds = startupSeconds,
             .ExecuteWallTimeSeconds = executeSeconds,
-            .ValidatorWallTimeSeconds = validatorReserve,
+            .ExecutionInactivitySeconds = inactivitySeconds,
+            .ValidatorWallTimeSeconds = validatorSeconds,
             .MemoryMiB = options.MemoryMiB,
             .MaxOutputBytes = options.MaximumOutputBytes,
             .MaxOutputFiles = options.MaximumOutputFiles,
@@ -695,7 +734,7 @@ Namespace Agents
             If options.MaximumHostRequestBytes < 1 OrElse options.MaximumHostRequestBytes > 67108864 OrElse options.MaximumHostResponseBytes < 1 OrElse options.MaximumHostResponseBytes > 134217728 Then
                 Throw New RedInkPythonAgentConfigurationException("Python host-service size limits are invalid.")
             End If
-            If options.DefaultHostCallTimeoutSeconds < 1 OrElse options.MaximumHostCallTimeoutSeconds < options.DefaultHostCallTimeoutSeconds OrElse options.MaximumHostCallTimeoutSeconds > 600 Then
+            If options.DefaultHostCallTimeoutSeconds < 1 OrElse options.MaximumHostCallTimeoutSeconds < options.DefaultHostCallTimeoutSeconds OrElse options.MaximumHostCallTimeoutSeconds > 3600 Then
                 Throw New RedInkPythonAgentConfigurationException("Python host-service timeout policy is invalid.")
             End If
         End Sub
@@ -899,15 +938,15 @@ Namespace Agents
                     Case "BROKER_STARTED"
                         SafeLog(Me.LogStepValue, "Preparing secure Python execution...")
                     Case "REQUEST_VALIDATED"
-                        SafeLog(Me.LogDiagValue, "Python request validated.")
+                        SafeLog(Me.LogStepValue, "Python request validated.")
                     Case "INPUT_STAGING_STARTED"
                         SafeLog(Me.LogStepValue, "Preparing sandbox input files...")
                     Case "INPUT_STAGING_COMPLETED"
-                        SafeLog(Me.LogDiagValue, "Sandbox input files prepared.")
+                        SafeLog(Me.LogStepValue, "Sandbox input files prepared.")
                     Case "RUNTIME_VERIFICATION_STARTED"
                         SafeLog(Me.LogStepValue, "Verifying secure Python runtime...")
                     Case "RUNTIME_VERIFICATION_COMPLETED"
-                        SafeLog(Me.LogDiagValue, "Secure Python runtime verified.")
+                        SafeLog(Me.LogStepValue, "Secure Python runtime verified.")
                     Case "EXECUTE_SANDBOX_STARTING", "EXECUTE_SANDBOX_RUNNING"
                         SafeLog(Me.LogStepValue, "Running Python script...")
                     Case "PYTHON_PROGRESS"
@@ -915,11 +954,11 @@ Namespace Agents
                     Case "VALIDATION_STARTED"
                         SafeLog(Me.LogStepValue, "Validating Python output files...")
                     Case "VALIDATION_COMPLETED"
-                        SafeLog(Me.LogDiagValue, "Python output files validated.")
+                        SafeLog(Me.LogStepValue, "Python output files validated.")
                     Case "PUBLICATION_STARTED"
                         SafeLog(Me.LogStepValue, "Publishing Python output files...")
                     Case "PUBLICATION_COMPLETED"
-                        SafeLog(Me.LogDiagValue, "Python output files published.")
+                        SafeLog(Me.LogStepValue, "Python output files published.")
                     Case "CANCELLATION_REQUESTED", "SESSION_CANCELLED"
                         SafeLog(Me.LogWarnValue, "Python execution cancellation requested.")
                     Case "SESSION_TIMED_OUT"

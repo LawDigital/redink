@@ -1401,6 +1401,8 @@ Namespace SharedLibrary
                     Return context.INI_UsageRestrictions
                 Case "LogPath"
                     Return context.INI_LogPath
+                Case "MonitorLink"
+                    Return context.INI_MonitorLink
                 Case "PythonAgentPath"
                     Return context.INI_PythonAgentPath
                 Case "ContextMenu"
@@ -2091,6 +2093,7 @@ Namespace SharedLibrary
                     {"APIKeyPrefix", context.INI_APIKeyPrefix},
                     {"UsageRestrictions", context.INI_UsageRestrictions},
                     {"LogPath", context.INI_LogPath},
+                    {"MonitorLink", context.INI_MonitorLink},
                     {"PythonAgentPath", context.INI_PythonAgentPath},
                     {"Language1", context.INI_Language1},
                     {"Language2", context.INI_Language2},
@@ -3629,6 +3632,7 @@ Namespace SharedLibrary
             variableValues.Add("AutoPilotSchedulerLocalChat", context.INI_AutoPilotSchedulerLocalChat)
             variableValues.Add("UsageRestrictions", context.INI_UsageRestrictions)
             variableValues.Add("LogPath", context.INI_LogPath)
+            variableValues.Add("MonitorLink", context.INI_MonitorLink)
             variableValues.Add("PythonAgentPath", context.INI_PythonAgentPath)
             variableValues.Add("Language1", context.INI_Language1)
             variableValues.Add("Language2", context.INI_Language2)
@@ -3930,6 +3934,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("AutoPilotSchedulerLocalChat") Then context.INI_AutoPilotSchedulerLocalChat = CBool(updatedValues("AutoPilotSchedulerLocalChat"))
                 If updatedValues.ContainsKey("UsageRestrictions") Then context.INI_UsageRestrictions = CStr(updatedValues("UsageRestrictions"))
                 If updatedValues.ContainsKey("LogPath") Then context.INI_LogPath = CStr(updatedValues("LogPath"))
+                If updatedValues.ContainsKey("MonitorLink") Then context.INI_MonitorLink = CStr(updatedValues("MonitorLink"))
                 If updatedValues.ContainsKey("PythonAgentPath") Then context.INI_PythonAgentPath = CStr(updatedValues("PythonAgentPath"))
                 If updatedValues.ContainsKey("Language1") Then context.INI_Language1 = CStr(updatedValues("Language1"))
                 If updatedValues.ContainsKey("Language2") Then context.INI_Language2 = CStr(updatedValues("Language2"))
@@ -4189,9 +4194,17 @@ Namespace SharedLibrary
 
             ' Calculate height based on text content
             Dim ExpireText As String = vbCrLf & vbCrLf & GetLicenseStatusShort()
+            Dim monitorLink As String = If(context.INI_MonitorLink, "").Trim()
+            Dim monitorUri As System.Uri = Nothing
+            Dim hasClickableMonitorLink As Boolean =
+                System.Uri.TryCreate(monitorLink, System.UriKind.Absolute, monitorUri) AndAlso
+                (String.Equals(monitorUri.Scheme, System.Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) OrElse
+                 String.Equals(monitorUri.Scheme, System.Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+            Dim statusLinePlain As String = If(hasClickableMonitorLink, $"{vbCrLf}{vbCrLf}Status: {monitorLink}", "")
+
             Dim testRichTextBox As New System.Windows.Forms.RichTextBox() With {
                             .Font = standardFont,
-                            .Text = $"{AN}{vbCrLf}{context.RDV}{ExpireText}{vbCrLf}{If(BrandedVersion = "", "", $"{vbCrLf}{BrandedVersion}{vbCrLf}")}{vbCrLf}By David Rosenthal & Team{vbCrLf}{vbCrLf}{CopyrightNotice}{vbCrLf}{vbCrLf}All rights reserved.{vbCrLf}{vbCrLf}{AN4}{vbCrLf}{vbCrLf}Local Chat: {AN7}"
+                            .Text = $"{AN}{vbCrLf}{context.RDV}{ExpireText}{vbCrLf}{If(BrandedVersion = "", "", $"{vbCrLf}{BrandedVersion}{vbCrLf}")}{vbCrLf}By David Rosenthal & Team{vbCrLf}{vbCrLf}{CopyrightNotice}{vbCrLf}{vbCrLf}All rights reserved.{vbCrLf}{vbCrLf}{AN4}{vbCrLf}{vbCrLf}Local Chat: {AN7}{statusLinePlain}"
                         }
             Dim graphics As System.Drawing.Graphics = testRichTextBox.CreateGraphics()
             Dim textSize As System.Drawing.SizeF = graphics.MeasureString(testRichTextBox.Text, standardFont, formWidth - 40)
@@ -4250,8 +4263,10 @@ Namespace SharedLibrary
             aboutTextBox.Location = New System.Drawing.Point(20, topOffset)
             aboutForm.Controls.Add(aboutTextBox)
 
+            Dim statusLineMarkup As String = If(hasClickableMonitorLink, $"<P><P>Status: {monitorLink}", "")
+
             Dim aboutContent As String =
-        $"{AN}<P>{context.RDV}{ExpireText}<P>{If(BrandedVersion = "", "", $"<P>{BrandedVersion}<P>")}<P>By David Rosenthal & Team<P><P>{CopyrightNotice}<P><P>All rights reserved.<P><P>{AN4}<P><P>Local Chat: {AN7}"
+        $"{AN}<P>{context.RDV}{ExpireText}<P>{If(BrandedVersion = "", "", $"<P>{BrandedVersion}<P>")}<P>By David Rosenthal & Team<P><P>{CopyrightNotice}<P><P>All rights reserved.<P><P>{AN4}<P><P>Local Chat: {AN7}{statusLineMarkup}"
 
             ' Replace <P> with vbCrLf
             Dim plainText As New System.Text.StringBuilder()
@@ -4283,7 +4298,7 @@ Namespace SharedLibrary
             Try
                 Process.Start(New ProcessStartInfo(e.LinkText) With {.UseShellExecute = True})
             Catch ex As System.Exception
-                MessageBox.Show("Error in ShowAboutWindow - unable to open the link.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                ShowCustomMessageBox("Error in ShowAboutWindow - unable to open the link.")
             End Try
         End Sub
 

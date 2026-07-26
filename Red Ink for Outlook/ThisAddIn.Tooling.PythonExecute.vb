@@ -1,4 +1,33 @@
-﻿Option Explicit On
+﻿' Part of "Red Ink for Outlook"
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: ThisAddIn.Tooling.PythonExecute.vb
+' Purpose: Integrates the shared `python_execute` tool into the Outlook host,
+'          including configuration, input resolution, output publishing, and
+'          host-service bridging for the active tooling loop.
+'
+' Architecture:
+'  - Tool Registration:
+'      - `TryConfigureAndBuildPythonExecuteTool()` parses `INI_PythonAgentPath`,
+'        validates availability, configures shared core options, and builds the
+'        advertised `ModelConfig` when the executor is usable.
+'  - Input / Output Bridging:
+'      - `ResolvePythonInputFile()` resolves staged session attachments first,
+'        then falls back to workspace-relative paths.
+'      - `PublishPythonAgentOutput()` routes produced files either into the
+'        session sink (chat / AutoPilot) or into the connected workspace.
+'  - Tool Execution:
+'      - `ExecutePythonExecuteTool()` converts Outlook `ToolCall` state into the
+'        shared `PythonExecuteTool` execution flow and maps results back into
+'        `ToolResponse`.
+'  - Host-Mediated Capabilities:
+'      - `BuildPythonHostServiceHandler()` exposes only the currently selected
+'        LLM / web retrieval / search capabilities to the Python worker.
+' =============================================================================
+
+
+Option Explicit On
 Option Strict Off
 
 Imports System.Threading
@@ -154,9 +183,15 @@ Partial Public Class ThisAddIn
                 _context,
                 toolCall.Arguments,
                 cancellationToken,
-                Sub(message) context.Log(message, "step"),
-                Sub(message) context.Log(message, "step"),
-                Sub(message) context.Log(message, "warn"),
+                Sub(message)
+                    context.Log(message, "step")
+                    If _apActive OrElse _chatAgentActive Then ApDashboardLog("🐍 " & message, "step")
+                End Sub,
+                Sub(message) context.Log(message, "diag"),
+                Sub(message)
+                    context.Log(message, "warn")
+                    If _apActive OrElse _chatAgentActive Then ApDashboardLog("   ⚠ " & message, "warn")
+                End Sub,
                 Sub(message) context.Log(message, "diag"),
                 hostServiceHandler,
                 allowedOperations)
