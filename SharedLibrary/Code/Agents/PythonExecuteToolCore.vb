@@ -33,6 +33,19 @@ Namespace Agents
         End Sub
     End Class
 
+    ''' <summary>
+    ''' Result of querying the installed Python Agent executable for its semantic version and comparing it
+    ''' against the required and recommended minimums. Protocol compatibility is enforced separately through
+    ''' the request/response contract and is therefore not part of this status.
+    ''' </summary>
+    Public NotInheritable Class PythonAgentVersionStatus
+        Public Property Succeeded As System.Boolean
+        Public Property Version As System.String
+        Public Property MeetsRequired As System.Boolean
+        Public Property MeetsRecommended As System.Boolean
+        Public Property ErrorMessage As System.String
+    End Class
+
     Public NotInheritable Class PythonExecuteToolCoreOptions
         Public Property AgentConfiguration As RedInkPythonAgentConfiguration
         Public Property RootDirectory As System.String = System.String.Empty
@@ -177,7 +190,157 @@ Namespace Agents
         Public Shared Function ResolveAndValidateAvailability(options As PythonExecuteToolCoreOptions) As System.String
             ValidateOptions(options)
             Dim configuration As RedInkPythonAgentConfiguration = ResolveConfigurationRelativeToAssembly(options.AgentConfiguration)
-            Return RedInkPythonAgentClient.ValidateExecutableConfiguration(configuration)
+            Dim executable As System.String = RedInkPythonAgentClient.ValidateExecutableConfiguration(configuration)
+
+            ' Gate exposure on the minimum required version. Below the required minimum the integration is
+            ' deactivated for the whole session (the tool is never advertised). A version at or above the
+            ' required minimum but below the recommended minimum is treated as a soft state: still available,
+            ' with an update advisory surfaced elsewhere. The result is cached per executable
+            ' (path + last-write-time + length), so the tooling loop pays no per-call process-launch cost.
+            Dim status As PythonAgentVersionStatus = QueryVersionStatus(executable)
+            If status.Succeeded AndAlso Not status.MeetsRequired Then
+                Throw New RedInkPythonAgentConfigurationException(
+                    "The installed Python Agent version " & status.Version &
+                    " is below the minimum required version " & SharedLibrary.SharedMethods.PythonAgentMinRequiredVersion &
+                    ". The Python integration is deactivated until it is updated.")
+            End If
+
+            Return executable
+        End Function
+
+        Private Shared ReadOnly VersionCacheLock As New System.Object()
+        Private Shared ReadOnly VersionCache As New System.Collections.Generic.Dictionary(Of System.String, PythonAgentVersionStatus)(System.StringComparer.OrdinalIgnoreCase)
+
+        Private Shared ReadOnly PythonAgentVersionRegex As New System.Text.RegularExpressions.Regex(
+            "^redink-pythonagent(?:\.exe)?\s+(?<version>\d+\.\d+\.\d+)$",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+
+        ''' <summary>
+        ''' Queries the Python Agent executable for its semantic version via "--version" and compares it against
+        ''' the required and recommended minimums. The result is cached per executable, keyed by full path,
+        ''' last-write-time and file length, so a changed or updated executable is automatically re-probed.
+        ''' </summary>
+        Public Shared Function QueryVersionStatus(executablePath As System.String) As PythonAgentVersionStatus
+            If System.String.IsNullOrWhiteSpace(executablePath) OrElse Not System.IO.File.Exists(executablePath) Then
+                Return New PythonAgentVersionStatus() With {
+                    .Succeeded = False,
+                    .ErrorMessage = "The Python Agent executable could not be found."
+                }
+            End If
+
+            Dim cacheKey As System.String
+            Try
+                Dim information As New System.IO.FileInfo(executablePath)
+                cacheKey = System.IO.Path.GetFullPath(executablePath) & "|" &
+                           information.LastWriteTimeUtc.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture) & "|" &
+                           information.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            Catch ex As System.Exception
+                cacheKey = System.IO.Path.GetFullPath(executablePath)
+            End Try
+
+            SyncLock VersionCacheLock
+                Dim cached As PythonAgentVersionStatus = Nothing
+                If VersionCache.TryGetValue(cacheKey, cached) Then
+                    Return cached
+                End If
+            End SyncLock
+
+            Dim status As PythonAgentVersionStatus = ProbeVersionStatus(executablePath)
+
+            SyncLock VersionCacheLock
+                VersionCache(cacheKey) = status
+            End SyncLock
+
+            Return status
+        End Function
+
+        Private Shared Function ProbeVersionStatus(executablePath As System.String) As PythonAgentVersionStatus
+            Dim status As New PythonAgentVersionStatus()
+
+            Dim rawVersion As System.String
+            Try
+                rawVersion = QueryPythonAgentVersion(executablePath)
+            Catch ex As System.Exception
+                status.Succeeded = False
+                status.ErrorMessage = ex.Message
+                Return status
+            End Try
+
+            Dim match As System.Text.RegularExpressions.Match = PythonAgentVersionRegex.Match(rawVersion.Trim())
+            If Not match.Success Then
+                status.Succeeded = False
+                status.ErrorMessage = "The Python Agent returned an unrecognized version string: " & rawVersion
+                Return status
+            End If
+
+            Dim versionText As System.String = match.Groups("version").Value
+            Dim installedVersion As System.Version = Nothing
+            Dim requiredVersion As System.Version = Nothing
+            Dim recommendedVersion As System.Version = Nothing
+            If Not System.Version.TryParse(versionText, installedVersion) OrElse
+               Not System.Version.TryParse(SharedLibrary.SharedMethods.PythonAgentMinRequiredVersion, requiredVersion) OrElse
+               Not System.Version.TryParse(SharedLibrary.SharedMethods.PythonAgentMinRecommendedVersion, recommendedVersion) Then
+                status.Succeeded = False
+                status.Version = versionText
+                status.ErrorMessage = "The Python Agent version could not be compared against the configured minimums."
+                Return status
+            End If
+
+            status.Succeeded = True
+            status.Version = versionText
+            status.MeetsRequired = installedVersion >= requiredVersion
+            status.MeetsRecommended = installedVersion >= recommendedVersion
+            Return status
+        End Function
+
+        Private Shared Function QueryPythonAgentVersion(executablePath As System.String) As System.String
+            Dim startInfo As New System.Diagnostics.ProcessStartInfo() With {
+                .FileName = executablePath,
+                .Arguments = "--version",
+                .UseShellExecute = False,
+                .CreateNoWindow = True,
+                .RedirectStandardOutput = True,
+                .RedirectStandardError = True
+            }
+
+            Using process As New System.Diagnostics.Process()
+                process.StartInfo = startInfo
+
+                If Not process.Start() Then
+                    Throw New System.InvalidOperationException("The Python Agent version process could not be started.")
+                End If
+
+                Dim outputTask As System.Threading.Tasks.Task(Of System.String) = process.StandardOutput.ReadToEndAsync()
+                Dim errorTask As System.Threading.Tasks.Task(Of System.String) = process.StandardError.ReadToEndAsync()
+
+                If Not process.WaitForExit(10000) Then
+                    Try
+                        process.Kill()
+                    Catch ex As System.Exception
+                        ' Preserve the original timeout outcome.
+                    End Try
+
+                    Throw New System.TimeoutException("The Python Agent version query timed out.")
+                End If
+
+                System.Threading.Tasks.Task.WaitAll(outputTask, errorTask)
+
+                Dim standardOutput As System.String = outputTask.Result.Trim()
+                Dim standardError As System.String = errorTask.Result.Trim()
+
+                If process.ExitCode <> 0 Then
+                    Throw New System.InvalidOperationException(
+                        "The Python Agent version query failed with exit code " &
+                        process.ExitCode.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                        ". " & standardError)
+                End If
+
+                If System.String.IsNullOrWhiteSpace(standardOutput) Then
+                    Throw New System.InvalidOperationException("The Python Agent returned an empty version string.")
+                End If
+
+                Return standardOutput
+            End Using
         End Function
 
         Public Shared Async Function ExecuteAsync(

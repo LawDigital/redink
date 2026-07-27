@@ -1119,9 +1119,18 @@ Partial Public Class ThisAddIn
                             stopCurrentBatchAfterTool = True
                             restartAfterExposureMiss = preparedForNextTurn
 
-                            context.LogWarn(
-                                "Blocked tool because it was not exposed at turn start.",
-                                details:=$"host={context.HostKind}; tool={tc.ToolName}; preparedForNextTurn={If(preparedForNextTurn, "true", "false")}")
+                            If preparedForNextTurn Then
+                                ' Expected lazy-load deferral: the tool is allowed and was materialized on
+                                ' demand; it becomes callable with its full schema on the next iteration.
+                                ' This is normal operation, not a fault, so it is logged informationally.
+                                context.Log(
+                                    $"Tool '{tc.ToolName}' was lazily loaded on demand; it will be callable with its full schema on the next iteration.",
+                                    "diag")
+                            Else
+                                context.LogWarn(
+                                    "Blocked tool because it was not exposed at turn start.",
+                                    details:=$"host={context.HostKind}; tool={tc.ToolName}; preparedForNextTurn=false")
+                            End If
 
                             Exit For
                         End If
@@ -1982,10 +1991,26 @@ Partial Public Class ThisAddIn
             context.Log($"Final response origin: {If(context.SequencingState IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(context.SequencingState.FinalResponseOrigin), context.SequencingState.FinalResponseOrigin, "model_provided")}")
             context.Log($"Total iterations: {iteration}")
             context.Log($"Total tool calls: {context.AllToolResponses.Count}")
+            ' A lazy-load deferral (tool_not_exposed_in_current_turn) is expected behaviour, not a
+            ' failure: the tool was allowed and loaded on demand, and the model re-issues the call
+            ' with the real schema on the next turn. Count it separately so it is neither reported
+            ' as a failure nor as a successful tool execution.
+            Dim deferredCount As Integer = context.AllToolResponses.
+                Where(Function(r) Not r.Success AndAlso
+                                  String.Equals(r.ErrorCode,
+                                                SharedLibrary.Agents.ToolCallSequencing.ToolNotExposedInCurrentTurnCode,
+                                                StringComparison.OrdinalIgnoreCase)).Count()
             Dim successCount As Integer = context.AllToolResponses.Where(Function(r) r.Success).Count()
-            Dim failedCount As Integer = context.AllToolResponses.Where(Function(r) Not r.Success).Count()
+            Dim failedCount As Integer = context.AllToolResponses.
+                Where(Function(r) Not r.Success AndAlso
+                                  Not String.Equals(r.ErrorCode,
+                                                    SharedLibrary.Agents.ToolCallSequencing.ToolNotExposedInCurrentTurnCode,
+                                                    StringComparison.OrdinalIgnoreCase)).Count()
             context.Log($"Successful: {successCount}", If(failedCount = 0, "success", "step"))
             context.Log($"Failed: {failedCount}", If(failedCount = 0, "step", "warn"))
+            If deferredCount > 0 Then
+                context.Log($"Deferred (lazy-loaded, re-issued next turn): {deferredCount}", "diag")
+            End If
 
             If SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(context.FinalResponseContract) Then
                 currentResponse =
@@ -2083,7 +2108,7 @@ Partial Public Class ThisAddIn
     $"Host final response prepared: len={finalResponseLength}; origin={finalResponseOrigin}; blocked={If(context.FinalizationBlocked, "true", "false")}; empty={If(context.EmptyMainModelResponse, "true", "false")}")
 
             Dim sessionSucceeded As Boolean = (Not context.EmptyMainModelResponse) AndAlso (Not context.FinalizationBlocked)
-            ToolingFileLogger.EndSession(sessionSucceeded, $"Iterations: {iteration}, Tool calls: {context.AllToolResponses.Count}, Success: {successCount}, Failed: {failedCount}")
+            ToolingFileLogger.EndSession(sessionSucceeded, $"Iterations: {iteration}, Tool calls: {context.AllToolResponses.Count}, Success: {successCount}, Failed: {failedCount}" & If(deferredCount > 0, $", Deferred: {deferredCount}", ""))
 
             Return currentResponse
 

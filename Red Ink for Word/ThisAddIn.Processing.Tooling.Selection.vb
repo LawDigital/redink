@@ -570,7 +570,7 @@ Partial Public Class ThisAddIn
 
             selector.AddExtraButton("Skills && Agents…",
                 Sub(s, e)
-                    Using f As New SharedLibrary.Agents.AgentResourcesViewerForm()
+                    Using f As New SharedLibrary.Agents.AgentResourcesViewerForm(_context)
                         f.ShowDialog(selector)
                     End Using
                 End Sub)
