@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 26.7.2026
+' 27.7.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -61,7 +61,7 @@ Partial Public Class ThisAddIn
     Public Const AN4 As String = "redink_"
     Public Const AN3 As String = "redink"
 
-    Public Shared Version As String = "V.260726" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.270726" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -430,6 +430,11 @@ Partial Public Class ThisAddIn
                 ' js_run will report "sandbox_uninitialized" if this failed.
             End Try
 
+            ' Warm the Python Agent version cache off the UI thread so the first tooling run
+            ' does not pay the version-probe cost. The lazy path in ResolveAndValidateAvailability
+            ' re-probes if this warm-up is skipped or the cache is cold.
+            PrimePythonAgentVersionCache()
+
         Catch ex As System.Exception
             ' Handling errors gracefully
         End Try
@@ -441,6 +446,25 @@ Partial Public Class ThisAddIn
         End Try
 
 
+    End Sub
+
+    ''' <summary>
+    ''' Fire-and-forget warm-up of the Python Agent version cache. Runs off the UI thread and never
+    ''' throws; on failure the on-demand tool-registration path re-probes.
+    ''' </summary>
+    Private Sub PrimePythonAgentVersionCache()
+        System.Threading.Tasks.Task.Run(
+            Sub()
+                Try
+                    Dim exePath As String = SharedMethods.ExpandEnvironmentVariables(
+                        If(INI_PythonAgentPath, "").Split(";"c)(0).Trim())
+                    If Not String.IsNullOrWhiteSpace(exePath) AndAlso System.IO.File.Exists(exePath) Then
+                        SharedLibrary.Agents.PythonExecuteToolCore.QueryVersionStatus(exePath)
+                    End If
+                Catch ex As System.Exception
+                    ' Non-fatal: the tool-registration path will re-probe on demand.
+                End Try
+            End Sub)
     End Sub
 
     ''' <summary>

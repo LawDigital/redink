@@ -410,7 +410,7 @@ Namespace SharedLibrary
                     If helperSupported AndAlso pythonAgentSupported Then
                         Return "Manage Helpers"
                     ElseIf pythonAgentSupported Then
-                        Return If(IsPythonAgentInstalled(CapturedContext), "Remove Python Agent", "Install Python Agent")
+                        Return If(IsPythonAgentInstalled(CapturedContext), "Handle Python Agent", "Install Python Agent")
                     Else
                         Return If(System.IO.File.Exists(FilePath), $"Remove {helperName}", $"Install {helperName}")
                     End If
@@ -848,6 +848,30 @@ Namespace SharedLibrary
             Catch
                 Return True
             End Try
+        End Function
+
+        ''' <summary>
+        ''' Indicates whether central resource (skill/agent) writing may be enabled. When local configuration is not
+        ''' enforced (<c>INI_NoLocalConfig = False</c>) it is always allowed; otherwise it is only possible when central
+        ''' access is configured via <c>CentralConfigClients</c> or <c>CentralConfigPW</c> (same rule as Expert Config).
+        ''' </summary>
+        Public Shared Function CanEnableCentralResourceWrites(context As ISharedContext) As Boolean
+            If context Is Nothing Then Return True
+            If Not context.INI_NoLocalConfig Then Return True
+            Return IsCentralConfigUnlockConfigured(context)
+        End Function
+
+        ''' <summary>
+        ''' Applies the central-configuration unlock before enabling central resource writes. When local configuration is
+        ''' not enforced the unlock passes directly; otherwise an explicitly allowed client passes and any other client is
+        ''' prompted for the configured <c>CentralConfigPW</c>. Mirrors the Expert Config / Manage Helpers unlock.
+        ''' </summary>
+        Public Shared Function TryUnlockCentralResourceWrites(context As ISharedContext, ownerForm As Form) As Boolean
+            If context Is Nothing Then Return True
+            If Not context.INI_NoLocalConfig Then Return True
+            Return TryUnlockCentralConfig(context, ownerForm,
+                                          "Enter the central configuration password to allow writing to the shared/central resource folder:",
+                                          "Central Skill Authoring")
         End Function
 
         Private Shared Function ResolveCentralConfigPasswordForExpertConfig(context As ISharedContext) As String
@@ -1300,12 +1324,14 @@ Namespace SharedLibrary
             Const installOption As String = "Install Python Agent"
             Const updateOption As String = "Update Python Agent (keep configuration)"
             Const removeOption As String = "Remove Python Agent"
+            Const versionOption As String = "Show Python Agent Version / Protocol"
             Const releaseNotesOption As String = "Show Current Release Notes (online)"
 
             Dim options As New List(Of String)()
             If installed Then
                 options.Add(updateOption)
                 options.Add(removeOption)
+                options.Add(versionOption)
             Else
                 options.Add(installOption)
             End If
@@ -1320,10 +1346,54 @@ Namespace SharedLibrary
                 Await InstallOrUpdatePythonAgent(context, True)
             ElseIf choice = removeOption Then
                 RemovePythonAgent(context)
+            ElseIf choice = versionOption Then
+                ShowPythonAgentVersionInfo(context)
             ElseIf choice = releaseNotesOption Then
                 Await ShowPythonAgentReleaseNotes()
             End If
         End Function
+
+        ''' <summary>
+        ''' Queries the installed Python Agent for its semantic version and shows it alongside the minimum
+        ''' required and minimum recommended version and protocol values. Protocol compatibility itself is
+        ''' enforced separately through the request/response contract; only the required and recommended
+        ''' protocol minimums are shown here for reference.
+        ''' </summary>
+        Private Shared Sub ShowPythonAgentVersionInfo(context As ISharedContext)
+            Dim exePath As String = GetPythonAgentExePath(context)
+            If String.IsNullOrEmpty(exePath) OrElse Not System.IO.File.Exists(exePath) Then
+                ShowCustomMessageBox("The Python Agent is not installed or its configured path could not be found.")
+                Return
+            End If
+
+            Dim status As Agents.PythonAgentVersionStatus = Agents.PythonExecuteToolCore.QueryVersionStatus(exePath)
+
+            Dim message As New System.Text.StringBuilder()
+            If status.Succeeded Then
+                message.AppendLine($"Installed version: {status.Version}")
+            Else
+                message.AppendLine("The installed version could not be determined.")
+                If Not String.IsNullOrWhiteSpace(status.ErrorMessage) Then
+                    message.AppendLine(status.ErrorMessage)
+                End If
+            End If
+            message.AppendLine()
+            message.AppendLine($"Minimum required version: {PythonAgentMinRequiredVersion} (protocol {PythonAgentMinRequiredProtocolVersion})")
+            message.AppendLine($"Minimum recommended version: {PythonAgentMinRecommendedVersion} (protocol {PythonAgentMinRecommendedProtocolVersion})")
+
+            If status.Succeeded Then
+                message.AppendLine()
+                If Not status.MeetsRequired Then
+                    message.AppendLine("This version is below the minimum required. The Python Agent will not be available until it is updated.")
+                ElseIf Not status.MeetsRecommended Then
+                    message.AppendLine("This version works, but an update to the recommended version is advisable.")
+                Else
+                    message.AppendLine("This version meets the recommended requirements.")
+                End If
+            End If
+
+            ShowCustomMessageBox(message.ToString().TrimEnd())
+        End Sub
 
         ''' <summary>
         ''' Downloads and installs (or updates) the Python Agent. On install, the user chooses the target directory

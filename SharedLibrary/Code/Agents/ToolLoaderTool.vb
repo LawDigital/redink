@@ -62,6 +62,11 @@ Namespace Agents
             Dim sb As New StringBuilder()
             sb.Append("tool_loader: Loads one or more allowed tools by exact name so their full schema and instructions become available in a later iteration. ")
             sb.Append("Use this first when you decide a specific tool is needed. ")
+            sb.Append("TURN RULE: A newly loaded tool is NOT callable in the same turn in which you load it; its schema only becomes available from the NEXT assistant turn onward. ")
+            sb.Append("Never emit tool_loader and a call to a just-loaded tool in the same turn, and never call a tool you have not already loaded in an earlier turn. ")
+            sb.Append("Plan ahead: in a single tool_loader call, load ALL tools you expect to need for the whole task (use the 'tools' array), then wait for the next turn and call them. ")
+            sb.Append("If a tool is already exposed with its full schema this turn, call it directly and do NOT load it again via tool_loader. ")
+            sb.Append("If you decide to use a skill or an agent, load it first; once its instructions list the tools it needs, load ALL of those required tools together in a single tool_loader call before invoking them. ")
             sb.Append("Available tool index:")
 
             For Each item In items

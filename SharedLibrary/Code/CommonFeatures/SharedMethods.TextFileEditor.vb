@@ -52,7 +52,8 @@ Namespace SharedLibrary
                                         Optional ForceJson As Boolean = False,
                                         Optional _context As ISharedContext = Nothing,
                                         Optional ByRef wasSaved As System.Boolean? = Nothing,
-                                        Optional ownerHandle As System.IntPtr = Nothing)
+                                        Optional ownerHandle As System.IntPtr = Nothing,
+                                        Optional readOnlyMode As Boolean = False)
 
             ' --- Guard & Input Validation ---
             Try
@@ -195,10 +196,17 @@ Namespace SharedLibrary
                     btnToggleWordWrap.Text = If(enabled, "Word Wrap: On", "Word Wrap: Off")
                 End Sub
 
-            flowButtons.Controls.Add(btnSave)
+            If Not readOnlyMode Then
+                flowButtons.Controls.Add(btnSave)
+            End If
             flowButtons.Controls.Add(btnCancel)
             flowButtons.Controls.Add(btnToggleWordWrap)
             flowButtons.Controls.SetChildIndex(btnToggleWordWrap, 1)
+
+            If readOnlyMode Then
+                textEditor.ReadOnly = True
+                btnCancel.Text = "Close"
+            End If
 
             applyWordWrap(False)
 
@@ -452,6 +460,7 @@ Namespace SharedLibrary
             Dim doSave As System.Action =
         Sub()
             Try
+                If readOnlyMode Then Return
                 Dim dir As System.String = System.IO.Path.GetDirectoryName(filePath)
                 If dir Is Nothing OrElse dir.Trim().Length = 0 Then
                     ShowCustomMessageBox("Invalid file path or directory.")
