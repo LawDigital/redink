@@ -148,14 +148,17 @@ Namespace Agents
 
             Dim localRoot As String = If(AgentResources.ConfiguredLocalPath, "")
             Dim centralRoot As String = If(AgentResources.ConfiguredCentralPath, "")
-            Dim allowCentral As Boolean = SkillAuthorMode.AllowCentralWrites
+            Dim authorActive As Boolean = SkillAuthorMode.IsActive
+            Dim allowCentral As Boolean = authorActive AndAlso SkillAuthorMode.AllowCentralWrites
 
             idx("local_root") = localRoot
             idx("central_root") = centralRoot
+            idx("author_mode_active") = authorActive
+            idx("local_writes_allowed") = authorActive
             idx("central_writes_allowed") = allowCentral
 
-            ' Deterministic target root for NEW resources: local is always writable;
-            ' central is only writable when the user explicitly enabled central writes.
+            ' Deterministic target root for NEW resources: local is writable only while author mode is
+            ' active; central is only writable when it was additionally and explicitly enabled.
             Dim newResourceRoot As String =
                 If(allowCentral AndAlso Not String.IsNullOrWhiteSpace(centralRoot), centralRoot, localRoot)
             idx("new_resource_root") = newResourceRoot
@@ -178,6 +181,7 @@ Namespace Agents
                       "Create ALL new resources under local_root. Never write under central_root."))
 
             idx("note") =
+                If(authorActive, "", "Author mode is OFF: skills and agents are READ-ONLY; do not attempt to create or edit any resource files. ") &
                 "To modify an EXISTING resource, edit the exact 'file' path shown for it (each entry carries its 'origin' = local or central). " &
                 "Do not invent new paths for existing resources, and do not copy a central resource into local_root unless the user asks to fork it."
 

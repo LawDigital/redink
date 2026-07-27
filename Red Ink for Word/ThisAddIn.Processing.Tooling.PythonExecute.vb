@@ -57,7 +57,7 @@ Partial Public Class ThisAddIn
                 .HostServiceHandler = Nothing
             })
         Catch ex As Exception
-            ToolingFileLogger.LogWarn("python_execute is unavailable and will not be advertised.", ex:=ex)
+            ToolingFileLogger.LogWarn("python_execute is unavailable (configuration invalid or Python Agent below the minimum required version) and will not be advertised.", ex:=ex)
             Return False
         End Try
 

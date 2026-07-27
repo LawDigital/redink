@@ -202,6 +202,15 @@ Namespace SharedLibrary
         Public Const PythonAgentExe As String = "redink-pythonagent.exe"
         Public Const PythonAgentSigner As String = "VISCHER AG"
         Public Const PythonAgentDefaultDir As String = "%APPDATA%\Microsoft\Word"
+
+        ' Python Agent version / protocol gating.
+        ' "Required" values are hard minimums: below these the agent is not exposed to the tooling loop.
+        ' "Recommended" values are advisory: at or above "Required" but below "Recommended" the agent still
+        ' runs, but the user is informed that an update is advisable.
+        Public Const PythonAgentMinRequiredVersion As System.String = "0.5.0"
+        Public Const PythonAgentMinRecommendedVersion As System.String = "0.5.0"
+        Public Const PythonAgentMinRequiredProtocolVersion As System.Int32 = 2
+        Public Const PythonAgentMinRecommendedProtocolVersion As System.Int32 = 2
         Public Shared ReadOnly PythonAgentRemovalFiles As System.String() = {"README.txt", "redink-pythonagent-licenses.zip", "redink-pythonagent.exe"}
 
         ' This is used by IniImportManager.vb (to check whether the host is trusted to import settings from remote sources; used for interactive mode)

@@ -23,6 +23,7 @@ Imports System.Diagnostics
 Imports System.Drawing
 Imports System.IO
 Imports System.Windows.Forms
+Imports SharedLibrary.SharedLibrary.SharedContext
 
 Namespace Agents
 
@@ -42,16 +43,20 @@ Namespace Agents
         Private btnRefresh As Button
         Private btnClose As Button
         Private btnOpenFolder As Button
+        Private btnDelete As Button
         Private pnlButtons As FlowLayoutPanel
         Private outer As TableLayoutPanel
         Private chkAuthorMode As CheckBox
         Private chkAuthorCentral As CheckBox
         Private _dialogOwnerScope As System.IDisposable = Nothing
+        Private ReadOnly _context As ISharedContext
 
         Private Class Entry
             Public Property Display As String
             Public Property Path As String
             Public Property Description As String
+            Public Property IsLocal As Boolean
+            Public Property Kind As String
 
             Public Overrides Function ToString() As String
                 Return If(Display, MyBase.ToString())
@@ -60,7 +65,8 @@ Namespace Agents
 
         Private ReadOnly entries As New List(Of Entry)
 
-        Public Sub New(Optional title As String = Nothing)
+        Public Sub New(Optional context As ISharedContext = Nothing, Optional title As String = Nothing)
+            _context = context
             InitializeComponent(title)
             ReloadEntries()
         End Sub
@@ -132,6 +138,10 @@ Namespace Agents
             ConfigureStandardButton(Me.btnOpenFolder)
             AddHandler Me.btnOpenFolder.Click, AddressOf OnOpenFolderClicked
 
+            Me.btnDelete = New Button() With {.Text = "Delete"}
+            ConfigureStandardButton(Me.btnDelete)
+            AddHandler Me.btnDelete.Click, AddressOf OnDeleteClicked
+
             Me.chkAuthorMode = New CheckBox() With {
                 .Text = "Skill-author mode (agent may write inside skills)",
                 .AutoSize = True,
@@ -145,18 +155,24 @@ Namespace Agents
                     ElseIf Not chkAuthorMode.Checked AndAlso SkillAuthorMode.IsActive Then
                         SkillAuthorMode.Disable()
                     End If
-                    Me.chkAuthorCentral.Enabled = chkAuthorMode.Checked
+                    UpdateAuthorModeControls()
                 End Sub
 
             Me.chkAuthorCentral = New CheckBox() With {
                 .Text = "Also allow writing to the shared/central resource folder",
                 .AutoSize = True,
                 .Checked = SkillAuthorMode.AllowCentralWrites,
-                .Enabled = SkillAuthorMode.IsActive,
+                .Enabled = False,
                 .Margin = New Padding(0, 8, 12, 0)
             }
             AddHandler Me.chkAuthorCentral.CheckedChanged,
                 Sub(s, e)
+                    If chkAuthorCentral.Checked AndAlso Not SkillAuthorMode.AllowCentralWrites Then
+                        If Not SharedLibrary.SharedMethods.TryUnlockCentralResourceWrites(_context, Me) Then
+                            chkAuthorCentral.Checked = False
+                            Return
+                        End If
+                    End If
                     SkillAuthorMode.AllowCentralWrites = chkAuthorCentral.Checked
                 End Sub
 
@@ -172,6 +188,7 @@ Namespace Agents
             }
             Me.pnlButtons.Controls.Add(Me.btnClose)
             Me.pnlButtons.Controls.Add(Me.btnView)
+            Me.pnlButtons.Controls.Add(Me.btnDelete)
             Me.pnlButtons.Controls.Add(Me.btnOpenFolder)
             Me.pnlButtons.Controls.Add(Me.btnRefresh)
             Me.pnlButtons.Controls.Add(Me.chkAuthorMode)
@@ -190,6 +207,7 @@ Namespace Agents
                 Sub(s, e)
                     SendMessage(Me.txtFilter.Handle, EM_SETCUEBANNER, CType(1, IntPtr), "Filter…")
                     UpdateButtons()
+                    UpdateAuthorModeControls()
                 End Sub
         End Sub
 
@@ -224,6 +242,24 @@ Namespace Agents
             button.Margin = New Padding(6, 0, 0, 0)
         End Sub
 
+        ''' <summary>
+        ''' Enables the "central writes" checkbox only when author mode is on, a central resource root is configured, and
+        ''' central writing is permitted for this configuration (see <c>CanEnableCentralResourceWrites</c>). Clears the
+        ''' checkbox when it becomes unavailable so state cannot get stuck in a disallowed configuration.
+        ''' </summary>
+        Private Sub UpdateAuthorModeControls()
+            Dim centralConfigured As Boolean = Not String.IsNullOrWhiteSpace(AgentResources.ConfiguredCentralPath)
+            Dim canCentral As Boolean = chkAuthorMode.Checked AndAlso centralConfigured AndAlso
+                SharedLibrary.SharedMethods.CanEnableCentralResourceWrites(_context)
+
+            Me.chkAuthorCentral.Enabled = canCentral
+
+            If Not canCentral AndAlso Me.chkAuthorCentral.Checked Then
+                Me.chkAuthorCentral.Checked = False
+                SkillAuthorMode.AllowCentralWrites = False
+            End If
+        End Sub
+
         Private Sub ReloadEntries()
             entries.Clear()
 
@@ -236,7 +272,9 @@ Namespace Agents
                                    If(sk.Enabled, "", "  [disabled]") &
                                    If(String.IsNullOrWhiteSpace(sk.Description), "", " — " & sk.Description.Trim()),
                         .Path = sk.FilePath,
-                        .Description = If(sk.Description, "")
+                        .Description = If(sk.Description, ""),
+                        .IsLocal = sk.IsLocal,
+                        .Kind = "Skill"
                     })
                 Next
 
@@ -246,7 +284,9 @@ Namespace Agents
                                    If(ag.Enabled, "", "  [disabled]") &
                                    If(String.IsNullOrWhiteSpace(ag.Description), "", " — " & ag.Description.Trim()),
                         .Path = ag.FilePath,
-                        .Description = If(ag.Description, "")
+                        .Description = If(ag.Description, ""),
+                        .IsLocal = ag.IsLocal,
+                        .Kind = "Agent"
                     })
                 Next
 
@@ -287,6 +327,7 @@ Namespace Agents
         Private Sub UpdateButtons()
             Dim hasSelection As Boolean = Me.lstItems.SelectedItem IsNot Nothing
             Me.btnView.Enabled = hasSelection
+            Me.btnDelete.Enabled = hasSelection
             Me.btnOpenFolder.Enabled = Not String.IsNullOrWhiteSpace(AgentResources.ConfiguredLocalPath)
         End Sub
 
@@ -320,6 +361,89 @@ Namespace Agents
             ApplyFilter()
         End Sub
 
+        ''' <summary>
+        ''' Deletes the selected skill or agent after an explicit, irreversible-action confirmation that lists every file
+        ''' (including files in the resource's own subdirectories) that will be removed. Deletion is only permitted when the
+        ''' matching write permission is active: local author mode for local resources, and additionally the central-write
+        ''' option for central resources. Folder-based resources (SKILL.md / AGENT.md) delete their own folder; a single-file
+        ''' agent (agents/&lt;name&gt;.md) deletes only that file so the shared agents/ folder is preserved.
+        ''' </summary>
+        Private Sub OnDeleteClicked(sender As Object, e As EventArgs)
+            Dim sel = TryCast(Me.lstItems.SelectedItem, Entry)
+            If sel Is Nothing Then Return
+
+            If String.IsNullOrWhiteSpace(sel.Path) OrElse Not File.Exists(sel.Path) Then
+                SharedLibrary.SharedMethods.ShowCustomMessageBox("File not found: " & If(sel.Path, ""))
+                Return
+            End If
+
+            ' Permission gate: local resources need author mode; central resources need central writes too.
+            If sel.IsLocal Then
+                If Not SkillAuthorMode.IsActive Then
+                    SharedLibrary.SharedMethods.ShowCustomMessageBox("Enable ""Skill-author mode"" before deleting local resources.")
+                    Return
+                End If
+            Else
+                If Not (SkillAuthorMode.IsActive AndAlso SkillAuthorMode.AllowCentralWrites) Then
+                    SharedLibrary.SharedMethods.ShowCustomMessageBox("Enable ""Skill-author mode"" and ""Also allow writing to the shared/central resource folder"" before deleting central resources.")
+                    Return
+                End If
+            End If
+
+            ' Determine the deletion target: folder-based resources own their folder; single-file agents own only the file.
+            Dim fileName As String = Path.GetFileName(sel.Path)
+            Dim folderBased As Boolean =
+                fileName.Equals("SKILL.md", StringComparison.OrdinalIgnoreCase) OrElse
+                fileName.Equals("AGENT.md", StringComparison.OrdinalIgnoreCase)
+
+            Dim targetDir As String = Nothing
+            Dim filesToDelete As New List(Of String)
+
+            Try
+                If folderBased Then
+                    targetDir = Path.GetDirectoryName(sel.Path)
+                    If String.IsNullOrWhiteSpace(targetDir) OrElse Not Directory.Exists(targetDir) Then
+                        SharedLibrary.SharedMethods.ShowCustomMessageBox("Resource folder not found: " & If(targetDir, ""))
+                        Return
+                    End If
+                    filesToDelete.AddRange(Directory.EnumerateFiles(targetDir, "*", SearchOption.AllDirectories))
+                Else
+                    filesToDelete.Add(sel.Path)
+                End If
+            Catch ex As Exception
+                SharedLibrary.SharedMethods.ShowCustomMessageBox("Failed to enumerate files for deletion: " & ex.Message)
+                Return
+            End Try
+
+            Dim fileList As String = String.Join(Environment.NewLine, filesToDelete.Select(Function(p) "  • " & p))
+            Dim scopeText As String = If(folderBased,
+                                         "The following folder and all its files will be permanently deleted:" & Environment.NewLine & "  " & targetDir,
+                                         "The following file will be permanently deleted:")
+
+            Dim message As String =
+                $"Delete {sel.Kind.ToLowerInvariant()} ({If(sel.IsLocal, "local", "central")})?" & Environment.NewLine & Environment.NewLine &
+                "This CANNOT be undone." & Environment.NewLine & Environment.NewLine &
+                scopeText & Environment.NewLine &
+                fileList
+
+            If SharedLibrary.SharedMethods.ShowCustomYesNoBox(message, "Delete", "Cancel") <> 1 Then
+                Return
+            End If
+
+            Try
+                If folderBased Then
+                    Directory.Delete(targetDir, True)
+                Else
+                    File.Delete(sel.Path)
+                End If
+            Catch ex As Exception
+                SharedLibrary.SharedMethods.ShowCustomMessageBox("Deletion failed: " & ex.Message)
+                Return
+            End Try
+
+            ReloadEntries()
+        End Sub
+
         Private Sub OnViewClicked(sender As Object, e As EventArgs)
             Dim sel = TryCast(Me.lstItems.SelectedItem, Entry)
             If sel Is Nothing Then Return
@@ -330,14 +454,22 @@ Namespace Agents
             End If
 
             Try
+                ' Editing is only writable when the matching author-mode permission is active:
+                ' local author mode for local resources, plus central writes for central resources.
+                Dim canEdit As Boolean =
+                    If(sel.IsLocal,
+                       SkillAuthorMode.IsActive,
+                       SkillAuthorMode.IsActive AndAlso SkillAuthorMode.AllowCentralWrites)
+
                 Dim headerText As String =
-                    "Edit agent resource file:" & Environment.NewLine &
-                    sel.Path
+                    If(canEdit, "Edit agent resource file:", "View agent resource file (read-only — enable Skill-author mode to edit):") &
+                    Environment.NewLine & sel.Path
 
                 SharedLibrary.SharedMethods.ShowTextFileEditor(
                     sel.Path,
                     headerText,
-                    ownerHandle:=Me.Handle)
+                    ownerHandle:=Me.Handle,
+                    readOnlyMode:=Not canEdit)
             Catch ex As Exception
                 SharedLibrary.SharedMethods.ShowCustomMessageBox("Failed to open file: " & ex.Message)
             End Try
