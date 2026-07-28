@@ -4485,6 +4485,15 @@ Partial Public Class ThisAddIn
                 GoTo __AfterDispatch
             End If
 
+            If SharedLibrary.Agents.ToolDescribeTool.IsDescribeTool(toolCall.ToolName) Then
+                Dim describeRegistry As SharedLibrary.Agents.ToolRegistry =
+                    If(context.AuthoritativeToolRegistrySnapshot,
+                       If(context.AuthoritativeToolRegistry, context.AllowedToolRegistry))
+                response.Response = SharedLibrary.Agents.ToolDescribeTool.Execute(toolCall.Arguments, describeRegistry)
+                response.Success = Not String.IsNullOrWhiteSpace(response.Response)
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+                GoTo __AfterDispatch
+            End If
             ' Agent layer (memory_*, skill_use, agent_*) — single-line dispatcher.
             If SharedLibrary.Agents.AgentToolRouter.IsAgentLayerTool(toolCall.ToolName) Then
                 Dim __agentJson = Await SharedLibrary.Agents.AgentToolRouter.TryHandleAsync(
@@ -4812,6 +4821,7 @@ __AfterDispatch:
             tools.AddRange(SharedLibrary.Agents.WordTools.BuildAll())
             tools.Add(SharedLibrary.Agents.JsRunTool.Build())
             tools.Add(SharedLibrary.Agents.SkillInvokeTool.Build())
+            tools.Add(SharedLibrary.Agents.ToolDescribeTool.Build())
 
             Dim __agentReg As New SharedLibrary.Agents.ToolRegistry()
             SharedLibrary.Agents.ToolRegistryBuilder.AddSkills(__agentReg, SharedLibrary.Agents.AgentResources.Skills)

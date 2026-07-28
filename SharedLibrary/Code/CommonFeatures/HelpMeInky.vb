@@ -776,7 +776,7 @@ Namespace SharedLibrary
 
         ''' <summary>
         ''' Loads manual text from an HTTP(S) URL or a local file path.
-        ''' Supports basic PDF detection for remote content and uses helper readers for PDF/RTF/DOCX.
+        ''' Supports remote PDF/DOCX/RTF downloads and a conservative SharePoint download fallback.
         ''' </summary>
         Private Shared Async Function GetManualTextFreshAsync(pathOrUrl As String, Optional context As ISharedContext = Nothing) As Task(Of String)
             If String.IsNullOrWhiteSpace(pathOrUrl) Then Return ""
@@ -793,101 +793,22 @@ Namespace SharedLibrary
             ' Remote URL
             If s.StartsWith("http://", StringComparison.OrdinalIgnoreCase) OrElse s.StartsWith("https://", StringComparison.OrdinalIgnoreCase) Then
                 Try
-                    Dim response = Await SharedMethods.SendHttpRequestAsync(
-                        New SharedMethods.SharedHttpRequest() With {
-                            .Url = s,
-                            .Method = "GET",
-                            .TimeoutMs = 30000,
-                            .UserAgent = "RedInk/1.0 (+https://redink.ai)",
-                            .Accept = "application/pdf, text/*, */*",
-                            .StackPreference = SharedMethods.HttpStackPreference.PreferConfiguredDefault
-                        }).ConfigureAwait(False)
+                    Dim candidateUrls As List(Of String) = BuildRemoteManualCandidateUrls(s)
 
-                    If response Is Nothing OrElse response.StatusCode < 200 OrElse response.StatusCode >= 300 Then
-                        Return ""
-                    End If
-
-                    Debug.WriteLine("Manual HTTP stack: " & response.UsedStack)
-
-                    Dim data As Byte() = If(response.BodyBytes, New Byte() {})
-
-                    ' Extract media type if provided
-                    Dim mediaType As String = ""
-                    If Not String.IsNullOrEmpty(response.ContentType) Then
-                        mediaType = response.ContentType.ToLowerInvariant()
-                    End If
-
-                    ' PDF detection
-                    Dim isPdf As Boolean = False
-
-                    ' 1) Declared content-type
-                    If Not String.IsNullOrEmpty(mediaType) AndAlso mediaType.IndexOf("pdf", StringComparison.OrdinalIgnoreCase) >= 0 Then
-                        isPdf = True
-                    End If
-
-                    ' 2) URL contains ".pdf" anywhere (also handles querystring)
-                    If Not isPdf Then
-                        If s.IndexOf(".pdf", StringComparison.OrdinalIgnoreCase) >= 0 Then
-                            isPdf = True
+                    For Each candidateUrl As String In candidateUrls
+                        Dim remoteText As String = Await TryGetRemoteManualTextAsync(candidateUrl, context).ConfigureAwait(False)
+                        If Not String.IsNullOrEmpty(remoteText) Then
+                            Return remoteText
                         End If
-                    End If
+                    Next
 
-                    ' 3) Magic header scan for "%PDF" within first KB (after possible BOM or garbage)
-                    If Not isPdf AndAlso data.Length >= 4 Then
-                        Dim scanMax As Integer = Math.Min(data.Length - 4, 1024)
-                        Dim i As Integer = 0
-                        While i <= scanMax
-                            If data(i) = AscW("%"c) AndAlso data(i + 1) = AscW("P"c) AndAlso data(i + 2) = AscW("D"c) AndAlso data(i + 3) = AscW("F"c) Then
-                                isPdf = True
-                                Exit While
-                            End If
-                            i += 1
-                        End While
-                    End If
-
-                    If isPdf Then
-                        Try
-                            Dim tmpPath As String = Path.Combine(Path.GetTempPath(), "manual_" & Guid.NewGuid().ToString("N") & ".pdf")
-                            File.WriteAllBytes(tmpPath, data)
-                            Return Await SharedMethods.ReadPdfAsText(tmpPath, True, False, False, context).ConfigureAwait(False)
-                        Catch
-                            Return ""
-                        End Try
-                    End If
-
-                    ' Fallback: decode as text
-                    Dim enc As Encoding = Encoding.UTF8
-                    If Not String.IsNullOrEmpty(response.CharSet) Then
-                        Try
-                            enc = Encoding.GetEncoding(response.CharSet)
-                        Catch
-                            enc = Encoding.UTF8
-                        End Try
-                    End If
-
-                    Dim text As String = enc.GetString(data)
-
-                    ' HTML -> plain
-                    If Not String.IsNullOrEmpty(mediaType) AndAlso mediaType.IndexOf("html", StringComparison.OrdinalIgnoreCase) >= 0 Then
-                        If LooksLikeHtml(text) Then
-                            Return HtmlToPlain(text)
-                        Else
-                            Return text
-                        End If
-                    End If
-
-                    ' Generic octet-stream sometimes still is HTML
-                    If LooksLikeHtml(text) Then
-                        Return HtmlToPlain(text)
-                    End If
-
-                    Return text
+                    Return ""
                 Catch
                     Return ""
                 End Try
             End If
 
-            ' Local file path
+            ' Local file path (includes UNC paths)
             Try
                 If Not File.Exists(s) Then Return ""
                 Select Case Path.GetExtension(s).ToLowerInvariant()
@@ -913,6 +834,279 @@ Namespace SharedLibrary
             Catch
                 Return ""
             End Try
+        End Function
+
+        Private Shared Async Function TryGetRemoteManualTextAsync(requestUrl As String, Optional context As ISharedContext = Nothing) As Task(Of String)
+            Try
+                Dim response = Await SharedMethods.SendHttpRequestAsync(
+                    New SharedMethods.SharedHttpRequest() With {
+                        .Url = requestUrl,
+                        .Method = "GET",
+                        .TimeoutMs = 30000,
+                        .UserAgent = "RedInk/1.0 (+https://redink.ai)",
+                        .Accept = "application/pdf, application/vnd.openxmlformats-officedocument.wordprocessingml.document, application/rtf, text/*, */*",
+                        .StackPreference = SharedMethods.HttpStackPreference.PreferConfiguredDefault
+                    }).ConfigureAwait(False)
+
+                If response Is Nothing OrElse response.StatusCode < 200 OrElse response.StatusCode >= 300 Then
+                    Return ""
+                End If
+
+                Debug.WriteLine("Manual HTTP stack: " & response.UsedStack)
+
+                Dim data As Byte() = If(response.BodyBytes, New Byte() {})
+                Dim mediaType As String = ""
+
+                If Not String.IsNullOrEmpty(response.ContentType) Then
+                    mediaType = response.ContentType.ToLowerInvariant()
+                End If
+
+                Dim detectedExtension As String = DetectRemoteManualExtension(requestUrl, mediaType, data)
+                Select Case detectedExtension
+                    Case ".pdf", ".docx", ".rtf"
+                        Return Await TryReadRemoteBinaryDocumentAsync(data, detectedExtension, context).ConfigureAwait(False)
+                End Select
+
+                Dim enc As Encoding = Encoding.UTF8
+                If Not String.IsNullOrEmpty(response.CharSet) Then
+                    Try
+                        enc = Encoding.GetEncoding(response.CharSet)
+                    Catch
+                        enc = Encoding.UTF8
+                    End Try
+                End If
+
+                Dim text As String = enc.GetString(data)
+
+                If LooksLikeHtml(text) Then
+                    If IsSharePointLikeUrl(requestUrl) AndAlso LooksLikeSharePointSignInOrViewerPage(text) Then
+                        Return ""
+                    End If
+
+                    Return HtmlToPlain(text)
+                End If
+
+                Return text
+            Catch
+                Return ""
+            End Try
+        End Function
+
+        Private Shared Async Function TryReadRemoteBinaryDocumentAsync(data As Byte(), extension As String, Optional context As ISharedContext = Nothing) As Task(Of String)
+            If data Is Nothing OrElse data.Length = 0 Then Return ""
+
+            Dim tempPath As String = Path.Combine(Path.GetTempPath(), "manual_" & Guid.NewGuid().ToString("N") & extension)
+
+            Try
+                File.WriteAllBytes(tempPath, data)
+
+                Select Case extension
+                    Case ".pdf"
+                        Return Await SharedMethods.ReadPdfAsText(tempPath, True, False, False, context).ConfigureAwait(False)
+                    Case ".docx"
+                        Return SharedMethods.ReadDocxSandboxed(tempPath)
+                    Case ".rtf"
+                        Return SharedMethods.ReadRtfAsText(tempPath)
+                    Case Else
+                        Return ""
+                End Select
+            Catch
+                Return ""
+            Finally
+                Try
+                    If File.Exists(tempPath) Then
+                        File.Delete(tempPath)
+                    End If
+                Catch
+                End Try
+            End Try
+        End Function
+
+        Private Shared Function BuildRemoteManualCandidateUrls(url As String) As List(Of String)
+            Dim result As New List(Of String)()
+
+            AddRemoteManualCandidateUrl(result, url)
+
+            If IsSharePointLikeUrl(url) Then
+                AddRemoteManualCandidateUrl(result, TryBuildSharePointDownloadUrl(url))
+            End If
+
+            Return result
+        End Function
+
+        Private Shared Sub AddRemoteManualCandidateUrl(urls As List(Of String), candidateUrl As String)
+            If urls Is Nothing OrElse String.IsNullOrWhiteSpace(candidateUrl) Then Return
+
+            For Each existingUrl As String In urls
+                If String.Equals(existingUrl, candidateUrl, StringComparison.OrdinalIgnoreCase) Then
+                    Return
+                End If
+            Next
+
+            urls.Add(candidateUrl)
+        End Sub
+
+        Private Shared Function TryBuildSharePointDownloadUrl(url As String) As String
+            If String.IsNullOrWhiteSpace(url) Then Return ""
+
+            Try
+                Dim builder As New UriBuilder(url)
+                Dim query As String = builder.Query
+
+                If query.StartsWith("?", StringComparison.Ordinal) Then
+                    query = query.Substring(1)
+                End If
+
+                If Regex.IsMatch(query, "(^|&)web=1($|&)", RegexOptions.IgnoreCase) Then
+                    query = Regex.Replace(query, "(^|&)web=1($|&)", "$1web=0$2", RegexOptions.IgnoreCase)
+                End If
+
+                If Not Regex.IsMatch(query, "(^|&)download=1($|&)", RegexOptions.IgnoreCase) Then
+                    If query.Length > 0 Then
+                        query &= "&download=1"
+                    Else
+                        query = "download=1"
+                    End If
+                End If
+
+                builder.Query = query
+
+                Dim candidateUrl As String = builder.Uri.AbsoluteUri
+                If String.Equals(candidateUrl, url, StringComparison.OrdinalIgnoreCase) Then
+                    Return ""
+                End If
+
+                Return candidateUrl
+            Catch
+                Return ""
+            End Try
+        End Function
+
+        Private Shared Function IsSharePointLikeUrl(url As String) As Boolean
+            If String.IsNullOrWhiteSpace(url) Then Return False
+
+            Dim uri As Uri = Nothing
+            If Not Uri.TryCreate(url, UriKind.Absolute, uri) OrElse uri Is Nothing Then
+                Return False
+            End If
+
+            If Not String.Equals(uri.Scheme, "http", StringComparison.OrdinalIgnoreCase) AndAlso
+               Not String.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase) Then
+                Return False
+            End If
+
+            Dim host As String = uri.Host
+
+            Return host.EndsWith(".sharepoint.com", StringComparison.OrdinalIgnoreCase) OrElse
+                   host.EndsWith(".sharepoint-df.com", StringComparison.OrdinalIgnoreCase) OrElse
+                   host.Equals("sharepoint.com", StringComparison.OrdinalIgnoreCase) OrElse
+                   host.Equals("onedrive.live.com", StringComparison.OrdinalIgnoreCase) OrElse
+                   host.Equals("1drv.ms", StringComparison.OrdinalIgnoreCase)
+        End Function
+
+        Private Shared Function DetectRemoteManualExtension(requestUrl As String, mediaType As String, data As Byte()) As String
+            If Not String.IsNullOrEmpty(mediaType) Then
+                If mediaType.IndexOf("pdf", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    Return ".pdf"
+                End If
+
+                If mediaType.IndexOf("wordprocessingml.document", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    Return ".docx"
+                End If
+
+                If mediaType.IndexOf("rtf", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    Return ".rtf"
+                End If
+            End If
+
+            Dim urlExtension As String = GetUrlPathExtension(requestUrl)
+            Select Case urlExtension
+                Case ".pdf", ".docx", ".rtf"
+                    Return urlExtension
+            End Select
+
+            If LooksLikePdfBytes(data) Then
+                Return ".pdf"
+            End If
+
+            If LooksLikeRtfBytes(data) Then
+                Return ".rtf"
+            End If
+
+            Return ""
+        End Function
+
+        Private Shared Function GetUrlPathExtension(url As String) As String
+            If String.IsNullOrWhiteSpace(url) Then Return ""
+
+            Try
+                Dim uri As Uri = Nothing
+                If Uri.TryCreate(url, UriKind.Absolute, uri) AndAlso uri IsNot Nothing Then
+                    Return Path.GetExtension(uri.AbsolutePath).ToLowerInvariant()
+                End If
+            Catch
+            End Try
+
+            Try
+                Dim normalized As String = url
+                Dim q As Integer = normalized.IndexOf("?"c)
+                If q >= 0 Then
+                    normalized = normalized.Substring(0, q)
+                End If
+
+                Dim h As Integer = normalized.IndexOf("#"c)
+                If h >= 0 Then
+                    normalized = normalized.Substring(0, h)
+                End If
+
+                Return Path.GetExtension(normalized).ToLowerInvariant()
+            Catch
+                Return ""
+            End Try
+        End Function
+
+        Private Shared Function LooksLikePdfBytes(data As Byte()) As Boolean
+            If data Is Nothing OrElse data.Length < 4 Then Return False
+
+            Dim scanMax As Integer = Math.Min(data.Length - 4, 1024)
+            Dim i As Integer = 0
+
+            While i <= scanMax
+                If data(i) = AscW("%"c) AndAlso
+                   data(i + 1) = AscW("P"c) AndAlso
+                   data(i + 2) = AscW("D"c) AndAlso
+                   data(i + 3) = AscW("F"c) Then
+                    Return True
+                End If
+
+                i += 1
+            End While
+
+            Return False
+        End Function
+
+        Private Shared Function LooksLikeRtfBytes(data As Byte()) As Boolean
+            If data Is Nothing OrElse data.Length = 0 Then Return False
+
+            Try
+                Dim probeLength As Integer = Math.Min(data.Length, 32)
+                Dim probe As String = Encoding.ASCII.GetString(data, 0, probeLength).TrimStart(ChrW(&HFEFF), ChrW(&HFFFE), ControlChars.NullChar)
+                Return probe.StartsWith("{\rtf", StringComparison.OrdinalIgnoreCase)
+            Catch
+                Return False
+            End Try
+        End Function
+
+        Private Shared Function LooksLikeSharePointSignInOrViewerPage(html As String) As Boolean
+            If String.IsNullOrWhiteSpace(html) OrElse Not LooksLikeHtml(html) Then Return False
+
+            Return html.IndexOf("login.microsoftonline.com", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+                   html.IndexOf("Sign in to your account", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+                   html.IndexOf("WopiFrame.aspx", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+                   html.IndexOf("_layouts/15/", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+                   html.IndexOf("Office Online", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+                   (html.IndexOf("OneDrive", StringComparison.OrdinalIgnoreCase) >= 0 AndAlso
+                    html.IndexOf("<script", StringComparison.OrdinalIgnoreCase) >= 0)
         End Function
 
         ''' <summary>

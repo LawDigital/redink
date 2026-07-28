@@ -19,6 +19,7 @@ Notes:
 | `web_grounding` | Uses a web-enabled model to perform cited live-web research. | Yes | Yes | Yes |
 | `knowledge_search` | Searches the user's local knowledge store for relevant internal content. | Yes | Yes | Yes |
 | `tool_loader` | Lazily loads full tool definitions only when a specific tool is needed. | Yes | Yes | Yes |
+| `tool_describe` | Returns the full parameter schema and usage instructions for one or more tools (by name or name prefix) without making them callable, so overlapping tools can be compared before loading. | Yes | Yes | No |
 | `memory_put` | Stores a key/value memory entry with summary, tags, and metadata. | Yes | Yes | No |
 | `memory_get` | Retrieves a stored memory entry by key. | Yes | Yes | No |
 | `memory_list` | Lists stored memory entries and their summaries. | Yes | Yes | No |
@@ -148,6 +149,20 @@ Notes:
 | `list_collection_use_cases` | Lists configured collection use cases for structured extraction workflows. | No | Yes | Yes |
 | `collect_data` | Runs a configured data-collection workflow against the current session files. | No | Yes | Yes |
 | `preview_collection` | Previews how a configured data-collection workflow would interpret the current request and files. | No | Yes | Yes |
+
+## Choosing among overlapping tools
+
+Several tool families overlap. Use `tool_describe` to read each candidate's exact
+parameters before selecting one. Key distinctions:
+
+- **Open-document vs. file-on-disk vs. host-bridge Word tools.**
+  - `worddoc_*` operate on a document already OPEN in Word (Word host only), addressing the active or a named open document (read-oriented, plus `worddoc_insert_text`/`worddoc_replace`/`worddoc_format`/`worddoc_comment_add`).
+  - `word_*` (for example `word_extract_text`, `word_write`, `word_markup`, `word_format`, `word_comment_add`) operate on a `.docx` FILE by path and are available in Word, Outlook, and AutoPilot.
+  - `word_doc_*` (`word_doc_read`/`word_doc_edit`/`word_doc_create`/`word_doc_export_pdf`) go through the Word host bridge for the active document (Word host only).
+- **Editing the open Word document in the Word chatbot** is normally done through the inline `[#REPLACE …]`/`[#INSERTAFTER …]` command channel, which takes precedence over tool calls.
+- **Word content edits on a file.** `word_write` inserts/replaces/appends plain text; `word_markup` applies tracked-change style markup; `word_format` changes paragraph/run formatting only. Pick by whether you need content, tracked changes, or formatting.
+- **Workspace vs. text tools.** `workspace_*` act inside the connected workspace boundary; `text_*` act on allowed-boundary files by path. Both are available on all three surfaces.
+- **Skills vs. agents.** `skill_use` loads instructions into the SHARED conversation; `agent_<name>` delegates a self-contained sub-task in an ISOLATED context.
 
 ## Online Sources
 

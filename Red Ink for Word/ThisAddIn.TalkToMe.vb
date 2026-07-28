@@ -26,6 +26,7 @@ Imports System.Text.RegularExpressions
 Imports System.Threading
 Imports System.Threading.Tasks
 Imports System.Windows.Forms
+Imports NAudio.CoreAudioApi
 Imports NAudio.Wave
 Imports Newtonsoft.Json
 Imports Newtonsoft.Json.Linq
@@ -4019,6 +4020,18 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
         Private ReadOnly _descriptors As List(Of LiveEngineDescriptor)
         Private ReadOnly _savedLanguageByEngine As Dictionary(Of String, String)
 
+        Private NotInheritable Class AudioInputDeviceChoice
+            Public Property DeviceId As String = ""
+            Public Property WaveDeviceIndex As Integer = 0
+            Public Property DisplayText As String = ""
+
+            Public Overrides Function ToString() As String
+                Return DisplayText
+            End Function
+        End Class
+
+        Private ReadOnly _audioInputDevices As New List(Of AudioInputDeviceChoice)()
+
         Private cboEngine As ComboBox
         Private cboLanguage As ComboBox
         Private cboMicrophone As ComboBox
@@ -4225,17 +4238,7 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
                 cboEngine.Items.Add(descriptor.DisplayName)
             Next
 
-            Dim maxMicrophoneItemWidth As Integer = cboMicrophone.DropDownWidth
-
-            For i As Integer = 0 To WaveInEvent.DeviceCount - 1
-                Dim microphoneText As String = $"{i}: {WaveInEvent.GetCapabilities(i).ProductName}"
-                cboMicrophone.Items.Add(microphoneText)
-                maxMicrophoneItemWidth = System.Math.Max(
-                    maxMicrophoneItemWidth,
-                    TextRenderer.MeasureText(microphoneText, cboMicrophone.Font).Width + 30)
-            Next
-
-            cboMicrophone.DropDownWidth = maxMicrophoneItemWidth
+            LoadAudioInputDevices(currentMicrophoneDeviceIndex)
 
             AddHandler cboEngine.SelectedIndexChanged, AddressOf OnEngineChanged
             AddHandler btnConfigureSpeechOutput.Click, AddressOf OnConfigureSpeechOutputClick
@@ -4251,11 +4254,6 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
 
             If cboEngine.Items.Count > 0 Then
                 cboEngine.SelectedIndex = selectedIndex
-            End If
-
-            If cboMicrophone.Items.Count > 0 Then
-                Dim micIndex As Integer = Math.Max(0, Math.Min(currentMicrophoneDeviceIndex, cboMicrophone.Items.Count - 1))
-                cboMicrophone.SelectedIndex = micIndex
             End If
 
             Dim modeIndex As Integer = cboSpeechOutputMode.FindStringExact(SelectedSpeechOutputMode)
@@ -4295,6 +4293,90 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
                 Me.Size = New System.Drawing.Size(Math.Max(Me.Width, minWidth), Math.Max(Me.Height, minHeight))
             End If
         End Sub
+
+        Private Sub LoadAudioInputDevices(selectedWaveDeviceIndex As Integer)
+            cboMicrophone.Items.Clear()
+            _audioInputDevices.Clear()
+
+            Dim maxMicrophoneItemWidth As Integer = cboMicrophone.DropDownWidth
+
+            Try
+                Using enumr As New MMDeviceEnumerator()
+                    Dim devs = enumr.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active)
+
+                    For Each d As MMDevice In devs
+                        Dim friendlyName As String = If(d.FriendlyName, "").Trim()
+                        If friendlyName.Length = 0 Then
+                            friendlyName = d.ID
+                        End If
+
+                        Dim choice As New AudioInputDeviceChoice With {
+                            .DeviceId = d.ID,
+                            .WaveDeviceIndex = FindLegacyWaveInputDeviceIndex(friendlyName),
+                            .DisplayText = friendlyName
+                        }
+
+                        _audioInputDevices.Add(choice)
+                        cboMicrophone.Items.Add(choice)
+                        maxMicrophoneItemWidth = System.Math.Max(
+                            maxMicrophoneItemWidth,
+                            TextRenderer.MeasureText(choice.DisplayText, cboMicrophone.Font).Width + 30)
+                    Next
+                End Using
+            Catch
+            End Try
+
+            If _audioInputDevices.Count = 0 Then
+                For i As Integer = 0 To WaveInEvent.DeviceCount - 1
+                    Dim microphoneText As String = $"{i}: {WaveInEvent.GetCapabilities(i).ProductName}"
+                    Dim choice As New AudioInputDeviceChoice With {
+                        .DeviceId = "",
+                        .WaveDeviceIndex = i,
+                        .DisplayText = microphoneText
+                    }
+
+                    _audioInputDevices.Add(choice)
+                    cboMicrophone.Items.Add(choice)
+                    maxMicrophoneItemWidth = System.Math.Max(
+                        maxMicrophoneItemWidth,
+                        TextRenderer.MeasureText(choice.DisplayText, cboMicrophone.Font).Width + 30)
+                Next
+            End If
+
+            cboMicrophone.DropDownWidth = maxMicrophoneItemWidth
+
+            If cboMicrophone.Items.Count = 0 Then
+                Return
+            End If
+
+            Dim selectedIndex As Integer =
+                _audioInputDevices.FindIndex(Function(choice) choice.WaveDeviceIndex = selectedWaveDeviceIndex)
+
+            cboMicrophone.SelectedIndex = If(selectedIndex >= 0, selectedIndex, 0)
+        End Sub
+
+        Private Shared Function FindLegacyWaveInputDeviceIndex(friendlyName As String) As Integer
+            Dim normalizedFriendlyName As String = If(friendlyName, "").Trim()
+
+            For i As Integer = 0 To WaveInEvent.DeviceCount - 1
+                Dim waveName As String = If(WaveInEvent.GetCapabilities(i).ProductName, "").Trim()
+
+                If String.Equals(waveName, normalizedFriendlyName, StringComparison.OrdinalIgnoreCase) Then
+                    Return i
+                End If
+
+                If normalizedFriendlyName.IndexOf(waveName, StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+                   waveName.IndexOf(normalizedFriendlyName, StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    Return i
+                End If
+            Next
+
+            Return 0
+        End Function
+
+        Private Function GetSelectedAudioInputDeviceChoice() As AudioInputDeviceChoice
+            Return TryCast(cboMicrophone.SelectedItem, AudioInputDeviceChoice)
+        End Function
 
         Private Sub RefreshSpeechOutputUi()
             Dim available As Boolean = _ownerAdapter IsNot Nothing AndAlso _ownerAdapter.IsSpeechOutputAvailable
@@ -4375,9 +4457,11 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
                 Return
             End If
 
+            Dim selectedMicrophone As AudioInputDeviceChoice = GetSelectedAudioInputDeviceChoice()
+
             SelectedDescriptor = _descriptors(cboEngine.SelectedIndex)
             SelectedLanguage = If(cboLanguage.SelectedItem IsNot Nothing, cboLanguage.SelectedItem.ToString(), "auto")
-            SelectedMicrophoneDeviceIndex = Math.Max(0, cboMicrophone.SelectedIndex)
+            SelectedMicrophoneDeviceIndex = If(selectedMicrophone IsNot Nothing, selectedMicrophone.WaveDeviceIndex, Math.Max(0, cboMicrophone.SelectedIndex))
             IncludeFullDocument = chkIncludeDocument.Checked
             SelectedSpeechOutputEnabled = chkSpeechOutputEnabled.Checked
             SelectedSpeechOutputMode = If(cboSpeechOutputMode.SelectedItem IsNot Nothing, cboSpeechOutputMode.SelectedItem.ToString(), "Queue")
