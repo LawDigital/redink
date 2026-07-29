@@ -1529,6 +1529,31 @@ Partial Public Class ThisAddIn
     End Sub
 
     ''' <summary>
+    ''' Builds the "system status" sentence containing the configured monitor link,
+    ''' or an empty string when no valid link is configured. Scheme-less values
+    ''' (e.g. "www.example.com/status") are normalized to https so a configured link
+    ''' is always surfaced. Used by every sender-facing auto-response notice.
+    ''' </summary>
+    Private Function BuildMonitorLinkStatusMessage() As String
+        Dim monitorLink As String = If(_context.INI_MonitorLink, "").Trim()
+        If String.IsNullOrWhiteSpace(monitorLink) Then Return ""
+
+        Dim normalizedMonitorLink As String = monitorLink
+        If normalizedMonitorLink.IndexOf("://", StringComparison.Ordinal) < 0 Then
+            normalizedMonitorLink = "https://" & normalizedMonitorLink
+        End If
+
+        Dim monitorUri As System.Uri = Nothing
+        If System.Uri.TryCreate(normalizedMonitorLink, System.UriKind.Absolute, monitorUri) AndAlso
+           (String.Equals(monitorUri.Scheme, System.Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) OrElse
+            String.Equals(monitorUri.Scheme, System.Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)) Then
+            Return SP_AutoPilot_HoldingResponseStatus.Replace("{MonitorLink}", normalizedMonitorLink)
+        End If
+
+        Return ""
+    End Function
+
+    ''' <summary>
     ''' Runs the full AutoPilot pre-filter pipeline against a mail item to determine
     ''' whether it will actually be processed. This is the same set of checks performed
     ''' at the top of ProcessIncomingMailAsync, extracted here so that queue notifications
@@ -1713,16 +1738,19 @@ Partial Public Class ThisAddIn
 
                     Dim isRepeat = (lastNotifiedUtc <> DateTime.MinValue)
 
+                    Dim monitorStatus = BuildMonitorLinkStatusMessage()
+                    Dim monitorStatusText = If(String.IsNullOrEmpty(monitorStatus), "", monitorStatus & " ")
+
                     Dim holdingMessage As String
                     If isRepeat Then
                         holdingMessage =
                             $"Thank you for your continued patience. This is an automated queue status update — your request is still awaiting processing. " &
-                            $"{positionText}{waitDescription}{stallWarning}{localChatHint} " &
+                            $"{positionText}{waitDescription}{stallWarning}{localChatHint} {monitorStatusText}" &
                             $"I will get back to you with a substantive reply as soon as possible. — {AN6}"
                     Else
                         holdingMessage =
                             $"Thank you for your message. This is an automated queue status notification — your request has not yet been processed in substance. " &
-                            $"{positionText}{waitDescription}{stallWarning}{localChatHint} " &
+                            $"{positionText}{waitDescription}{stallWarning}{localChatHint} {monitorStatusText}" &
                             $"I will get back to you with a substantive reply as soon as possible. — {AN6}"
                     End If
 
@@ -1787,11 +1815,14 @@ Partial Public Class ThisAddIn
                 Dim senderLabel = If(mailInfo IsNot Nothing, mailInfo.SenderEmail, "unknown")
 
                 Dim elapsedMinutes = CInt(Math.Floor(elapsedSeconds / 60))
+                Dim monitorStatus = BuildMonitorLinkStatusMessage()
+                Dim monitorStatusText = If(String.IsNullOrEmpty(monitorStatus), "", monitorStatus & " ")
+
                 Dim progressMessage As String =
                     $"Thank you for your continued patience. This is an automated progress update — your request is currently being processed and has been running for approximately {elapsedMinutes} minutes. " &
                     $"Some requests, particularly those involving document processing, may take considerable time to complete. " &
                     $"I will get back to you with the final result as soon as processing is finished. " &
-                    $"If you need immediate assistance, you can also use the {AN} add-in's corresponding feature to have your tasks done right away. Use 'Help me, Inky' or the chatbot on https://redink.ai if you need instructions. " &
+                    $"If you need immediate assistance, you can also use the {AN} add-in's corresponding feature to have your tasks done right away. Use 'Help me, Inky' or the chatbot on https://redink.ai if you need instructions. {monitorStatusText}" &
                     $"— {AN6}"
 
                 Await SwitchToUi(Sub() SendReplyToSender(mi, progressMessage, Nothing, tagAsAutoReply:=True, isHoldingOnly:=True))
@@ -2066,6 +2097,13 @@ Partial Public Class ThisAddIn
                 End If
                 Dim systemPrompt As String = InterpolateAtRuntime(SP_AutoPilot)
 
+                ' ── Inject per-sender policy system-prompt instruction (hard, in-code) ──
+                Dim senderPromptAddition As String = ResolveSystemPromptAdditionForSender(mailInfo.SenderEmail)
+                If Not String.IsNullOrWhiteSpace(senderPromptAddition) Then
+                    systemPrompt &= vbLf & vbLf & "[PER-SENDER POLICY INSTRUCTION]" & vbLf & senderPromptAddition
+                    ApDashboardLog("Applied per-sender system-prompt instruction.", "step")
+                End If
+
                 ' ── Inject per-user memory into system prompt ──
                 If _apConfig.EnableUserMemory AndAlso IsUserMemoryEnabled(mailInfo.SenderEmail) Then
                     Dim userMemory = ReadUserMemory(mailInfo.SenderEmail, _context.INI_InkyMemoryCap)
@@ -2312,13 +2350,24 @@ Partial Public Class ThisAddIn
                 If requiresApproval AndAlso Not _apConfig.IsUnattended Then
                     Dim holdingResponse As String = SP_AutoPilot_HoldingResponse.Replace("{StatusMessage}", "")
                     Dim monitorLink As String = If(_context.INI_MonitorLink, "").Trim()
-                    Dim monitorUri As System.Uri = Nothing
 
-                    If System.Uri.TryCreate(monitorLink, System.UriKind.Absolute, monitorUri) AndAlso
-                       (String.Equals(monitorUri.Scheme, System.Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) OrElse
-                        String.Equals(monitorUri.Scheme, System.Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)) Then
-                        Dim statusMessage As String = SP_AutoPilot_HoldingResponseStatus.Replace("{MonitorLink}", monitorLink)
-                        holdingResponse = SP_AutoPilot_HoldingResponse.Replace("{StatusMessage}", " " & statusMessage)
+                    If Not String.IsNullOrWhiteSpace(monitorLink) Then
+                        ' Accept scheme-less values (e.g. "www.example.com/status") by defaulting
+                        ' to https, so a configured monitor link is always surfaced to the sender.
+                        Dim normalizedMonitorLink As String = monitorLink
+                        If normalizedMonitorLink.IndexOf("://", StringComparison.Ordinal) < 0 Then
+                            normalizedMonitorLink = "https://" & normalizedMonitorLink
+                        End If
+
+                        Dim monitorUri As System.Uri = Nothing
+                        If System.Uri.TryCreate(normalizedMonitorLink, System.UriKind.Absolute, monitorUri) AndAlso
+                           (String.Equals(monitorUri.Scheme, System.Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) OrElse
+                            String.Equals(monitorUri.Scheme, System.Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)) Then
+                            Dim statusMessage As String = SP_AutoPilot_HoldingResponseStatus.Replace("{MonitorLink}", normalizedMonitorLink)
+                            holdingResponse = SP_AutoPilot_HoldingResponse.Replace("{StatusMessage}", " " & statusMessage)
+                        Else
+                            ApDashboardLog($"⚠ MonitorLink '{monitorLink}' is not a valid http/https URL — omitted from holding notice.", "warn")
+                        End If
                     End If
 
                     Await SwitchToUi(Sub() SendReplyToSender(mi, holdingResponse, Nothing, tagAsAutoReply:=True, isHoldingOnly:=True))
@@ -5070,6 +5119,13 @@ Partial Public Class ThisAddIn
                 ' Build prompt with the transcription as the "email body"
                 Dim userPrompt = BuildUserPromptFromMail(voicemailMailInfo, Nothing)
                 Dim systemPrompt = InterpolateAtRuntime(SP_AutoPilot)
+
+                ' ── Inject per-sender policy system-prompt instruction (keyed on the caller's mapped email) ──
+                Dim senderPromptAddition As String = ResolveSystemPromptAdditionForSender(recipientEmail)
+                If Not String.IsNullOrWhiteSpace(senderPromptAddition) Then
+                    systemPrompt &= vbLf & vbLf & "[PER-SENDER POLICY INSTRUCTION]" & vbLf & senderPromptAddition
+                    ApDashboardLog("Applied per-sender system-prompt instruction (voicemail).", "step")
+                End If
 
                 ' ── Inject per-user memory into system prompt (keyed on recipientEmail, not voicemail system) ──
                 If _apConfig.EnableUserMemory AndAlso IsUserMemoryEnabled(recipientEmail) Then

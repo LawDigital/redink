@@ -608,7 +608,7 @@ Namespace SharedLibrary
                 Try
                     Dim defaultPaths = SharedMethods.DefaultINIPaths
                     For Each kvp In defaultPaths
-                        Dim p = Environment.ExpandEnvironmentVariables(kvp.Value)
+                        Dim p = ExpandEnvironmentVariables(kvp.Value)
                         If File.Exists(p) AndAlso Not String.Equals(p, mainPath, StringComparison.OrdinalIgnoreCase) Then
                             sb.AppendLine($"<{kvp.Key} Configuration>")
                             sb.AppendLine($"Path: {p}")
@@ -760,7 +760,7 @@ Namespace SharedLibrary
         ''' Returns manual text from cache when possible; otherwise loads it from the configured path/URL.
         ''' </summary>
         Private Async Function GetManualOnceAsync() As Task(Of String)
-            Dim path = If(_context IsNot Nothing, _context.INI_HelpMeInkyPath, "")
+            Dim path = If(_context IsNot Nothing, ExpandEnvironmentVariables(_context.INI_HelpMeInkyPath), "")
             If String.IsNullOrWhiteSpace(path) Then Return ""
             If _manualCache IsNot Nothing AndAlso String.Equals(_manualCachePath, path, StringComparison.OrdinalIgnoreCase) Then
                 Return _manualCache

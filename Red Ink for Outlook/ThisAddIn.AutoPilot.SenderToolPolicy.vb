@@ -24,6 +24,14 @@
 '     <pattern> = ONLY skill_<name>   -> sender may only run that one skill
 '     DEFAULT = <rule>                -> fallback for senders that match no pattern
 '
+'  - Any rule may append a hard, in-code system-prompt instruction for the sender:
+'         <pattern> = <rule> || <system prompt instruction>
+'    Example:
+'         info@lawdigital.com = ONLY skill_produkteanfragen || Only provide an answer
+'             during weekdays and process any response through that skill
+'    For an ONLY-skill rule without an explicit instruction, a default instruction is
+'    generated automatically that confines the sender to running that one skill.
+'
 '  - <pattern> supports * and ? wildcards and is matched against the SMTP address.
 '  - First matching line wins (top-to-bottom). DEFAULT is only used if no pattern
 '    matched. If there is no match and no DEFAULT, the sender inherits ALL tools.
@@ -58,6 +66,12 @@ Partial Public Class ThisAddIn
         Public Property Kind As AutoPilotSenderPolicyRuleKind
         Public Property ToolNames As New List(Of String)()
         Public Property SkillToolName As String = ""
+
+        ''' <summary>
+        ''' Optional hard system-prompt instruction injected for this sender (in code, not
+        ''' under LLM control). Specified in the policy file after a "||" separator.
+        ''' </summary>
+        Public Property SystemPromptAddition As String = ""
     End Class
 
     ''' <summary>Parsed sender policy rules for the active session (Nothing = no policy in effect).</summary>
@@ -94,9 +108,20 @@ Partial Public Class ThisAddIn
                 Dim rulePart = line.Substring(sepIndex + 1).Trim()
                 If patternPart.Length = 0 OrElse rulePart.Length = 0 Then Continue For
 
+                ' Optional per-sender system-prompt instruction after a "||" separator:
+                '     <pattern> = <rule> || <system prompt instruction>
+                Dim promptPart As String = ""
+                Dim promptSepIndex = rulePart.IndexOf("||", StringComparison.Ordinal)
+                If promptSepIndex >= 0 Then
+                    promptPart = rulePart.Substring(promptSepIndex + 2).Trim()
+                    rulePart = rulePart.Substring(0, promptSepIndex).Trim()
+                    If rulePart.Length = 0 Then Continue For
+                End If
+
                 Dim rule As New AutoPilotSenderPolicyRule()
                 rule.IsDefault = patternPart.Equals("DEFAULT", StringComparison.OrdinalIgnoreCase)
                 rule.Pattern = patternPart
+                rule.SystemPromptAddition = promptPart
 
                 If rulePart.Equals("ALL", StringComparison.OrdinalIgnoreCase) Then
                     rule.Kind = AutoPilotSenderPolicyRuleKind.AllowAll
@@ -133,12 +158,13 @@ Partial Public Class ThisAddIn
     ''' </summary>
     ''' <param name="senderEmail">SMTP address of the current sender.</param>
     ''' <param name="sessionTools">The tools selected for the session.</param>
-    Friend Function ResolveToolsForSender(senderEmail As String, sessionTools As List(Of ModelConfig)) As List(Of ModelConfig)
-        ' No policy in effect -> unchanged behaviour.
-        If _apSenderPolicyRules Is Nothing OrElse _apSenderPolicyRules.Count = 0 Then Return sessionTools
-        If sessionTools Is Nothing OrElse sessionTools.Count = 0 Then Return sessionTools
+    ''' <summary>
+    ''' Returns the policy rule that applies to a sender (first pattern match wins;
+    ''' DEFAULT is used only when no specific pattern matched). Nothing = no policy.
+    ''' </summary>
+    Private Function MatchSenderPolicyRule(senderEmail As String) As AutoPilotSenderPolicyRule
+        If _apSenderPolicyRules Is Nothing OrElse _apSenderPolicyRules.Count = 0 Then Return Nothing
 
-        ' First match wins; DEFAULT is only used when no specific pattern matched.
         Dim matched As AutoPilotSenderPolicyRule = Nothing
         Dim defaultRule As AutoPilotSenderPolicyRule = Nothing
 
@@ -154,6 +180,38 @@ Partial Public Class ThisAddIn
         Next
 
         If matched Is Nothing Then matched = defaultRule
+        Return matched
+    End Function
+
+    ''' <summary>
+    ''' Returns the hard, in-code system-prompt instruction that applies to a sender,
+    ''' or an empty string when none applies. For an ONLY-skill rule without an explicit
+    ''' instruction, a default instruction is generated that confines the sender to that skill.
+    ''' </summary>
+    Friend Function ResolveSystemPromptAdditionForSender(senderEmail As String) As String
+        Dim matched = MatchSenderPolicyRule(senderEmail)
+        If matched Is Nothing Then Return ""
+
+        Dim addition = If(matched.SystemPromptAddition, "").Trim()
+
+        If addition.Length = 0 AndAlso
+           matched.Kind = AutoPilotSenderPolicyRuleKind.OnlySkill AndAlso
+           Not String.IsNullOrWhiteSpace(matched.SkillToolName) Then
+            addition =
+                $"For this sender, you must handle the request exclusively by invoking the '{matched.SkillToolName.Trim()}' skill. " &
+                "Do not perform any other task, answer from your own knowledge, or use any other tool. " &
+                "If the request cannot be fulfilled by that skill, briefly decline using report_inability."
+        End If
+
+        Return addition
+    End Function
+
+    Friend Function ResolveToolsForSender(senderEmail As String, sessionTools As List(Of ModelConfig)) As List(Of ModelConfig)
+        ' No policy in effect -> unchanged behaviour.
+        If _apSenderPolicyRules Is Nothing OrElse _apSenderPolicyRules.Count = 0 Then Return sessionTools
+        If sessionTools Is Nothing OrElse sessionTools.Count = 0 Then Return sessionTools
+
+        Dim matched As AutoPilotSenderPolicyRule = MatchSenderPolicyRule(senderEmail)
 
         ' No matching rule and no DEFAULT -> sender inherits all tools (unchanged).
         If matched Is Nothing Then Return sessionTools
@@ -202,7 +260,6 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Function FilterToExclusiveSkill(sessionTools As List(Of ModelConfig), skillToolName As String) As List(Of ModelConfig)
         Dim exclusive = If(skillToolName, "").Trim()
-        Dim internalNames = GetInternalToolNames()
 
         Return sessionTools.
             Where(Function(t)
@@ -213,14 +270,14 @@ Partial Public Class ThisAddIn
                       If IsAlwaysAllowedTool(name) Then Return True
                       If name.Equals(SharedLibrary.Agents.SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) Then Return True
 
-                      ' Keep exactly the exclusive skill; block all other skills and all agents.
+                      ' Keep exactly the exclusive skill; block everything else, including all
+                      ' internal helper tools, other skills, agents, and external sources. This
+                      ' confines the sender strictly to running the one permitted skill.
                       If name.StartsWith("skill_", StringComparison.OrdinalIgnoreCase) Then
                           Return name.Equals(exclusive, StringComparison.OrdinalIgnoreCase)
                       End If
-                      If name.StartsWith("agent_", StringComparison.OrdinalIgnoreCase) Then Return False
 
-                      ' Keep internal helper tools (the skill may need them); block external sources.
-                      Return internalNames.Contains(name)
+                      Return False
                   End Function).
             ToList()
     End Function
