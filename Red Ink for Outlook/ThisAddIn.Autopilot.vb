@@ -190,6 +190,11 @@ Partial Public Class ThisAddIn
 
     Private Const SP_AutoPilot_HoldingResponseStatus As String = "To check the current system status, click on {MonitorLink}."
 
+    Private Const SP_AutoPilot_RejectionResponse As String =
+        "Thank you for your message. After review, your request has not been approved for automated processing, and no substantive reply will be sent. " &
+        "If you believe this is in error or require assistance, please contact us directly. " &
+        "— " & AN6
+
     Private Const AP_MaxToolIterations As Integer = 50
 
     ''' <summary>
@@ -359,6 +364,18 @@ Partial Public Class ThisAddIn
     ''' These mails bypass cooldown because the operator (or unattended mode) explicitly chose them.</summary>
     Private ReadOnly _apCatchUpEntryIds As New ConcurrentDictionary(Of String, Boolean)()
 
+    ''' <summary>Pre-processing approval queue: EntryID → pending request info. Mails registered here
+    ''' have NOT been processed and are NOT tagged as processed, so a restart's catch-up scan
+    ''' re-discovers them and re-queues them for approval.</summary>
+    Private ReadOnly _apPendingApprovals As New ConcurrentDictionary(Of String, AutoPilotPendingApproval)()
+
+    ''' <summary>EntryIDs the operator has approved for processing. Presence bypasses the approval
+    ''' gate on the next pump pass so the mail is processed and auto-sent.</summary>
+    Private ReadOnly _apApprovedEntryIds As New ConcurrentDictionary(Of String, Boolean)()
+
+    ''' <summary>Dashboard button surfacing the pending-approval count; created when approval is enabled.</summary>
+    Private _apApprovalsButton As Button = Nothing
+
     ' ═══════════════════════════════════════════════════════════════════════════
     '  PUBLIC ENTRY POINTS
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -410,6 +427,9 @@ Partial Public Class ThisAddIn
         _apHelpMeManualCacheLoaded = False
         _apHoldingOnlyEntryIds.Clear()
         _apCatchUpEntryIds.Clear()
+        _apPendingApprovals.Clear()
+        _apApprovedEntryIds.Clear()
+        _apApprovalsButton = Nothing
         _apCurrentProcessingEntryId = Nothing
         _apActiveJobLastNotifiedUtc = DateTime.MinValue
         _apVoicemailCallerIdMap = Nothing
@@ -490,6 +510,16 @@ Partial Public Class ThisAddIn
     ''' <summary>Starts AutoPilot with an explicit configuration instance.</summary>
     Private Sub StartAutoPilotWithConfig(config As AutoPilotConfig)
         _apConfig = config
+
+        ' Always persist the effective configuration on every start, regardless of which
+        ' entry point was used. This guarantees My.Settings (and the registry backup) are
+        ' refreshed each time AutoPilot starts. Best-effort: never block startup on failure.
+        Try
+            SaveAutoPilotConfigToSettings(config)
+        Catch ex As System.Exception
+            Debug.WriteLine($"[AutoPilot] Failed to persist config on start: {ex.Message}")
+        End Try
+
         StopLocalSchedulerRuntime()
         _apActive = True
         _apCts = New CancellationTokenSource()
@@ -593,6 +623,26 @@ Partial Public Class ThisAddIn
                             }
                             AddHandler btnUserStorage.Click, Sub(s, e) ShowUserStorageDashboard()
                             buttonPanel.Controls.Add(btnUserStorage)
+                        End If
+                    Catch
+                    End Try
+                End If
+
+                ' Add Approvals button (pre-processing approval queue) when manual approval is enabled.
+                If config.RequireApprovalForNonWhitelisted Then
+                    Try
+                        Dim buttonPanel = _apDashboard.Controls.OfType(Of TableLayoutPanel)().
+                            FirstOrDefault()?.Controls.OfType(Of FlowLayoutPanel)().FirstOrDefault()
+
+                        If buttonPanel IsNot Nothing Then
+                            _apApprovalsButton = New Button() With {
+                                .Text = "Approvals (0)",
+                                .AutoSize = True,
+                                .Padding = New Padding(10, 5, 10, 5),
+                                .Enabled = False
+                            }
+                            AddHandler _apApprovalsButton.Click, Sub(s, e) ShowPendingApprovalsReview()
+                            buttonPanel.Controls.Add(_apApprovalsButton)
                         End If
                     Catch
                     End Try
@@ -1994,11 +2044,46 @@ Partial Public Class ThisAddIn
             Dim isWhitelisted As Boolean = IsSenderWhitelisted(mailInfo.SenderEmail)
             ' Existing conversations: skip approval only (sender already passed domain/sender filter above)
             Dim requiresApproval As Boolean = (_apConfig.RequireApprovalForNonWhitelisted AndAlso Not isWhitelisted AndAlso Not isExistingConversation)
+
+            ' ── Pre-processing approval gate ──
+            ' If this mail was previously held and the operator has since approved it, consume the
+            ' approval flag and process it normally (auto-send). This must be evaluated BEFORE any
+            ' expensive work (temp extraction / LLM) so a held mail costs nothing until approved.
+            Dim isOperatorApproved As Boolean = False
+            Dim consumedApproval As Boolean
+            If _apApprovedEntryIds.TryRemove(entryId, consumedApproval) Then
+                isOperatorApproved = True
+                requiresApproval = False
+            End If
+
             ApDashboardLog("━━━ PROCESSING ━━━", "info")
             SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "AutoPilot (Mail) invoked")
             ApDashboardLog($"From: {mailInfo.SenderName} <{mailInfo.SenderEmail}>", "info")
             ApDashboardLog($"Subject: {mailInfo.Subject}", "info")
-            ApDashboardLog($"Attachments: {mailInfo.AttachmentCount}" & If(requiresApproval, " [approval required]", " [auto-send]"), "info")
+            ApDashboardLog($"Attachments: {mailInfo.AttachmentCount}" & If(isOperatorApproved, " [operator-approved]", If(requiresApproval, " [approval required]", " [auto-send]")), "info")
+
+            ' Hold non-whitelisted senders for MANUAL approval before processing (attended mode only).
+            ' We send a manual-approval notice, register the mail in the dashboard approval queue, and
+            ' return WITHOUT tagging it as processed — so a restart's catch-up scan re-discovers it.
+            ' The pump is never blocked: we return immediately and continue with the next mail.
+            If requiresApproval AndAlso Not _apConfig.IsUnattended Then
+                If _apPendingApprovals.TryAdd(entryId, New AutoPilotPendingApproval() With {
+                        .EntryID = entryId,
+                        .SenderName = mailInfo.SenderName,
+                        .SenderEmail = mailInfo.SenderEmail,
+                        .Subject = mailInfo.Subject,
+                        .ReceivedTime = mailInfo.ReceivedTime,
+                        .BodyPreview = BuildApprovalBodyPreview(mailInfo.Body)}) Then
+                    Dim approvalNotice As String = BuildManualApprovalNotice()
+                    Await SwitchToUi(Sub() SendReplyToSender(mi, approvalNotice, Nothing, tagAsAutoReply:=True, isHoldingOnly:=True))
+                    _apHoldingOnlyEntryIds.TryAdd(entryId, True)
+                    UpdateApprovalsDashboardButton()
+                    ApDashboardLog($"⏸ Held for manual approval (see Approvals in dashboard): {mailInfo.SenderEmail} — {mailInfo.Subject}", "step")
+                Else
+                    ApDashboardLog($"⏸ Already awaiting approval: {mailInfo.SenderEmail}", "step")
+                End If
+                Return
+            End If
 
             ' Check for #model: command
             Dim modelOverrideConfig As ModelConfig = Nothing
@@ -2374,19 +2459,24 @@ Partial Public Class ThisAddIn
                     _apHoldingOnlyEntryIds.TryAdd(entryId, True)
 
                     ApDashboardLog("Holding response sent to: " & mailInfo.SenderEmail, "step")
-                    Dim approved As Boolean = Await SwitchToUi(Function() ShowApprovalDialog(mailInfo, response, resultAttachments))
-                    If approved Then
-                        Await SwitchToUi(Sub() SendReplyToSender(mi, response, resultAttachments, tagAsAutoReply:=True, sourcesHtml:=sourcesHtml))
-                        Await SwitchToUi(Sub() TagOriginalMailAsProcessed(mi))
-                        Interlocked.Increment(_apSessionReplyCount)
-                        RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
-                        RecordLastProcessedTime()
-                        Dim dummyBool As Boolean
-                        _apHoldingOnlyEntryIds.TryRemove(entryId, dummyBool)
-                        ApDashboardLog("✓ APPROVED & SENT reply to: " & mailInfo.SenderEmail, "info")
-                    Else
-                        ApDashboardLog("REJECTED reply for: " & mailInfo.Subject, "step")
-                    End If
+
+                    ' ── Non-blocking approval ──
+                    ' The operator approval dialog must NEVER run on the processing pump, or it
+                    ' would hold _apProcessingSemaphore and block the entire queue until answered.
+                    ' We therefore stage the result attachments (the per-mail temp dir is deleted
+                    ' when this method returns) and hand approval + final send to a detached task,
+                    ' then return immediately so the pump is free for the next mail.
+                    Dim deferredAttachments As List(Of String) = CopyAttachmentsForDeferredApproval(resultAttachments)
+                    Dim deferredMailInfo As AutoPilotMailInfo = mailInfo
+                    Dim deferredResponse As String = response
+                    Dim deferredSourcesHtml As String = sourcesHtml
+                    Dim deferredEntryId As String = entryId
+                    Dim deferredMailSentUtc As DateTime = mailSentUtc
+
+                    RunDeferredApprovalAsync(deferredEntryId, deferredMailInfo, deferredResponse,
+                                             deferredAttachments, deferredSourcesHtml, deferredMailSentUtc)
+
+                    ApDashboardLog($"Reply for {mailInfo.SenderEmail} is awaiting operator approval — queue continues.", "info")
                 Else
                     If requiresApproval AndAlso _apConfig.IsUnattended Then
                         ApDashboardLog($"⚡ Unattended mode — auto-approving reply for non-whitelisted sender: {mailInfo.SenderEmail}", "info")
@@ -2419,6 +2509,141 @@ Partial Public Class ThisAddIn
             Debug.WriteLine("AutoPilot ProcessIncomingMailAsync error: " & ex.ToString())
         Finally
             If mi IsNot Nothing Then Try : Marshal.ReleaseComObject(mi) : Catch : End Try
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Copies result attachments into a dedicated temp directory owned by the deferred
+    ''' approval task. This is required because the per-mail temp directory is deleted as
+    ''' soon as <see cref="ProcessIncomingMailAsync"/> returns, which happens before the
+    ''' operator answers the (non-blocking) approval dialog. The returned files live in a
+    ''' directory the deferred task deletes when it completes.
+    ''' </summary>
+    Private Function CopyAttachmentsForDeferredApproval(resultAttachments As List(Of String)) As List(Of String)
+        Dim copied As New List(Of String)()
+        If resultAttachments Is Nothing OrElse resultAttachments.Count = 0 Then Return copied
+
+        Try
+            Dim stagingDir As String = Path.Combine(Path.GetTempPath(), AP_TempPrefix & "approval_" & Guid.NewGuid().ToString("N"))
+            Directory.CreateDirectory(stagingDir)
+
+            For Each src In resultAttachments
+                Try
+                    If String.IsNullOrWhiteSpace(src) OrElse Not File.Exists(src) Then Continue For
+                    Dim dest = Path.Combine(stagingDir, Path.GetFileName(src))
+                    Dim counter = 1
+                    While File.Exists(dest)
+                        dest = Path.Combine(stagingDir, Path.GetFileNameWithoutExtension(src) & $"_{counter}" & Path.GetExtension(src))
+                        counter += 1
+                    End While
+                    File.Copy(src, dest, True)
+                    copied.Add(dest)
+                Catch ex As System.Exception
+                    ApDashboardLog($"⚠ Failed to stage attachment for deferred approval: {ex.Message}", "warn")
+                End Try
+            Next
+        Catch ex As System.Exception
+            ApDashboardLog($"⚠ Failed to stage attachments for deferred approval: {ex.Message}", "warn")
+        End Try
+
+        Return copied
+    End Function
+
+    ''' <summary>
+    ''' Runs the CoPilot operator approval workflow OFF the processing pump so the mail
+    ''' queue is never blocked while awaiting a decision. Shows the approval dialog and, if
+    ''' approved, re-resolves the original mail by EntryID and sends the substantive reply.
+    ''' Fire-and-forget: all errors are handled internally and never propagate to the pump.
+    ''' </summary>
+    Private Async Function RunDeferredApprovalAsync(entryId As String,
+                                                    mailInfo As AutoPilotMailInfo,
+                                                    response As String,
+                                                    resultAttachments As List(Of String),
+                                                    sourcesHtml As String,
+                                                    mailSentUtc As DateTime) As Task
+        Dim stagingDir As String = Nothing
+        If resultAttachments IsNot Nothing AndAlso resultAttachments.Count > 0 Then
+            Try : stagingDir = Path.GetDirectoryName(resultAttachments(0)) : Catch : End Try
+        End If
+
+        Try
+            Dim approved As Boolean = Await SwitchToUi(Function() ShowApprovalDialog(mailInfo, response, resultAttachments))
+
+            If Not approved Then
+                ApDashboardLog("REJECTED reply for: " & mailInfo.Subject, "step")
+
+                ' Inform the sender that their request was rejected. Best-effort:
+                ' failure to notify must never disrupt the approval workflow.
+                Try
+                    Dim rejectEntryId As String = entryId
+                    Dim rejectMail As MailItem = Await SwitchToUi(Function() As MailItem
+                                                                      Try
+                                                                          Dim ns = Application.GetNamespace("MAPI")
+                                                                          Dim obj = ns.GetItemFromID(rejectEntryId)
+                                                                          If TypeOf obj Is MailItem Then Return DirectCast(obj, MailItem)
+                                                                      Catch
+                                                                      End Try
+                                                                      Return Nothing
+                                                                  End Function)
+                    If rejectMail IsNot Nothing Then
+                        Try
+                            Await SwitchToUi(Sub() SendReplyToSender(rejectMail, SP_AutoPilot_RejectionResponse, Nothing, tagAsAutoReply:=True))
+                            Await SwitchToUi(Sub() TagOriginalMailAsProcessed(rejectMail))
+                            RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
+                            RecordLastProcessedTime()
+                            Dim rejectDummy As Boolean
+                            _apHoldingOnlyEntryIds.TryRemove(entryId, rejectDummy)
+                            ApDashboardLog("✉ Sent rejection notice to: " & mailInfo.SenderEmail, "step")
+                        Finally
+                            Try : Marshal.ReleaseComObject(rejectMail) : Catch : End Try
+                        End Try
+                    Else
+                        ApDashboardLog($"⚠ Rejection notice could not be sent — original mail no longer available: {mailInfo.SenderEmail}", "warn")
+                    End If
+                Catch rejectEx As System.Exception
+                    ApDashboardLog("⚠ Failed to send rejection notice: " & rejectEx.Message, "warn")
+                End Try
+
+                Return
+            End If
+
+            ' Re-resolve the original mail; it may have been moved or deleted meanwhile.
+            Dim mi As MailItem = Await SwitchToUi(Function() As MailItem
+                                                      Try
+                                                          Dim ns = Application.GetNamespace("MAPI")
+                                                          Dim obj = ns.GetItemFromID(entryId)
+                                                          If TypeOf obj Is MailItem Then Return DirectCast(obj, MailItem)
+                                                      Catch
+                                                      End Try
+                                                      Return Nothing
+                                                  End Function)
+            If mi Is Nothing Then
+                ApDashboardLog($"⚠ Approved reply could not be sent — original mail no longer available: {mailInfo.SenderEmail}", "warn")
+                Return
+            End If
+
+            Try
+                Await SwitchToUi(Sub() SendReplyToSender(mi, response, resultAttachments, tagAsAutoReply:=True, sourcesHtml:=sourcesHtml))
+                Await SwitchToUi(Sub() TagOriginalMailAsProcessed(mi))
+                Interlocked.Increment(_apSessionReplyCount)
+                RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
+                RecordLastProcessedTime()
+                Dim dummyBool As Boolean
+                _apHoldingOnlyEntryIds.TryRemove(entryId, dummyBool)
+                ApDashboardLog($"✓ APPROVED & SENT reply to: {mailInfo.SenderEmail} (session total: {_apSessionReplyCount})", "info")
+            Finally
+                If mi IsNot Nothing Then Try : Marshal.ReleaseComObject(mi) : Catch : End Try
+            End Try
+        Catch ex As System.Exception
+            RecordAutoPilotError("Deferred approval error: " & ex.Message)
+            ApDashboardLog("Deferred approval error: " & ex.Message, "warn")
+        Finally
+            Try
+                If Not String.IsNullOrEmpty(stagingDir) AndAlso Directory.Exists(stagingDir) Then
+                    Directory.Delete(stagingDir, recursive:=True)
+                End If
+            Catch
+            End Try
         End Try
     End Function
 
@@ -3872,6 +4097,179 @@ Partial Public Class ThisAddIn
             "── Draft Reply ──" & vbCrLf & draftResponse & attachmentInfo
         Return ShowCustomYesNoBox(displayText, "Send Reply", "Discard", header:=$"{AN6} AutoPilot — Approve Reply") = 1
     End Function
+
+    ''' <summary>Pending pre-processing approval request shown in the dashboard approval queue.</summary>
+    Private Class AutoPilotPendingApproval
+        Public Property EntryID As String
+        Public Property SenderName As String
+        Public Property SenderEmail As String
+        Public Property Subject As String
+        Public Property ReceivedTime As DateTime
+
+        ''' <summary>Truncated, plain-text excerpt of the request body shown to the operator.</summary>
+        Public Property BodyPreview As String
+    End Class
+
+    ''' <summary>Maximum number of body characters shown in the approval dialog.</summary>
+    Private Const AP_ApprovalBodyPreviewChars As Integer = 3000
+
+    ''' <summary>
+    ''' Produces a compact, single-block plain-text excerpt of the request body for operator
+    ''' review. Collapses runs of blank lines and truncates to <see cref="AP_ApprovalBodyPreviewChars"/>
+    ''' characters with an explicit truncation marker so the operator knows more text exists.
+    ''' </summary>
+    Private Function BuildApprovalBodyPreview(body As String) As String
+        If String.IsNullOrWhiteSpace(body) Then Return "(no request text)"
+
+        Dim text As String = body.Replace(vbCr & vbLf, vbLf).Replace(vbCr, vbLf).Trim()
+
+        ' Collapse 3+ consecutive newlines down to a single blank line to keep the preview compact.
+        Do While text.Contains(vbLf & vbLf & vbLf)
+            text = text.Replace(vbLf & vbLf & vbLf, vbLf & vbLf)
+        Loop
+
+        If text.Length > AP_ApprovalBodyPreviewChars Then
+            text = text.Substring(0, AP_ApprovalBodyPreviewChars).TrimEnd() &
+                   vbLf & vbLf & "… [request truncated for preview]"
+        End If
+
+        Return text
+    End Function
+
+    ''' <summary>
+    ''' Builds the sender-facing notice telling the caller that their request has been received
+    ''' but requires manual approval before it can be processed. Includes the configured monitor
+    ''' link (when valid) via the shared helper, consistent with all other auto-response notices.
+    ''' </summary>
+    Private Function BuildManualApprovalNotice() As String
+        Dim statusMsg As String = BuildMonitorLinkStatusMessage()
+        Dim statusText As String = If(String.IsNullOrEmpty(statusMsg), "", statusMsg & " ")
+        Return "Thank you for your message. This is an automated acknowledgement — your request has been received but requires manual approval before it can be processed. " &
+               "You will receive a substantive reply once your request has been approved and handled, or a notice if it cannot be processed. " &
+               statusText &
+               "If you need immediate assistance, you can also use the " & AN & " add-in's corresponding feature to have your tasks done right away. Use 'Help me, Inky' or the chatbot on https://redink.ai if you need instructions. " &
+               "— " & AN6
+    End Function
+
+    ''' <summary>
+    ''' Refreshes the dashboard "Approvals (N)" button text/enabled state. Thread-safe: marshals
+    ''' to the UI thread when required. No-op if the button has not been created.
+    ''' </summary>
+    Private Sub UpdateApprovalsDashboardButton()
+        Try
+            Dim dash = _apDashboard
+            If dash Is Nothing OrElse dash.IsDisposed Then Return
+            If dash.InvokeRequired Then
+                If dash.IsHandleCreated Then dash.BeginInvoke(New MethodInvoker(AddressOf UpdateApprovalsDashboardButton))
+                Return
+            End If
+            If _apApprovalsButton Is Nothing OrElse _apApprovalsButton.IsDisposed Then Return
+            Dim count As Integer = _apPendingApprovals.Count
+            _apApprovalsButton.Text = $"Approvals ({count})"
+            _apApprovalsButton.Enabled = count > 0
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Operator review of the pending pre-processing approval queue. For each pending request the
+    ''' operator can Approve &amp; Process (re-queues the mail for normal processing) or Reject (sends
+    ''' a rejection notice and marks the mail processed). Closing the dialog leaves the remainder
+    ''' pending. Runs on the UI thread (invoked from the dashboard button click).
+    ''' </summary>
+    Private Sub ShowPendingApprovalsReview()
+        Dim snapshot = _apPendingApprovals.Values.OrderBy(Function(p) p.ReceivedTime).ToList()
+        If snapshot.Count = 0 Then
+            UpdateApprovalsDashboardButton()
+            Return
+        End If
+
+        For Each pending In snapshot
+            ' Skip entries already resolved during this review pass.
+            If Not _apPendingApprovals.ContainsKey(pending.EntryID) Then Continue For
+
+            Dim details As String =
+                $"From: {pending.SenderName} <{pending.SenderEmail}>" & vbCrLf &
+                $"Subject: {pending.Subject}" & vbCrLf &
+                $"Received: {pending.ReceivedTime:yyyy-MM-dd HH:mm}" & vbCrLf & vbCrLf &
+                "── Request ──" & vbCrLf &
+                If(pending.BodyPreview, "(no request text)") & vbCrLf & vbCrLf &
+                "Approve this request for automated processing, reject it, or delay the decision. " &
+                "Delaying (or closing this dialog) leaves the request pending for later review."
+
+            ' A local flag lets the ""Delay"" extra button be distinguished from a plain close,
+            ' because the shared dialog only sets its result for button1/button2.
+            Dim delayed As Boolean = False
+
+            Dim choice As Integer = ShowCustomYesNoBox(
+                details, "Approve & Process", "Reject",
+                header:=$"{AN6} AutoPilot — Approval ({_apPendingApprovals.Count} pending)",
+                extraButtonText:="Delay",
+                extraButtonAction:=Sub() delayed = True,
+                CloseAfterExtra:=True)
+
+            If delayed Then
+                ApDashboardLog($"⏳ Approval delayed (left pending): {pending.SenderEmail} — {pending.Subject}", "step")
+                Continue For
+            End If
+
+            If choice = 1 Then
+                ApprovePendingRequest(pending.EntryID)
+            ElseIf choice = 2 Then
+                RejectPendingRequest(pending.EntryID)
+            Else
+                ' Dialog closed/cancelled — stop reviewing and leave the rest pending.
+                Exit For
+            End If
+        Next
+
+        UpdateApprovalsDashboardButton()
+    End Sub
+
+    ''' <summary>Approves a pending request: re-queues it for normal processing (auto-send).</summary>
+    Private Sub ApprovePendingRequest(entryId As String)
+        Dim removed As AutoPilotPendingApproval = Nothing
+        _apPendingApprovals.TryRemove(entryId, removed)
+        _apApprovedEntryIds.TryAdd(entryId, True)
+        _apMailQueue.Enqueue(entryId)
+        _apQueueEnqueueTimes.TryAdd(entryId, DateTime.UtcNow)
+        ApDashboardLog($"✅ Approved for processing: {If(removed IsNot Nothing, removed.SenderEmail, entryId)}", "success")
+    End Sub
+
+    ''' <summary>Rejects a pending request: sends a rejection notice and marks the mail processed.</summary>
+    Private Sub RejectPendingRequest(entryId As String)
+        Dim removed As AutoPilotPendingApproval = Nothing
+        _apPendingApprovals.TryRemove(entryId, removed)
+        Dim senderLabel As String = If(removed IsNot Nothing, removed.SenderEmail, entryId)
+
+        Try
+            Dim mi As MailItem = Nothing
+            Try
+                Dim ns = Application.GetNamespace("MAPI")
+                Dim obj = ns.GetItemFromID(entryId)
+                If TypeOf obj Is MailItem Then mi = DirectCast(obj, MailItem)
+            Catch
+            End Try
+
+            If mi Is Nothing Then
+                ApDashboardLog($"🚫 Rejected (sender not notified — mail no longer available): {senderLabel}", "warn")
+                Return
+            End If
+
+            Try
+                SendReplyToSender(mi, SP_AutoPilot_RejectionResponse, Nothing, tagAsAutoReply:=True)
+                TagOriginalMailAsProcessed(mi)
+                RecordLastProcessedTime()
+                Dim removedHolding As Boolean
+                _apHoldingOnlyEntryIds.TryRemove(entryId, removedHolding)
+                ApDashboardLog($"🚫 Rejected & notified sender: {senderLabel}", "step")
+            Finally
+                Try : Marshal.ReleaseComObject(mi) : Catch : End Try
+            End Try
+        Catch ex As System.Exception
+            ApDashboardLog($"⚠ Failed to process rejection for {senderLabel}: {ex.Message}", "warn")
+        End Try
+    End Sub
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  DASHBOARD LOG — date+time, no duplicate timestamp
