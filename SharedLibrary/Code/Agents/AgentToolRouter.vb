@@ -12,6 +12,7 @@
 '  - skill_use (SkillInvokeTool)
 '  - agent_<name> (SubAgentRunner for sub-agent delegation)
 '  - text_* tools (TextTools for plain file operations)
+'  - file_* tools (FileTools for binary-safe file/directory operations)
 '  - workspace_* tools (WorkspaceTools for workspace-scoped operations)
 '  - word_* / worddoc_* tools (Word document operations)
 '  - js_run (WebView2 JavaScript sandbox)
@@ -48,6 +49,10 @@ Namespace Agents
 
             If TextTools.IsTextTool(toolName) Then
                 Return TextTools.Execute(toolName, arguments)
+            End If
+
+            If FileTools.IsFileTool(toolName) Then
+                Return FileTools.Execute(toolName, arguments)
             End If
 
             If WorkspaceTools.IsWorkspaceTool(toolName) Then
@@ -88,6 +93,7 @@ Namespace Agents
             If String.IsNullOrWhiteSpace(toolName) Then Return False
             If MemoryTools.IsMemoryTool(toolName) Then Return True
             If TextTools.IsTextTool(toolName) Then Return True
+            If FileTools.IsFileTool(toolName) Then Return True
             If WorkspaceTools.IsWorkspaceTool(toolName) Then Return True
             If WordTools.IsWordTool(toolName) Then Return True
             If WordDocTools.IsWordDocTool(toolName) Then Return True

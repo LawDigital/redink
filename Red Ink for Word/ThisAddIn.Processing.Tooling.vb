@@ -60,6 +60,12 @@ Partial Public Class ThisAddIn
 
     Private _activeToolingContext As ToolExecutionContext = Nothing
 
+    ''' <summary>Per-session staging/temp directory for the current Word tooling run.</summary>
+    Private _wordAgentTempDir As String = Nothing
+
+    ''' <summary>Prefix for Word agent staging directories.</summary>
+    Private Const WordAgentTempPrefix As String = AN2 & "_wordagent_"
+
 
     Private Const SubAgentLargeToolResponseThresholdChars As Integer = 30000
     Private Const SubAgentLargeToolResponseExcerptChars As Integer = 8000
@@ -174,6 +180,7 @@ Partial Public Class ThisAddIn
         ToolingFileLogger.StartSession()
 
         Dim parentToolingContext = _activeToolingContext
+        Dim parentStagingRoot As String = SharedLibrary.Agents.PathPolicy.SessionStagingRoot
         Dim workflowScope As IDisposable = Nothing
         Dim acceptedFinalStatus As String = ""
 
@@ -200,6 +207,15 @@ Partial Public Class ThisAddIn
             SharedLibrary.Agents.WorkspaceTools.SetActive(New SharedLibrary.Agents.WorkspaceState())
         End Try
 
+        ' Sub-agents inherit the parent run's staging root; only a top-level run owns one.
+        If Not subAgentMode Then
+            Try
+                WordEnsureAgentTempDir()
+            Catch ex As Exception
+                ToolingFileLogger.LogWarn("Failed to initialize Word session staging directory.", ex:=ex)
+            End Try
+        End If
+
         Dim fullAllowedTools As List(Of ModelConfig) =
             If(selectedTools, New List(Of ModelConfig)()).
                 Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
@@ -215,6 +231,12 @@ Partial Public Class ThisAddIn
                 fullAllowedTools)
         Catch ex As Exception
             ToolingFileLogger.LogWarn("Failed to register selected Word tooling tools.", ex:=ex)
+        End Try
+
+        Try
+            SharedLibrary.Agents.SkillInvokeTool.CurrentHostProvider = Function() "Word"
+        Catch ex As Exception
+            ToolingFileLogger.LogWarn("Failed to set skill host provider for Word.", ex:=ex)
         End Try
 
         Dim context As New ToolExecutionContext() With {
@@ -2123,6 +2145,19 @@ Partial Public Class ThisAddIn
                 workflowScope = Nothing
             End If
 
+            If Not subAgentMode Then
+                Try
+                    WordCollectAndCopyOutputs()
+                Catch ex As Exception
+                    ToolingFileLogger.LogWarn("Failed to deliver Word session outputs.", ex:=ex)
+                End Try
+                Try
+                    WordCleanupAgentTempDir(parentStagingRoot)
+                Catch ex As Exception
+                    ToolingFileLogger.LogWarn("Failed to clean up Word session staging directory.", ex:=ex)
+                End Try
+            End If
+
             _activeToolingContext = parentToolingContext
             INI_APICall_ToolInstructions_2 = ""
             INI_APICall_ToolResponses_2 = ""
@@ -2157,6 +2192,124 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
+
+    ''' <summary>
+    ''' Eagerly creates the per-session Word staging directory (reclaiming stale ones first)
+    ''' and registers it as the PathPolicy session staging root so tool producers and
+    ''' consumers share common ground even when a workspace is connected.
+    ''' </summary>
+    Private Function WordEnsureAgentTempDir() As String
+        If String.IsNullOrWhiteSpace(_wordAgentTempDir) OrElse Not Directory.Exists(_wordAgentTempDir) Then
+            WordCleanupStaleAgentTempDirs()
+            _wordAgentTempDir = Path.Combine(Path.GetTempPath(), WordAgentTempPrefix & Guid.NewGuid().ToString("N"))
+            Directory.CreateDirectory(_wordAgentTempDir)
+        End If
+
+        SharedLibrary.Agents.PathPolicy.SetSessionStagingRoot(_wordAgentTempDir)
+        Return _wordAgentTempDir
+    End Function
+
+    ''' <summary>
+    ''' Deletes the current Word staging directory (best-effort) and clears the PathPolicy
+    ''' staging root, restoring any parent staging root supplied by the caller.
+    ''' </summary>
+    Private Sub WordCleanupAgentTempDir(parentStagingRoot As String)
+        Try
+            If Not String.IsNullOrWhiteSpace(_wordAgentTempDir) AndAlso Directory.Exists(_wordAgentTempDir) Then
+                Directory.Delete(_wordAgentTempDir, recursive:=True)
+            End If
+        Catch
+        End Try
+        _wordAgentTempDir = Nothing
+        SharedLibrary.Agents.PathPolicy.SetSessionStagingRoot(parentStagingRoot)
+    End Sub
+
+    ''' <summary>
+    ''' Best-effort reclamation of orphaned Word staging directories from prior runs whose
+    ''' cleanup failed. Deletes only directories matching this host's prefix, excluding the
+    ''' current active dir, and only when older than 24 hours (protects parallel sessions).
+    ''' </summary>
+    Private Sub WordCleanupStaleAgentTempDirs()
+        Try
+            Dim tempRoot = Path.GetTempPath()
+            Dim cutoff = DateTime.UtcNow.AddHours(-24)
+
+            For Each dirPath In Directory.GetDirectories(tempRoot, WordAgentTempPrefix & "*")
+                Try
+                    Dim full = Path.GetFullPath(dirPath)
+
+                    If Not String.IsNullOrWhiteSpace(_wordAgentTempDir) AndAlso
+                       full.Equals(Path.GetFullPath(_wordAgentTempDir), StringComparison.OrdinalIgnoreCase) Then Continue For
+
+                    If Directory.GetLastWriteTimeUtc(full) > cutoff Then Continue For
+
+                    Directory.Delete(full, recursive:=True)
+                Catch
+                End Try
+            Next
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Delivers files produced into the Word staging directory to Desktop\Inky\yyMMdd_HH-mm\
+    ''' and opens the folder, mirroring the Outlook Local Agent. Since a Word session is one
+    ''' tooling run into a fresh staging dir, every file present is a produced deliverable.
+    ''' </summary>
+    Private Function WordCollectAndCopyOutputs() As List(Of String)
+        Dim copiedFiles As New List(Of String)()
+
+        If String.IsNullOrWhiteSpace(_wordAgentTempDir) OrElse Not Directory.Exists(_wordAgentTempDir) Then
+            Return copiedFiles
+        End If
+
+        Dim filesToCopy = Directory.GetFiles(_wordAgentTempDir, "*.*", SearchOption.AllDirectories).
+            Select(Function(p) Path.GetFullPath(p)).
+            Distinct(StringComparer.OrdinalIgnoreCase).
+            ToList()
+
+        If filesToCopy.Count = 0 Then Return copiedFiles
+
+        Dim desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
+        Dim timestamp = DateTime.Now.ToString("yyMMdd_HH-mm")
+        Dim outputDir = Path.Combine(desktopPath, "Inky", timestamp)
+
+        Dim counter = 1
+        While Directory.Exists(outputDir)
+            outputDir = Path.Combine(desktopPath, "Inky", timestamp & $"_{counter}")
+            counter += 1
+        End While
+
+        Directory.CreateDirectory(outputDir)
+
+        For Each srcPath In filesToCopy
+            Try
+                Dim destName = Path.GetFileName(srcPath)
+                Dim destPath = Path.Combine(outputDir, destName)
+
+                Dim fileCounter = 1
+                While File.Exists(destPath)
+                    Dim baseName = Path.GetFileNameWithoutExtension(destName)
+                    Dim ext = Path.GetExtension(destName)
+                    destPath = Path.Combine(outputDir, baseName & $"_{fileCounter}{ext}")
+                    fileCounter += 1
+                End While
+
+                File.Copy(srcPath, destPath, overwrite:=False)
+                copiedFiles.Add(destPath)
+            Catch
+            End Try
+        Next
+
+        If copiedFiles.Count > 0 Then
+            Try
+                Process.Start("explorer.exe", outputDir)
+            Catch
+            End Try
+        End If
+
+        Return copiedFiles
+    End Function
 
     Private Function ResolveToolingWorkflowId(requestedWorkflowId As String,
                                               subAgentMode As Boolean,

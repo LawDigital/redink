@@ -448,6 +448,7 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Code\Agents\AgentToolRouter.vb" />
+    <Compile Include="Code\Agents\FileTools.vb" />
     <Compile Include="Code\Agents\PythonExecuteToolConfig.vb" />
     <Compile Include="Code\Agents\RedinkPythonAgentClient.vb" />
     <Compile Include="Code\Agents\HostToolRegistration.vb" />
@@ -474,6 +475,7 @@
     <Compile Include="Code\Agents\TaskStatusFooterParser.vb" />
     <Compile Include="Code\Agents\TextTools.vb" />
     <Compile Include="Code\Agents\ToolCallSequencing.vb" />
+    <Compile Include="Code\Agents\ToolDescribeTool.vb" />
     <Compile Include="Code\Agents\ToolExecutorRegistry.vb" />
     <Compile Include="Code\Agents\ToolingConstants.vb" />
     <Compile Include="Code\Agents\ToolingFinalResponseContract.vb" />

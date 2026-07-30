@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 27.7.2026
+' 30.7.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -61,7 +61,7 @@ Partial Public Class ThisAddIn
     Public Const AN4 As String = "redink_"
     Public Const AN3 As String = "redink"
 
-    Public Shared Version As String = "V.270726" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.300726" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -456,10 +456,10 @@ Partial Public Class ThisAddIn
         System.Threading.Tasks.Task.Run(
             Sub()
                 Try
-                    Dim exePath As String = SharedMethods.ExpandEnvironmentVariables(
-                        If(INI_PythonAgentPath, "").Split(";"c)(0).Trim())
-                    If Not String.IsNullOrWhiteSpace(exePath) AndAlso System.IO.File.Exists(exePath) Then
-                        SharedLibrary.Agents.PythonExecuteToolCore.QueryVersionStatus(exePath)
+                    Dim configuration = SharedLibrary.Agents.PythonExecuteToolConfig.Parse(
+                        SharedMethods.ExpandEnvironmentVariables(INI_PythonAgentPath))
+                    If configuration IsNot Nothing Then
+                        SharedLibrary.Agents.PythonExecuteToolCore.PrimeAvailabilityCache(configuration)
                     End If
                 Catch ex As System.Exception
                     ' Non-fatal: the tool-registration path will re-probe on demand.

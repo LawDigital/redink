@@ -114,24 +114,29 @@ Namespace Agents
             Dim p As String = PathPolicy.Resolve(GetStr(args, "path"), PathAccess.Read)
             If Not File.Exists(p) Then Return Err_("not_found", "File not found.")
 
-            Using doc As WordprocessingDocument = WordprocessingDocument.Open(p, isEditable:=False)
-                Dim paragraphs As List(Of ParagraphRow) = ExtractParagraphs(doc)
-                Dim joined As String = String.Join(Environment.NewLine, paragraphs.Select(Function(t) t.Text))
-                Dim maxChars As Integer = GetInt(args, "max_chars", 0)
-                Dim truncated As Boolean = False
+            ' Use the rich sandboxed extractor so the returned text includes footnotes,
+            ' endnotes, headers/footers, automatic paragraph/list/heading numbering,
+            ' cross-references, tables, and text-box/margin text — not just body runs.
+            Dim joined As String = SharedMethods.DocxTextExtractor.ReadDocxSandboxed(p)
+            If joined Is Nothing Then joined = String.Empty
 
-                If maxChars > 0 AndAlso joined.Length > maxChars Then
-                    joined = joined.Substring(0, maxChars)
-                    truncated = True
-                End If
+            If joined.StartsWith("Error:", StringComparison.Ordinal) Then
+                Return Err_("extract_failed", joined.Substring("Error:".Length).Trim())
+            End If
 
-                Return JsonConvert.SerializeObject(New With {
-                    Key .path = p,
-                    Key .paragraphs = paragraphs.Count,
-                    Key .truncated = truncated,
-                    Key .text = joined
-                })
-            End Using
+            Dim maxChars As Integer = GetInt(args, "max_chars", 0)
+            Dim truncated As Boolean = False
+
+            If maxChars > 0 AndAlso joined.Length > maxChars Then
+                joined = joined.Substring(0, maxChars)
+                truncated = True
+            End If
+
+            Return JsonConvert.SerializeObject(New With {
+                Key .path = p,
+                Key .truncated = truncated,
+                Key .text = joined
+            })
         End Function
 
         Private Shared Function ExecuteSearch(args As IDictionary(Of String, Object)) As String
@@ -163,12 +168,12 @@ Namespace Agents
                     If useRegex Then
                         For Each m As Match In rx.Matches(text)
                             If hits.Count >= maxHits Then Exit For
-                            hits.Add(BuildHit(idx, text, m.Index, m.Length, m.Value))
+                            hits.Add(BuildHit(idx, paragraphs(idx).Story, text, m.Index, m.Length, m.Value))
                         Next
                     Else
                         Dim matches As List(Of Integer()) = FindAllInText(text, query, ignoreCase, maxHits - hits.Count)
                         For Each mm As Integer() In matches
-                            hits.Add(BuildHit(idx, text, mm(0), mm(1), text.Substring(mm(0), mm(1))))
+                            hits.Add(BuildHit(idx, paragraphs(idx).Story, text, mm(0), mm(1), text.Substring(mm(0), mm(1))))
                             If hits.Count >= maxHits Then Exit For
                         Next
                     End If
@@ -190,62 +195,121 @@ Namespace Agents
             Dim p As String = PathPolicy.Resolve(GetStr(args, "path"), PathAccess.Write)
             If Not File.Exists(p) Then Return Err_("not_found", "File not found.")
 
-            Dim op As String = GetStr(args, "op").ToLowerInvariant() ' replace | insert_before | insert_after | append
-            Dim find As String = GetStr(args, "find")
-            Dim text As String = GetStr(args, "text")
-            Dim author As String = If(GetStr(args, "author"), "Red Ink")
-            Dim onlyFirst As Boolean = GetBool(args, "only_first", True)
+            Dim authorRaw As String = GetStr(args, "author")
+            Dim author As String = If(String.IsNullOrWhiteSpace(authorRaw), "Red Ink", authorRaw)
 
-            If String.IsNullOrWhiteSpace(op) Then op = "replace"
-            If op <> "append" AndAlso String.IsNullOrWhiteSpace(find) Then
-                Return Err_("missing_find", "find is required for op '" & op & "'.")
-            End If
+            Dim tasks As List(Of MarkupTask) = ParseTasks(args)
+            If tasks.Count = 0 Then Return Err_("missing_tasks", "Provide either op/find/text or a 'tasks' array.")
 
-            ' Matching is per-W.Paragraph, so a 'find' that spans more than one paragraph
-            ' can never match. Reject it early with an actionable message instead of a
-            ' misleading 'no_match', and instruct the caller to split the operation.
-            If op <> "append" AndAlso ContainsParagraphBreak(find) Then
-                Return Err_("multi_paragraph_find",
-                            "The 'find' text spans more than one paragraph. word_markup matches within a single paragraph. " &
-                            "Split this into one operation per paragraph: replace the first paragraph, then use insert_after / additional replace calls for the remaining paragraphs.")
-            End If
+            Dim results As New List(Of Object)()
+            Dim anyApplied As Boolean = False
+            Dim failedCount As Integer = 0
 
             Using doc As WordprocessingDocument = WordprocessingDocument.Open(p, isEditable:=True)
                 Dim body As W.Body = doc.MainDocumentPart.Document.Body
-                Dim mutated As Integer = 0
 
-                If op = "append" Then
-                    For Each ln As String In SplitLines(text)
-                        body.AppendChild(MakeMarkdownParagraph(ln, body, asMarkup, author))
+                For Each t As MarkupTask In tasks
+                    Dim op As String = If(String.IsNullOrWhiteSpace(t.Op), "replace", t.Op)
+
+                    If op = "append" Then
+                        For Each ln As String In SplitLines(t.Text)
+                            body.AppendChild(MakeMarkdownParagraph(ln, body, asMarkup, author))
+                        Next
+                        anyApplied = True
+                        results.Add(New With {Key .op = op, Key .applied = True})
+                        Continue For
+                    End If
+
+                    If String.IsNullOrWhiteSpace(t.Find) Then
+                        results.Add(New With {Key .op = op, Key .applied = False, Key .error = "missing_find"})
+                        Continue For
+                    End If
+
+                    ' Matching is per-W.Paragraph. A 'find' that spans a paragraph break can never
+                    ' match. To merge two paragraphs into one, replace the first and use
+                    ' delete_paragraph on the second (its paragraph mark is marked deleted).
+                    If ContainsParagraphBreak(t.Find) Then
+                        results.Add(New With {
+                            Key .op = op,
+                            Key .applied = False,
+                            Key .error = "multi_paragraph_find",
+                            Key .message = "'find' spans more than one paragraph. Split into one task per paragraph; to merge two paragraphs, replace the first and use op 'delete_paragraph' on the second."
+                        })
+                        Continue For
+                    End If
+
+                    Dim count As Integer = 0
+
+                    ' Body, footnotes and endnotes are all edited so revisions apply wherever the
+                    ' text appears. Each story carries its own change-id scope root.
+                    For Each sp As StoryParagraph In EnumerateStoryParagraphs(doc)
+                        Dim para As W.Paragraph = sp.Para
+                        Dim done As Boolean = False
+
+                        If op = "delete_paragraph" Then
+                            Dim mStart As Integer
+                            Dim mLen As Integer
+                            If Not TryFindInText(GetParagraphText(para), t.Find, mStart, mLen) Then Continue For
+                            MarkParagraphDeleted(para, asMarkup, author, sp.Scope)
+                            done = True
+                        Else
+                            done = ApplyMarkupOpToParagraphSurgical(para, t.Find, t.Text, op, asMarkup, author, sp.Scope)
+                        End If
+
+                        If done Then
+                            count += 1
+                            If t.OnlyFirst Then Exit For
+                        End If
                     Next
 
-                    mutated = 1
-                Else
-                    For Each para As W.Paragraph In body.Descendants(Of W.Paragraph)().ToList()
-                        Dim pt As String = GetParagraphText(para)
-                        Dim mStart As Integer
-                        Dim mLen As Integer
-                        If Not TryFindInText(pt, find, mStart, mLen) Then Continue For
+                    If count > 0 Then
+                        anyApplied = True
+                        results.Add(New With {Key .op = op, Key .find = t.Find, Key .applied = True, Key .matches = count})
+                    Else
+                        failedCount += 1
+                        results.Add(New With {
+                            Key .op = op,
+                            Key .find = t.Find,
+                            Key .applied = False,
+                            Key .matches = 0,
+                            Key .reason = "no_match",
+                            Key .suggestions = SuggestClosestParagraphsAll(doc, t.Find, 3)
+                        })
+                    End If
+                Next
 
-                        ApplyTextOpToParagraph(para, mStart, mLen, text, op, asMarkup, author, body)
-                        mutated += 1
-
-                        If onlyFirst Then Exit For
-                    Next
+                If anyApplied Then
+                    doc.MainDocumentPart.Document.Save()
+                    If doc.MainDocumentPart.FootnotesPart IsNot Nothing AndAlso doc.MainDocumentPart.FootnotesPart.Footnotes IsNot Nothing Then
+                        doc.MainDocumentPart.FootnotesPart.Footnotes.Save()
+                    End If
+                    If doc.MainDocumentPart.EndnotesPart IsNot Nothing AndAlso doc.MainDocumentPart.EndnotesPart.Endnotes IsNot Nothing Then
+                        doc.MainDocumentPart.EndnotesPart.Endnotes.Save()
+                    End If
                 End If
-
-                If mutated = 0 Then
-                    Return Err_("no_match", "No W.Paragraph contained the 'find' text.")
-                End If
-
-                doc.MainDocumentPart.Document.Save()
             End Using
+
+            Dim appliedCount As Integer = tasks.Count - failedCount
+            Dim status As String
+            If failedCount = 0 Then
+                status = "complete"
+            ElseIf anyApplied Then
+                status = "partial"
+            Else
+                status = "none"
+            End If
 
             Return JsonConvert.SerializeObject(New With {
                 Key .path = p,
-                Key .mutated = True,
-                Key .op = op,
-                Key .markup = asMarkup
+                Key .markup = asMarkup,
+                Key .status = status,
+                Key .applied_count = appliedCount,
+                Key .failed_count = failedCount,
+                Key .tasks = results,
+                Key .hint = If(failedCount = 0, Nothing,
+                    "Tool call succeeded. " & failedCount.ToString() &
+                    " task(s) found no matching anchor (see tasks[].reason='no_match' and tasks[].suggestions). " &
+                    "Re-read the document to get the CURRENT text, then retry only the failed 'find' values using the exact current wording. Do not treat this as blocked.")
             })
         End Function
 
@@ -258,71 +322,687 @@ Namespace Agents
             Return value.IndexOfAny(New Char() {ChrW(10), ChrW(13)}) >= 0
         End Function
 
-        Private Shared Sub ApplyTextOpToParagraph(para As W.Paragraph,
-                                                   matchStart As Integer,
-                                                   matchLength As Integer,
-                                                   newText As String,
-                                                   op As String,
-                                                   asMarkup As Boolean,
-                                                   author As String,
-                                                   body As W.Body)
-            ' Rebuild the W.Paragraph from its plain text. matchStart/matchLength are offsets
-            ' into GetParagraphText(para) produced by whitespace-normalized matching, so 'mid'
-            ' is the ACTUAL text in the paragraph, not the model-supplied 'find'. Preserves the
-            ' paragraph's pPr; loses inline run formatting that splits across the matched span.
-            Dim pt As String = GetParagraphText(para)
-            If matchStart < 0 OrElse matchStart > pt.Length Then Return
-            If matchLength < 0 Then matchLength = 0
-            If matchStart + matchLength > pt.Length Then matchLength = pt.Length - matchStart
 
-            Dim before As String = pt.Substring(0, matchStart)
-            Dim mid As String = pt.Substring(matchStart, matchLength)
-            Dim after As String = pt.Substring(matchStart + matchLength)
+        ' =============================================================================
+        ' Surgical, structure-preserving markup engine (file-level).
+        '
+        ' Unlike ApplyTextOpToParagraph, this NEVER rebuilds a paragraph from plain text.
+        ' The paragraph is flattened into an ordered atom stream:
+        '   - TextChar atoms: one per character, carrying a cloned rPr and existing
+        '     ins/del state, and
+        '   - Opaque atoms: any non-text inline content (footnote/endnote references,
+        '     fields, drawings/images, tabs, breaks, comment marks, bookmarks, symbols),
+        '     cloned verbatim and re-emitted so it is never lost.
+        ' Only the matched span is diffed and rewritten. Word-level diff is used by
+        ' default; heavily rewritten spans collapse to a single delete+insert using the
+        ' shared materialRewrite* thresholds. Inserted text and opaque atoms are pinned to
+        ' the formatting/position of the nearest unchanged word.
+        ' =============================================================================
+
+        Private Enum AtomKind
+            TextChar
+            Opaque
+        End Enum
+
+        Private NotInheritable Class ParaAtom
+            Public Kind As AtomKind
+            Public Ch As Char
+            Public RunProps As W.RunProperties
+            Public OpaqueNode As OpenXmlElement
+            Public InExistingIns As Boolean
+            Public InExistingDel As Boolean
+        End Class
+
+        Private Structure MarkupTask
+            Public Op As String
+            Public Find As String
+            Public Text As String
+            Public OnlyFirst As Boolean
+        End Structure
+
+        Private Shared Function CloneRPr(rPr As W.RunProperties) As W.RunProperties
+            If rPr Is Nothing Then Return Nothing
+            Return CType(rPr.CloneNode(True), W.RunProperties)
+        End Function
+
+        Private Shared Sub FlattenParagraph(container As OpenXmlElement,
+                                            atoms As List(Of ParaAtom),
+                                            inIns As Boolean,
+                                            inDel As Boolean)
+            For Each child As OpenXmlElement In container.ChildElements
+                If TypeOf child Is W.ParagraphProperties Then
+                    Continue For
+                ElseIf TypeOf child Is W.InsertedRun Then
+                    FlattenParagraph(child, atoms, True, inDel)
+                ElseIf TypeOf child Is W.DeletedRun Then
+                    FlattenParagraph(child, atoms, inIns, True)
+                ElseIf TypeOf child Is W.Run Then
+                    FlattenRun(DirectCast(child, W.Run), atoms, inIns, inDel)
+                ElseIf ContainerHasEditableText(child) Then
+                    ' Some editable text lives inside container elements that are direct
+                    ' children of the paragraph (e.g. hyperlinks, smart tags, structured-
+                    ' document-tag content, custom-XML wrappers). Treating the whole
+                    ' container as opaque hides its text from the matcher, so 'find' can
+                    ' never anchor there — this is why footnote/endnote text wrapped in such
+                    ' a container was reported as no_match even though the text was present.
+                    ' Recurse so the inner runs become matchable; genuinely inline objects
+                    ' (note references, fields without text, drawings, breaks, symbols,
+                    ' bookmarks, comment marks) have no w:t and stay opaque below.
+                    FlattenParagraph(child, atoms, inIns, inDel)
+                Else
+                    atoms.Add(New ParaAtom With {
+                        .Kind = AtomKind.Opaque,
+                        .OpaqueNode = CType(child.CloneNode(True), OpenXmlElement),
+                        .InExistingIns = inIns,
+                        .InExistingDel = inDel
+                    })
+                End If
+            Next
+        End Sub
+
+        ' True when the element carries editable text (a w:t somewhere inside), i.e. it is a
+        ' text-bearing container we can safely recurse into rather than treat as one opaque
+        ' blob. Elements without any w:t (drawings, note references, empty fields, bookmarks,
+        ' comment range markers) return False and remain opaque.
+        Private Shared Function ContainerHasEditableText(el As OpenXmlElement) As Boolean
+            If el Is Nothing Then Return False
+            Return el.Descendants(Of W.Text)().Any()
+        End Function
+
+        Private Shared Sub FlattenRun(run As W.Run,
+                                      atoms As List(Of ParaAtom),
+                                      inIns As Boolean,
+                                      inDel As Boolean)
+            Dim rPr As W.RunProperties = run.RunProperties
+
+            Dim hasText As Boolean = run.Elements(Of W.Text)().Any()
+            Dim hasSpecial As Boolean = run.ChildElements.Any(
+                Function(c) Not (TypeOf c Is W.RunProperties OrElse TypeOf c Is W.Text))
+
+            ' Pure special run (footnote/endnote reference alone, drawing, field char, deleted
+            ' text, etc.): no editable text, so keep the whole run opaque and formatting intact.
+            If hasSpecial AndAlso Not hasText Then
+                atoms.Add(New ParaAtom With {
+                    .Kind = AtomKind.Opaque,
+                    .OpaqueNode = CType(run.CloneNode(True), OpenXmlElement),
+                    .InExistingIns = inIns,
+                    .InExistingDel = inDel
+                })
+                Return
+            End If
+
+            ' Pure text run: emit one TextChar atom per character.
+            If Not hasSpecial Then
+                For Each t As W.Text In run.Elements(Of W.Text)()
+                    Dim s As String = t.Text
+                    If s Is Nothing Then Continue For
+                    For Each ch As Char In s
+                        atoms.Add(New ParaAtom With {
+                            .Kind = AtomKind.TextChar,
+                            .Ch = ch,
+                            .RunProps = CloneRPr(rPr),
+                            .InExistingIns = inIns,
+                            .InExistingDel = inDel
+                        })
+                    Next
+                Next
+                Return
+            End If
+
+            ' Mixed run: text AND special children in the same run. This is how many
+            ' footnote/endnote styles store content (e.g. w:footnoteRef + w:tab + w:t together).
+            ' Treating the whole run as opaque would hide its text from the matcher even though
+            ' the text is clearly present. Walk the children in order, emitting TextChar atoms
+            ' for w:t and wrapping every other child in its own run (carrying the original rPr)
+            ' as an opaque atom, so the text becomes matchable and the reference mark / tab /
+            ' formatting are preserved verbatim when the paragraph is rebuilt.
+            For Each child As OpenXmlElement In run.ChildElements
+                If TypeOf child Is W.RunProperties Then
+                    Continue For
+                ElseIf TypeOf child Is W.Text Then
+                    Dim s As String = DirectCast(child, W.Text).Text
+                    If s Is Nothing Then Continue For
+                    For Each ch As Char In s
+                        atoms.Add(New ParaAtom With {
+                            .Kind = AtomKind.TextChar,
+                            .Ch = ch,
+                            .RunProps = CloneRPr(rPr),
+                            .InExistingIns = inIns,
+                            .InExistingDel = inDel
+                        })
+                    Next
+                Else
+                    Dim wrap As New W.Run()
+                    If rPr IsNot Nothing Then wrap.AppendChild(CloneRPr(rPr))
+                    wrap.AppendChild(CType(child.CloneNode(True), OpenXmlElement))
+                    atoms.Add(New ParaAtom With {
+                        .Kind = AtomKind.Opaque,
+                        .OpaqueNode = wrap,
+                        .InExistingIns = inIns,
+                        .InExistingDel = inDel
+                    })
+                End If
+            Next
+        End Sub
+
+        ' Coalescing emitter. Mode: 1 = plain, 2 = inserted (w:ins), 3 = deleted (w:del).
+        Private NotInheritable Class MarkupEmitter
+            Public ReadOnly Children As New List(Of OpenXmlElement)()
+            Private ReadOnly _scope As OpenXmlElement
+            Private ReadOnly _author As String
+            Private ReadOnly _sb As New StringBuilder()
+            Private _mode As Integer = 0
+            Private _rPr As W.RunProperties = Nothing
+            Private _rPrXml As String = Nothing
+
+            Public Sub New(scope As OpenXmlElement, author As String)
+                _scope = scope
+                _author = author
+            End Sub
+
+            Public Sub AddChar(ch As Char, rPr As W.RunProperties, mode As Integer)
+                Dim xml As String = If(rPr Is Nothing, String.Empty, rPr.OuterXml)
+                If _sb.Length > 0 AndAlso (_mode <> mode OrElse Not String.Equals(_rPrXml, xml, StringComparison.Ordinal)) Then
+                    Flush()
+                End If
+                _mode = mode
+                _rPr = rPr
+                _rPrXml = xml
+                _sb.Append(ch)
+            End Sub
+
+            Public Sub AddText(text As String, rPr As W.RunProperties, mode As Integer)
+                If String.IsNullOrEmpty(text) Then Return
+                For Each ch As Char In text
+                    AddChar(ch, rPr, mode)
+                Next
+            End Sub
+
+            Public Sub AddOpaque(node As OpenXmlElement, inIns As Boolean, inDel As Boolean)
+                Flush()
+                If node Is Nothing Then Return
+                If inDel Then
+                    Dim d As New W.DeletedRun() With {.Id = NextChangeId(_scope).ToString(), .Author = _author, .Date = DateTime.UtcNow}
+                    d.AppendChild(node)
+                    Children.Add(d)
+                ElseIf inIns Then
+                    Dim ins As New W.InsertedRun() With {.Id = NextChangeId(_scope).ToString(), .Author = _author, .Date = DateTime.UtcNow}
+                    ins.AppendChild(node)
+                    Children.Add(ins)
+                Else
+                    Children.Add(node)
+                End If
+            End Sub
+
+            Public Sub Flush()
+                If _sb.Length = 0 Then Return
+                Dim text As String = _sb.ToString()
+                _sb.Clear()
+
+                Dim run As New W.Run()
+                If _rPr IsNot Nothing Then run.AppendChild(CType(_rPr.CloneNode(True), W.RunProperties))
+
+                If _mode = 3 Then
+                    run.AppendChild(New W.DeletedText(text) With {.Space = SpaceProcessingModeValues.Preserve})
+                    Dim d As New W.DeletedRun() With {.Id = NextChangeId(_scope).ToString(), .Author = _author, .Date = DateTime.UtcNow}
+                    d.AppendChild(run)
+                    Children.Add(d)
+                ElseIf _mode = 2 Then
+                    run.AppendChild(New W.Text(text) With {.Space = SpaceProcessingModeValues.Preserve})
+                    Dim ins As New W.InsertedRun() With {.Id = NextChangeId(_scope).ToString(), .Author = _author, .Date = DateTime.UtcNow}
+                    ins.AppendChild(run)
+                    Children.Add(ins)
+                Else
+                    run.AppendChild(New W.Text(text) With {.Space = SpaceProcessingModeValues.Preserve})
+                    Children.Add(run)
+                End If
+
+                _mode = 0
+                _rPr = Nothing
+                _rPrXml = Nothing
+            End Sub
+        End Class
+
+        Private Shared Sub EmitOriginalRange(em As MarkupEmitter, atoms As List(Of ParaAtom), fromIdx As Integer, toIdx As Integer)
+            If fromIdx > toIdx Then Return
+            For ai As Integer = fromIdx To toIdx
+                Dim a As ParaAtom = atoms(ai)
+                If a.Kind = AtomKind.TextChar Then
+                    Dim mode As Integer = If(a.InExistingDel, 3, If(a.InExistingIns, 2, 1))
+                    em.AddChar(a.Ch, a.RunProps, mode)
+                Else
+                    em.AddOpaque(a.OpaqueNode, a.InExistingIns, a.InExistingDel)
+                End If
+            Next
+        End Sub
+
+        ' Locates 'find' in the paragraph's final-view text projection (opaque atoms and
+        ' existing deletions ignored) and returns the first/last atom indices of the match.
+        Private Shared Function LocateFindInAtoms(atoms As List(Of ParaAtom),
+                                                  find As String,
+                                                  ByRef firstAtom As Integer,
+                                                  ByRef lastAtom As Integer) As Boolean
+            firstAtom = -1
+            lastAtom = -1
+
+            Dim finalCharAtom As New List(Of Integer)()
+            Dim sbProj As New StringBuilder()
+            For i As Integer = 0 To atoms.Count - 1
+                Dim a As ParaAtom = atoms(i)
+                If a.Kind = AtomKind.TextChar AndAlso Not a.InExistingDel Then
+                    finalCharAtom.Add(i)
+                    sbProj.Append(a.Ch)
+                End If
+            Next
+            Dim projection As String = sbProj.ToString()
+
+            Dim hit As List(Of Integer()) = FindAllInText(projection, find, False, 1)
+            If hit.Count = 0 Then hit = FindAllInText(projection, find, True, 1)
+            If hit.Count = 0 Then Return False
+
+            Dim projStart As Integer = hit(0)(0)
+            Dim projLen As Integer = hit(0)(1)
+            If projLen <= 0 Then Return False
+
+            firstAtom = finalCharAtom(projStart)
+            lastAtom = finalCharAtom(projStart + projLen - 1)
+            Return True
+        End Function
+
+        Private Shared Function ApplyMarkupOpToParagraphSurgical(para As W.Paragraph,
+                                                                 find As String,
+                                                                 newText As String,
+                                                                 op As String,
+                                                                 asMarkup As Boolean,
+                                                                 author As String,
+                                                                 scope As OpenXmlElement) As Boolean
+            Dim atoms As New List(Of ParaAtom)()
+            FlattenParagraph(para, atoms, False, False)
+
+            ' Final-view projection: characters that are visible in Word (text chars not
+            ' inside an existing deletion). Opaque atoms (footnotes/fields/...) contribute
+            ' nothing, so 'find' matches irrespective of them.
+            Dim finalCharAtom As New List(Of Integer)()
+            Dim sbProj As New StringBuilder()
+            For i As Integer = 0 To atoms.Count - 1
+                Dim a As ParaAtom = atoms(i)
+                If a.Kind = AtomKind.TextChar AndAlso Not a.InExistingDel Then
+                    finalCharAtom.Add(i)
+                    sbProj.Append(a.Ch)
+                End If
+            Next
+            Dim projection As String = sbProj.ToString()
+
+            Dim hit As List(Of Integer()) = FindAllInText(projection, find, False, 1)
+            If hit.Count = 0 Then hit = FindAllInText(projection, find, True, 1)
+            If hit.Count = 0 Then Return False
+
+            Dim projStart As Integer = hit(0)(0)
+            Dim projLen As Integer = hit(0)(1)
+            If projLen <= 0 Then Return False
+            Dim projEnd As Integer = projStart + projLen
+
+            Dim firstAtom As Integer = finalCharAtom(projStart)
+            Dim lastAtom As Integer = finalCharAtom(projEnd - 1)
+
+            Dim midText As String = projection.Substring(projStart, projLen)
+
+            ' Build per-mid-character labels (1 = keep, 3 = delete) and insert buffers.
+            Dim labels() As Integer = New Integer(midText.Length - 1) {}
+            Dim insertsAt As New Dictionary(Of Integer, String)()
+
+            Select Case op
+                Case "insert_before"
+                    For k As Integer = 0 To midText.Length - 1
+                        labels(k) = 1
+                    Next
+                    insertsAt(0) = newText
+                Case "insert_after"
+                    For k As Integer = 0 To midText.Length - 1
+                        labels(k) = 1
+                    Next
+                    insertsAt(midText.Length) = newText
+                Case Else ' replace
+                    Dim diffs As List(Of SharedMethods.Diff) = ComputeMarkupDiff(midText, newText)
+                    Dim pos As Integer = 0
+                    For Each d As SharedMethods.Diff In diffs
+                        Select Case d.Op
+                            Case SharedMethods.Diff.Operation.Equal
+                                For k As Integer = 0 To d.Text.Length - 1
+                                    labels(pos) = 1
+                                    pos += 1
+                                Next
+                            Case SharedMethods.Diff.Operation.Delete
+                                For k As Integer = 0 To d.Text.Length - 1
+                                    labels(pos) = 3
+                                    pos += 1
+                                Next
+                            Case SharedMethods.Diff.Operation.Insert
+                                Dim cur As String = Nothing
+                                insertsAt.TryGetValue(pos, cur)
+                                insertsAt(pos) = If(cur, String.Empty) & d.Text
+                        End Select
+                    Next
+            End Select
+
+            Dim em As New MarkupEmitter(scope, author)
+
+            EmitOriginalRange(em, atoms, 0, firstAtom - 1)
+
+            Dim localIndex As Integer = 0
+            For ai As Integer = firstAtom To lastAtom
+                Dim a As ParaAtom = atoms(ai)
+
+                If a.Kind = AtomKind.TextChar AndAlso Not a.InExistingDel Then
+                    Dim pending As String = Nothing
+                    If insertsAt.TryGetValue(localIndex, pending) Then
+                        ' Pin inserted text formatting to the following (nearest) word.
+                        em.AddText(pending, a.RunProps, If(asMarkup, 2, 1))
+                    End If
+
+                    If labels(localIndex) = 3 Then
+                        If asMarkup Then em.AddChar(a.Ch, a.RunProps, 3)  ' write mode drops deleted text
+                    Else
+                        em.AddChar(a.Ch, a.RunProps, If(a.InExistingIns AndAlso asMarkup, 2, 1))
+                    End If
+
+                    localIndex += 1
+                ElseIf a.Kind = AtomKind.TextChar Then
+                    em.AddChar(a.Ch, a.RunProps, 3)  ' preserve pre-existing deletion
+                Else
+                    em.AddOpaque(a.OpaqueNode, a.InExistingIns, a.InExistingDel)
+                End If
+            Next
+
+            Dim tail As String = Nothing
+            If insertsAt.TryGetValue(midText.Length, tail) Then
+                em.AddText(tail, atoms(lastAtom).RunProps, If(asMarkup, 2, 1))
+            End If
+
+            em.Flush()
+            EmitOriginalRange(em, atoms, lastAtom + 1, atoms.Count - 1)
+            em.Flush()
 
             Dim pPr As W.ParagraphProperties = para.Elements(Of W.ParagraphProperties)().FirstOrDefault()
             para.RemoveAllChildren()
+            If pPr IsNot Nothing Then para.AppendChild(CType(pPr.CloneNode(True), W.ParagraphProperties))
+            For Each c As OpenXmlElement In em.Children
+                para.AppendChild(c)
+            Next
 
-            If pPr IsNot Nothing Then
-                para.AppendChild(CType(pPr.CloneNode(True), W.ParagraphProperties))
+            Return True
+        End Function
+
+        Private Shared Sub MarkParagraphDeleted(para As W.Paragraph, asMarkup As Boolean, author As String, scope As OpenXmlElement)
+            If Not asMarkup Then
+                para.Remove()
+                Return
             End If
 
-            If before.Length > 0 Then
-                para.AppendChild(MakeRun(before))
+            Dim atoms As New List(Of ParaAtom)()
+            FlattenParagraph(para, atoms, False, False)
+
+            Dim em As New MarkupEmitter(scope, author)
+            For Each a As ParaAtom In atoms
+                If a.Kind = AtomKind.TextChar Then
+                    em.AddChar(a.Ch, a.RunProps, 3)
+                Else
+                    em.AddOpaque(a.OpaqueNode, a.InExistingIns, True)
+                End If
+            Next
+            em.Flush()
+
+            Dim pPr As W.ParagraphProperties = para.Elements(Of W.ParagraphProperties)().FirstOrDefault()
+            para.RemoveAllChildren()
+            If pPr Is Nothing Then pPr = New W.ParagraphProperties()
+
+            ' Mark the paragraph mark itself as deleted so accepting the change merges this
+            ' paragraph into the next one.
+            Dim mrp As W.ParagraphMarkRunProperties = pPr.Elements(Of W.ParagraphMarkRunProperties)().FirstOrDefault()
+            If mrp Is Nothing Then
+                mrp = New W.ParagraphMarkRunProperties()
+                pPr.AppendChild(mrp)
+            End If
+            If mrp.Elements(Of W.Deleted)().FirstOrDefault() Is Nothing Then
+                mrp.PrependChild(New W.Deleted() With {.Id = NextChangeId(scope).ToString(), .Author = author, .Date = DateTime.UtcNow})
             End If
 
-            Dim last As W.Paragraph = para
-
-            Select Case op
-                Case "replace"
-                    If asMarkup AndAlso mid.Length > 0 Then
-                        Dim del As New W.DeletedRun() With {
-                            .Id = NextChangeId(body).ToString(),
-                            .Author = author,
-                            .Date = DateTime.UtcNow
-                        }
-                        del.AppendChild(MakeRun(mid, deletedText:=True))
-                        para.AppendChild(del)
-                    End If
-
-                    Dim allowBlockOnFirst As Boolean = (before.Length = 0 AndAlso after.Length = 0)
-                    last = AppendMarkdownContent(para, newText, asMarkup, author, body, allowBlockOnFirst)
-                    AppendPlainRun(last, after)
-
-                Case "insert_before"
-                    last = AppendMarkdownContent(para, newText, asMarkup, author, body, False)
-                    AppendPlainRun(last, mid)
-                    AppendPlainRun(last, after)
-
-                Case "insert_after"
-                    AppendPlainRun(para, mid)
-                    last = AppendMarkdownContent(para, newText, asMarkup, author, body, False)
-                    AppendPlainRun(last, after)
-
-                Case Else
-                    AppendPlainRun(para, mid)
-                    AppendPlainRun(last, after)
-            End Select
+            para.AppendChild(pPr)
+            For Each c As OpenXmlElement In em.Children
+                para.AppendChild(c)
+            Next
         End Sub
+
+        ' ---------------------------------------------------- diff (word-level / text-level)
+
+        Private Shared Function ComputeMarkupDiff(oldText As String, newText As String) As List(Of SharedMethods.Diff)
+            Dim result As New List(Of SharedMethods.Diff)()
+            Dim o As String = If(oldText, String.Empty)
+            Dim n As String = If(newText, String.Empty)
+
+            If o.Length = 0 AndAlso n.Length = 0 Then Return result
+            If o.Length = 0 Then
+                result.Add(New SharedMethods.Diff(SharedMethods.Diff.Operation.Insert, n))
+                Return result
+            End If
+            If n.Length = 0 Then
+                result.Add(New SharedMethods.Diff(SharedMethods.Diff.Operation.Delete, o))
+                Return result
+            End If
+
+            If ShouldCollapseToTextLevel(o, n) Then
+                result.Add(New SharedMethods.Diff(SharedMethods.Diff.Operation.Delete, o))
+                result.Add(New SharedMethods.Diff(SharedMethods.Diff.Operation.Insert, n))
+                Return result
+            End If
+
+            Dim t1 As List(Of String) = TokenizeForDiff(o)
+            Dim t2 As List(Of String) = TokenizeForDiff(n)
+            Dim j1 As String = String.Join(vbLf, t1)
+            Dim j2 As String = String.Join(vbLf, t2)
+
+            Dim builder As New DiffPlex.DiffBuilder.InlineDiffBuilder(New DiffPlex.Differ())
+            Dim model As DiffPlex.DiffBuilder.Model.DiffPaneModel = builder.BuildDiffModel(j1, j2)
+
+            For Each line As DiffPlex.DiffBuilder.Model.DiffPiece In model.Lines
+                Dim txt As String = If(line.Text, String.Empty)
+                If txt.Length = 0 Then Continue For
+
+                Dim opv As SharedMethods.Diff.Operation
+                Select Case line.Type
+                    Case DiffPlex.DiffBuilder.Model.ChangeType.Inserted
+                        opv = SharedMethods.Diff.Operation.Insert
+                    Case DiffPlex.DiffBuilder.Model.ChangeType.Deleted
+                        opv = SharedMethods.Diff.Operation.Delete
+                    Case Else
+                        opv = SharedMethods.Diff.Operation.Equal
+                End Select
+
+                If result.Count > 0 AndAlso result(result.Count - 1).Op = opv Then
+                    result(result.Count - 1).Text &= txt
+                Else
+                    result.Add(New SharedMethods.Diff(opv, txt))
+                End If
+            Next
+
+            Return result
+        End Function
+
+        Private Shared Function TokenizeForDiff(text As String) As List(Of String)
+            Dim r As New List(Of String)()
+            If String.IsNullOrEmpty(text) Then Return r
+            For Each m As Match In Regex.Matches(text, "[\p{L}\p{M}\p{N}_]+|\s+|[^\s]", RegexOptions.Singleline)
+                If m.Length > 0 Then r.Add(m.Value)
+            Next
+            Return r
+        End Function
+
+        Private Shared Function ShouldCollapseToTextLevel(oldText As String, newText As String) As Boolean
+            If String.IsNullOrWhiteSpace(oldText) OrElse String.IsNullOrWhiteSpace(newText) Then Return False
+
+            Dim a As List(Of String) = ComparableTokens(oldText)
+            Dim b As List(Of String) = ComparableTokens(newText)
+            If a.Count < 7 OrElse b.Count < 7 Then Return False
+
+            Dim lcs As Integer = TokenLcs(a, b)
+            Dim similarity As Double = (2.0 * lcs) / (a.Count + b.Count)
+            Dim changed As Integer = (a.Count - lcs) + (b.Count - lcs)
+            Dim ratio As Double = changed / (a.Count + b.Count)
+
+            Return changed >= SharedMethods.materialRewriteMinimumChangedTokens AndAlso
+                   similarity < SharedMethods.materialRewriteSimilarityThreshold AndAlso
+                   ratio >= SharedMethods.materialRewriteChangedTokenRatioThreshold
+        End Function
+
+        Private Shared Function ComparableTokens(value As String) As List(Of String)
+            Dim r As New List(Of String)()
+            If String.IsNullOrEmpty(value) Then Return r
+            For Each m As Match In Regex.Matches(value, "[\p{L}\p{M}\p{N}_]+")
+                r.Add(m.Value.ToLowerInvariant())
+            Next
+            Return r
+        End Function
+
+        Private Shared Function TokenLcs(a As List(Of String), b As List(Of String)) As Integer
+            If a.Count = 0 OrElse b.Count = 0 Then Return 0
+            Dim prev(b.Count) As Integer
+            Dim cur(b.Count) As Integer
+            For i As Integer = 1 To a.Count
+                For j As Integer = 1 To b.Count
+                    If String.Equals(a(i - 1), b(j - 1), StringComparison.Ordinal) Then
+                        cur(j) = prev(j - 1) + 1
+                    Else
+                        cur(j) = System.Math.Max(prev(j), cur(j - 1))
+                    End If
+                Next
+                System.Array.Copy(cur, prev, cur.Length)
+                System.Array.Clear(cur, 0, cur.Length)
+            Next
+            Return prev(b.Count)
+        End Function
+
+        ' ---------------------------------------------------- task parsing
+
+        Private Shared Function ParseTasks(args As IDictionary(Of String, Object)) As List(Of MarkupTask)
+            Dim result As New List(Of MarkupTask)()
+            Dim token As JToken = Nothing
+
+            If args IsNot Nothing AndAlso args.ContainsKey("tasks") AndAlso args("tasks") IsNot Nothing Then
+                Try
+                    token = JToken.FromObject(args("tasks"))
+                Catch
+                End Try
+            End If
+
+            If token IsNot Nothing AndAlso token.Type = JTokenType.Array Then
+                For Each it As JToken In CType(token, JArray)
+                    result.Add(New MarkupTask With {
+                        .Op = NormOp(JStr(it, "op")),
+                        .Find = JStr(it, "find"),
+                        .Text = JStr(it, "text"),
+                        .OnlyFirst = JBool(it, "only_first", True)
+                    })
+                Next
+            Else
+                result.Add(New MarkupTask With {
+                    .Op = NormOp(GetStr(args, "op")),
+                    .Find = GetStr(args, "find"),
+                    .Text = GetStr(args, "text"),
+                    .OnlyFirst = GetBool(args, "only_first", True)
+                })
+            End If
+
+            Return result
+        End Function
+
+        ' Returns the paragraph texts most similar to an unmatched 'find', so the model can
+        ' re-anchor a failed task against the current document instead of guessing.
+        Private Shared Function SuggestClosestParagraphs(body As W.Body, find As String, maxItems As Integer) As List(Of String)
+            Dim suggestions As New List(Of String)()
+            If body Is Nothing OrElse String.IsNullOrWhiteSpace(find) Then Return suggestions
+
+            Dim needle As List(Of String) = ComparableTokens(find)
+            If needle.Count = 0 Then Return suggestions
+
+            Dim scored As New List(Of KeyValuePair(Of Double, String))()
+            For Each para As W.Paragraph In body.Descendants(Of W.Paragraph)()
+                Dim pt As String = GetParagraphText(para)
+                If String.IsNullOrWhiteSpace(pt) Then Continue For
+
+                Dim hay As List(Of String) = ComparableTokens(pt)
+                If hay.Count = 0 Then Continue For
+
+                Dim lcs As Integer = TokenLcs(needle, hay)
+                Dim score As Double = (2.0 * lcs) / (needle.Count + hay.Count)
+                If score <= 0 Then Continue For
+
+                Dim snippet As String = pt.Trim()
+                If snippet.Length > 200 Then snippet = snippet.Substring(0, 200) & "…"
+                scored.Add(New KeyValuePair(Of Double, String)(score, snippet))
+            Next
+
+            scored.Sort(Function(a, b) b.Key.CompareTo(a.Key))
+            For i As Integer = 0 To System.Math.Min(maxItems, scored.Count) - 1
+                suggestions.Add(scored(i).Value)
+            Next
+            Return suggestions
+        End Function
+
+        ' Like SuggestClosestParagraphs but scans body, footnotes and endnotes so a failed
+        ' footnote/endnote anchor can still be re-anchored against the current document.
+        Private Shared Function SuggestClosestParagraphsAll(doc As WordprocessingDocument, find As String, maxItems As Integer) As List(Of String)
+            Dim suggestions As New List(Of String)()
+            If doc Is Nothing OrElse String.IsNullOrWhiteSpace(find) Then Return suggestions
+
+            Dim needle As List(Of String) = ComparableTokens(find)
+            If needle.Count = 0 Then Return suggestions
+
+            Dim scored As New List(Of KeyValuePair(Of Double, String))()
+            For Each sp As StoryParagraph In EnumerateStoryParagraphs(doc)
+                Dim pt As String = GetParagraphText(sp.Para)
+                If String.IsNullOrWhiteSpace(pt) Then Continue For
+
+                Dim hay As List(Of String) = ComparableTokens(pt)
+                If hay.Count = 0 Then Continue For
+
+                Dim lcs As Integer = TokenLcs(needle, hay)
+                Dim score As Double = (2.0 * lcs) / (needle.Count + hay.Count)
+                If score <= 0 Then Continue For
+
+                Dim snippet As String = pt.Trim()
+                If snippet.Length > 200 Then snippet = snippet.Substring(0, 200) & "…"
+                scored.Add(New KeyValuePair(Of Double, String)(score, snippet))
+            Next
+
+            scored.Sort(Function(a, b) b.Key.CompareTo(a.Key))
+            For i As Integer = 0 To System.Math.Min(maxItems, scored.Count) - 1
+                suggestions.Add(scored(i).Value)
+            Next
+            Return suggestions
+        End Function
+
+        Private Shared Function NormOp(op As String) As String
+            If String.IsNullOrWhiteSpace(op) Then Return "replace"
+            Return op.Trim().ToLowerInvariant()
+        End Function
+
+        Private Shared Function JStr(t As JToken, name As String) As String
+            If t Is Nothing Then Return String.Empty
+            Dim v As JToken = t(name)
+            If v Is Nothing OrElse v.Type = JTokenType.Null Then Return String.Empty
+            Return v.ToString()
+        End Function
+
+        Private Shared Function JBool(t As JToken, name As String, defaultValue As Boolean) As Boolean
+            If t Is Nothing Then Return defaultValue
+            Dim v As JToken = t(name)
+            If v Is Nothing OrElse v.Type = JTokenType.Null Then Return defaultValue
+            Select Case v.ToString().Trim().ToLowerInvariant()
+                Case "true", "1", "yes" : Return True
+                Case "false", "0", "no" : Return False
+                Case Else : Return defaultValue
+            End Select
+        End Function
 
         ' --------------------------------------------------------------- comments
 
@@ -330,16 +1010,19 @@ Namespace Agents
             Dim p As String = PathPolicy.Resolve(GetStr(args, "path"), PathAccess.Write)
             If Not File.Exists(p) Then Return Err_("not_found", "File not found.")
 
-            Dim find As String = GetStr(args, "find")
-            Dim text As String = GetStr(args, "text")
-            Dim author As String = If(GetStr(args, "author"), "Red Ink")
-            Dim initials As String = If(GetStr(args, "initials"), "RI")
+            Dim defAuthor As String = If(String.IsNullOrWhiteSpace(GetStr(args, "author")), "Red Ink", GetStr(args, "author"))
+            Dim defInitials As String = If(String.IsNullOrWhiteSpace(GetStr(args, "initials")), "RI", GetStr(args, "initials"))
 
-            If String.IsNullOrWhiteSpace(find) Then Return Err_("missing_find", "find is required.")
-            If String.IsNullOrWhiteSpace(text) Then Return Err_("missing_text", "text is required.")
+            Dim tasks As List(Of CommentTask) = ParseCommentTasks(args)
+            If tasks.Count = 0 Then Return Err_("missing_tasks", "Provide either find/text or a 'tasks' array.")
+
+            Dim results As New List(Of Object)()
+            Dim anyApplied As Boolean = False
+            Dim failedCount As Integer = 0
 
             Using doc As WordprocessingDocument = WordprocessingDocument.Open(p, isEditable:=True)
                 Dim main As MainDocumentPart = doc.MainDocumentPart
+                Dim body As W.Body = main.Document.Body
                 Dim commentsPart As WordprocessingCommentsPart = main.WordprocessingCommentsPart
 
                 If commentsPart Is Nothing Then
@@ -347,49 +1030,129 @@ Namespace Agents
                     commentsPart.Comments = New W.Comments()
                 End If
 
-                Dim newId As Integer = NextCommentId(commentsPart.Comments)
-                Dim cmt As New W.Comment() With {
-                    .Id = newId.ToString(),
-                    .Author = author,
-                    .Initials = initials,
-                    .Date = DateTime.UtcNow
-                }
+                For Each t As CommentTask In tasks
+                    If String.IsNullOrWhiteSpace(t.Find) Then
+                        failedCount += 1
+                        results.Add(New With {Key .find = t.Find, Key .applied = False, Key .reason = "missing_find"})
+                        Continue For
+                    End If
+                    If String.IsNullOrWhiteSpace(t.Text) Then
+                        failedCount += 1
+                        results.Add(New With {Key .find = t.Find, Key .applied = False, Key .reason = "missing_text"})
+                        Continue For
+                    End If
+                    If ContainsParagraphBreak(t.Find) Then
+                        failedCount += 1
+                        results.Add(New With {Key .find = t.Find, Key .applied = False, Key .reason = "multi_paragraph_find"})
+                        Continue For
+                    End If
 
-                cmt.AppendChild(
-                    New W.Paragraph(
-                        New W.Run(
-                            New W.Text(text) With {.Space = SpaceProcessingModeValues.Preserve}
-                        )
-                    )
-                )
+                    Dim newId As Integer = NextCommentId(commentsPart.Comments)
+                    Dim attached As Boolean = False
 
-                commentsPart.Comments.AppendChild(cmt)
+                    For Each para As W.Paragraph In body.Descendants(Of W.Paragraph)().ToList()
+                        If Not LocateFindProbe(para, t.Find) Then Continue For
+                        If AttachCommentSurgical(para, t.Find, newId, body) Then
+                            attached = True
+                            Exit For
+                        End If
+                    Next
 
-                Dim attached As Boolean = False
+                    If attached Then
+                        Dim cmt As New W.Comment() With {
+                            .Id = newId.ToString(),
+                            .Author = If(String.IsNullOrWhiteSpace(t.Author), defAuthor, t.Author),
+                            .Initials = If(String.IsNullOrWhiteSpace(t.Initials), defInitials, t.Initials),
+                            .Date = DateTime.UtcNow
+                        }
+                        cmt.AppendChild(New W.Paragraph(New W.Run(New W.Text(t.Text) With {.Space = SpaceProcessingModeValues.Preserve})))
+                        commentsPart.Comments.AppendChild(cmt)
 
-                For Each para As W.Paragraph In main.Document.Body.Descendants(Of W.Paragraph)().ToList()
-                    Dim pt As String = GetParagraphText(para)
-                    Dim mStart As Integer
-                    Dim mLen As Integer
-                    If Not TryFindInText(pt, find, mStart, mLen) Then Continue For
-
-                    AttachCommentRangeToParagraph(para, mStart, mLen, newId)
-                    attached = True
-                    Exit For
+                        anyApplied = True
+                        results.Add(New With {Key .find = t.Find, Key .applied = True, Key .comment_id = newId})
+                    Else
+                        failedCount += 1
+                        results.Add(New With {
+                            Key .find = t.Find,
+                            Key .applied = False,
+                            Key .reason = "no_match",
+                            Key .suggestions = SuggestClosestParagraphs(body, t.Find, 3)
+                        })
+                    End If
                 Next
 
-                If Not attached Then
-                    Return Err_("no_match", "No W.Paragraph contained the 'find' text.")
+                If anyApplied Then
+                    commentsPart.Comments.Save()
+                    main.Document.Save()
                 End If
-
-                commentsPart.Comments.Save()
-                main.Document.Save()
-
-                Return JsonConvert.SerializeObject(New With {
-                    Key .path = p,
-                    Key .comment_id = newId
-                })
             End Using
+
+            Dim status As String
+            If failedCount = 0 Then
+                status = "complete"
+            ElseIf anyApplied Then
+                status = "partial"
+            Else
+                status = "none"
+            End If
+
+            Return JsonConvert.SerializeObject(New With {
+                Key .path = p,
+                Key .status = status,
+                Key .applied_count = tasks.Count - failedCount,
+                Key .failed_count = failedCount,
+                Key .tasks = results,
+                Key .hint = If(failedCount = 0, Nothing,
+                    "Tool call succeeded. " & failedCount.ToString() &
+                    " comment(s) found no matching anchor (see tasks[].reason='no_match' and tasks[].suggestions). " &
+                    "Re-read the document for the CURRENT text and retry only the failed 'find' values. Do not treat this as blocked.")
+            })
+        End Function
+
+        Private Structure CommentTask
+            Public Find As String
+            Public Text As String
+            Public Author As String
+            Public Initials As String
+        End Structure
+
+        Private Shared Function ParseCommentTasks(args As IDictionary(Of String, Object)) As List(Of CommentTask)
+            Dim result As New List(Of CommentTask)()
+            Dim token As JToken = Nothing
+
+            If args IsNot Nothing AndAlso args.ContainsKey("tasks") AndAlso args("tasks") IsNot Nothing Then
+                Try
+                    token = JToken.FromObject(args("tasks"))
+                Catch
+                End Try
+            End If
+
+            If token IsNot Nothing AndAlso token.Type = JTokenType.Array Then
+                For Each it As JToken In CType(token, JArray)
+                    result.Add(New CommentTask With {
+                        .Find = JStr(it, "find"),
+                        .Text = JStr(it, "text"),
+                        .Author = JStr(it, "author"),
+                        .Initials = JStr(it, "initials")
+                    })
+                Next
+            Else
+                result.Add(New CommentTask With {
+                    .Find = GetStr(args, "find"),
+                    .Text = GetStr(args, "text"),
+                    .Author = GetStr(args, "author"),
+                    .Initials = GetStr(args, "initials")
+                })
+            End If
+
+            Return result
+        End Function
+
+        ' Lightweight pre-check so we only run the surgical attach on a paragraph that matches.
+        Private Shared Function LocateFindProbe(para As W.Paragraph, find As String) As Boolean
+            Dim mStart As Integer
+            Dim mLen As Integer
+            Return TryFindInText(GetParagraphText(para), find, mStart, mLen)
         End Function
 
         Private Shared Function ExecuteCommentList(args As IDictionary(Of String, Object)) As String
@@ -492,7 +1255,10 @@ Namespace Agents
             Using doc As WordprocessingDocument = WordprocessingDocument.Open(p, isEditable:=True)
                 Dim mutated As Integer = 0
 
-                For Each para As W.Paragraph In doc.MainDocumentPart.Document.Body.Descendants(Of W.Paragraph)().ToList()
+                ' Body, footnotes and endnotes are all formatted so the match is styled
+                ' wherever it appears in the document.
+                For Each sp As StoryParagraph In EnumerateStoryParagraphs(doc)
+                    Dim para As W.Paragraph = sp.Para
                     Dim pt As String = GetParagraphText(para)
                     Dim fmtStart As Integer
                     Dim fmtLen As Integer
@@ -576,6 +1342,12 @@ Namespace Agents
                 End If
 
                 doc.MainDocumentPart.Document.Save()
+                If doc.MainDocumentPart.FootnotesPart IsNot Nothing AndAlso doc.MainDocumentPart.FootnotesPart.Footnotes IsNot Nothing Then
+                    doc.MainDocumentPart.FootnotesPart.Footnotes.Save()
+                End If
+                If doc.MainDocumentPart.EndnotesPart IsNot Nothing AndAlso doc.MainDocumentPart.EndnotesPart.Endnotes IsNot Nothing Then
+                    doc.MainDocumentPart.EndnotesPart.Endnotes.Save()
+                End If
 
                 Return JsonConvert.SerializeObject(New With {
                     Key .path = p,
@@ -681,16 +1453,58 @@ Namespace Agents
         Private Class ParagraphRow
             Public Index As Integer
             Public Text As String
+            Public Story As String
         End Class
+
+        ' A paragraph paired with the story it lives in ("body" | "footnote" | "endnote")
+        ' and the story root element used as the change-id scope for tracked changes.
+        Private Structure StoryParagraph
+            Public Para As W.Paragraph
+            Public Scope As OpenXmlElement
+            Public Story As String
+        End Structure
+
+        ' Enumerates every editable paragraph across the main body, the footnotes part and
+        ' the endnotes part. Headers/footers are intentionally excluded (separate stories).
+        Private Shared Function EnumerateStoryParagraphs(doc As WordprocessingDocument) As List(Of StoryParagraph)
+            Dim rows As New List(Of StoryParagraph)()
+
+            Dim main As MainDocumentPart = doc.MainDocumentPart
+            If main Is Nothing Then Return rows
+
+            Dim body As W.Body = main.Document.Body
+            If body IsNot Nothing Then
+                For Each para As W.Paragraph In body.Descendants(Of W.Paragraph)().ToList()
+                    rows.Add(New StoryParagraph With {.Para = para, .Scope = body, .Story = "body"})
+                Next
+            End If
+
+            If main.FootnotesPart IsNot Nothing AndAlso main.FootnotesPart.Footnotes IsNot Nothing Then
+                Dim fn As W.Footnotes = main.FootnotesPart.Footnotes
+                For Each para As W.Paragraph In fn.Descendants(Of W.Paragraph)().ToList()
+                    rows.Add(New StoryParagraph With {.Para = para, .Scope = fn, .Story = "footnote"})
+                Next
+            End If
+
+            If main.EndnotesPart IsNot Nothing AndAlso main.EndnotesPart.Endnotes IsNot Nothing Then
+                Dim en As W.Endnotes = main.EndnotesPart.Endnotes
+                For Each para As W.Paragraph In en.Descendants(Of W.Paragraph)().ToList()
+                    rows.Add(New StoryParagraph With {.Para = para, .Scope = en, .Story = "endnote"})
+                Next
+            End If
+
+            Return rows
+        End Function
 
         Private Shared Function ExtractParagraphs(doc As WordprocessingDocument) As List(Of ParagraphRow)
             Dim output As New List(Of ParagraphRow)()
             Dim i As Integer = 0
 
-            For Each p As W.Paragraph In doc.MainDocumentPart.Document.Body.Descendants(Of W.Paragraph)()
+            For Each sp As StoryParagraph In EnumerateStoryParagraphs(doc)
                 output.Add(New ParagraphRow With {
                     .Index = i,
-                    .Text = GetParagraphText(p)
+                    .Text = GetParagraphText(sp.Para),
+                    .Story = sp.Story
                 })
                 i += 1
             Next
@@ -1001,17 +1815,17 @@ Namespace Agents
             Return current
         End Function
 
-        Private Shared Function NextChangeId(body As W.Body) As Integer
+        Private Shared Function NextChangeId(scope As OpenXmlElement) As Integer
             Dim maxId As Integer = 0
 
-            For Each n As W.InsertedRun In body.Descendants(Of W.InsertedRun)()
+            For Each n As W.InsertedRun In scope.Descendants(Of W.InsertedRun)()
                 Dim v As Integer
                 If n.Id IsNot Nothing AndAlso Integer.TryParse(n.Id.Value, v) AndAlso v > maxId Then
                     maxId = v
                 End If
             Next
 
-            For Each n As W.DeletedRun In body.Descendants(Of W.DeletedRun)()
+            For Each n As W.DeletedRun In scope.Descendants(Of W.DeletedRun)()
                 Dim v As Integer
                 If n.Id IsNot Nothing AndAlso Integer.TryParse(n.Id.Value, v) AndAlso v > maxId Then
                     maxId = v
@@ -1034,45 +1848,43 @@ Namespace Agents
             Return maxId + 1
         End Function
 
-        Private Shared Sub AttachCommentRangeToParagraph(para As W.Paragraph, matchStart As Integer, matchLength As Integer, commentId As Integer)
-            ' matchStart/matchLength are offsets into GetParagraphText(para) produced by
-            ' whitespace-normalized matching, so 'mid' is the ACTUAL anchored text.
-            Dim pt As String = GetParagraphText(para)
-            If matchStart < 0 OrElse matchStart > pt.Length Then Return
-            If matchLength < 0 Then matchLength = 0
-            If matchStart + matchLength > pt.Length Then matchLength = pt.Length - matchStart
+        ' Content-preserving comment anchoring: wraps the matched span in CommentRangeStart/End
+        ' plus a reference run, WITHOUT rebuilding the paragraph from plain text. Footnotes,
+        ' fields, images, existing tracked changes and run formatting are retained.
+        Private Shared Function AttachCommentSurgical(para As W.Paragraph, find As String, commentId As Integer, body As W.Body) As Boolean
+            Dim atoms As New List(Of ParaAtom)()
+            FlattenParagraph(para, atoms, False, False)
 
-            Dim before As String = pt.Substring(0, matchStart)
-            Dim mid As String = pt.Substring(matchStart, matchLength)
-            Dim after As String = pt.Substring(matchStart + matchLength)
-            Dim pPr As W.ParagraphProperties = para.Elements(Of W.ParagraphProperties)().FirstOrDefault()
+            Dim firstAtom As Integer
+            Dim lastAtom As Integer
+            If Not LocateFindInAtoms(atoms, find, firstAtom, lastAtom) Then Return False
 
-            para.RemoveAllChildren()
+            Dim em As New MarkupEmitter(body, "Red Ink")
 
-            If pPr IsNot Nothing Then
-                para.AppendChild(CType(pPr.CloneNode(True), W.ParagraphProperties))
-            End If
+            EmitOriginalRange(em, atoms, 0, firstAtom - 1)
+            em.Flush()
+            em.Children.Add(New W.CommentRangeStart() With {.Id = commentId.ToString()})
 
-            If before.Length > 0 Then
-                para.AppendChild(MakeRun(before))
-            End If
-
-            para.AppendChild(New W.CommentRangeStart() With {.Id = commentId.ToString()})
-
-            If mid.Length > 0 Then
-                para.AppendChild(MakeRun(mid))
-            End If
-
-            para.AppendChild(New W.CommentRangeEnd() With {.Id = commentId.ToString()})
+            EmitOriginalRange(em, atoms, firstAtom, lastAtom)
+            em.Flush()
+            em.Children.Add(New W.CommentRangeEnd() With {.Id = commentId.ToString()})
 
             Dim refRun As New W.Run()
             refRun.AppendChild(New W.CommentReference() With {.Id = commentId.ToString()})
-            para.AppendChild(refRun)
+            em.Children.Add(refRun)
 
-            If after.Length > 0 Then
-                para.AppendChild(MakeRun(after))
-            End If
-        End Sub
+            EmitOriginalRange(em, atoms, lastAtom + 1, atoms.Count - 1)
+            em.Flush()
+
+            Dim pPr As W.ParagraphProperties = para.Elements(Of W.ParagraphProperties)().FirstOrDefault()
+            para.RemoveAllChildren()
+            If pPr IsNot Nothing Then para.AppendChild(CType(pPr.CloneNode(True), W.ParagraphProperties))
+            For Each c As OpenXmlElement In em.Children
+                para.AppendChild(c)
+            Next
+
+            Return True
+        End Function
 
         Private Shared Function AlignmentFromString(s As String) As W.JustificationValues
             Select Case s
@@ -1099,13 +1911,14 @@ Namespace Agents
             End If
         End Sub
 
-        Private Shared Function BuildHit(paragraphIndex As Integer, paraText As String, index As Integer, length As Integer, match As String) As Object
+        Private Shared Function BuildHit(paragraphIndex As Integer, story As String, paraText As String, index As Integer, length As Integer, match As String) As Object
             Dim winStart As Integer = System.Math.Max(0, index - 40)
             Dim winEnd As Integer = System.Math.Min(paraText.Length, index + length + 40)
             Dim ctx As String = paraText.Substring(winStart, winEnd - winStart)
 
             Return New With {
                 Key .paragraph_index = paragraphIndex,
+                Key .story = story,
                 Key .index_in_paragraph = index,
                 Key .length = length,
                 Key .match = match,
@@ -1181,8 +1994,8 @@ Namespace Agents
                 .ToolPriority = 880,
                 .ToolErrorHandling = "skip",
                 .ModelDescription = "Word (extract text)",
-                .ToolDefinition = "{""name"":""" & ToolExtract & """,""description"":""Extract plain text from a .docx file. Returns paragraphs joined by newlines."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string""},""max_chars"":{""type"":""integer"",""description"":""Optional cap on returned text length.""}},""required"":[""path""]}}",
-                .ToolInstructionsPrompt = ToolExtract & ": Extract plain text from a .docx file."
+                .ToolDefinition = "{""name"":""" & ToolExtract & """,""description"":""Extract plain text from a .docx file, including the main body, footnotes, endnotes, headers/footers, tables, numbering, and text-box/margin text when present."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string""},""max_chars"":{""type"":""integer"",""description"":""Optional cap on returned text length.""}},""required"":[""path""]}}",
+                .ToolInstructionsPrompt = ToolExtract & ": Extract plain text from a .docx file, including footnotes and endnotes."
             }
         End Function
 
@@ -1193,8 +2006,8 @@ Namespace Agents
                 .ToolPriority = 881,
                 .ToolErrorHandling = "skip",
                 .ModelDescription = "Word (search)",
-                .ToolDefinition = "{""name"":""" & ToolSearch & """,""description"":""Search a .docx for a substring or regex. Returns W.Paragraph index and a small context window per hit."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string""},""query"":{""type"":""string""},""regex"":{""type"":""boolean""},""ignore_case"":{""type"":""boolean""},""max_hits"":{""type"":""integer""}},""required"":[""path"",""query""]}}",
-                .ToolInstructionsPrompt = ToolSearch & ": Find text inside a .docx file."
+                .ToolDefinition = "{""name"":""" & ToolSearch & """,""description"":""Search a .docx for a substring or regex across the main body, footnotes, and endnotes. Returns W.Paragraph index, story (body|footnote|endnote), and a small context window per hit."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string""},""query"":{""type"":""string""},""regex"":{""type"":""boolean""},""ignore_case"":{""type"":""boolean""},""max_hits"":{""type"":""integer""}},""required"":[""path"",""query""]}}",
+                .ToolInstructionsPrompt = ToolSearch & ": Find text inside a .docx file, including footnotes and endnotes."
             }
         End Function
 
@@ -1205,8 +2018,8 @@ Namespace Agents
                 .ToolPriority = 882,
                 .ToolErrorHandling = "skip",
                 .ModelDescription = "Word (write, no markup)",
-                .ToolDefinition = "{""name"":""" & ToolWrite & """,""description"":""Modify text in a .docx WITHOUT tracked changes. Ops: replace | insert_before | insert_after | append (no 'find' required for append)."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string""},""op"":{""type"":""string"",""enum"":[""replace"",""insert_before"",""insert_after"",""append""]},""find"":{""type"":""string""},""text"":{""type"":""string""},""only_first"":{""type"":""boolean"",""description"":""Default true.""}},""required"":[""path"",""text""]}}",
-                .ToolInstructionsPrompt = ToolWrite & ": Edit a .docx without revision marks. " &
+                .ToolDefinition = "{""name"":""" & ToolWrite & """,""description"":""Modify text in a .docx WITHOUT tracked changes, in the main body AND in footnotes and endnotes, preserving fields, images, comments and run formatting. Ops: replace | insert_before | insert_after | append (append targets the main body) | delete_paragraph. 'find' must not span a paragraph break; to merge two paragraphs, replace the first and delete_paragraph the second. Pass multiple edits at once via 'tasks'."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string""},""op"":{""type"":""string"",""enum"":[""replace"",""insert_before"",""insert_after"",""append"",""delete_paragraph""]},""find"":{""type"":""string""},""text"":{""type"":""string""},""only_first"":{""type"":""boolean"",""description"":""Default true.""},""tasks"":{""type"":""array"",""description"":""Batch of edits applied in order; each may match text produced by earlier tasks."",""items"":{""type"":""object"",""properties"":{""op"":{""type"":""string"",""enum"":[""replace"",""insert_before"",""insert_after"",""append"",""delete_paragraph""]},""find"":{""type"":""string""},""text"":{""type"":""string""},""only_first"":{""type"":""boolean""}}}}},""required"":[""path""]}}",
+                .ToolInstructionsPrompt = ToolWrite & ": Edit a .docx without revision marks. Same behavior as word_markup but without tracked changes. Batch related edits in one call via 'tasks'. The result 'status' may be complete, partial, or none: partial/none is NOT a block or failure. When status is partial/none, re-read the document to get the CURRENT text and retry ONLY the failed tasks[].find values (see tasks[].suggestions); then report completion normally. " &
                     "Prefer the Outlook and Autopilot tools (like process_word_document) when they can accomplish the task; only fall back to word_* tools when those tools are not suitable, or when a skill or the user explicitly asks to use word_* tools."
             }
         End Function
@@ -1218,8 +2031,8 @@ Namespace Agents
                 .ToolPriority = 883,
                 .ToolErrorHandling = "skip",
                 .ModelDescription = "Word (markup / tracked changes)",
-                .ToolDefinition = "{""name"":""" & ToolMarkup & """,""description"":""Modify text in a .docx using tracked changes (Word revision marks). Same ops as word_write."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string""},""op"":{""type"":""string"",""enum"":[""replace"",""insert_before"",""insert_after"",""append""]},""find"":{""type"":""string""},""text"":{""type"":""string""},""author"":{""type"":""string""},""only_first"":{""type"":""boolean""}},""required"":[""path"",""text""]}}",
-                .ToolInstructionsPrompt = ToolMarkup & ": Edit a .docx with revision marks (tracked changes)." &
+                .ToolDefinition = "{""name"":""" & ToolMarkup & """,""description"":""Modify text in a .docx using tracked changes (Word revision marks), in the main body AND in footnotes and endnotes, preserving fields, images, comments, existing tracked changes and run formatting. Only inserted/deleted words are marked (word-level diff; large rewrites collapse to a single change). 'find' must not span a paragraph break; to merge two paragraphs, replace the first and delete_paragraph the second. Pass multiple edits at once via 'tasks'."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string""},""op"":{""type"":""string"",""enum"":[""replace"",""insert_before"",""insert_after"",""append"",""delete_paragraph""]},""find"":{""type"":""string""},""text"":{""type"":""string""},""author"":{""type"":""string""},""only_first"":{""type"":""boolean""},""tasks"":{""type"":""array"",""description"":""Batch of edits applied in order; each may match text produced by earlier tasks."",""items"":{""type"":""object"",""properties"":{""op"":{""type"":""string"",""enum"":[""replace"",""insert_before"",""insert_after"",""append"",""delete_paragraph""]},""find"":{""type"":""string""},""text"":{""type"":""string""},""only_first"":{""type"":""boolean""}}}}},""required"":[""path""]}}",
+                .ToolInstructionsPrompt = ToolMarkup & ": Edit a .docx with revision marks (tracked changes). Batch related edits in one call via 'tasks'. The result 'status' may be complete, partial, or none: partial/none is NOT a block or failure. When status is partial/none, re-read the document to get the CURRENT text and retry ONLY the failed tasks[].find values (see tasks[].suggestions); then report completion normally. " &
                 "Prefer the Outlook and Autopilot tools when they can accomplish the task; only fall back to word_* tools when those tools are not suitable, or when a skill or the user explicitly asks to use word_* tools."
             }
         End Function
@@ -1231,8 +2044,8 @@ Namespace Agents
                 .ToolPriority = 884,
                 .ToolErrorHandling = "skip",
                 .ModelDescription = "Word (comment add)",
-                .ToolDefinition = "{""name"":""" & ToolCommentAdd & """,""description"":""Attach a Word comment to the first W.Paragraph containing 'find'. Returns the new comment id."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string""},""find"":{""type"":""string""},""text"":{""type"":""string""},""author"":{""type"":""string""},""initials"":{""type"":""string""}},""required"":[""path"",""find"",""text""]}}",
-                .ToolInstructionsPrompt = ToolCommentAdd & ": Add a Word bubble comment to a matched span." &
+                .ToolDefinition = "{""name"":""" & ToolCommentAdd & """,""description"":""Attach Word comment(s) to matched text, preserving footnotes, fields, images and formatting. 'find' uses format/whitespace-insensitive matching within a single paragraph. Add many comments at once via 'tasks'. Result reports status (complete/partial/none) with per-task applied flag and suggestions for anchors that were not found."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string""},""find"":{""type"":""string""},""text"":{""type"":""string""},""author"":{""type"":""string""},""initials"":{""type"":""string""},""tasks"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{""find"":{""type"":""string""},""text"":{""type"":""string""},""author"":{""type"":""string""},""initials"":{""type"":""string""}}}}},""required"":[""path""]}}",
+                .ToolInstructionsPrompt = ToolCommentAdd & ": Add Word bubble comment(s) to matched span(s). Add many at once via 'tasks'. The result 'status' may be complete, partial, or none: partial/none is NOT a block or failure. When status is partial/none, re-read the document for the CURRENT text and retry ONLY the failed tasks[].find values (see tasks[].suggestions); then report completion normally. " &
                                 "Prefer the Outlook and Autopilot tools when they can accomplish the task; only fall back to word_* tools when those tools are not suitable, or when a skill or the user explicitly asks to use word_* tools."
             }
         End Function
@@ -1268,7 +2081,7 @@ Namespace Agents
                 .ToolPriority = 887,
                 .ToolErrorHandling = "skip",
                 .ModelDescription = "Word (format)",
-                .ToolDefinition = "{""name"":""" & ToolFormat & """,""description"":""Apply W.Paragraph style and/or W.Run formatting to every W.Paragraph containing 'find'. Available: style (Word style id, e.g. 'Heading1'), bold, italic, underline, size (pt), color (RRGGBB), align (left|center|right|justify)."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string""},""find"":{""type"":""string""},""style"":{""type"":""string""},""bold"":{""type"":""boolean""},""italic"":{""type"":""boolean""},""underline"":{""type"":""boolean""},""size"":{""type"":""integer""},""color"":{""type"":""string""},""align"":{""type"":""string"",""enum"":[""left"",""center"",""right"",""justify""]}},""required"":[""path"",""find""]}}",
+                                .ToolDefinition = "{""name"":""" & ToolFormat & """,""description"":""Apply W.Paragraph style and/or W.Run formatting to every W.Paragraph containing 'find', in the main body AND in footnotes and endnotes. Available: style (Word style id, e.g. 'Heading1'), bold, italic, underline, size (pt), color (RRGGBB), align (left|center|right|justify)."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string""},""find"":{""type"":""string""},""style"":{""type"":""string""},""bold"":{""type"":""boolean""},""italic"":{""type"":""boolean""},""underline"":{""type"":""boolean""},""size"":{""type"":""integer""},""color"":{""type"":""string""},""align"":{""type"":""string"",""enum"":[""left"",""center"",""right"",""justify""]}},""required"":[""path"",""find""]}}",
                 .ToolInstructionsPrompt = ToolFormat & ": Apply W.Paragraph/W.Run formatting (style, bold/italic/underline, size, color, alignment)."
             }
         End Function
@@ -1280,7 +2093,7 @@ Namespace Agents
                 .ToolPriority = 888,
                 .ToolErrorHandling = "skip",
                 .ModelDescription = "Word (apply template)",
-                .ToolDefinition = "{""name"":""" & ToolApplyTemplate & """,""description"":""Clone a .docx template from a skill's references/ directory to a new file in the workspace (or Desktop) and substitute {{placeholders}} from the 'substitutions' object."",""parameters"":{""type"":""object"",""properties"":{""skill"":{""type"":""string"",""description"":""Skill name.""},""template"":{""type"":""string"",""description"":""Path relative to the skill's references/ directory.""},""output_name"":{""type"":""string"",""description"":""Suggested output filename (default 'from_template.docx').""},""substitutions"":{""type"":""object"",""description"":""Object of {placeholderName: value}; each key K becomes the literal '{{K}}' in the template.""}},""required"":[""skill"",""template""]}}",
+                .ToolDefinition = "{""name"":""" & ToolApplyTemplate & """,""description"":""Clone a .docx template from a skill's references/ directory to a new file in the default writable root (the connected workspace, otherwise the current session's staging/working area) and substitute {{placeholders}} from the 'substitutions' object."",""parameters"":{""type"":""object"",""properties"":{""skill"":{""type"":""string"",""description"":""Skill name.""},""template"":{""type"":""string"",""description"":""Path relative to the skill's references/ directory.""},""output_name"":{""type"":""string"",""description"":""Suggested output filename (default 'from_template.docx').""},""substitutions"":{""type"":""object"",""description"":""Object of {placeholderName: value}; each key K becomes the literal '{{K}}' in the template.""}},""required"":[""skill"",""template""]}}",
                 .ToolInstructionsPrompt = ToolApplyTemplate & ": Instantiate a Word template from a skill's references/ directory."
             }
         End Function
@@ -1292,7 +2105,7 @@ Namespace Agents
                 .ToolPriority = 889,
                 .ToolErrorHandling = "skip",
                 .ModelDescription = "Word (save as)",
-                .ToolDefinition = "{""name"":""" & ToolSaveAs & """,""description"":""Copy a .docx to a new path inside the writable root (workspace or Desktop)."",""parameters"":{""type"":""object"",""properties"":{""source"":{""type"":""string""},""output_name"":{""type"":""string""}},""required"":[""source""]}}",
+                .ToolDefinition = "{""name"":""" & ToolSaveAs & """,""description"":""Copy a .docx to a new path inside the default writable root (the connected workspace, otherwise the current session's staging/working area, which is delivered to the user at the end of the run)."",""parameters"":{""type"":""object"",""properties"":{""source"":{""type"":""string""},""output_name"":{""type"":""string""}},""required"":[""source""]}}",
                 .ToolInstructionsPrompt = ToolSaveAs & ": Copy a .docx to a new path in the writable root."
             }
         End Function

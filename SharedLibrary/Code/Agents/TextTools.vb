@@ -215,10 +215,10 @@ Namespace Agents
         Private Shared Function BuildWrite() As ModelConfig
             Dim def =
                 "{""name"":""" & ToolWrite & """," &
-                """description"":""Write a UTF-8 text file. If 'path' is omitted, a new file is created under the workspace (or the Desktop if no workspace is set) using 'filename' as a suggestion. Modes: overwrite (default), append, create_new."",""parameters"":{" &
+                """description"":""Write a UTF-8 text file. If 'path' is omitted, a new file is created in the default writable root using 'filename' as a suggestion. The default writable root is the connected workspace when one is set; otherwise the current session's staging/working area, which is delivered to the user at the end of the run. Prefer relative paths or an omitted path so intermediate edits stay in the working area rather than a fixed location. Modes: overwrite (default), append, create_new."",""parameters"":{" &
                 """type"":""object""," &
                 """properties"":{" &
-                """path"":{""type"":""string"",""description"":""Absolute or workspace-relative path. Omit to auto-name in the default writable root.""}," &
+                """path"":{""type"":""string"",""description"":""Absolute path, or a path relative to the default writable root (connected workspace, otherwise the session staging/working area). Omit to auto-name in the default writable root.""}," &
                 """filename"":{""type"":""string"",""description"":""Suggested filename when 'path' is omitted.""}," &
                 """text"":{""type"":""string"",""description"":""Content to write.""}," &
                 """mode"":{""type"":""string"",""enum"":[""overwrite"",""append"",""create_new""],""description"":""Write mode (default 'overwrite').""}}," &

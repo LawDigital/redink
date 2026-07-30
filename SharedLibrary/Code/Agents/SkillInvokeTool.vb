@@ -11,7 +11,9 @@
 '  - Lazy-loads skill bodies on first access via AgentResources.FindSkill().
 '  - Returns skill instructions + inventory (names + sizes) as JSON.
 '  - Model follows those instructions in subsequent turns.
-'  - Script bodies are NOT auto-loaded; model fetches what it needs.
+'  - Text and script bodies are NOT auto-loaded; model fetches what it needs.
+'  - Binary reference/script assets are discovered by inventory and can be
+'    materialized with file_* tools when the loaded skill allows them.
 '  - Security: allowed-tools communicated; enforcement by host runner.
 ' =============================================================================
 
@@ -31,10 +33,16 @@ Namespace Agents
 
         Public Const ToolName As String = "skill_use"
 
+        ' Host-identity hook. Each host wires this up at startup so a loaded skill
+        ' can deterministically know where it runs ("Word" or "Outlook Local Chat")
+        ' instead of guessing from the visible tool set. skill_use is not available
+        ' under AutoPilot, so AutoPilot never needs to set this.
+        Public Shared Property CurrentHostProvider As Func(Of String)
+
         Public Shared Function Build() As SharedLibrary.ModelConfig
             Dim def =
                 "{""name"":""" & ToolName & """," &
-                """description"":""Load and apply a Skill (Claude-style SKILL.md). Returns the skill's instructions and an inventory of its scripts/ and references/ files. Read individual files with text_read; execute scripts with js_run. Use this when a relevant skill is offered above and the user's task matches."",""parameters"":{" &
+                """description"":""Load and apply a Skill (Claude-style SKILL.md). Returns the skill's instructions and an inventory of its scripts/ and references/ files. Read text files with text_read, materialize binary reference or script assets with the appropriate file_* tools when allowed, and execute scripts with js_run. Use this when a relevant skill is offered above and the user's task matches."",""parameters"":{" &
                 """type"":""object""," &
                 """properties"":{" &
                 """name"":{""type"":""string"",""description"":""The skill name (matches the Skill listed above).""}," &
@@ -44,7 +52,7 @@ Namespace Agents
             Return New SharedLibrary.ModelConfig() With {
                 .ToolName = ToolName,
                 .ToolDefinition = def,
-                .ToolInstructionsPrompt = ToolName & ": Load a Skill's instructions (lazy). Call this once per skill, then follow its directions in subsequent turns.",
+                .ToolInstructionsPrompt = ToolName & ": Load a Skill's instructions (lazy). Call this once per skill, then follow its directions in subsequent turns, using text_read for text resources and the appropriate file_* tools for binary reference assets when the skill allows them.",
                 .ModelDescription = "Skill loader",
                 .Tool = True,
                 .ToolPriority = 940,
@@ -69,15 +77,28 @@ Namespace Agents
                     name = GetStr(arguments, "skill")
                 End If
 
-                If name.StartsWith("skill_", StringComparison.OrdinalIgnoreCase) Then
-                    name = name.Substring("skill_".Length)
-                End If
-
                 If String.IsNullOrWhiteSpace(name) Then
                     Return JsonConvert.SerializeObject(New With {Key .error = "missing_name"})
                 End If
 
+                ' Canonical, agnostic skill resolution: try the name exactly as provided
+                ' first, then fall back to a single "skill_" prefix strip only if that
+                ' actually resolves. This avoids double-stripping when the tool name
+                ' (e.g. "skill_<slug>") has already been reduced to the skill's own name,
+                ' which may itself legitimately start with "skill_".
                 Dim sk = AgentResources.FindSkill(name)
+
+                If sk Is Nothing AndAlso name.StartsWith("skill_", StringComparison.OrdinalIgnoreCase) Then
+                    Dim strippedName As String = name.Substring("skill_".Length)
+                    If Not String.IsNullOrWhiteSpace(strippedName) Then
+                        Dim strippedSkill = AgentResources.FindSkill(strippedName)
+                        If strippedSkill IsNot Nothing Then
+                            name = strippedName
+                            sk = strippedSkill
+                        End If
+                    End If
+                End If
+
                 If sk Is Nothing Then
                     Return JsonConvert.SerializeObject(New With {Key .error = "skill_not_found", Key .name = name})
                 End If
@@ -150,6 +171,17 @@ Namespace Agents
             Dim centralRoot As String = If(AgentResources.ConfiguredCentralPath, "")
             Dim authorActive As Boolean = SkillAuthorMode.IsActive
             Dim allowCentral As Boolean = authorActive AndAlso SkillAuthorMode.AllowCentralWrites
+
+            Dim currentHost As String = ""
+            Try
+                Dim hostProvider As Func(Of String) = CurrentHostProvider
+                If hostProvider IsNot Nothing Then
+                    Dim resolvedHost As String = hostProvider()
+                    If resolvedHost IsNot Nothing Then currentHost = resolvedHost
+                End If
+            Catch
+            End Try
+            idx("host") = currentHost
 
             idx("local_root") = localRoot
             idx("central_root") = centralRoot
