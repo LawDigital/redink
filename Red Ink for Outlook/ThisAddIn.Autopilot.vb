@@ -3711,6 +3711,14 @@ Partial Public Class ThisAddIn
             alreadySurfaced = New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
         End If
 
+        ' Files edited in place this turn are deliverables even though they
+        ' pre-existed the turn (and so appear in alreadySurfaced). Deliver them
+        ' regardless of the surfaced gate.
+        Dim forcedDeliverables As HashSet(Of String) = _chatAgentForcedDeliverables
+        If forcedDeliverables Is Nothing Then
+            forcedDeliverables = New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        End If
+
         ' 1. Collect from OutputFiles (registered by tools like process_word_document, merge_pdfs).
         '    OutputFiles for the current turn are accumulated as tools run; prior-turn
         '    entries were cleared by ResetChatAgentDeliverableTrackingForNewTurn().
@@ -3722,8 +3730,9 @@ Partial Public Class ThisAddIn
                             Dim fullOut As String = Path.GetFullPath(outputPath)
                             ' Security: only include files inside the per-turn temp dir.
                             If Not fullOut.StartsWith(tempDirFull, StringComparison.OrdinalIgnoreCase) Then Continue For
-                            ' Bleed protection: skip files already surfaced in a previous turn.
-                            If alreadySurfaced.Contains(fullOut) Then Continue For
+                            ' Bleed protection: skip files already surfaced in a previous turn,
+                            ' unless a tool explicitly force-delivered this path (in-place edit).
+                            If alreadySurfaced.Contains(fullOut) AndAlso Not forcedDeliverables.Contains(fullOut) Then Continue For
                             results.Add(fullOut)
                         End If
                     Next

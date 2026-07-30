@@ -2093,7 +2093,7 @@ Namespace Agents
                 .ToolPriority = 888,
                 .ToolErrorHandling = "skip",
                 .ModelDescription = "Word (apply template)",
-                .ToolDefinition = "{""name"":""" & ToolApplyTemplate & """,""description"":""Clone a .docx template from a skill's references/ directory to a new file in the workspace (or Desktop) and substitute {{placeholders}} from the 'substitutions' object."",""parameters"":{""type"":""object"",""properties"":{""skill"":{""type"":""string"",""description"":""Skill name.""},""template"":{""type"":""string"",""description"":""Path relative to the skill's references/ directory.""},""output_name"":{""type"":""string"",""description"":""Suggested output filename (default 'from_template.docx').""},""substitutions"":{""type"":""object"",""description"":""Object of {placeholderName: value}; each key K becomes the literal '{{K}}' in the template.""}},""required"":[""skill"",""template""]}}",
+                .ToolDefinition = "{""name"":""" & ToolApplyTemplate & """,""description"":""Clone a .docx template from a skill's references/ directory to a new file in the default writable root (the connected workspace, otherwise the current session's staging/working area) and substitute {{placeholders}} from the 'substitutions' object."",""parameters"":{""type"":""object"",""properties"":{""skill"":{""type"":""string"",""description"":""Skill name.""},""template"":{""type"":""string"",""description"":""Path relative to the skill's references/ directory.""},""output_name"":{""type"":""string"",""description"":""Suggested output filename (default 'from_template.docx').""},""substitutions"":{""type"":""object"",""description"":""Object of {placeholderName: value}; each key K becomes the literal '{{K}}' in the template.""}},""required"":[""skill"",""template""]}}",
                 .ToolInstructionsPrompt = ToolApplyTemplate & ": Instantiate a Word template from a skill's references/ directory."
             }
         End Function
@@ -2105,7 +2105,7 @@ Namespace Agents
                 .ToolPriority = 889,
                 .ToolErrorHandling = "skip",
                 .ModelDescription = "Word (save as)",
-                .ToolDefinition = "{""name"":""" & ToolSaveAs & """,""description"":""Copy a .docx to a new path inside the writable root (workspace or Desktop)."",""parameters"":{""type"":""object"",""properties"":{""source"":{""type"":""string""},""output_name"":{""type"":""string""}},""required"":[""source""]}}",
+                .ToolDefinition = "{""name"":""" & ToolSaveAs & """,""description"":""Copy a .docx to a new path inside the default writable root (the connected workspace, otherwise the current session's staging/working area, which is delivered to the user at the end of the run)."",""parameters"":{""type"":""object"",""properties"":{""source"":{""type"":""string""},""output_name"":{""type"":""string""}},""required"":[""source""]}}",
                 .ToolInstructionsPrompt = ToolSaveAs & ": Copy a .docx to a new path in the writable root."
             }
         End Function

@@ -894,7 +894,7 @@ Namespace Agents
             Return New ModelConfig() With {
                 .ToolName = ToolGet, .Tool = True, .ToolPriority = 910, .ToolErrorHandling = "skip",
                 .ModelDescription = "Workspace (info)",
-                .ToolDefinition = "{""name"":""" & ToolGet & """,""description"":""Return current workspace info and permissions. If 'connected' is false, no workspace is configured and writes will go to the user's Desktop."",""parameters"":{""type"":""object"",""properties"":{}}}",
+                .ToolDefinition = "{""name"":""" & ToolGet & """,""description"":""Return current workspace info and permissions. If 'connected' is false, no workspace is configured and writes go to the current session's staging/working area (delivered to the user at the end of the run), or to the Desktop when no session staging area is active."",""parameters"":{""type"":""object"",""properties"":{}}}",
                 .ToolInstructionsPrompt = ToolGet & ": Inspect the current workspace state. Call this once to learn whether a workspace is configured and what permissions you have."
             }
         End Function

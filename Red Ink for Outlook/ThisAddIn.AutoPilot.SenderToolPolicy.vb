@@ -17,12 +17,22 @@
 '    list is returned unchanged, so current behaviour is fully preserved.
 '
 ' Policy file format (one rule per line):
-'     # or ;            -> comment line (ignored)
-'     <pattern> = ALL                 -> sender may use every selected tool
-'     <pattern> = NONE                -> sender may use nothing (report_inability only)
-'     <pattern> = tool1, tool2, ...   -> sender may use only the listed tools
-'     <pattern> = ONLY skill_<name>   -> sender may only run that one skill
-'     DEFAULT = <rule>                -> fallback for senders that match no pattern
+'     # or ;                  -> comment line (ignored)
+'     <pattern> = ALL         -> sender may use every selected tool
+'     <pattern> = NONE        -> sender may use nothing (report_inability only)
+'     <pattern> = ONLY skill_<name>
+'                              -> sender may only run that one skill
+'     <pattern> = <selector>, <selector>, ...
+'                              -> combined include/exclude selector list
+'     DEFAULT = <rule>        -> fallback for senders that match no pattern
+'
+'  - A selector is matched purely against the NAME of a tool, skill, agent, or online
+'    resource. Selectors may be:
+'      - an exact name (e.g. internet_search, skill_intake, agent_research, some_online_source)
+'      - a wildcard name pattern using * and ? (e.g. skill_*, swiss-caselaw*, agent_?)
+'      - the universal placeholder * (or ALL) matching every name
+'  - Prefix any selector with ! or - to EXCLUDE the matching names.
+'  - If a selector list contains only exclusions, it behaves like * except those exclusions.
 '
 '  - Any rule may append a hard, in-code system-prompt instruction for the sender:
 '         <pattern> = <rule> || <system prompt instruction>
@@ -64,7 +74,8 @@ Partial Public Class ThisAddIn
         Public Property Pattern As String
         Public Property IsDefault As Boolean
         Public Property Kind As AutoPilotSenderPolicyRuleKind
-        Public Property ToolNames As New List(Of String)()
+        Public Property AllowedToolSelectors As New List(Of String)()
+        Public Property DeniedToolSelectors As New List(Of String)()
         Public Property SkillToolName As String = ""
 
         ''' <summary>
@@ -132,9 +143,26 @@ Partial Public Class ThisAddIn
                     rule.SkillToolName = rulePart.Substring(5).Trim()
                 Else
                     rule.Kind = AutoPilotSenderPolicyRuleKind.ToolList
+
                     For Each namePart In rulePart.Split(","c)
-                        Dim toolName = namePart.Trim()
-                        If toolName.Length > 0 Then rule.ToolNames.Add(toolName)
+                        Dim selector As String = namePart.Trim()
+                        If selector.Length = 0 Then Continue For
+
+                        Dim isDenied As Boolean =
+            selector.StartsWith("!", StringComparison.Ordinal) OrElse
+            selector.StartsWith("-", StringComparison.Ordinal)
+
+                        If isDenied Then
+                            selector = selector.Substring(1).Trim()
+                        End If
+
+                        If selector.Length = 0 Then Continue For
+
+                        If isDenied Then
+                            rule.DeniedToolSelectors.Add(selector)
+                        Else
+                            rule.AllowedToolSelectors.Add(selector)
+                        End If
                     Next
                 End If
 
@@ -224,7 +252,7 @@ Partial Public Class ThisAddIn
                 Return KeepAlwaysAllowedToolsOnly(sessionTools)
 
             Case AutoPilotSenderPolicyRuleKind.ToolList
-                Return FilterToNamedTools(sessionTools, matched.ToolNames)
+                Return FilterToNamedTools(sessionTools, matched.AllowedToolSelectors, matched.DeniedToolSelectors)
 
             Case AutoPilotSenderPolicyRuleKind.OnlySkill
                 Return FilterToExclusiveSkill(sessionTools, matched.SkillToolName)
@@ -241,16 +269,72 @@ Partial Public Class ThisAddIn
             ToList()
     End Function
 
-    ''' <summary>Returns only tools whose name is in the allowed list, plus the always-allowed safety tools.</summary>
-    Private Function FilterToNamedTools(sessionTools As List(Of ModelConfig), allowedNames As List(Of String)) As List(Of ModelConfig)
-        Dim allowed As New HashSet(Of String)(
-            If(allowedNames, New List(Of String)()).Where(Function(n) Not String.IsNullOrWhiteSpace(n)).Select(Function(n) n.Trim()),
-            StringComparer.OrdinalIgnoreCase)
+    ''' <summary>
+    ''' Returns only tools that match the allowed selectors and do not match the denied selectors,
+    ''' plus the always-allowed safety tools. If only denied selectors are provided, the rule behaves
+    ''' like ALL except those exclusions.
+    ''' </summary>
+    Private Function FilterToNamedTools(
+    sessionTools As List(Of ModelConfig),
+    allowedSelectors As List(Of String),
+    deniedSelectors As List(Of String)) As List(Of ModelConfig)
+
+        Dim allowed As List(Of String) =
+        If(allowedSelectors, New List(Of String)()).
+            Where(Function(n) Not String.IsNullOrWhiteSpace(n)).
+            Select(Function(n) n.Trim()).
+            ToList()
+
+        Dim denied As List(Of String) =
+        If(deniedSelectors, New List(Of String)()).
+            Where(Function(n) Not String.IsNullOrWhiteSpace(n)).
+            Select(Function(n) n.Trim()).
+            ToList()
 
         Return sessionTools.
-            Where(Function(t) t IsNot Nothing AndAlso
-                              (IsAlwaysAllowedTool(t.ToolName) OrElse allowed.Contains(If(t.ToolName, "").Trim()))).
-            ToList()
+        Where(Function(t)
+                  If t Is Nothing OrElse String.IsNullOrWhiteSpace(t.ToolName) Then Return False
+
+                  Dim toolName As String = t.ToolName.Trim()
+
+                  If IsAlwaysAllowedTool(toolName) Then Return True
+
+                  Dim isAllowed As Boolean =
+                      allowed.Count = 0 OrElse
+                      allowed.Any(Function(selector) ToolSelectorMatches(selector, toolName))
+
+                  If Not isAllowed Then Return False
+
+                  Dim isDenied As Boolean =
+                      denied.Any(Function(selector) ToolSelectorMatches(selector, toolName))
+
+                  Return Not isDenied
+              End Function).
+        ToList()
+    End Function
+
+    ''' <summary>
+    ''' Agnostic selector match: a selector is matched purely against a tool/skill/agent/online-resource
+    ''' NAME. Any named entity can be allowed or denied. "*" (or "ALL") matches everything; selectors
+    ''' containing * or ? are treated as wildcard name patterns; otherwise an exact (case-insensitive)
+    ''' name comparison is used. No entity-type-specific or name-specific heuristics are applied.
+    ''' </summary>
+    Private Function ToolSelectorMatches(selector As String, toolName As String) As Boolean
+        Dim normalizedSelector As String = If(selector, "").Trim()
+        Dim normalizedToolName As String = If(toolName, "").Trim()
+
+        If normalizedSelector = "" OrElse normalizedToolName = "" Then Return False
+
+        If normalizedSelector = "*" OrElse
+           normalizedSelector.Equals("ALL", StringComparison.OrdinalIgnoreCase) Then
+            Return True
+        End If
+
+        If ContainsWildcardPattern(normalizedSelector) Then
+            Return WildcardToolNameMatches(normalizedSelector, normalizedToolName)
+        End If
+
+        Return normalizedToolName.Equals(normalizedSelector, StringComparison.OrdinalIgnoreCase)
     End Function
 
     ''' <summary>

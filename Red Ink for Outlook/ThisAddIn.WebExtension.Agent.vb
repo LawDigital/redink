@@ -60,6 +60,15 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private _chatAgentSurfacedFiles As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
 
+    ''' <summary>
+    ''' Paths that a tool edited in place during the current turn and that must be
+    ''' delivered even though they pre-existed (and are therefore in
+    ''' _chatAgentSurfacedFiles). Populated by tools such as the live Excel workbook
+    ''' completion when editing the existing file in place. Reset at the start of
+    ''' every non-sub-agent tooling run.
+    ''' </summary>
+    Private _chatAgentForcedDeliverables As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
     ''' <summary>Temp directory used by the current chat agent session.</summary>
     Private _chatAgentTempDir As String = Nothing
 
@@ -129,11 +138,9 @@ Partial Public Class ThisAddIn
     Private Function ChatAgentAddFile(sourcePath As String) As AutoPilotAttachmentInfo
         If String.IsNullOrWhiteSpace(sourcePath) OrElse Not File.Exists(sourcePath) Then Return Nothing
 
-        ' Ensure per-session temp dir exists
-        If String.IsNullOrWhiteSpace(_chatAgentTempDir) OrElse Not Directory.Exists(_chatAgentTempDir) Then
-            _chatAgentTempDir = Path.Combine(Path.GetTempPath(), CA_TempPrefix & Guid.NewGuid().ToString("N"))
-            Directory.CreateDirectory(_chatAgentTempDir)
-        End If
+        ' Ensure per-session temp dir exists (also reclaims stale dirs and registers the
+        ' staging root with PathPolicy, so uploads and tool outputs share the same session).
+        EnsureChatAgentTempDir()
 
         ' The upload handler (inky_upload) saves files as "{32-hex-guid}_{originalName}".
         ' Strip that GUID prefix so tools see the user's original filename.
@@ -190,6 +197,10 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Function GetAgentFileListForBrowser() As List(Of Object)
         Dim result As New List(Of Object)()
+
+        ' Surface any files produced by tools into the session staging directory as chips,
+        ' so users can see and open/download them alongside drag-and-dropped uploads.
+        RegisterStagingFilesAsSessionChips()
 
         For Each att In _chatAgentFiles
             Dim hydrated = EnsureSessionAttachmentAvailable(att)
@@ -544,6 +555,7 @@ Partial Public Class ThisAddIn
         _apCurrentTempDir = _chatAgentTempDir
         _apCurrentAttachments = _chatAgentFiles
         _apCurrentToolCallLog = New List(Of AutoPilotToolCallEntry)()
+        SharedLibrary.Agents.PathPolicy.SetSessionStagingRoot(_chatAgentTempDir)
 
         _apCurrentMailInfo = New AutoPilotMailInfo() With {
             .EntryID = "",
@@ -707,6 +719,7 @@ Partial Public Class ThisAddIn
     Friend Sub ResetChatAgentDeliverableTrackingForNewTurn()
         Try
             _chatAgentSurfacedFiles = New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+            _chatAgentForcedDeliverables = New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
 
             If Not String.IsNullOrWhiteSpace(_chatAgentTempDir) AndAlso Directory.Exists(_chatAgentTempDir) Then
                 For Each filePath In Directory.GetFiles(_chatAgentTempDir, "*.*", IO.SearchOption.AllDirectories)
@@ -728,6 +741,55 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
+
+    ''' <summary>
+    ''' When a shared in-place file-editing tool (e.g. word_write/word_markup/word_format/
+    ''' word_comment_*) succeeds, its result JSON carries the edited file 'path'. That path
+    ''' pre-existed the turn and would be filtered out by the already-surfaced gate in
+    ''' CollectResultAttachments. Force its delivery so in-place edits reach Desktop\Inky.
+    ''' No-ops for tools/results without a usable in-temp-dir path.
+    ''' </summary>
+    Private Sub MarkInPlaceEditAsForcedDeliverable(toolName As String, resultJson As String)
+        Try
+            If String.IsNullOrWhiteSpace(toolName) OrElse String.IsNullOrWhiteSpace(resultJson) Then Return
+
+            ' Only shared Word document-file tools that mutate the file in place.
+            Select Case toolName
+                Case SharedLibrary.Agents.WordTools.ToolWrite,
+                     SharedLibrary.Agents.WordTools.ToolMarkup,
+                     SharedLibrary.Agents.WordTools.ToolFormat,
+                     SharedLibrary.Agents.WordTools.ToolCommentAdd,
+                     SharedLibrary.Agents.WordTools.ToolCommentRemove
+                    ' proceed
+                Case Else
+                    Return
+            End Select
+
+            Dim obj As JObject
+            Try
+                obj = JObject.Parse(resultJson)
+            Catch
+                Return
+            End Try
+
+            Dim editedPath As String = If(obj.Value(Of String)("path"), "").Trim()
+            If String.IsNullOrWhiteSpace(editedPath) OrElse Not File.Exists(editedPath) Then Return
+
+            Dim full As String = Path.GetFullPath(editedPath)
+
+            ' Security: only files inside the active session staging/temp dir are eligible.
+            Dim stagingDir As String =
+                If(_apActive AndAlso Not String.IsNullOrWhiteSpace(_apCurrentTempDir),
+                   _apCurrentTempDir, _chatAgentTempDir)
+            If String.IsNullOrWhiteSpace(stagingDir) Then Return
+            If Not full.StartsWith(Path.GetFullPath(stagingDir), StringComparison.OrdinalIgnoreCase) Then Return
+
+            _chatAgentForcedDeliverables.Add(full)
+        Catch ex As Exception
+            ToolingFileLogger.LogWarn("MarkInPlaceEditAsForcedDeliverable failed.", ex:=ex)
+        End Try
+    End Sub
+
     ''' <summary>
     ''' Deletes the chat agent temp directory (recursively, including subdirectories)
     ''' and resets the file tracking list. Safe to call multiple times.
@@ -741,6 +803,106 @@ Partial Public Class ThisAddIn
         Catch
         End Try
         _chatAgentTempDir = Nothing
+        SharedLibrary.Agents.PathPolicy.SetSessionStagingRoot(Nothing)
+    End Sub
+
+    ''' <summary>
+    ''' Registers any files currently present in the active session staging directory
+    ''' as session attachments so tool consumers can resolve them by name. Runs on every
+    ''' FindAttachment lookup; registration is deduped by temp-file path. Registers into
+    ''' _apCurrentAttachments only (in Local Agent this is the same list as _chatAgentFiles;
+    ''' in AutoPilot it is the mail-attachment list), so no cross-session state is polluted.
+    ''' </summary>
+    Private Sub RefreshSessionStagingAttachments()
+        Try
+            If _apCurrentAttachments Is Nothing Then Return
+
+            Dim stagingDir As String =
+                If(_apActive AndAlso Not String.IsNullOrWhiteSpace(_apCurrentTempDir),
+                   _apCurrentTempDir, _chatAgentTempDir)
+            If String.IsNullOrWhiteSpace(stagingDir) OrElse Not Directory.Exists(stagingDir) Then Return
+
+            For Each filePath In Directory.GetFiles(stagingDir, "*.*", IO.SearchOption.AllDirectories)
+                Dim full = Path.GetFullPath(filePath)
+
+                Dim already = _apCurrentAttachments.Any(
+                    Function(a) a IsNot Nothing AndAlso
+                                Not String.IsNullOrWhiteSpace(a.TempFilePath) AndAlso
+                                a.TempFilePath.Equals(full, StringComparison.OrdinalIgnoreCase))
+                If already Then Continue For
+
+                Dim fi As New FileInfo(full)
+                _apCurrentAttachments.Add(New AutoPilotAttachmentInfo() With {
+                    .OriginalFileName = Path.GetFileName(full),
+                    .Extension = Path.GetExtension(full).ToLowerInvariant(),
+                    .TempFilePath = full,
+                    .SizeBytes = fi.Length,
+                    .IsOverSizeLimit = False,
+                    .StatusMessage = "Session staging file",
+                    .IsToolOutput = True,
+                    .OutputFiles = New List(Of String)()
+                })
+            Next
+        Catch ex As Exception
+            ToolingFileLogger.LogWarn("RefreshSessionStagingAttachments failed.", ex:=ex)
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Registers files present in the session staging directory into _chatAgentFiles so
+    ''' they appear as browser chips. Deduped by temp-file path. Unlike
+    ''' RefreshSessionStagingAttachments (which targets the active tool-run attachment list),
+    ''' this keeps the browser chip list current even outside an active tool run.
+    ''' </summary>
+    Private Sub RegisterStagingFilesAsSessionChips()
+        Try
+            Dim stagingDir As String =
+                If(_apActive AndAlso Not String.IsNullOrWhiteSpace(_apCurrentTempDir),
+                   _apCurrentTempDir, _chatAgentTempDir)
+            If String.IsNullOrWhiteSpace(stagingDir) OrElse Not Directory.Exists(stagingDir) Then Return
+
+            For Each filePath In Directory.GetFiles(stagingDir, "*.*", IO.SearchOption.AllDirectories)
+                Dim full = Path.GetFullPath(filePath)
+                If _chatAgentFiles.Any(
+                    Function(a) a IsNot Nothing AndAlso
+                                Not String.IsNullOrWhiteSpace(a.TempFilePath) AndAlso
+                                a.TempFilePath.Equals(full, StringComparison.OrdinalIgnoreCase)) Then Continue For
+
+                RegisterSessionFile(full, "Session staging file", isToolOutput:=True)
+            Next
+        Catch ex As Exception
+            ToolingFileLogger.LogWarn("RegisterStagingFilesAsSessionChips failed.", ex:=ex)
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Best-effort reclamation of orphaned chat-agent staging directories from prior
+    ''' sessions whose cleanup previously failed. Deletes only directories matching this
+    ''' host's temp prefix, excluding the current active dirs, and only when older than
+    ''' 24 hours (age gate protects concurrently running sessions).
+    ''' </summary>
+    Private Sub CleanupStaleChatAgentTempDirs()
+        Try
+            Dim tempRoot = Path.GetTempPath()
+            Dim cutoff = DateTime.UtcNow.AddHours(-24)
+
+            For Each dirPath In Directory.GetDirectories(tempRoot, CA_TempPrefix & "*")
+                Try
+                    Dim full = Path.GetFullPath(dirPath)
+
+                    If Not String.IsNullOrWhiteSpace(_chatAgentTempDir) AndAlso
+                       full.Equals(Path.GetFullPath(_chatAgentTempDir), StringComparison.OrdinalIgnoreCase) Then Continue For
+                    If Not String.IsNullOrWhiteSpace(_apCurrentTempDir) AndAlso
+                       full.Equals(Path.GetFullPath(_apCurrentTempDir), StringComparison.OrdinalIgnoreCase) Then Continue For
+
+                    If Directory.GetLastWriteTimeUtc(full) > cutoff Then Continue For
+
+                    Directory.Delete(full, recursive:=True)
+                Catch
+                End Try
+            Next
+        Catch
+        End Try
     End Sub
 
     ''' <summary>
@@ -992,8 +1154,13 @@ Partial Public Class ThisAddIn
         End If
 
         If String.IsNullOrWhiteSpace(_chatAgentTempDir) OrElse Not Directory.Exists(_chatAgentTempDir) Then
+            CleanupStaleChatAgentTempDirs()
             _chatAgentTempDir = Path.Combine(Path.GetTempPath(), CA_TempPrefix & Guid.NewGuid().ToString("N"))
             Directory.CreateDirectory(_chatAgentTempDir)
+        End If
+
+        If Not _apActive Then
+            SharedLibrary.Agents.PathPolicy.SetSessionStagingRoot(_chatAgentTempDir)
         End If
 
         Return _chatAgentTempDir

@@ -33,6 +33,12 @@ Namespace Agents
 
         Public Const ToolName As String = "skill_use"
 
+        ' Host-identity hook. Each host wires this up at startup so a loaded skill
+        ' can deterministically know where it runs ("Word" or "Outlook Local Chat")
+        ' instead of guessing from the visible tool set. skill_use is not available
+        ' under AutoPilot, so AutoPilot never needs to set this.
+        Public Shared Property CurrentHostProvider As Func(Of String)
+
         Public Shared Function Build() As SharedLibrary.ModelConfig
             Dim def =
                 "{""name"":""" & ToolName & """," &
@@ -165,6 +171,17 @@ Namespace Agents
             Dim centralRoot As String = If(AgentResources.ConfiguredCentralPath, "")
             Dim authorActive As Boolean = SkillAuthorMode.IsActive
             Dim allowCentral As Boolean = authorActive AndAlso SkillAuthorMode.AllowCentralWrites
+
+            Dim currentHost As String = ""
+            Try
+                Dim hostProvider As Func(Of String) = CurrentHostProvider
+                If hostProvider IsNot Nothing Then
+                    Dim resolvedHost As String = hostProvider()
+                    If resolvedHost IsNot Nothing Then currentHost = resolvedHost
+                End If
+            Catch
+            End Try
+            idx("host") = currentHost
 
             idx("local_root") = localRoot
             idx("central_root") = centralRoot

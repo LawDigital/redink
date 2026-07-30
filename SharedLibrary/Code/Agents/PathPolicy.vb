@@ -134,6 +134,33 @@ Namespace Agents
             _strictExtraRoots = If(collected.Count > 0, collected.ToArray(), Nothing)
         End Sub
 
+        ' --------------------------------------------------------------- session staging root
+
+        ' The active session's staging/temp directory (host-provided). Files produced by
+        ' tools into this directory are always readable and writable, independently of the
+        ' workspace/Desktop roots, so tool producers and consumers share common ground even
+        ' when a workspace is connected. Hosts set this on session start and clear it on end.
+        Private Shared _sessionStagingRoot As String = Nothing
+
+        ''' <summary>Sets the active session staging root (host call). Pass Nothing to clear.</summary>
+        Public Shared Sub SetSessionStagingRoot(rootOrNothing As String)
+            If String.IsNullOrWhiteSpace(rootOrNothing) Then
+                _sessionStagingRoot = Nothing
+            Else
+                Try
+                    _sessionStagingRoot = Path.GetFullPath(rootOrNothing)
+                Catch
+                    _sessionStagingRoot = Nothing
+                End Try
+            End If
+        End Sub
+
+        Public Shared ReadOnly Property SessionStagingRoot As String
+            Get
+                Return _sessionStagingRoot
+            End Get
+        End Property
+
         ' --------------------------------------------------------------- chat-author scope
 
         Private Shared ReadOnly _chatAuthor As New AsyncLocal(Of Boolean)
@@ -172,6 +199,9 @@ Namespace Agents
         Public Shared Function GetDefaultWritableRoot() As String
             If Not String.IsNullOrWhiteSpace(_workspaceRoot) AndAlso Directory.Exists(_workspaceRoot) Then
                 Return _workspaceRoot
+            End If
+            If Not String.IsNullOrWhiteSpace(_sessionStagingRoot) AndAlso Directory.Exists(_sessionStagingRoot) Then
+                Return _sessionStagingRoot
             End If
             Return Environment.GetFolderPath(Environment.SpecialFolder.Desktop)
         End Function
@@ -236,6 +266,9 @@ Namespace Agents
                 If Not String.IsNullOrWhiteSpace(ws) AndAlso Directory.Exists(ws) Then
                     strictRoots.Add(Path.GetFullPath(ws))
                 End If
+                If Not String.IsNullOrWhiteSpace(_sessionStagingRoot) AndAlso Directory.Exists(_sessionStagingRoot) Then
+                    strictRoots.Add(Path.GetFullPath(_sessionStagingRoot))
+                End If
                 Dim extra = _strictExtraRoots
                 If extra IsNot Nothing Then
                     For Each r In extra
@@ -278,6 +311,10 @@ Namespace Agents
             If Not String.IsNullOrWhiteSpace(desktop) Then
                 writeRoots.Add(Path.GetFullPath(desktop))
                 readRoots.Add(Path.GetFullPath(desktop))
+            End If
+            If Not String.IsNullOrWhiteSpace(_sessionStagingRoot) AndAlso Directory.Exists(_sessionStagingRoot) Then
+                writeRoots.Add(Path.GetFullPath(_sessionStagingRoot))
+                readRoots.Add(Path.GetFullPath(_sessionStagingRoot))
             End If
 
             ' Skill scripts/references — always readable.

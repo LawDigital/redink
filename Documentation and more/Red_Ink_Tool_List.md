@@ -29,7 +29,7 @@ Notes:
 | `text_search` | Searches text files for substring or regex matches. | Yes | Yes | Yes |
 | `js_run` | Executes sandboxed JavaScript in a hidden WebView2 environment. | Yes | Yes | Yes |
 | `python_execute` | Executes sandboxed Python code through the configured secure Python agent and may return structured results or published output files.1) | Yes | Yes | Yes |
-| `skill_use` | Loads a skill's instructions and file inventory for guided execution. | Yes | Yes | No |
+| `skill_use` | Loads a skill's instructions and file inventory for guided execution. Word and Outlook Local Chat expose this generic loader directly. AutoPilot does not advertise the generic `skill_use` tool, but it can still run selected skills through dynamic `skill_<name>` tools that route internally to the same skill loader. | Yes | Yes | No |
 | `m365_search` | Searches Microsoft 365 content such as mail, files, chats, events, and notes. | Yes | Yes | No |
 | `m365_get_mail` | Retrieves a mail message and its attachment text. | Yes | Yes | No |
 | `m365_get_mail_thread` | Retrieves an entire mail conversation as one transcript. | Yes | Yes | No |

@@ -490,6 +490,23 @@ Partial Public Class ThisAddIn
             ToolingFileLogger.LogWarn("Failed to register selected Outlook tooling tools.", ex:=ex)
         End Try
 
+        Try
+            SharedLibrary.Agents.SkillInvokeTool.CurrentHostProvider =
+                Function()
+                    If _apActive Then
+                        Return "Outlook AutoPilot"
+                    End If
+
+                    If _chatAgentActive Then
+                        Return "Outlook Local Chat"
+                    End If
+
+                    Return "Outlook"
+                End Function
+        Catch ex As Exception
+            ToolingFileLogger.LogWarn("Failed to set skill host provider for Outlook.", ex:=ex)
+        End Try
+
         Dim context As New ToolExecutionContext() With {
             .MaxIterations = INI_ToolingMaximumIterations
         }
@@ -4501,6 +4518,10 @@ Partial Public Class ThisAddIn
 
                 response.Response = If(__agentJson, "")
                 response.Success = Not String.IsNullOrWhiteSpace(response.Response)
+
+                If response.Success Then
+                    MarkInPlaceEditAsForcedDeliverable(toolCall.ToolName, response.Response)
+                End If
 
                 ApplyStructuredAgentResult(response, context)
 

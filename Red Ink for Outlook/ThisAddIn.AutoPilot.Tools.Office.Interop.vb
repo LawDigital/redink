@@ -455,7 +455,14 @@ Partial Public Class ThisAddIn
         Try
             Dim updates As JArray = DirectCast(toolCall.Arguments("updates"), JArray)
             Dim defaultWorksheetName As String = GetArgString(toolCall.Arguments, "worksheet_name")
-            Dim outputPath As String = APExcelBuildCompletedOutputPath(att.OriginalFileName)
+
+            ' Default behavior: edit the existing workbook in place so repeated updates
+            ' accumulate in a single file. Only when the caller supplies output_filename
+            ' is a separate copy produced, leaving the source workbook untouched.
+            Dim requestedOutputName As String = GetArgString(toolCall.Arguments, "output_filename")
+            Dim saveInPlace As Boolean = String.IsNullOrWhiteSpace(requestedOutputName)
+            Dim outputPath As String =
+                If(saveInPlace, att.TempFilePath, APExcelResolveOutputPath(requestedOutputName))
 
             excelApp = APExcelCreateApplication()
             wb = APExcelOpenWorkbook(excelApp, att.TempFilePath, False)
@@ -509,11 +516,21 @@ Partial Public Class ThisAddIn
                     registrationTarget.OutputFiles.Add(outputPath)
                 End If
 
+                ' When editing in place, the saved path pre-existed the turn and would be
+                ' filtered out by the already-surfaced gate. Force its delivery explicitly.
+                If saveInPlace Then
+                    _chatAgentForcedDeliverables.Add(Path.GetFullPath(outputPath))
+                End If
+
                 payload("output_file") = Path.GetFileName(outputPath)
                 payload("output_path") = outputPath
+                payload("edited_in_place") = saveInPlace
                 payload("message") =
-                    $"Workbook saved as '{Path.GetFileName(outputPath)}'. Applied {updateResult.AppliedCount} update(s), " &
-                    $"{updateResult.FailedCount} failed, {updateResult.SkippedProtectedCount} skipped as non-writable."
+                    If(saveInPlace,
+                       $"Workbook '{Path.GetFileName(outputPath)}' updated in place. Applied {updateResult.AppliedCount} update(s), " &
+                       $"{updateResult.FailedCount} failed, {updateResult.SkippedProtectedCount} skipped as non-writable.",
+                       $"Workbook saved as '{Path.GetFileName(outputPath)}'. Applied {updateResult.AppliedCount} update(s), " &
+                       $"{updateResult.FailedCount} failed, {updateResult.SkippedProtectedCount} skipped as non-writable.")
 
                 response.Success = True
                 response.Response = payload.ToString(Formatting.None)
@@ -626,15 +643,22 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
-    Private Function APExcelBuildCompletedOutputPath(originalFileName As String) As String
-        Dim baseName As String = Path.GetFileNameWithoutExtension(originalFileName)
-        Dim outputName As String = baseName & "_completed.xlsx"
-        Dim outputPath As String = Path.Combine(_apCurrentTempDir, outputName)
+    Private Function APExcelResolveOutputPath(requestedOutputName As String) As String
+        Dim safeName As String = Path.GetFileName(If(requestedOutputName, "").Trim())
+        If String.IsNullOrWhiteSpace(safeName) Then
+            safeName = "completed.xlsx"
+        End If
+
+        If Not Path.GetExtension(safeName).Equals(".xlsx", StringComparison.OrdinalIgnoreCase) Then
+            safeName = Path.GetFileNameWithoutExtension(safeName) & ".xlsx"
+        End If
+
+        Dim baseName As String = Path.GetFileNameWithoutExtension(safeName)
+        Dim outputPath As String = Path.Combine(_apCurrentTempDir, safeName)
         Dim counter As Integer = 1
 
         While File.Exists(outputPath)
-            outputName = $"{baseName}_completed_{counter}.xlsx"
-            outputPath = Path.Combine(_apCurrentTempDir, outputName)
+            outputPath = Path.Combine(_apCurrentTempDir, $"{baseName}_{counter}.xlsx")
             counter += 1
         End While
 
