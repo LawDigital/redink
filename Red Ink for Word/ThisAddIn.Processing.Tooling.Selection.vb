@@ -195,6 +195,7 @@ Partial Public Class ThisAddIn
             tools.AddRange(SharedLibrary.Agents.WordDocTools.BuildAll())
             tools.Add(SharedLibrary.Agents.JsRunTool.Build())
             tools.Add(SharedLibrary.Agents.SkillInvokeTool.Build())
+            tools.Add(SharedLibrary.Agents.ToolDescribeTool.Build())
 
             Dim __agentReg As New SharedLibrary.Agents.ToolRegistry()
             SharedLibrary.Agents.ToolRegistryBuilder.AddSkills(__agentReg, SharedLibrary.Agents.AgentResources.Skills)
@@ -307,6 +308,7 @@ Partial Public Class ThisAddIn
            SharedLibrary.Agents.WordDocTools.IsWordDocTool(toolName) OrElse
            SharedLibrary.Agents.JsRunTool.IsJsTool(toolName) OrElse
            SharedLibrary.Agents.PythonExecuteTool.IsPythonTool(toolName) OrElse
+           SharedLibrary.Agents.ToolDescribeTool.IsDescribeTool(toolName) OrElse
            toolName.Equals(SharedLibrary.Agents.SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) Then
             Return True
         End If

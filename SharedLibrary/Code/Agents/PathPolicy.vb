@@ -41,6 +41,14 @@ Namespace Agents
         Private Shared _workspaceRoot As String = Nothing
         Private Shared ReadOnly _restrictToWorkspaceRootOnly As New AsyncLocal(Of Boolean)
 
+        ' User-configured workspace permissions (mirrored from WorkspaceState by the host).
+        ' These apply ONLY to paths that resolve under the workspace root; skill and
+        ' staging/Desktop roots are governed by their own gates and are unaffected.
+        Private Shared _workspaceAllowRead As Boolean = True
+        Private Shared _workspaceAllowWrite As Boolean = True
+        Private Shared _workspaceAllowMoveCopyRename As Boolean = True
+        Private Shared _workspaceAllowDelete As Boolean = False
+
         ''' <summary>Sets the active workspace root for this process (host call). Pass Nothing to clear.</summary>
         Public Shared Sub SetWorkspaceRoot(rootOrNothing As String)
             If String.IsNullOrWhiteSpace(rootOrNothing) Then
@@ -57,6 +65,34 @@ Namespace Agents
         Public Shared ReadOnly Property WorkspaceRoot As String
             Get
                 Return _workspaceRoot
+            End Get
+        End Property
+
+        ''' <summary>
+        ''' Mirrors the user-configured workspace permissions into the policy. Hosts call
+        ''' this whenever the active workspace state changes. Read/Write are enforced by
+        ''' <see cref="Resolve"/>; MoveCopyRename/Delete are exposed for destructive file
+        ''' tools to consult (Resolve only distinguishes Read from Write).
+        ''' </summary>
+        Public Shared Sub SetWorkspacePermissions(allowRead As Boolean,
+                                                  allowWrite As Boolean,
+                                                  allowMoveCopyRename As Boolean,
+                                                  allowDelete As Boolean)
+            _workspaceAllowRead = allowRead
+            _workspaceAllowWrite = allowWrite
+            _workspaceAllowMoveCopyRename = allowMoveCopyRename
+            _workspaceAllowDelete = allowDelete
+        End Sub
+
+        Public Shared ReadOnly Property WorkspaceAllowMoveCopyRename As Boolean
+            Get
+                Return _workspaceAllowMoveCopyRename
+            End Get
+        End Property
+
+        Public Shared ReadOnly Property WorkspaceAllowDelete As Boolean
+            Get
+                Return _workspaceAllowDelete
             End Get
         End Property
 
@@ -98,6 +134,33 @@ Namespace Agents
             _strictExtraRoots = If(collected.Count > 0, collected.ToArray(), Nothing)
         End Sub
 
+        ' --------------------------------------------------------------- session staging root
+
+        ' The active session's staging/temp directory (host-provided). Files produced by
+        ' tools into this directory are always readable and writable, independently of the
+        ' workspace/Desktop roots, so tool producers and consumers share common ground even
+        ' when a workspace is connected. Hosts set this on session start and clear it on end.
+        Private Shared _sessionStagingRoot As String = Nothing
+
+        ''' <summary>Sets the active session staging root (host call). Pass Nothing to clear.</summary>
+        Public Shared Sub SetSessionStagingRoot(rootOrNothing As String)
+            If String.IsNullOrWhiteSpace(rootOrNothing) Then
+                _sessionStagingRoot = Nothing
+            Else
+                Try
+                    _sessionStagingRoot = Path.GetFullPath(rootOrNothing)
+                Catch
+                    _sessionStagingRoot = Nothing
+                End Try
+            End If
+        End Sub
+
+        Public Shared ReadOnly Property SessionStagingRoot As String
+            Get
+                Return _sessionStagingRoot
+            End Get
+        End Property
+
         ' --------------------------------------------------------------- chat-author scope
 
         Private Shared ReadOnly _chatAuthor As New AsyncLocal(Of Boolean)
@@ -136,6 +199,9 @@ Namespace Agents
         Public Shared Function GetDefaultWritableRoot() As String
             If Not String.IsNullOrWhiteSpace(_workspaceRoot) AndAlso Directory.Exists(_workspaceRoot) Then
                 Return _workspaceRoot
+            End If
+            If Not String.IsNullOrWhiteSpace(_sessionStagingRoot) AndAlso Directory.Exists(_sessionStagingRoot) Then
+                Return _sessionStagingRoot
             End If
             Return Environment.GetFolderPath(Environment.SpecialFolder.Desktop)
         End Function
@@ -180,6 +246,18 @@ Namespace Agents
 
             Dim ws = If(_workspaceRoot, "")
 
+            ' Enforce user-configured workspace permissions for any path that resolves
+            ' under the workspace root. Skill and staging/Desktop roots are governed by
+            ' their own gates and are intentionally unaffected here.
+            If Not String.IsNullOrWhiteSpace(ws) AndAlso IsUnder(full, Path.GetFullPath(ws)) Then
+                If access = PathAccess.Read AndAlso Not _workspaceAllowRead Then
+                    Throw New UnauthorizedAccessException("Workspace read access is disabled.")
+                End If
+                If access = PathAccess.Write AndAlso Not _workspaceAllowWrite Then
+                    Throw New UnauthorizedAccessException("Workspace write access is disabled.")
+                End If
+            End If
+
             If _restrictToWorkspaceRootOnly.Value Then
                 ' Collect the strict allow-set: the active workspace root plus any
                 ' additional host-registered roots (e.g. the AutoPilot temp directory and
@@ -187,6 +265,9 @@ Namespace Agents
                 Dim strictRoots As New List(Of String)()
                 If Not String.IsNullOrWhiteSpace(ws) AndAlso Directory.Exists(ws) Then
                     strictRoots.Add(Path.GetFullPath(ws))
+                End If
+                If Not String.IsNullOrWhiteSpace(_sessionStagingRoot) AndAlso Directory.Exists(_sessionStagingRoot) Then
+                    strictRoots.Add(Path.GetFullPath(_sessionStagingRoot))
                 End If
                 Dim extra = _strictExtraRoots
                 If extra IsNot Nothing Then
@@ -230,6 +311,10 @@ Namespace Agents
             If Not String.IsNullOrWhiteSpace(desktop) Then
                 writeRoots.Add(Path.GetFullPath(desktop))
                 readRoots.Add(Path.GetFullPath(desktop))
+            End If
+            If Not String.IsNullOrWhiteSpace(_sessionStagingRoot) AndAlso Directory.Exists(_sessionStagingRoot) Then
+                writeRoots.Add(Path.GetFullPath(_sessionStagingRoot))
+                readRoots.Add(Path.GetFullPath(_sessionStagingRoot))
             End If
 
             ' Skill scripts/references — always readable.

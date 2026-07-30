@@ -1,4 +1,5 @@
-﻿' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
 ' File: HostToolRegistration.vb
@@ -31,6 +32,12 @@ Namespace Agents
             TextTools.ToolRead,
             TextTools.ToolWrite,
             TextTools.ToolSearch,
+            FileTools.ToolCopy,
+            FileTools.ToolMove,
+            FileTools.ToolRename,
+            FileTools.ToolDelete,
+            FileTools.ToolMakeDir,
+            FileTools.ToolRemoveDir,
             JsRunTool.ToolName,
             PythonExecuteTool.ToolName,
             SkillInvokeTool.ToolName,
@@ -128,6 +135,7 @@ Namespace Agents
             WordDocTools.ToolListComments,
             WordDocTools.ToolInsert,
             WordDocTools.ToolReplace,
+            WordDocTools.ToolDelete,
             WordDocTools.ToolCommentAdd,
             WordDocTools.ToolFormat,
             "word_doc_read",
@@ -140,6 +148,7 @@ Namespace Agents
             "download_web_files",
             WorkspaceTools.ToolWrite,
             TextTools.ToolWrite,
+            FileTools.ToolCopy,
             PythonExecuteTool.ToolName,
             "merge_pdfs",
             "create_pdf_from_text",
@@ -162,6 +171,7 @@ Namespace Agents
             "download_web_files",
             WorkspaceTools.ToolWrite,
             TextTools.ToolWrite,
+            FileTools.ToolCopy,
             PythonExecuteTool.ToolName,
             WordTools.ToolWrite,
             WordTools.ToolMarkup,

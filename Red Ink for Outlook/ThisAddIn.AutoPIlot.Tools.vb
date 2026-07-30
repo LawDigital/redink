@@ -230,6 +230,7 @@ Partial Public Class ThisAddIn
 
         ' Shared file/workspace tools available inside the current AutoPilot workspace.
         tools.AddRange(SharedLibrary.Agents.TextTools.BuildAll())
+        tools.AddRange(SharedLibrary.Agents.FileTools.BuildAll())
         tools.AddRange(SharedLibrary.Agents.WordTools.BuildAll())
         tools.AddRange(SharedLibrary.Agents.WorkspaceTools.BuildAll())
         tools.AddRange(GetAutoPilotAgentWorkspaceTools())
@@ -557,21 +558,23 @@ Partial Public Class ThisAddIn
             .ModelDescription = "Complete Live Excel Workbook (built-in)",
             .ToolPriority = 990,
             .ToolInstructionsPrompt =
-                AP_Tool_ExcelCompleteLiveWorkbook & ": Completes or updates an existing Excel attachment through Excel Interop and saves a new '_completed.xlsx' copy. " &
+                AP_Tool_ExcelCompleteLiveWorkbook & ": Completes or updates an existing Excel attachment through Excel Interop. By default it edits the existing workbook in place, so repeated updates accumulate in one file rather than creating a new file per round. Supply output_filename only when a separate copy is wanted, leaving the source workbook untouched. " &
                 "Use this for any Excel form completion or update task when formulas, dropdowns, validations, recalculation, protection, current workbook state, or cell and structure formatting matter. " &
                 "Do not use normal XML-based Excel editing for such tasks. " &
                 "Before filling an existing workbook, first call excel_list_live_worksheets and then excel_read_live_range so the tool loop understands the current workbook structure, live values, available options, and any required formatting. " &
                 "Updates are provided as JSON. Each update targets a single cell and can set a value, a formula, a comment, font formatting, fill formatting, common formatting, borders, row height, column width, merge state, and cell protection flags. " &
+                "Always batch every cell change for a workbook into a single call by passing all updates in one 'updates' array. Do not make one call per cell; the workbook is opened, recalculated, and saved once per call, so batching many updates together is far more efficient. " &
                 "If worksheet_name is omitted, the first worksheet is used. A per-update worksheet_name may override the default worksheet. " &
                 "For formulas, prefer English Excel formulas with comma separators when possible. The tool includes locale-safe fallbacks for localized Excel installations and different list separators.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_ExcelCompleteLiveWorkbook & """," &
-                """description"":""Updates an existing Excel attachment through live Excel Interop and saves a new '_completed.xlsx' copy. " &
+                """description"":""Updates an existing Excel attachment through live Excel Interop. By default the existing workbook is edited in place so repeated updates accumulate in a single file; provide output_filename to instead save the result as a separate copy and leave the source untouched. " &
                 "This is the preferred tool for completing existing Excel workbooks that may contain active formulas, dropdowns, validations, recalculation, protected sheets with LiftLock markers, or required formatting such as strikethrough, font color, fill color, number format, alignment, borders, row height, column width, merge state, and cell protection flags. " &
                 "Use JSON-based cell updates. Prefer English Excel formulas with comma separators; locale fallbacks are built in.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """attachment_name"":{""type"":""string"",""description"":""Filename of the Excel attachment to complete or update""}," &
-                """worksheet_name"":{""type"":""string"",""description"":""Optional default worksheet name. If omitted, the first worksheet is used.""}," &
+                                """worksheet_name"":{""type"":""string"",""description"":""Optional default worksheet name. If omitted, the first worksheet is used.""}," &
+                """output_filename"":{""type"":""string"",""description"":""Optional. If omitted, the existing workbook is edited in place (preferred for iterative edits). If provided, the result is saved as a separate .xlsx copy under this name and the source workbook is left unchanged.""}," &
                 """updates"":{""type"":""array"",""description"":""Array of cell updates to apply. Each update targets one cell."",""items"":{""type"":""object"",""properties"":{" &
                 """worksheet_name"":{""type"":""string"",""description"":""Optional worksheet override for this update. If omitted, the tool-level worksheet_name or the first worksheet is used.""}," &
                 """cell"":{""type"":""string"",""description"":""Target cell address in A1 notation, for example 'B12'""}," &
@@ -1764,6 +1767,11 @@ Partial Public Class ThisAddIn
     ''' </remarks>
     Private Function FindAttachment(fileName As String) As AutoPilotAttachmentInfo
         If String.IsNullOrWhiteSpace(fileName) OrElse _apCurrentAttachments Is Nothing Then Return Nothing
+
+        ' Rescan the active session staging directory on every lookup so that files produced
+        ' by any tool (file_copy, js_run outputs, completed workbooks, etc.) become resolvable
+        ' even when the model never learned their name. Registration is deduped and cheap.
+        RefreshSessionStagingAttachments()
 
         Dim trimmedName = fileName.Trim()
 

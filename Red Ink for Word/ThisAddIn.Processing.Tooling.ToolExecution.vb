@@ -311,6 +311,16 @@ Partial Public Class ThisAddIn
                 GoTo __AfterDispatch
             End If
 
+            If SharedLibrary.Agents.ToolDescribeTool.IsDescribeTool(toolCall.ToolName) Then
+                Dim describeRegistry As SharedLibrary.Agents.ToolRegistry =
+                    If(context.AuthoritativeToolRegistrySnapshot,
+                       If(context.AuthoritativeToolRegistry, context.AllowedToolRegistry))
+                response.Response = SharedLibrary.Agents.ToolDescribeTool.Execute(toolCall.Arguments, describeRegistry)
+                response.Success = Not String.IsNullOrWhiteSpace(response.Response)
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+                GoTo __AfterDispatch
+            End If
+
             ' Agent layer (memory_*, skill_use, agent_*) — single-line dispatcher.
             If SharedLibrary.Agents.AgentToolRouter.IsAgentLayerTool(toolCall.ToolName) Then
                 cancellationToken.ThrowIfCancellationRequested()

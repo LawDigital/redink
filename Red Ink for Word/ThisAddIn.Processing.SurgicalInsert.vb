@@ -64,9 +64,13 @@ Partial Public Class ThisAddIn
     ' editing such as "scheduled to depart on" -> "scheduled for" and "more than" -> "over" as
     ' sentence replacement. A sentence should be replaced wholesale only when both the common-token
     ' similarity is low enough and the changed-token mass is large enough.
-    Const materialRewriteSimilarityThreshold As Double = 0.72
-    Const materialRewriteChangedTokenRatioThreshold As Double = 0.28
-    Const materialRewriteMinimumChangedTokens As Integer = 10    ' ========================== Surgical Markup (MarkupMethod 2 & 5) ==========================
+
+    ' Update: The collapse thresholds (materialRewriteSimilarityThreshold,
+    ' materialRewriteChangedTokenRatioThreshold, materialRewriteMinimumChangedTokens)
+    ' now live in SharedLibrary.SharedMethods so both the live-document and file-level
+    ' markup engines share one source of truth. They resolve unqualified here via
+    ' "Imports SharedLibrary.SharedLibrary.SharedMethods".
+    ' ========================== Surgical Markup (MarkupMethod 2 & 5) ==========================
 
     ''' <summary>
     ''' Represents a single word-level run from the DiffPlex output: Unchanged, Inserted, or Deleted.

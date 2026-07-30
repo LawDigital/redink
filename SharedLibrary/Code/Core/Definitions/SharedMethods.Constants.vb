@@ -39,6 +39,7 @@ Namespace SharedLibrary
         Public Const AN7 As String = "http://localhost:12333/inky"  ' Localhost URL for Inky
         Public Const AN8 As String = "Inky"
 
+
         Public Shared CopyrightNotice As String = "Copyright © LawDigital Ltd. 2025-"
 
         Public Const NoThinkTrigger As String = "(nothink)"
@@ -57,6 +58,15 @@ Namespace SharedLibrary
         Private Const ISearch_DefResults = 4         ' default maximum number of search results
         Private Const ISearch_DefMaxDepth = 2        ' maximum number of search levels to crawl a website
         Private Const ISearch_DefSearchTimeout = 3   ' default maximum seconds per search hit
+
+        ' -------------------------------------------------------------------------
+        ' Surgical markup collapse thresholds (shared by the live-document engine in
+        ' ThisAddIn.Processing.SurgicalInsert.vb and the file-level engine in
+        ' Agents\WordTools.vb). A sentence/span is replaced wholesale only when both
+        ' the common-token similarity is low enough AND the changed-token mass is large.
+        Public Const materialRewriteSimilarityThreshold As Double = 0.72
+        Public Const materialRewriteChangedTokenRatioThreshold As Double = 0.28
+        Public Const materialRewriteMinimumChangedTokens As Integer = 10
 
         Public Const RegPath_Base As String = "HKEY_CURRENT_USER\Software\" & AN3 & "\"
         Public Const RegPath_CodeBasis As String = "CodeBasis"
@@ -452,6 +462,8 @@ Namespace SharedLibrary
         ''' matching the legacy <c>doc.Content.Text</c> COM output.
         ''' </summary>
         Public Const DocxIncludeHeaderFooterFootnotes As Boolean = True
+
+        Public Const WorkspaceDeleteByDefaultOn As Boolean = False
 
         ' LICENSING SYSTEM CONSTANTS AND GLOBAL VARIABLES        
 
