@@ -10,7 +10,7 @@
 ' Operations (all SYNCHRONOUS by design):
 '  - Read verbs: HasActiveDocument, ListOpenDocuments, GetActiveDocument,
 '    ExtractText, SearchJson, ListComments (always available).
-'  - Write verbs: InsertTextJson, ReplaceJson, AddCommentJson, FormatJson
+'  - Write verbs: InsertTextJson, ReplaceJson, DeleteJson, AddCommentJson, FormatJson
 '    (gated by WordHostPolicy.ActiveDocReadOnly).
 '  - Host enforces read-only policy; COM/STA calls do not benefit from async.
 ' =============================================================================
@@ -60,11 +60,16 @@ Namespace Agents
         ' --- mutating operations (host enforces WordHostPolicy.ActiveDocReadOnly) ---
 
         ''' <summary>Inserts text at the document's current selection / end. Returns JSON result.</summary>
-        Function InsertTextJson(documentNameOrPath As String, text As String, location As String) As String
+        Function InsertTextJson(documentNameOrPath As String, text As String, location As String,
+                                trackChanges As Boolean) As String
 
-        ''' <summary>Replaces the first occurrence of 'find' with 'replacement'.</summary>
+        ''' <summary>Replaces the resilient-located 'find' span with 'replacement' (optionally scope-expanded).</summary>
         Function ReplaceJson(documentNameOrPath As String, find As String, replacement As String,
-                              onlyFirst As Boolean) As String
+                              onlyFirst As Boolean, trackChanges As Boolean, matchScope As String) As String
+
+        ''' <summary>Deletes the resilient-located 'find' span (or its enclosing sentence/paragraph).</summary>
+        Function DeleteJson(documentNameOrPath As String, find As String,
+                             trackChanges As Boolean, matchScope As String) As String
 
         ''' <summary>Adds a comment anchored to a 'find' match.</summary>
         Function AddCommentJson(documentNameOrPath As String, find As String, text As String,
@@ -86,7 +91,7 @@ Namespace Agents
         ''' mutating verbs refuse to run. Flip to False (via future ribbon toggle) to let
         ''' the agent modify the open document via Word interop.
         ''' </summary>
-        Public Shared Property ActiveDocReadOnly As Boolean = True
+        Public Shared Property ActiveDocReadOnly As Boolean = False
 
         ''' <summary>
         ''' Host registration. Set once at startup; null for Outlook (no Word interop).

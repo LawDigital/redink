@@ -190,7 +190,7 @@ Namespace Agents
         Public Shared Function ResolveAndValidateAvailability(options As PythonExecuteToolCoreOptions) As System.String
             ValidateOptions(options)
             Dim configuration As RedInkPythonAgentConfiguration = ResolveConfigurationRelativeToAssembly(options.AgentConfiguration)
-            Dim executable As System.String = RedInkPythonAgentClient.ValidateExecutableConfiguration(configuration)
+            Dim executable As System.String = ValidateExecutableConfigurationCached(configuration)
 
             ' Gate exposure on the minimum required version. Below the required minimum the integration is
             ' deactivated for the whole session (the tool is never advertised). A version at or above the
@@ -207,6 +207,66 @@ Namespace Agents
 
             Return executable
         End Function
+
+        Private Shared ReadOnly TrustCacheLock As New System.Object()
+        Private Shared ReadOnly TrustCache As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.OrdinalIgnoreCase)
+
+        ''' <summary>
+        ''' Caches a successful executable trust validation (SHA-256 + Authenticode) keyed by full path,
+        ''' last-write-time, length and the configured trust criteria, so the tooling-loop tool-registration
+        ''' path does not repeat the hash/WinVerifyTrust cost on every run. A changed or updated executable
+        ''' (or changed criteria) produces a new key and is therefore re-verified automatically.
+        ''' </summary>
+        Private Shared Function ValidateExecutableConfigurationCached(configuration As RedInkPythonAgentConfiguration) As System.String
+            Dim cacheKey As System.String = Nothing
+            Try
+                Dim resolvedPath As System.String = System.IO.Path.GetFullPath(
+                    System.Environment.ExpandEnvironmentVariables(configuration.ExecutablePath))
+                Dim information As New System.IO.FileInfo(resolvedPath)
+                cacheKey = resolvedPath & "|" &
+                           information.LastWriteTimeUtc.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture) & "|" &
+                           information.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) & "|" &
+                           If(configuration.ExpectedSignerOrganization, System.String.Empty) & "|" &
+                           If(configuration.ExpectedSha256, System.String.Empty)
+            Catch ex As System.Exception
+                cacheKey = Nothing
+            End Try
+
+            If cacheKey IsNot Nothing Then
+                SyncLock TrustCacheLock
+                    Dim cachedExecutable As System.String = Nothing
+                    If TrustCache.TryGetValue(cacheKey, cachedExecutable) Then
+                        Return cachedExecutable
+                    End If
+                End SyncLock
+            End If
+
+            Dim executable As System.String = RedInkPythonAgentClient.ValidateExecutableConfiguration(configuration)
+
+            If cacheKey IsNot Nothing Then
+                SyncLock TrustCacheLock
+                    TrustCache(cacheKey) = executable
+                End SyncLock
+            End If
+
+            Return executable
+        End Function
+
+        ''' <summary>
+        ''' Warms the trust and version caches for the configured Python Agent executable off the hot path
+        ''' (e.g. during add-in startup), so the first tooling run does not pay the SHA-256 + Authenticode
+        ''' verification and version-probe cost. Never throws; on failure the on-demand path re-verifies.
+        ''' </summary>
+        Public Shared Sub PrimeAvailabilityCache(configuration As RedInkPythonAgentConfiguration)
+            If configuration Is Nothing Then Return
+            Try
+                Dim resolved As RedInkPythonAgentConfiguration = ResolveConfigurationRelativeToAssembly(configuration)
+                ValidateExecutableConfigurationCached(resolved)
+                QueryVersionStatus(resolved.ExecutablePath)
+            Catch ex As System.Exception
+                ' Non-fatal: on-demand tool registration re-verifies.
+            End Try
+        End Sub
 
         Private Shared ReadOnly VersionCacheLock As New System.Object()
         Private Shared ReadOnly VersionCache As New System.Collections.Generic.Dictionary(Of System.String, PythonAgentVersionStatus)(System.StringComparer.OrdinalIgnoreCase)

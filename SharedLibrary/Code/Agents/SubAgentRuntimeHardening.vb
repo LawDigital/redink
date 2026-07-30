@@ -341,9 +341,37 @@ Namespace Agents
 
                 resultKind = If(obj.Value(Of String)("resultKind"), "")
 
+                ' Structured error object: {"error":{"code":"..."}}
                 Dim errObj As JObject = TryCast(obj("error"), JObject)
                 If errObj IsNot Nothing Then
                     errorCode = If(errObj.Value(Of String)("code"), "")
+                End If
+
+                ' Flat / string error: {"error":"skill_not_found"} or any non-null "error".
+                If String.IsNullOrWhiteSpace(errorCode) Then
+                    Dim errToken As JToken = obj("error")
+                    If errToken IsNot Nothing AndAlso errToken.Type <> JTokenType.Null Then
+                        If errToken.Type = JTokenType.String Then
+                            errorCode = errToken.Value(Of String)()
+                        ElseIf errToken.Type <> JTokenType.Object Then
+                            errorCode = errToken.ToString()
+                        End If
+                        If String.IsNullOrWhiteSpace(errorCode) Then errorCode = "error"
+                    End If
+                End If
+
+                ' Explicit business-failure flags: {"success":false} / {"ok":false}.
+                If String.IsNullOrWhiteSpace(errorCode) Then
+                    If TokenIsExplicitlyFalse(obj("success")) Then errorCode = "success_false"
+                    If String.IsNullOrWhiteSpace(errorCode) AndAlso TokenIsExplicitlyFalse(obj("ok")) Then errorCode = "ok_false"
+                End If
+
+                ' Explicit status strings: {"status":"error"} / {"status":"failed"}.
+                Dim statusValue As String = If(obj.Value(Of String)("status"), "").Trim()
+                If String.IsNullOrWhiteSpace(errorCode) AndAlso
+                   (String.Equals(statusValue, "error", StringComparison.OrdinalIgnoreCase) OrElse
+                    String.Equals(statusValue, "failed", StringComparison.OrdinalIgnoreCase)) Then
+                    errorCode = statusValue.ToLowerInvariant()
                 End If
 
                 If String.Equals(resultKind, "error", StringComparison.OrdinalIgnoreCase) Then
@@ -359,6 +387,19 @@ Namespace Agents
             End Try
 
             Return False
+        End Function
+
+        Private Shared Function TokenIsExplicitlyFalse(token As JToken) As Boolean
+            If token Is Nothing Then Return False
+
+            Select Case token.Type
+                Case JTokenType.Boolean
+                    Return Not token.Value(Of Boolean)()
+                Case JTokenType.String
+                    Return String.Equals(token.Value(Of String)(), "false", StringComparison.OrdinalIgnoreCase)
+                Case Else
+                    Return False
+            End Select
         End Function
 
         Private Shared Function LooksLikeJson(text As String) As Boolean

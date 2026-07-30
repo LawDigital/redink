@@ -495,20 +495,24 @@ Namespace SharedLibrary
                                         System.Globalization.CultureInfo.CurrentUICulture.DisplayName,
                                         _hostLanguage)
             Dim partOfDay As String = GetPartOfDay()
-            Dim manualText As String = Await GetManualOnceAsync()
+            Dim manualText As String = Await GetManualOnceAsync().ConfigureAwait(False)
             Dim systemPrompt As String
+            Dim userPrompt As String = ""
 
             manualText = manualText.Trim()
-            If manualText.StartsWith("Error", System.StringComparison.OrdinalIgnoreCase) OrElse manualText = "" Then
+            If IsManualLoadError(manualText) Then
+                systemPrompt = $"Generate a brief, friendly {langName} welcome that naturally references it is {partOfDay} now, but explain that you cannot work because the configured manual could not be loaded. Start the reply with exactly 'Manual access error:'. Include the provided error details and advise checking the configured file path or URL."
+                userPrompt = manualText
+            ElseIf manualText = "" Then
                 systemPrompt = $"Generate a brief, friendly {langName} welcome that naturally references it is {partOfDay} now, but tell the user that you can't work because you have no access to the manual (which needs to be configured and is retrieved either via an URL or file path; most likely, the path/URL is wrong or not working). Advise that the configured source should be checked or configured as per the manual."
             Else
                 systemPrompt = $"Generate a brief, friendly {langName} welcome that naturally references it is {partOfDay} now and asks what you can do. Do NOT state your name. One short short sentence, not talkative."
             End If
-            Dim userPrompt As String = ""
+
             Dim answer As String = ""
             Try
                 Dim sw = Stopwatch.StartNew()
-                answer = Await CallHelpMeLlmAsync(systemPrompt, userPrompt)
+                answer = Await CallHelpMeLlmAsync(systemPrompt, userPrompt).ConfigureAwait(False)
                 sw.Stop()
                 Dbg($"Welcome LLM ms={sw.ElapsedMilliseconds} rawLen={If(answer, "").Length}")
             Catch ex As Exception
@@ -517,6 +521,10 @@ Namespace SharedLibrary
             End Try
 
             answer = If(answer, "").Trim()
+            If IsManualLoadError(manualText) Then
+                answer = EnsureManualAccessErrorPrefix(answer, manualText)
+            End If
+
             AppendAssistantMarkdown(answer)
             _history.Add(("assistant", answer))
             PersistChatHtml()
@@ -532,13 +540,16 @@ Namespace SharedLibrary
             Try
                 Dim hostInfo As String = If(String.IsNullOrEmpty(_hostAppName), "", $" (Host application (and version of {AN} add-in): Microsoft {_hostAppName})")
                 Dim systemPrompt As String = _context.SP_HelpMe & hostInfo
-                Dim manualText As String = Await GetManualOnceAsync()
+                Dim manualText As String = Await GetManualOnceAsync().ConfigureAwait(False)
                 Dim convo As String = BuildConversationForLlm()
 
                 manualText = manualText.Trim()
-                If manualText.StartsWith("Error", System.StringComparison.OrdinalIgnoreCase) Or manualText = "" Then
-                    manualText = "No manual"
+                If IsManualLoadError(manualText) Then
+                    systemPrompt &= " If the manual section contains an 'Error loading HelpMeInky manual...' entry, treat it as a hard failure to access the manual. Return a concise error response that clearly explains the manual could not be loaded and includes the provided failure details. Start the reply with exactly 'Manual access error:'. Do not invent manual content."
+                ElseIf manualText = "" Then
+                    manualText = "No manual configured."
                 End If
+
                 Dim sb As New StringBuilder()
                 sb.AppendLine("User question:")
                 sb.AppendLine(userText)
@@ -559,10 +570,14 @@ Namespace SharedLibrary
                 End If
 
                 Dim sw = Stopwatch.StartNew()
-                Dim answer As String = Await CallHelpMeLlmAsync(systemPrompt, sb.ToString())
+                Dim answer As String = Await CallHelpMeLlmAsync(systemPrompt, sb.ToString()).ConfigureAwait(False)
                 sw.Stop()
 
                 answer = If(answer, "").Trim()
+                If IsManualLoadError(manualText) Then
+                    answer = EnsureManualAccessErrorPrefix(answer, manualText)
+                End If
+
                 Dbg($"SendAsync ms={sw.ElapsedMilliseconds} ansLen={answer.Length}")
 
                 RemoveAssistantThinking()
@@ -765,13 +780,81 @@ Namespace SharedLibrary
             If _manualCache IsNot Nothing AndAlso String.Equals(_manualCachePath, path, StringComparison.OrdinalIgnoreCase) Then
                 Return _manualCache
             End If
+
             Dbg("Loading manual fresh: " & path)
-            Dim loaded = Await GetManualTextFreshAsync(path, _context)
-            If Not String.IsNullOrEmpty(loaded) Then
+            Dim loaded = Await GetManualTextFreshAsync(path, _context).ConfigureAwait(False)
+            If loaded IsNot Nothing Then
                 _manualCache = loaded
                 _manualCachePath = path
             End If
-            Return If(_manualCache, "")
+
+            Return If(loaded, "")
+        End Function
+
+        Private Shared Function IsManualLoadError(text As String) As Boolean
+            Return Not String.IsNullOrWhiteSpace(text) AndAlso
+                   text.StartsWith("Error loading HelpMeInky manual", StringComparison.OrdinalIgnoreCase)
+        End Function
+
+        Private Shared Function CreateManualLoadError(pathOrUrl As String, detail As String) As String
+            Dim source As String = If(String.IsNullOrWhiteSpace(pathOrUrl), "the configured source", pathOrUrl.Trim())
+            Dim message As String = If(String.IsNullOrWhiteSpace(detail), "Unknown error.", detail.Trim())
+
+            Return $"Error loading HelpMeInky manual from '{source}': {message}"
+        End Function
+
+        Private Shared Function GetExceptionSummary(ex As Exception) As String
+            If ex Is Nothing Then Return "Unknown error."
+
+            Dim parts As New List(Of String)()
+            Dim current As Exception = ex
+            Dim depth As Integer = 0
+
+            While current IsNot Nothing AndAlso depth < 5
+                Dim part As String = current.Message
+                If String.IsNullOrWhiteSpace(part) Then
+                    part = current.GetType().Name
+                End If
+
+                If parts.Count = 0 OrElse Not String.Equals(parts(parts.Count - 1), part, StringComparison.Ordinal) Then
+                    parts.Add(part)
+                End If
+
+                current = current.InnerException
+                depth += 1
+            End While
+
+            Return String.Join(" --> ", parts)
+        End Function
+
+        Private Shared Function EnsureManualAccessErrorPrefix(answer As String, detail As String) As String
+            Dim prefix As String = "Manual access error:"
+            Dim normalizedAnswer As String = If(answer, "").Trim()
+            Dim normalizedDetail As String = If(detail, "").Trim()
+
+            If String.IsNullOrWhiteSpace(normalizedAnswer) Then
+                If normalizedDetail.Length > 0 Then
+                    Return $"{prefix} {normalizedDetail}"
+                End If
+
+                Return prefix
+            End If
+
+            If normalizedAnswer.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) Then
+                If normalizedDetail.Length > 0 AndAlso
+                   normalizedAnswer.IndexOf(normalizedDetail, StringComparison.OrdinalIgnoreCase) < 0 Then
+                    Return normalizedAnswer & " Details: " & normalizedDetail
+                End If
+
+                Return normalizedAnswer
+            End If
+
+            If normalizedDetail.Length > 0 AndAlso
+               normalizedAnswer.IndexOf(normalizedDetail, StringComparison.OrdinalIgnoreCase) < 0 Then
+                Return $"{prefix} {normalizedAnswer} Details: {normalizedDetail}"
+            End If
+
+            Return $"{prefix} {normalizedAnswer}"
         End Function
 
         ''' <summary>
@@ -794,45 +877,73 @@ Namespace SharedLibrary
             If s.StartsWith("http://", StringComparison.OrdinalIgnoreCase) OrElse s.StartsWith("https://", StringComparison.OrdinalIgnoreCase) Then
                 Try
                     Dim candidateUrls As List(Of String) = BuildRemoteManualCandidateUrls(s)
+                    Dim firstError As String = ""
 
                     For Each candidateUrl As String In candidateUrls
                         Dim remoteText As String = Await TryGetRemoteManualTextAsync(candidateUrl, context).ConfigureAwait(False)
-                        If Not String.IsNullOrEmpty(remoteText) Then
+
+                        If IsManualLoadError(remoteText) Then
+                            If String.IsNullOrWhiteSpace(firstError) Then
+                                firstError = remoteText
+                            End If
+
+                            Continue For
+                        End If
+
+                        If Not String.IsNullOrWhiteSpace(remoteText) Then
                             Return remoteText
                         End If
                     Next
 
-                    Return ""
-                Catch
-                    Return ""
+                    If Not String.IsNullOrWhiteSpace(firstError) Then
+                        Return firstError
+                    End If
+
+                    Return CreateManualLoadError(s, "The URL was reached, but no readable manual text could be extracted.")
+                Catch ex As Exception
+                    Return CreateManualLoadError(s, GetExceptionSummary(ex))
                 End Try
             End If
 
             ' Local file path (includes UNC paths)
             Try
-                If Not File.Exists(s) Then Return ""
+                If Not File.Exists(s) Then
+                    Return CreateManualLoadError(s, "The file does not exist or is not reachable.")
+                End If
+
                 Select Case Path.GetExtension(s).ToLowerInvariant()
                     Case ".txt", ".md", ".log"
                         Return File.ReadAllText(s, Encoding.UTF8)
+
                     Case ".docx"
-                        Return SharedMethods.ReadDocxSandboxed(s)
+                        Dim docxText As String = SharedMethods.ReadDocxSandboxed(s)
+                        If String.IsNullOrWhiteSpace(docxText) Then
+                            Return CreateManualLoadError(s, "The DOCX file was opened, but no readable text was extracted.")
+                        End If
+
+                        Return docxText
+
                     Case ".rtf"
-                        Try
-                            Return SharedMethods.ReadRtfAsText(s)
-                        Catch
-                            Return ""
-                        End Try
+                        Dim rtfText As String = SharedMethods.ReadRtfAsText(s)
+                        If String.IsNullOrWhiteSpace(rtfText) Then
+                            Return CreateManualLoadError(s, "The RTF file was opened, but no readable text was extracted.")
+                        End If
+
+                        Return rtfText
+
                     Case ".pdf"
-                        Try
-                            Return Await SharedMethods.ReadPdfAsText(s, True, False, False, context).ConfigureAwait(False)
-                        Catch
-                            Return ""
-                        End Try
+                        Dim pdfText As String = Await SharedMethods.ReadPdfAsText(s, True, False, False, context).ConfigureAwait(False)
+                        If String.IsNullOrWhiteSpace(pdfText) Then
+                            Return CreateManualLoadError(s, "The PDF file was opened, but no readable text was extracted.")
+                        End If
+
+                        Return pdfText
+
                     Case Else
                         Return File.ReadAllText(s, Encoding.UTF8)
                 End Select
-            Catch
-                Return ""
+            Catch ex As Exception
+                Return CreateManualLoadError(s, GetExceptionSummary(ex))
             End Try
         End Function
 
@@ -848,8 +959,12 @@ Namespace SharedLibrary
                         .StackPreference = SharedMethods.HttpStackPreference.PreferConfiguredDefault
                     }).ConfigureAwait(False)
 
-                If response Is Nothing OrElse response.StatusCode < 200 OrElse response.StatusCode >= 300 Then
-                    Return ""
+                If response Is Nothing Then
+                    Return CreateManualLoadError(requestUrl, "The HTTP request returned no response.")
+                End If
+
+                If response.StatusCode < 200 OrElse response.StatusCode >= 300 Then
+                    Return CreateManualLoadError(requestUrl, $"The server returned HTTP status {response.StatusCode}.")
                 End If
 
                 Debug.WriteLine("Manual HTTP stack: " & response.UsedStack)
@@ -864,7 +979,7 @@ Namespace SharedLibrary
                 Dim detectedExtension As String = DetectRemoteManualExtension(requestUrl, mediaType, data)
                 Select Case detectedExtension
                     Case ".pdf", ".docx", ".rtf"
-                        Return Await TryReadRemoteBinaryDocumentAsync(data, detectedExtension, context).ConfigureAwait(False)
+                        Return Await TryReadRemoteBinaryDocumentAsync(data, detectedExtension, requestUrl, context).ConfigureAwait(False)
                 End Select
 
                 Dim enc As Encoding = Encoding.UTF8
@@ -878,22 +993,28 @@ Namespace SharedLibrary
 
                 Dim text As String = enc.GetString(data)
 
+                If String.IsNullOrWhiteSpace(text) Then
+                    Return CreateManualLoadError(requestUrl, "The request succeeded, but the response body was empty.")
+                End If
+
                 If LooksLikeHtml(text) Then
                     If IsSharePointLikeUrl(requestUrl) AndAlso LooksLikeSharePointSignInOrViewerPage(text) Then
-                        Return ""
+                        Return CreateManualLoadError(requestUrl, "The URL returned a SharePoint sign-in or viewer page instead of the document content.")
                     End If
 
                     Return HtmlToPlain(text)
                 End If
 
                 Return text
-            Catch
-                Return ""
+            Catch ex As Exception
+                Return CreateManualLoadError(requestUrl, GetExceptionSummary(ex))
             End Try
         End Function
 
-        Private Shared Async Function TryReadRemoteBinaryDocumentAsync(data As Byte(), extension As String, Optional context As ISharedContext = Nothing) As Task(Of String)
-            If data Is Nothing OrElse data.Length = 0 Then Return ""
+        Private Shared Async Function TryReadRemoteBinaryDocumentAsync(data As Byte(), extension As String, sourceDescription As String, Optional context As ISharedContext = Nothing) As Task(Of String)
+            If data Is Nothing OrElse data.Length = 0 Then
+                Return CreateManualLoadError(sourceDescription, "The download succeeded, but the document content was empty.")
+            End If
 
             Dim tempPath As String = Path.Combine(Path.GetTempPath(), "manual_" & Guid.NewGuid().ToString("N") & extension)
 
@@ -902,16 +1023,34 @@ Namespace SharedLibrary
 
                 Select Case extension
                     Case ".pdf"
-                        Return Await SharedMethods.ReadPdfAsText(tempPath, True, False, False, context).ConfigureAwait(False)
+                        Dim pdfText As String = Await SharedMethods.ReadPdfAsText(tempPath, True, False, False, context).ConfigureAwait(False)
+                        If String.IsNullOrWhiteSpace(pdfText) Then
+                            Return CreateManualLoadError(sourceDescription, "The PDF download succeeded, but no readable text was extracted.")
+                        End If
+
+                        Return pdfText
+
                     Case ".docx"
-                        Return SharedMethods.ReadDocxSandboxed(tempPath)
+                        Dim docxText As String = SharedMethods.ReadDocxSandboxed(tempPath)
+                        If String.IsNullOrWhiteSpace(docxText) Then
+                            Return CreateManualLoadError(sourceDescription, "The DOCX download succeeded, but no readable text was extracted.")
+                        End If
+
+                        Return docxText
+
                     Case ".rtf"
-                        Return SharedMethods.ReadRtfAsText(tempPath)
+                        Dim rtfText As String = SharedMethods.ReadRtfAsText(tempPath)
+                        If String.IsNullOrWhiteSpace(rtfText) Then
+                            Return CreateManualLoadError(sourceDescription, "The RTF download succeeded, but no readable text was extracted.")
+                        End If
+
+                        Return rtfText
+
                     Case Else
-                        Return ""
+                        Return CreateManualLoadError(sourceDescription, $"Unsupported manual document type '{extension}'.")
                 End Select
-            Catch
-                Return ""
+            Catch ex As Exception
+                Return CreateManualLoadError(sourceDescription, GetExceptionSummary(ex))
             Finally
                 Try
                     If File.Exists(tempPath) Then

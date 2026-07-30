@@ -11,6 +11,7 @@
 Option Strict Off
 Option Explicit On
 
+Imports System.Diagnostics
 Imports System.Text
 Imports System.Text.RegularExpressions
 Imports Newtonsoft.Json
@@ -118,7 +119,8 @@ Partial Public Class ThisAddIn
         Return out
     End Function
 
-    Public Function InsertTextJson(target As String, text As String, location As String) As String _
+    Public Function InsertTextJson(target As String, text As String, location As String,
+                                    trackChanges As Boolean) As String _
                                     Implements IWordDocumentHost.InsertTextJson
         Dim d = ResolveDoc(target)
         If d Is Nothing Then Return Err_("not_found", "Document not found.")
@@ -131,24 +133,42 @@ Partial Public Class ThisAddIn
             Case Else
                 rng = d.Content : rng.Collapse(Word.WdCollapseDirection.wdCollapseEnd)
         End Select
-        rng.InsertAfter(text)
-        Return JsonConvert.SerializeObject(New With {Key .target = d.Name, Key .inserted = text.Length})
+        Dim prevTrack As Boolean = d.TrackRevisions
+        Try
+            d.TrackRevisions = trackChanges
+            rng.InsertAfter(text)
+        Finally
+            d.TrackRevisions = prevTrack
+        End Try
+        Return JsonConvert.SerializeObject(New With {Key .target = d.Name, Key .inserted = text.Length, Key .tracked = trackChanges})
     End Function
 
     Public Function ReplaceJson(target As String, find As String, replacement As String,
-                                  onlyFirst As Boolean) As String Implements IWordDocumentHost.ReplaceJson
+                                  onlyFirst As Boolean, trackChanges As Boolean, matchScope As String) As String _
+                                  Implements IWordDocumentHost.ReplaceJson
         Dim d = ResolveDoc(target)
         If d Is Nothing Then Return Err_("not_found", "Document not found.")
         If String.IsNullOrEmpty(find) Then Return Err_("missing_find", "find is required.")
-        Dim rng = d.Content
-        rng.Find.ClearFormatting()
-        rng.Find.Replacement.ClearFormatting()
-        Dim wrap As Word.WdFindWrap = Word.WdFindWrap.wdFindStop
-        Dim replaceMode As Word.WdReplace = If(onlyFirst, Word.WdReplace.wdReplaceOne, Word.WdReplace.wdReplaceAll)
-        rng.Find.Execute(FindText:=find, Replace:=replaceMode, ReplaceWith:=replacement,
-                         MatchCase:=False, MatchWholeWord:=False, MatchWildcards:=False,
-                         Forward:=True, Wrap:=wrap)
-        Return JsonConvert.SerializeObject(New With {Key .target = d.Name, Key .replaced = True})
+        Dim rng = LocateRange(d, find, matchScope)
+        If rng Is Nothing Then Return Err_("no_match", "No match for 'find'.")
+        If Not ApplyEdit(d, rng, replacement, trackChanges) Then
+            Return Err_("apply_failed", "Could not apply the replacement.")
+        End If
+        Return JsonConvert.SerializeObject(New With {Key .target = d.Name, Key .replaced = True, Key .tracked = trackChanges})
+    End Function
+
+    Public Function DeleteJson(target As String, find As String,
+                                 trackChanges As Boolean, matchScope As String) As String _
+                                 Implements IWordDocumentHost.DeleteJson
+        Dim d = ResolveDoc(target)
+        If d Is Nothing Then Return Err_("not_found", "Document not found.")
+        If String.IsNullOrEmpty(find) Then Return Err_("missing_find", "find is required.")
+        Dim rng = LocateRange(d, find, matchScope)
+        If rng Is Nothing Then Return Err_("no_match", "No match for 'find'.")
+        If Not ApplyEdit(d, rng, "", trackChanges) Then
+            Return Err_("apply_failed", "Could not apply the deletion.")
+        End If
+        Return JsonConvert.SerializeObject(New With {Key .target = d.Name, Key .deleted = True, Key .tracked = trackChanges})
     End Function
 
     Public Function AddCommentJson(target As String, find As String, text As String,
@@ -157,9 +177,8 @@ Partial Public Class ThisAddIn
         Dim d = ResolveDoc(target)
         If d Is Nothing Then Return Err_("not_found", "Document not found.")
         If String.IsNullOrEmpty(find) Then Return Err_("missing_find", "find is required.")
-        Dim rng = d.Content
-        rng.Find.ClearFormatting()
-        If rng.Find.Execute(FindText:=find, Forward:=True, Wrap:=Word.WdFindWrap.wdFindStop) Then
+        Dim rng = LocateRange(d, find, "")
+        If rng IsNot Nothing Then
             Dim cmt = d.Comments.Add(rng, text)
             If Not String.IsNullOrEmpty(author) Then cmt.Author = author
             If Not String.IsNullOrEmpty(initials) Then cmt.Initial = initials
@@ -175,9 +194,8 @@ Partial Public Class ThisAddIn
         Dim d = ResolveDoc(target)
         If d Is Nothing Then Return Err_("not_found", "Document not found.")
         If String.IsNullOrEmpty(find) Then Return Err_("missing_find", "find is required.")
-        Dim rng = d.Content
-        rng.Find.ClearFormatting()
-        If Not rng.Find.Execute(FindText:=find, Forward:=True, Wrap:=Word.WdFindWrap.wdFindStop) Then
+        Dim rng = LocateRange(d, find, "")
+        If rng Is Nothing Then
             Return Err_("no_match", "No match for 'find'.")
         End If
         Try
@@ -216,6 +234,60 @@ Partial Public Class ThisAddIn
     End Function
 
     ' --------------------------------------------------------------- helpers
+
+    ''' <summary>
+    ''' Resilient locator shared by replace/delete/comment/format. Uses FindLongTextInChunks
+    ''' (WordSearchHelper.FindLongTextAnchoredFast) so matching tolerates superfluous whitespace,
+    ''' paragraph marks, fields, footnote/endnote anchors and control characters, and handles anchors
+    ''' longer than Word's 255-character Find limit. matchScope optionally expands the located span to
+    ''' the enclosing sentence or paragraph.
+    ''' </summary>
+    Private Function LocateRange(d As Word.Document, find As String, matchScope As String) As Word.Range
+        If d Is Nothing OrElse String.IsNullOrEmpty(find) Then Return Nothing
+        Try : d.Activate() : Catch : End Try
+        Dim sel As Word.Selection = Globals.ThisAddIn.Application.Selection
+        Try
+            sel.SetRange(d.Content.Start, d.Content.End)
+        Catch
+            Return Nothing
+        End Try
+        If Not FindLongTextInChunks(find, sel) Then Return Nothing
+        Dim rng As Word.Range = sel.Range.Duplicate
+        Select Case If(matchScope, "").Trim().ToLowerInvariant()
+            Case "sentence" : Try : rng = rng.Sentences(1) : Catch : End Try
+            Case "paragraph" : Try : rng = rng.Paragraphs(1).Range : Catch : End Try
+        End Select
+        Return rng
+    End Function
+
+    ''' <summary>
+    ''' Applies a replacement/deletion (deletion = empty replacement) to a located range. When
+    ''' trackChanges is True the edit is routed through the proven surgical engine
+    ''' (ApplySurgicalReplacement), which produces tracked revisions while preserving footnotes,
+    ''' fields, placeholders and unchanged-run formatting. When False the span is mutated directly
+    ''' with tracking temporarily disabled so the edit is silent.
+    ''' </summary>
+    Private Function ApplyEdit(d As Word.Document, rng As Word.Range,
+                               replacement As String, trackChanges As Boolean) As Boolean
+        If rng Is Nothing Then Return False
+        Try
+            If trackChanges Then
+                ApplySurgicalReplacement(rng.Text, If(replacement, ""), rng)
+            Else
+                Dim prevTrack As Boolean = d.TrackRevisions
+                Try
+                    d.TrackRevisions = False
+                    rng.Text = If(replacement, "")
+                Finally
+                    d.TrackRevisions = prevTrack
+                End Try
+            End If
+        Catch ex As System.Exception
+            Debug.WriteLine("ApplyEdit failed: " & ex.Message)
+            Return False
+        End Try
+        Return True
+    End Function
 
     Private Function ResolveDoc(target As String) As Word.Document
         Try

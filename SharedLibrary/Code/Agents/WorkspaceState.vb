@@ -34,7 +34,7 @@ Namespace Agents
         Public Property AllowRead As Boolean = True
         Public Property AllowWrite As Boolean = True
         Public Property AllowMoveCopyRename As Boolean = True
-        Public Property AllowDelete As Boolean = False
+        Public Property AllowDelete As Boolean = SharedMethods.WorkspaceDeleteByDefaultOn
         Public Property IncludeHiddenSystem As Boolean = False
     End Class
 

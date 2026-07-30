@@ -4592,6 +4592,9 @@ __AfterDispatch:
             If response.Success Then
                 Dim resultSummary As String = BuildResultExcerpt(response.Response, 80)
                 context.Log($"Tool {toolCall.ToolName} completed: {resultSummary}", "success")
+                ' Also write the full, unmodified tool response JSON so diagnostics
+                ' (e.g. word_search/word_markup results) are not lost to truncation.
+                ToolingFileLogger.LogRawResponse($"Tool result ({toolCall.ToolName})", response.Response)
             Else
                 context.Log($"Tool {toolCall.ToolName} failed: {response.ErrorMessage}", "error")
             End If

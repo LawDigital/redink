@@ -41,6 +41,14 @@ Namespace Agents
         Private Shared _workspaceRoot As String = Nothing
         Private Shared ReadOnly _restrictToWorkspaceRootOnly As New AsyncLocal(Of Boolean)
 
+        ' User-configured workspace permissions (mirrored from WorkspaceState by the host).
+        ' These apply ONLY to paths that resolve under the workspace root; skill and
+        ' staging/Desktop roots are governed by their own gates and are unaffected.
+        Private Shared _workspaceAllowRead As Boolean = True
+        Private Shared _workspaceAllowWrite As Boolean = True
+        Private Shared _workspaceAllowMoveCopyRename As Boolean = True
+        Private Shared _workspaceAllowDelete As Boolean = False
+
         ''' <summary>Sets the active workspace root for this process (host call). Pass Nothing to clear.</summary>
         Public Shared Sub SetWorkspaceRoot(rootOrNothing As String)
             If String.IsNullOrWhiteSpace(rootOrNothing) Then
@@ -57,6 +65,34 @@ Namespace Agents
         Public Shared ReadOnly Property WorkspaceRoot As String
             Get
                 Return _workspaceRoot
+            End Get
+        End Property
+
+        ''' <summary>
+        ''' Mirrors the user-configured workspace permissions into the policy. Hosts call
+        ''' this whenever the active workspace state changes. Read/Write are enforced by
+        ''' <see cref="Resolve"/>; MoveCopyRename/Delete are exposed for destructive file
+        ''' tools to consult (Resolve only distinguishes Read from Write).
+        ''' </summary>
+        Public Shared Sub SetWorkspacePermissions(allowRead As Boolean,
+                                                  allowWrite As Boolean,
+                                                  allowMoveCopyRename As Boolean,
+                                                  allowDelete As Boolean)
+            _workspaceAllowRead = allowRead
+            _workspaceAllowWrite = allowWrite
+            _workspaceAllowMoveCopyRename = allowMoveCopyRename
+            _workspaceAllowDelete = allowDelete
+        End Sub
+
+        Public Shared ReadOnly Property WorkspaceAllowMoveCopyRename As Boolean
+            Get
+                Return _workspaceAllowMoveCopyRename
+            End Get
+        End Property
+
+        Public Shared ReadOnly Property WorkspaceAllowDelete As Boolean
+            Get
+                Return _workspaceAllowDelete
             End Get
         End Property
 
@@ -179,6 +215,18 @@ Namespace Agents
             End If
 
             Dim ws = If(_workspaceRoot, "")
+
+            ' Enforce user-configured workspace permissions for any path that resolves
+            ' under the workspace root. Skill and staging/Desktop roots are governed by
+            ' their own gates and are intentionally unaffected here.
+            If Not String.IsNullOrWhiteSpace(ws) AndAlso IsUnder(full, Path.GetFullPath(ws)) Then
+                If access = PathAccess.Read AndAlso Not _workspaceAllowRead Then
+                    Throw New UnauthorizedAccessException("Workspace read access is disabled.")
+                End If
+                If access = PathAccess.Write AndAlso Not _workspaceAllowWrite Then
+                    Throw New UnauthorizedAccessException("Workspace write access is disabled.")
+                End If
+            End If
 
             If _restrictToWorkspaceRootOnly.Value Then
                 ' Collect the strict allow-set: the active workspace root plus any

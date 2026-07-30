@@ -13,6 +13,7 @@ Imports System.Drawing
 Imports System.IO
 Imports System.Windows.Forms
 Imports SharedLibrary.Agents
+Imports SharedLibrary.SharedLibrary
 
 ''' <summary>
 ''' Modal dialog for designating and managing the Word agent workspace.
@@ -154,7 +155,7 @@ Public Class WordWorkspaceForm
         chkDelete = New CheckBox() With {
             .Text = "Allow the agent to delete (to Recycle Bin)",
             .AutoSize = True,
-            .Checked = False,
+            .Checked = SharedMethods.WorkspaceDeleteByDefaultOn,
             .Margin = New Padding(0, 0, 0, 2)
         }
 

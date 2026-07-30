@@ -64,6 +64,11 @@ Namespace Agents
             Else
                 PathPolicy.SetWorkspaceRoot(Nothing)
             End If
+            ' Mirror the user-configured permissions so every PathPolicy-based tool
+            ' (text_*, file_*) honors the same Read/Write/Move/Delete gates as workspace_*.
+            PathPolicy.SetWorkspacePermissions(
+                _active.AllowRead, _active.AllowWrite,
+                _active.AllowMoveCopyRename, _active.AllowDelete)
         End Sub
 
         Public Shared ReadOnly Property Active As WorkspaceState

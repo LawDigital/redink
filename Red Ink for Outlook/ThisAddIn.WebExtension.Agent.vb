@@ -95,7 +95,7 @@ Partial Public Class ThisAddIn
         Public Property AllowRead As Boolean = True
         Public Property AllowWrite As Boolean = True
         Public Property AllowMoveCopyRename As Boolean = True
-        Public Property AllowDelete As Boolean = False
+        Public Property AllowDelete As Boolean = SharedMethods.WorkspaceDeleteByDefaultOn
         Public Property SaveDroppedFilesToWorkspace As Boolean = False
         Public Property IncludeHiddenSystem As Boolean = False
     End Class
@@ -809,7 +809,7 @@ Partial Public Class ThisAddIn
             .allowRead = If(_chatAgentWorkspace?.AllowRead, True),
             .allowWrite = If(_chatAgentWorkspace?.AllowWrite, True),
             .allowMoveCopyRename = If(_chatAgentWorkspace?.AllowMoveCopyRename, True),
-            .allowDelete = If(_chatAgentWorkspace?.AllowDelete, False),
+            .allowDelete = If(_chatAgentWorkspace?.AllowDelete, SharedMethods.WorkspaceDeleteByDefaultOn),
             .saveDroppedFilesToWorkspace = If(_chatAgentWorkspace?.SaveDroppedFilesToWorkspace, False),
             .includeHiddenSystem = If(_chatAgentWorkspace?.IncludeHiddenSystem, False)
         }

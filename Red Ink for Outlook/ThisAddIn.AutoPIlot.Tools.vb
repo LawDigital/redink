@@ -230,6 +230,7 @@ Partial Public Class ThisAddIn
 
         ' Shared file/workspace tools available inside the current AutoPilot workspace.
         tools.AddRange(SharedLibrary.Agents.TextTools.BuildAll())
+        tools.AddRange(SharedLibrary.Agents.FileTools.BuildAll())
         tools.AddRange(SharedLibrary.Agents.WordTools.BuildAll())
         tools.AddRange(SharedLibrary.Agents.WorkspaceTools.BuildAll())
         tools.AddRange(GetAutoPilotAgentWorkspaceTools())
