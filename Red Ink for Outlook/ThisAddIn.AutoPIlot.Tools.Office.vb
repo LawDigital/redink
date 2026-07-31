@@ -2663,8 +2663,8 @@ Partial Public Class ThisAddIn
                 att.TempFilePath, includeComments, includeHeadersFooters,
                 includeFootnotesEndnotes, includeTrackedChanges, filterAuthor, filterSince))
 
-            If result.Length > 100000 Then
-                result = result.Substring(0, 100000) & vbCrLf & "[... content truncated at 100,000 characters ...]"
+            If result.Length > 300000 Then
+                result = result.Substring(0, 300000) & vbCrLf & "[... content truncated at 300,000 characters (use read_attachment for more) ...]"
             End If
 
             response.Success = True

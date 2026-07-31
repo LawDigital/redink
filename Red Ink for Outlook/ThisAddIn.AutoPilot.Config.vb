@@ -254,9 +254,9 @@ Partial Public Class ThisAddIn
             End If
         End If
 
-        ' Persist the selected mailbox immediately so subsequent runs remember it
+        ' Persist the selected mailbox immediately so subsequent runs and reinstall recovery remember it
         My.Settings.AP_MonitoredMailbox = If(config.MonitoredMailbox, "")
-        My.Settings.Save()
+        SaveAutoPilotSettingsWithRegistryBackup()
 
         ' Determine whether the mailbox changed — if so, reset filter/whitelist to defaults
         Dim mailboxChanged As Boolean = Not String.Equals(
@@ -659,8 +659,7 @@ Partial Public Class ThisAddIn
             My.Settings.AP_SelectedExternalToolNames = ""
         End If
 
-        My.Settings.Save()
-        BackupAutoPilotSettingsToRegistry()
+        SaveAutoPilotSettingsWithRegistryBackup()
     End Sub
 
     ''' <summary>Loads previously saved config as defaults for the dialog.</summary>

@@ -595,6 +595,7 @@
     <Compile Include="Code\Core\LLM\SharedMethods.MCP.vb" />
     <Compile Include="Code\Core\LLM\SharedMethods.MCPOAuth.vb" />
     <Compile Include="Code\Core\LLM\SharedMethods.Signing.vb" />
+    <Compile Include="Code\Core\Texthandling\SharedMethods.SemanticSearch.CoreAndGenerator.vb" />
     <Compile Include="Code\Core\Texthandling\SharedMethods.Diff.vb" />
     <Compile Include="Code\Core\LLM\ImageDecoder.vb" />
     <Compile Include="Code\Core\LLM\JsonTemplateFormatter.vb" />
@@ -605,6 +606,7 @@
     <Compile Include="Code\Core\LLM\ModelSelection\MultiModelSelectorForm.vb">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="Code\Core\Texthandling\SharedMethods.SemanticSearch.Retriever.vb" />
     <Compile Include="Code\Core\Texthandling\SharedMethods.TextHandling.vb" />
     <Compile Include="Code\Core\Texthandling\SharedMethods.TextHandlingExcel.vb" />
     <Compile Include="Code\Core\UI\MCPOAuthBrowserForm.vb">

@@ -5095,6 +5095,61 @@ Partial Public Class ThisAddIn
         Return sb.ToString()
     End Function
 
+    Private Shared Function BuildAutoPilotHelpMeQuestion(
+            mailInfo As AutoPilotMailInfo,
+            failureReason As String) As String
+
+        Dim builder As New StringBuilder()
+        Dim subjectText As String = If(mailInfo IsNot Nothing, mailInfo.Subject, "")
+        Dim bodyText As String = If(mailInfo IsNot Nothing, mailInfo.Body, "")
+
+        builder.AppendLine("The user sent an e-mail request that AutoPilot could not fulfill automatically.")
+        builder.AppendLine("Task: " & subjectText)
+
+        If Not String.IsNullOrWhiteSpace(bodyText) Then
+            builder.AppendLine("Details: " & If(bodyText.Length > 500, bodyText.Substring(0, 500), bodyText))
+        End If
+
+        If Not String.IsNullOrWhiteSpace(failureReason) Then
+            builder.AppendLine("Failure reason: " & failureReason)
+        End If
+
+        If mailInfo IsNot Nothing AndAlso
+           mailInfo.AttachmentNames IsNot Nothing AndAlso
+           mailInfo.AttachmentNames.Count > 0 Then
+
+            builder.AppendLine("Attachments: " & String.Join(", ", mailInfo.AttachmentNames))
+        End If
+
+        builder.AppendLine("Question: Which Red Ink feature could help the user accomplish this task directly, and how should they use it?")
+
+        Return builder.ToString().Trim()
+    End Function
+
+    Private Shared Function BuildAutoPilotHelpMeRetrievalOptions() As SharedMethods.SemanticSearchRetrievalOptions
+        Return New SharedMethods.SemanticSearchRetrievalOptions() With {
+            .MinimumSelectedSegments = 1,
+            .MaximumSelectedSegments = 8,
+            .MaximumTotalSegments = 24,
+            .ContextBytesBefore = 2048,
+            .ContextBytesAfter = 2048,
+            .MergeGapBytes = 0,
+            .SpecialTaskName = "HelpMe",
+            .IncludePreviouslyUsedIds = False,
+            .MaximumPreviouslyUsedIds = 0,
+            .IncludeAdjacentToPreviouslyUsedIds = False,
+            .EnableFullScanFallback = True,
+            .ForceFullScan = False,
+            .FallbackWhenPotentiallyMissing = True,
+            .MinimumSelectionRelevance = 0.35R,
+            .FullScanMinimumRelevance = 0.5R,
+            .MaximumFullScanSegments = 8,
+            .MaximumReloadRounds = 0,
+            .MaximumLlmAttempts = 2,
+            .MaximumConversationCharacters = 12000
+        }
+    End Function
+
     ''' <summary>
     ''' Calls the LLM with the HelpMeInky manual to suggest how the user could
     ''' accomplish the task using the Red Ink add-ins. Returns a brief suggestion
@@ -5108,22 +5163,64 @@ Partial Public Class ThisAddIn
             failureReason As String,
             ct As CancellationToken) As Task(Of String)
 
-        ' Load the HelpMeInky manual (cached per session)
-        If Not _apHelpMeManualCacheLoaded Then
-            _apHelpMeManualCacheLoaded = True
-            Try
-                Dim manualPath = INI_HelpMeInkyPath
-                If Not String.IsNullOrWhiteSpace(manualPath) Then
-                    manualPath = ExpandEnvironmentVariables(manualPath)
-                    _apHelpMeManualCache = Await LoadManualTextAsync(manualPath, ct)
-                    ApDashboardLog($"Loaded HelpMe manual for fallback suggestions ({If(_apHelpMeManualCache IsNot Nothing, _apHelpMeManualCache.Length.ToString() & " chars", "not available")})", "step")
+        Dim manualPath As String = ExpandEnvironmentVariables(INI_HelpMeInkyPath)
+        If String.IsNullOrWhiteSpace(manualPath) Then Return Nothing
+
+        manualPath = ExpandEnvironmentVariables(manualPath)
+
+        Dim questionForManual As String = BuildAutoPilotHelpMeQuestion(mailInfo, failureReason)
+        Dim manualText As String = ""
+        Dim usingIndexedManual As Boolean = False
+
+        Dim isRemote As Boolean =
+            manualPath.StartsWith("http://", StringComparison.OrdinalIgnoreCase) OrElse
+            manualPath.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+
+        If Not isRemote AndAlso
+           SharedMethods.IsPotentiallySemanticSearchIndexedTextFile(manualPath) Then
+
+            Dim retrieval As SharedMethods.SemanticSearchRetrievalResult =
+                Await SharedMethods.RetrieveSemanticSearchAsync(
+                    manualPath,
+                    _context,
+                    questionForManual,
+                    "",
+                    options:=BuildAutoPilotHelpMeRetrievalOptions(),
+                    cancellationToken:=ct).ConfigureAwait(False)
+
+            If retrieval IsNot Nothing AndAlso retrieval.IsIndexed Then
+                manualText = If(retrieval.ReducedSourceText, "").Trim()
+                usingIndexedManual = True
+
+                If retrieval.SelectedEntryIds IsNot Nothing AndAlso retrieval.SelectedEntryIds.Count > 0 Then
+                    ApDashboardLog(
+                        "Red Ink suggestion semantic source IDs: " &
+                        String.Join(", ", retrieval.SelectedEntryIds),
+                        "step")
                 End If
-            Catch ex As System.Exception
-                ApDashboardLog($"Failed to load HelpMe manual: {ex.Message}", "warn")
-            End Try
+
+                If String.IsNullOrWhiteSpace(manualText) Then
+                    ApDashboardLog("Red Ink suggestion semantic retrieval found no relevant indexed excerpts", "step")
+                    Return Nothing
+                End If
+            End If
         End If
 
-        If String.IsNullOrWhiteSpace(_apHelpMeManualCache) Then Return Nothing
+        If Not usingIndexedManual Then
+            If Not _apHelpMeManualCacheLoaded Then
+                _apHelpMeManualCacheLoaded = True
+                Try
+                    _apHelpMeManualCache = Await LoadManualTextAsync(manualPath, ct)
+                    ApDashboardLog($"Loaded HelpMe manual for fallback suggestions ({If(_apHelpMeManualCache IsNot Nothing, _apHelpMeManualCache.Length.ToString() & " chars", "not available")})", "step")
+                Catch ex As System.Exception
+                    ApDashboardLog($"Failed to load HelpMe manual: {ex.Message}", "warn")
+                End Try
+            End If
+
+            manualText = If(_apHelpMeManualCache, "").Trim()
+        End If
+
+        If String.IsNullOrWhiteSpace(manualText) Then Return Nothing
 
         ' Use the SP_HelpMe system prompt (same as HelpMeInky) with an AutoPilot-specific addendum
         Dim systemPrompt As String = _context.SP_HelpMe &
@@ -5132,6 +5229,14 @@ Partial Public Class ThisAddIn
             $"Based on the manual, suggest in 4-10 SHORT sentences what {AN} feature could help, " &
             $"how to use it, and tell the user to open 'Help me, {AN8}' inside the add-in for more guidance. " &
             $"If no {AN} feature applies, reply with exactly one word: NONE)"
+
+        If usingIndexedManual Then
+            systemPrompt &=
+                " Answer exclusively from the supplied original SOURCE excerpts. " &
+                "Do not invent functions, steps or UI elements. Preserve exact UI terms, " &
+                "prerequisites, restrictions and warnings. If the excerpts are insufficient, " &
+                "state that clearly. Do not expose internal SOURCE IDs or append a 'Sources:' line."
+        End If
 
         ' Build user prompt in the same structure as HelpMeInky.SendAsync
         Dim userPrompt As New StringBuilder()
@@ -5145,7 +5250,7 @@ Partial Public Class ThisAddIn
         userPrompt.AppendLine($"What {AN} feature could help the user accomplish this task directly?")
         userPrompt.AppendLine()
         userPrompt.AppendLine("Manual:")
-        userPrompt.AppendLine(_apHelpMeManualCache)
+        userPrompt.AppendLine(manualText)
 
         ' Try to use the dedicated HelpMe model (same as HelpMeInky.CallHelpMeLlmAsync)
         Dim backupConfig = GetCurrentConfig(_context)
