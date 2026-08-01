@@ -5,7 +5,8 @@
 ' File: SharedMethods.SemanticSearch.CoreAndGenerator.vb
 ' Purpose: Provides generic semantic-index data models, JSON utilities, serialized
 '          special-task LLM invocation, natural UTF-8 segmentation, and creation
-'          of self-indexed text files with content-relative byte offsets.
+'          of self-indexed text files with content-relative byte offsets. The concept
+'          is referred to as "flat semantic search" or FSS.
 '
 ' Architecture:
 '  - File Format: Writes a generic versioned index marker, a JSON index document,
@@ -18,11 +19,6 @@
 '    configuration, applies an available special-task model, and restores state.
 '  - Durability: Writes to a temporary file, validates complete byte coverage, and
 '    moves or replaces the destination only after successful generation.
-'
-' External Dependencies:
-'  - System.Runtime.Serialization: JSON serialization/deserialization.
-'  - SharedLibrary.SharedContext: ISharedContext configuration contract.
-'  - SharedMethods LLM/model-selection functions.
 ' =============================================================================
 
 Option Strict On
@@ -44,6 +40,20 @@ Namespace SharedLibrary
 
         Private Shared ReadOnly SemanticSearchUtf8NoBom As New System.Text.UTF8Encoding(False, True)
         Private Shared ReadOnly SemanticSearchSpecialTaskSemaphore As New System.Threading.SemaphoreSlim(1, 1)
+
+        ' Generic structured-document wrapper markers (combine-standard separator):
+        '   <documentN name="..."> ... </documentN>
+        ' The generator prefers these positions as strong structural break candidates
+        ' and records which wrapped documents a segment covers.
+        Private Shared ReadOnly SemanticSearchDocumentWrapperOpenRegex As New System.Text.RegularExpressions.Regex(
+            "<document(\d+)(?:\s+name=""([^""]*)"")?\s*>",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.Compiled)
+        Private Shared ReadOnly SemanticSearchDocumentWrapperCloseRegex As New System.Text.RegularExpressions.Regex(
+            "</document(\d+)\s*>",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.Compiled)
+        Private Shared ReadOnly SemanticSearchDocumentWrapperEventRegex As New System.Text.RegularExpressions.Regex(
+            "(<document(\d+)(?:\s+name=""([^""]*)"")?\s*>)|(</document(\d+)\s*>)",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.Compiled)
 
         Public Class SemanticSearchIndexDocument
             Public Property FormatVersion As Integer
@@ -68,6 +78,7 @@ Namespace SharedLibrary
             Public Property Actions As New System.Collections.Generic.List(Of String)()
             Public Property Constraints As New System.Collections.Generic.List(Of String)()
             Public Property CrossReferences As New System.Collections.Generic.List(Of String)()
+            Public Property SourceDocuments As New System.Collections.Generic.List(Of String)()
             Public Property PreviousId As String = Nothing
             Public Property NextId As String = Nothing
             Public Property RelatedIds As New System.Collections.Generic.List(Of String)()
@@ -118,6 +129,7 @@ Namespace SharedLibrary
             Public Property StartByte As Long
             Public Property LengthBytes As Long
             Public Property Text As String = ""
+            Public Property SourceDocuments As New System.Collections.Generic.List(Of String)()
         End Class
 
         Private Class SemanticSearchBreakCandidate
@@ -216,6 +228,7 @@ Namespace SharedLibrary
                     .Actions = NormalizeSemanticSearchStringList(metadata.Actions),
                     .Constraints = NormalizeSemanticSearchStringList(metadata.Constraints),
                     .CrossReferences = NormalizeSemanticSearchStringList(metadata.CrossReferences),
+                    .SourceDocuments = New System.Collections.Generic.List(Of String)(rawSegment.SourceDocuments),
                     .RelatedIds = New System.Collections.Generic.List(Of String)(),
                     .StartByte = rawSegment.StartByte,
                     .LengthBytes = rawSegment.LengthBytes
@@ -278,6 +291,84 @@ Namespace SharedLibrary
                 .ContentSha256 = indexDocument.ContentSha256,
                 .IndexDocument = indexDocument
             }
+        End Function
+
+        ''' <summary>
+        ''' Convenience wrapper that creates a self-indexed text file directly from an in-memory
+        ''' string, without the caller having to manage a temporary input file. The text is written
+        ''' to a short-named temporary UTF-8 file, indexed into <paramref name="outputPath"/>, and the
+        ''' temporary file is always removed. Callers that combine multiple documents should use the
+        ''' canonical wrapper separator (&lt;documentN name="..."&gt; ... &lt;/documentN&gt;) so the
+        ''' generator can align segments to document boundaries.
+        ''' </summary>
+        Public Shared Async Function CreateSemanticSearchIndexFromTextAsync(
+            text As String,
+            outputPath As String,
+            context As ISharedContext,
+            Optional options As SemanticSearchIndexGeneratorOptions = Nothing,
+            Optional progress As System.IProgress(Of SemanticSearchIndexGenerationProgress) = Nothing,
+            Optional cancellationToken As System.Threading.CancellationToken = Nothing
+        ) As System.Threading.Tasks.Task(Of SemanticSearchIndexGenerationResult)
+
+            If text Is Nothing Then
+                Throw New System.ArgumentNullException(NameOf(text))
+            End If
+            If String.IsNullOrWhiteSpace(outputPath) Then
+                Throw New System.ArgumentException("An output path is required.", NameOf(outputPath))
+            End If
+            If context Is Nothing Then
+                Throw New System.ArgumentNullException(NameOf(context))
+            End If
+
+            Dim temporaryInputPath As String = System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(),
+                "ss" & System.Guid.NewGuid().ToString("N").Substring(0, 8) & ".txt")
+
+            Try
+                Await WriteAllTextAsyncCompat(temporaryInputPath, text, cancellationToken).ConfigureAwait(False)
+
+                Return Await CreateSemanticSearchIndexedTextFileAsync(
+                    temporaryInputPath,
+                    outputPath,
+                    context,
+                    options,
+                    progress,
+                    cancellationToken).ConfigureAwait(False)
+            Finally
+                Try
+                    If System.IO.File.Exists(temporaryInputPath) Then
+                        System.IO.File.Delete(temporaryInputPath)
+                    End If
+                Catch cleanupException As System.Exception
+                    System.Diagnostics.Debug.WriteLine(cleanupException.Message)
+                End Try
+            End Try
+        End Function
+
+        ''' <summary>
+        ''' Writes UTF-8 text (no BOM) to a file asynchronously. All stored byte offsets rely on
+        ''' the exact bytes read back by the generator, so the source encoding used here matches the
+        ''' generator's default text reading.
+        ''' </summary>
+        Private Shared Async Function WriteAllTextAsyncCompat(
+            path As String,
+            text As String,
+            cancellationToken As System.Threading.CancellationToken
+        ) As System.Threading.Tasks.Task
+
+            Dim bytes As Byte() = New System.Text.UTF8Encoding(False).GetBytes(If(text, ""))
+
+            Using outputStream As New System.IO.FileStream(
+                path,
+                System.IO.FileMode.Create,
+                System.IO.FileAccess.Write,
+                System.IO.FileShare.None,
+                81920,
+                True)
+
+                Await outputStream.WriteAsync(bytes, 0, bytes.Length, cancellationToken).ConfigureAwait(False)
+                Await outputStream.FlushAsync(cancellationToken).ConfigureAwait(False)
+            End Using
         End Function
 
         ''' <summary>
@@ -356,6 +447,7 @@ Namespace SharedLibrary
 
             Dim effectiveUserPrompt As String = If(userPrompt, "")
             Dim lastException As System.Exception = Nothing
+            Dim lastRawResponse As String = ""
 
             For attemptNumber As Integer = 1 To maximumAttempts
                 cancellationToken.ThrowIfCancellationRequested()
@@ -368,6 +460,8 @@ Namespace SharedLibrary
                         effectiveUserPrompt,
                         cancellationToken).ConfigureAwait(False)
 
+                    lastRawResponse = If(response, "")
+
                     Dim result As TResult = DeserializeSemanticSearchJson(Of TResult)(ExtractSemanticSearchJsonObject(response))
                     If result Is Nothing Then
                         Throw New System.FormatException("The LLM returned no usable JSON object.")
@@ -378,6 +472,9 @@ Namespace SharedLibrary
                     Throw
                 Catch ex As System.Exception
                     lastException = ex
+                    System.Diagnostics.Debug.WriteLine(
+                        "Semantic search structured task '" & specialTaskName & "' attempt " &
+                        attemptNumber.ToString(System.Globalization.CultureInfo.InvariantCulture) & " failed: " & ex.ToString())
                     If attemptNumber < maximumAttempts Then
                         effectiveUserPrompt &= vbCrLf & vbCrLf &
                             "The previous response could not be parsed. Return exactly one valid JSON object with the requested properties and no surrounding prose."
@@ -386,8 +483,55 @@ Namespace SharedLibrary
             Next
 
             Throw New System.InvalidOperationException(
-                "The structured LLM task failed after " & maximumAttempts.ToString(System.Globalization.CultureInfo.InvariantCulture) & " attempts.",
+                "The structured LLM task failed after " &
+                maximumAttempts.ToString(System.Globalization.CultureInfo.InvariantCulture) & " attempts." &
+                BuildSemanticSearchStructuredFailureDetail(specialTaskName, lastException, lastRawResponse),
                 lastException)
+        End Function
+
+        ''' <summary>
+        ''' Builds a human-readable failure detail suffix for a structured LLM task, including the
+        ''' underlying error (or its type when the message is empty), the inner error, and a short,
+        ''' single-line snippet of the last raw model response so the concrete cause is visible
+        ''' without attaching a debugger.
+        ''' </summary>
+        Private Shared Function BuildSemanticSearchStructuredFailureDetail(
+            specialTaskName As String,
+            lastException As System.Exception,
+            lastRawResponse As String
+        ) As String
+
+            Dim detail As New System.Text.StringBuilder()
+
+            If Not String.IsNullOrWhiteSpace(specialTaskName) Then
+                detail.Append(" Task: " & specialTaskName & ".")
+            End If
+
+            If lastException IsNot Nothing Then
+                If Not String.IsNullOrWhiteSpace(lastException.Message) Then
+                    detail.Append(" Last error: " & lastException.Message)
+                Else
+                    detail.Append(" Last error: " & lastException.GetType().FullName)
+                End If
+
+                If lastException.InnerException IsNot Nothing AndAlso
+                   Not String.IsNullOrWhiteSpace(lastException.InnerException.Message) Then
+                    detail.Append(" (inner: " & lastException.InnerException.Message & ")")
+                End If
+            End If
+
+            If Not String.IsNullOrWhiteSpace(lastRawResponse) Then
+                Dim snippet As String = lastRawResponse.Replace(vbCr, " "c).Replace(vbLf, " "c).Trim()
+                Const maximumSnippetLength As Integer = 300
+                If snippet.Length > maximumSnippetLength Then
+                    snippet = snippet.Substring(0, maximumSnippetLength) & "…"
+                End If
+                detail.Append(" Raw response: " & snippet)
+            Else
+                detail.Append(" Raw response: <empty>")
+            End If
+
+            Return detail.ToString()
         End Function
 
         Private Shared Async Function GenerateSemanticSearchSegmentMetadataAsync(
@@ -466,6 +610,7 @@ Namespace SharedLibrary
 
             Dim characterStart As Integer = 0
             Dim byteStart As Long = 0
+            Dim currentOpenDocument As String = Nothing
 
             While characterStart < text.Length
                 Dim remainingCharacters As Integer = text.Length - characterStart
@@ -485,13 +630,16 @@ Namespace SharedLibrary
 
                 Dim segmentValue As String = text.Substring(characterStart, selectedEnd - characterStart)
                 Dim segmentBytes As Byte() = SemanticSearchUtf8NoBom.GetBytes(segmentValue)
+                Dim segmentDocuments As System.Collections.Generic.List(Of String) =
+                    CollectSemanticSearchSegmentDocuments(segmentValue, currentOpenDocument)
 
                 result.Add(New SemanticSearchRawSegment() With {
                     .StartCharacter = characterStart,
                     .CharacterLength = selectedEnd - characterStart,
                     .StartByte = byteStart,
                     .LengthBytes = segmentBytes.LongLength,
-                    .Text = segmentValue
+                    .Text = segmentValue,
+                    .SourceDocuments = segmentDocuments
                 })
 
                 characterStart = selectedEnd
@@ -499,6 +647,43 @@ Namespace SharedLibrary
             End While
 
             Return result
+        End Function
+
+        ''' <summary>
+        ''' Returns the ordered, distinct wrapped-document labels a segment covers, and updates
+        ''' the currently open document as wrapper open/close tags are encountered. Enables
+        ''' meaningful citations when many small documents share one segment.
+        ''' </summary>
+        Private Shared Function CollectSemanticSearchSegmentDocuments(
+            segmentText As String,
+            ByRef currentOpenDocument As String
+        ) As System.Collections.Generic.List(Of String)
+
+            Dim documents As New System.Collections.Generic.List(Of String)()
+            If Not String.IsNullOrEmpty(currentOpenDocument) Then
+                documents.Add(currentOpenDocument)
+            End If
+
+            For Each wrapperMatch As System.Text.RegularExpressions.Match In SemanticSearchDocumentWrapperEventRegex.Matches(segmentText)
+                If wrapperMatch.Groups(1).Success Then
+                    Dim number As String = wrapperMatch.Groups(2).Value
+                    Dim name As String = If(wrapperMatch.Groups(3).Success, wrapperMatch.Groups(3).Value, "")
+                    ' The wrapper number is an internal segmentation aid only and must never be
+                    ' surfaced to the model or the user. Prefer the document name; fall back to a
+                    ' neutral placeholder only when no name was provided by the combine step.
+                    Dim label As String = If(String.IsNullOrWhiteSpace(name),
+                                             "Unnamed document",
+                                             name.Trim())
+                    currentOpenDocument = label
+                    If Not documents.Contains(label) Then
+                        documents.Add(label)
+                    End If
+                ElseIf wrapperMatch.Groups(4).Success Then
+                    currentOpenDocument = Nothing
+                End If
+            Next
+
+            Return documents
         End Function
 
         Private Shared Function ChooseSemanticSearchNaturalBreak(
@@ -582,6 +767,29 @@ Namespace SharedLibrary
                     })
                     searchStart = candidatePosition
                 End While
+            Next
+
+            ' Prefer breaking at structured-document wrapper boundaries so small documents
+            ' (e.g. batched emails) are packed to the byte target without being split, and
+            ' large documents still break at their own internal headings/paragraphs first.
+            Dim wrapperRegion As String = text.Substring(lowerBound, maximumEnd - lowerBound)
+
+            For Each openMatch As System.Text.RegularExpressions.Match In SemanticSearchDocumentWrapperOpenRegex.Matches(wrapperRegion)
+                Dim candidatePosition As Integer = lowerBound + openMatch.Index
+                candidates.Add(New SemanticSearchBreakCandidate() With {
+                    .Position = candidatePosition,
+                    .StructuralScore = 175,
+                    .DistanceFromTarget = System.Math.Abs(candidatePosition - preferredPosition)
+                })
+            Next
+
+            For Each closeMatch As System.Text.RegularExpressions.Match In SemanticSearchDocumentWrapperCloseRegex.Matches(wrapperRegion)
+                Dim candidatePosition As Integer = lowerBound + closeMatch.Index + closeMatch.Length
+                candidates.Add(New SemanticSearchBreakCandidate() With {
+                    .Position = candidatePosition,
+                    .StructuralScore = 168,
+                    .DistanceFromTarget = System.Math.Abs(candidatePosition - preferredPosition)
+                })
             Next
 
             If candidates.Count = 0 Then
@@ -902,6 +1110,19 @@ Namespace SharedLibrary
             Return If(value, "").Trim()
         End Function
 
+        ''' <summary>
+        ''' Shared deserialization settings that tolerate common LLM type deviations, such as a
+        ''' numeric value returned as a string or a boolean returned as a string/number. This keeps
+        ''' the structured retrieval pipeline agnostic and resilient without relying on any specific
+        ''' prompt phrasing or language.
+        ''' </summary>
+        Private Shared ReadOnly SemanticSearchJsonSettings As New Newtonsoft.Json.JsonSerializerSettings() With {
+            .Converters = New System.Collections.Generic.List(Of Newtonsoft.Json.JsonConverter)() From {
+                New TolerantSemanticSearchDoubleConverter(),
+                New TolerantSemanticSearchBooleanConverter()
+            }
+        }
+
         Private Shared Function SerializeSemanticSearchJson(Of T)(value As T) As String
             Return Newtonsoft.Json.JsonConvert.SerializeObject(value)
         End Function
@@ -911,8 +1132,130 @@ Namespace SharedLibrary
                 Return Nothing
             End If
 
-            Return Newtonsoft.Json.JsonConvert.DeserializeObject(Of T)(json)
+            Return Newtonsoft.Json.JsonConvert.DeserializeObject(Of T)(json, SemanticSearchJsonSettings)
         End Function
+
+        ''' <summary>
+        ''' Reads a JSON value as <see cref="System.Double"/> even when the model returns it as a
+        ''' string or as a non-numeric explanation. Unparseable or missing values become 0.0 so the
+        ''' downstream relevance clamps and thresholds can handle them uniformly.
+        ''' </summary>
+        Private Class TolerantSemanticSearchDoubleConverter
+            Inherits Newtonsoft.Json.JsonConverter
+
+            Public Overrides Function CanConvert(objectType As System.Type) As Boolean
+                Return objectType Is GetType(Double) OrElse objectType Is GetType(Double?)
+            End Function
+
+            Public Overrides Function ReadJson(
+                reader As Newtonsoft.Json.JsonReader,
+                objectType As System.Type,
+                existingValue As Object,
+                serializer As Newtonsoft.Json.JsonSerializer
+            ) As Object
+
+                Dim isNullable As Boolean = objectType Is GetType(Double?)
+
+                Select Case reader.TokenType
+                    Case Newtonsoft.Json.JsonToken.Null
+                        Return If(isNullable, CObj(Nothing), CObj(0.0R))
+                    Case Newtonsoft.Json.JsonToken.Float, Newtonsoft.Json.JsonToken.Integer
+                        Return System.Convert.ToDouble(reader.Value, System.Globalization.CultureInfo.InvariantCulture)
+                    Case Newtonsoft.Json.JsonToken.String
+                        Dim parsed As Double
+                        If Double.TryParse(
+                            System.Convert.ToString(reader.Value, System.Globalization.CultureInfo.InvariantCulture),
+                            System.Globalization.NumberStyles.Any,
+                            System.Globalization.CultureInfo.InvariantCulture,
+                            parsed) Then
+                            Return parsed
+                        End If
+                        Return If(isNullable, CObj(Nothing), CObj(0.0R))
+                    Case Newtonsoft.Json.JsonToken.Boolean
+                        Return If(System.Convert.ToBoolean(reader.Value), 1.0R, 0.0R)
+                    Case Else
+                        reader.Skip()
+                        Return If(isNullable, CObj(Nothing), CObj(0.0R))
+                End Select
+            End Function
+
+            Public Overrides ReadOnly Property CanWrite As Boolean
+                Get
+                    Return False
+                End Get
+            End Property
+
+            Public Overrides Sub WriteJson(
+                writer As Newtonsoft.Json.JsonWriter,
+                value As Object,
+                serializer As Newtonsoft.Json.JsonSerializer
+            )
+                Throw New System.NotSupportedException()
+            End Sub
+        End Class
+
+        ''' <summary>
+        ''' Reads a JSON value as <see cref="System.Boolean"/> even when the model returns it as a
+        ''' string (for example "true"/"yes"/"1") or as a number. Unrecognized values become False.
+        ''' </summary>
+        Private Class TolerantSemanticSearchBooleanConverter
+            Inherits Newtonsoft.Json.JsonConverter
+
+            Public Overrides Function CanConvert(objectType As System.Type) As Boolean
+                Return objectType Is GetType(Boolean) OrElse objectType Is GetType(Boolean?)
+            End Function
+
+            Public Overrides Function ReadJson(
+                reader As Newtonsoft.Json.JsonReader,
+                objectType As System.Type,
+                existingValue As Object,
+                serializer As Newtonsoft.Json.JsonSerializer
+            ) As Object
+
+                Dim isNullable As Boolean = objectType Is GetType(Boolean?)
+
+                Select Case reader.TokenType
+                    Case Newtonsoft.Json.JsonToken.Null
+                        Return If(isNullable, CObj(Nothing), CObj(False))
+                    Case Newtonsoft.Json.JsonToken.Boolean
+                        Return System.Convert.ToBoolean(reader.Value)
+                    Case Newtonsoft.Json.JsonToken.Integer, Newtonsoft.Json.JsonToken.Float
+                        Return System.Convert.ToDouble(reader.Value, System.Globalization.CultureInfo.InvariantCulture) <> 0.0R
+                    Case Newtonsoft.Json.JsonToken.String
+                        Dim raw As String = System.Convert.ToString(reader.Value, System.Globalization.CultureInfo.InvariantCulture)
+                        Dim normalized As String = If(raw, "").Trim().ToLowerInvariant()
+                        If normalized = "true" OrElse normalized = "yes" OrElse normalized = "1" Then
+                            Return True
+                        End If
+                        If normalized = "false" OrElse normalized = "no" OrElse normalized = "0" Then
+                            Return False
+                        End If
+
+                        Dim parsedBoolean As Boolean
+                        If Boolean.TryParse(normalized, parsedBoolean) Then
+                            Return parsedBoolean
+                        End If
+                        Return If(isNullable, CObj(Nothing), CObj(False))
+                    Case Else
+                        reader.Skip()
+                        Return If(isNullable, CObj(Nothing), CObj(False))
+                End Select
+            End Function
+
+            Public Overrides ReadOnly Property CanWrite As Boolean
+                Get
+                    Return False
+                End Get
+            End Property
+
+            Public Overrides Sub WriteJson(
+                writer As Newtonsoft.Json.JsonWriter,
+                value As Object,
+                serializer As Newtonsoft.Json.JsonSerializer
+            )
+                Throw New System.NotSupportedException()
+            End Sub
+        End Class
 
         Private Shared Function ExtractSemanticSearchJsonObject(value As String) As String
             Dim text As String = If(value, "").Trim()

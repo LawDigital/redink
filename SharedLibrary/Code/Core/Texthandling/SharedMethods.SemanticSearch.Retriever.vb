@@ -5,7 +5,8 @@
 ' File: SharedMethods.SemanticSearch.Retriever.vb
 ' Purpose: Provides reusable readers, validation, caching, semantic selection,
 '          byte-range loading, full-scan fallback, and response-verification
-'          utilities for generic self-indexed text sources.
+'          utilities for generic self-indexed text sources. The concept is referred
+'          to as "flat semantic search" or FSS.
 '
 ' Architecture:
 '  - Detection/Validation: Reads only the index prefix, validates metadata and all
@@ -18,11 +19,6 @@
 '    boundaries, reuses exact segment text, and considers prior/adjacent sources.
 '  - Fallback/Verification: Can inspect every segment independently and can verify
 '    a generated response before requesting further original source segments.
-'
-' External Dependencies:
-'  - System.Runtime.Serialization: JSON serialization/deserialization from the core.
-'  - SharedLibrary.SharedContext: ISharedContext configuration contract.
-'  - Companion SharedMethods partial-class core/generator file.
 ' =============================================================================
 
 Option Strict On
@@ -732,6 +728,20 @@ Namespace SharedLibrary
             Return builder.ToString()
         End Function
 
+        ''' <summary>
+        ''' Removes the internal &lt;documentN name="..."&gt; / &lt;/documentN&gt; combine wrappers from
+        ''' excerpt text before it is shown to the model. The wrapper number is an internal
+        ''' segmentation aid only; document attribution is provided separately through the "Source"
+        ''' line, so the raw tags (and their internal numbers) must not leak into model-visible text.
+        ''' </summary>
+        Private Shared Function StripSemanticSearchDocumentWrappers(text As String) As String
+            If String.IsNullOrEmpty(text) Then
+                Return If(text, "")
+            End If
+
+            Return SemanticSearchDocumentWrapperEventRegex.Replace(text, "")
+        End Function
+
         Private Shared Async Function CallSanitizedSemanticSearchStructuredLlmAsync(Of TResult As Class)(
             context As ISharedContext,
             specialTaskName As String,
@@ -756,6 +766,7 @@ Namespace SharedLibrary
             Dim restoreRequired As Boolean = False
             Dim useSecondApi As Boolean = False
             Dim lastException As System.Exception = Nothing
+            Dim lastRawResponse As String = ""
 
             Try
                 If Not String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) AndAlso
@@ -787,6 +798,7 @@ Namespace SharedLibrary
                             cancellationToken:=cancellationToken).ConfigureAwait(False)
 
                         rawResponse = WebAgentInterpreter.SanitizeLlmResult(rawResponse)
+                        lastRawResponse = If(rawResponse, "")
 
                         If String.IsNullOrWhiteSpace(rawResponse) Then
                             Throw New System.InvalidOperationException("The LLM returned an empty structured response.")
@@ -803,6 +815,9 @@ Namespace SharedLibrary
                         Throw
                     Catch ex As System.Exception
                         lastException = ex
+                        System.Diagnostics.Debug.WriteLine(
+                            "Semantic search structured task '" & specialTaskName & "' attempt " &
+                            attempt.ToString(System.Globalization.CultureInfo.InvariantCulture) & " failed: " & ex.ToString())
                     End Try
                 Next
             Finally
@@ -815,9 +830,8 @@ Namespace SharedLibrary
                 "The structured LLM task failed after " &
                 maximumAttempts.ToString(System.Globalization.CultureInfo.InvariantCulture) &
                 " attempts." &
-                If(lastException IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(lastException.Message),
-                   " Last error: " & lastException.Message,
-                   ""))
+                BuildSemanticSearchStructuredFailureDetail(specialTaskName, lastException, lastRawResponse),
+                lastException)
         End Function
 
         Private Shared Function LoadSemanticSearchIndexCore(path As String) As SemanticSearchIndexCacheItem
@@ -1244,7 +1258,11 @@ Namespace SharedLibrary
 
             Dim systemPrompt As String =
                 "Evaluate one original source segment for relevance to a search question. Do not write a final response. " &
-                "Return only JSON with Relevant, Relevance, Evidence and ReferencedSections. Evidence must contain only concise information present in the segment."
+                "Return only JSON with Relevant, Relevance, Evidence and ReferencedSections. " &
+                "Relevant must be a JSON boolean (true or false). " &
+                "Relevance must be a JSON number between 0 and 1 (for example 0.0), never a string or explanation. " &
+                "Evidence and ReferencedSections must be arrays of concise strings present in the segment. " &
+                "Do not wrap the JSON in markdown or code fences."
 
             Dim userPrompt As String =
                 "Search preparation:" & vbCrLf & SerializeSemanticSearchJson(preparation) & vbCrLf & vbCrLf &
@@ -1687,28 +1705,36 @@ Namespace SharedLibrary
         ) As String
 
             Dim builder As New System.Text.StringBuilder()
-            builder.AppendLine("The following blocks contain original excerpts selected from the configured source. Use the source IDs when referring to evidence.")
+            builder.AppendLine("The following blocks contain original excerpts selected from the configured source. When referring to evidence, cite the ""Source"" document name shown for each block (never any internal identifier or number).")
             builder.AppendLine()
 
+            Dim blockNumber As Integer = 0
             For Each source As SemanticSearchLoadedSourceSegment In sources
-                Dim ids As String = String.Join(",", source.EntryIds)
+                blockNumber += 1
                 Dim titles As New System.Collections.Generic.List(Of String)()
+                Dim sourceDocuments As New System.Collections.Generic.List(Of String)()
 
                 For Each id As String In source.EntryIds
                     Dim entry As SemanticSearchIndexEntry = Nothing
                     If cacheItem.EntriesById.TryGetValue(id, entry) Then
                         titles.Add(entry.Title)
+                        If entry.SourceDocuments IsNot Nothing Then
+                            For Each documentName As String In entry.SourceDocuments
+                                If Not String.IsNullOrWhiteSpace(documentName) AndAlso
+                                   Not sourceDocuments.Contains(documentName) Then
+                                    sourceDocuments.Add(documentName)
+                                End If
+                            Next
+                        End If
                     End If
                 Next
 
-                builder.AppendLine("<<<SOURCE " & ids & ">>>")
-                builder.AppendLine("Title: " & String.Join(" | ", titles))
-                builder.AppendLine(
-                    "Relative byte range: " &
-                    source.RelativeStartByte.ToString(System.Globalization.CultureInfo.InvariantCulture) & "-" &
-                    (source.RelativeStartByte + source.LengthBytes - 1).ToString(System.Globalization.CultureInfo.InvariantCulture))
-                builder.AppendLine(source.Text)
-                builder.AppendLine("<<<END SOURCE " & ids & ">>>")
+                builder.AppendLine("<<<EXCERPT " & blockNumber.ToString(System.Globalization.CultureInfo.InvariantCulture) & ">>>")
+                If sourceDocuments.Count > 0 Then
+                    builder.AppendLine("Source: " & String.Join(" | ", sourceDocuments))
+                End If
+                builder.AppendLine(StripSemanticSearchDocumentWrappers(source.Text))
+                builder.AppendLine("<<<END EXCERPT " & blockNumber.ToString(System.Globalization.CultureInfo.InvariantCulture) & ">>>")
                 builder.AppendLine()
             Next
 

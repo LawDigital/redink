@@ -2163,6 +2163,8 @@ Partial Public Class ThisAddIn
         Dim failedFiles As New List(Of String)()
         Dim emptyContentFiles As New List(Of String)()
         Dim flattenedPdfCount As Integer = 0
+        ' Collected successfully-extracted content for the optional combine/index step.
+        Dim extractedDocuments As New List(Of (Name As String, Content As String))()
 
         Try
             For i As Integer = 0 To filesToProcess.Count - 1
@@ -2253,6 +2255,7 @@ Partial Public Class ThisAddIn
 
                         IO.File.WriteAllText(outputPath, content, System.Text.Encoding.UTF8)
                         successCount += 1
+                        extractedDocuments.Add((fileName, content))
 
                     Finally
                         ' Clean up temp flattened PDF
@@ -2272,6 +2275,100 @@ Partial Public Class ThisAddIn
             ProgressBarModule.CancelOperation = True
         End Try
 
+        ' Optional: combine multiple extracted documents into a single file and/or create a
+        ' semantic-search index from them.
+        Dim combinedOutputPath As String = Nothing
+        Dim indexOutputPath As String = Nothing
+
+        If extractedDocuments.Count > 1 Then
+            Dim combineChoice As Integer = ShowCustomYesNoBox(
+                $"{extractedDocuments.Count:N0} documents were extracted." & vbCrLf & vbCrLf &
+                "Do you want to combine them into a single file using the standard document separators? " &
+                $"This is useful for feeding all documents to the AI at once or for creating a searchable index for {AN} (you can choose to create one as the next step).",
+                "Yes, combine into one file",
+                "No, keep separate files")
+
+            If combineChoice = 1 Then
+                Try
+                    ' Combine using the canonical wrapper separator so the semantic-search generator
+                    ' can align segments to document boundaries.
+                    Dim combinedBuilder As New System.Text.StringBuilder()
+                    For docIndex As Integer = 0 To extractedDocuments.Count - 1
+                        Dim docNumber As Integer = docIndex + 1
+                        Dim safeName As String = If(extractedDocuments(docIndex).Name, "").Replace("""", "'")
+                        combinedBuilder.Append($"<document{docNumber} name=""{safeName}"">").AppendLine()
+                        combinedBuilder.Append(If(extractedDocuments(docIndex).Content, "")).AppendLine()
+                        combinedBuilder.Append($"</document{docNumber}>").AppendLine()
+                        combinedBuilder.AppendLine()
+                    Next
+
+                    Dim combineBaseDir As String =
+                        If(useSubdirectory,
+                           outputBaseDir,
+                           If(isDirectory, selectedPath, IO.Path.GetDirectoryName(selectedPath)))
+
+                    Dim combineBaseName As String =
+                        If(isDirectory, IO.Path.GetFileName(selectedPath.TrimEnd(IO.Path.DirectorySeparatorChar)), IO.Path.GetFileNameWithoutExtension(selectedPath))
+                    If String.IsNullOrWhiteSpace(combineBaseName) Then
+                        combineBaseName = "combined"
+                    End If
+
+                    combinedOutputPath = IO.Path.Combine(combineBaseDir, combineBaseName & ".combined.txt")
+                    IO.File.WriteAllText(combinedOutputPath, combinedBuilder.ToString().TrimEnd(), System.Text.Encoding.UTF8)
+
+                    ' Offer to also create a semantic-search index from the combined file.
+                    Dim indexChoice As Integer = ShowCustomYesNoBox(
+                        "The documents were combined into a single file." & vbCrLf & vbCrLf &
+                        "Do you also want to create a semantic-search index file from it? " &
+                        $"This allows {AN} to find and retrieve content from the file even if it is too large to be sent to the AI at once. 'Discuss this, Inky' and the chatbot in Word supports these index files, for example.",
+                        "Yes, create an index file",
+                        "No, just keep the combined file")
+
+                    If indexChoice = 1 Then
+                        indexOutputPath = IO.Path.Combine(combineBaseDir, combineBaseName & ".indexed.txt")
+
+                        Using indexProgress As New ProgressScope(
+                            "Generating semantic-search index",
+                            "Preparing combined content ...",
+                            1)
+
+                            Dim generationProgress As New System.Progress(Of SharedMethods.SemanticSearchIndexGenerationProgress)(
+                                Sub(update As SharedMethods.SemanticSearchIndexGenerationProgress)
+                                    Dim segCount As Integer = System.Math.Max(1, update.SegmentCount)
+                                    Dim segNumber As Integer = System.Math.Max(0, System.Math.Min(update.SegmentNumber, segCount))
+                                    Dim statusMessage As String = If(update.Message, "").Trim()
+                                    If String.IsNullOrWhiteSpace(statusMessage) Then
+                                        statusMessage = "Generating semantic metadata"
+                                    End If
+                                    ProgressScope.Report(
+                                        segNumber,
+                                        segCount,
+                                        statusMessage & " (" &
+                                        segNumber.ToString(System.Globalization.CultureInfo.InvariantCulture) & "/" &
+                                        segCount.ToString(System.Globalization.CultureInfo.InvariantCulture) & ")")
+                                End Sub)
+
+                            Await SharedMethods.CreateSemanticSearchIndexedTextFileAsync(
+                                combinedOutputPath,
+                                indexOutputPath,
+                                _context,
+                                New SharedMethods.SemanticSearchIndexGeneratorOptions() With {
+                                    .SpecialTaskName = "Indexer",
+                                    .OverwriteOutput = True
+                                },
+                                generationProgress,
+                                indexProgress.Token).ConfigureAwait(True)
+                        End Using
+                    End If
+
+                Catch ex As Exception
+                    ShowCustomMessageBox($"Failed to combine or index the extracted documents: {ex.Message}")
+                    combinedOutputPath = Nothing
+                    indexOutputPath = Nothing
+                End Try
+            End If
+        End If
+
         ' Build summary
         Dim wasCancelled As Boolean = (successCount + failedFiles.Count + emptyContentFiles.Count) < filesToProcess.Count
 
@@ -2286,6 +2383,14 @@ Partial Public Class ThisAddIn
 
         If useSubdirectory Then
             summary.AppendLine($"Output directory: {outputBaseDir}")
+        End If
+
+        If Not String.IsNullOrWhiteSpace(combinedOutputPath) Then
+            summary.AppendLine()
+            summary.AppendLine($"Combined file: {combinedOutputPath}")
+            If Not String.IsNullOrWhiteSpace(indexOutputPath) Then
+                summary.AppendLine($"Index file: {indexOutputPath}")
+            End If
         End If
 
         If doOcr Then
