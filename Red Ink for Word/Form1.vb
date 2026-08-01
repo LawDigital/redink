@@ -572,6 +572,9 @@ Public Class frmAIChat
     ' Loaded external context (attached via the Load Context button)
     Private Const PersistedContextFileName As String = "redink-wordchatcontext.txt"
 
+    ' Loaded semantic index (attached via the Load Context button, either a document OR an index).
+    Private Const PersistedIndexFileName As String = "redink-wordchatindex.index.txt"
+
     Private Shared ReadOnly SupportedContextExtensions As String() = {
         ".txt", ".rtf", ".doc", ".docx", ".xlsx", ".pdf", ".pptx", ".msg", ".eml",
         ".ini", ".csv", ".log", ".json", ".xml", ".html", ".htm", ".md",
@@ -586,12 +589,19 @@ Public Class frmAIChat
     Private _isUpdatingPersistContextCheckbox As Boolean = False
     Private ReadOnly _contextToolTip As New System.Windows.Forms.ToolTip()
 
+    ' Loaded semantic index state (either a document context or an index is active, never both).
+    Private _loadedIndexSourcePath As String = Nothing
+    Private _loadedIndexDisplayName As String = Nothing
+    Private Shared _cachedLoadedIndexPath As String = Nothing
+    Private Shared _cachedLoadedIndexDisplayName As String = Nothing
+    Private _semanticConversationState As New SharedMethods.SemanticSearchConversationState()
+
     ''' <summary>Button: attach or remove external context material (files or a folder).</summary>
     Private WithEvents btnLoadContext As New Button() With {.Text = "Load Context", .AutoSize = True}
 
-    ''' <summary>Checkbox: persist the loaded context temporarily to a temp file.</summary>
+    ''' <summary>Checkbox: persist the loaded context or index to durable AppData storage.</summary>
     Private WithEvents chkPersistContext As New System.Windows.Forms.CheckBox() With {
-        .Text = "Persist context temporarily",
+        .Text = "Persist context",
         .AutoSize = True
     }
 
@@ -853,6 +863,7 @@ Public Class frmAIChat
 
         If Not chkPersistContext.Checked Then
             DeletePersistedContextFile(False)
+            DeletePersistedIndexFile(False)
         End If
 
         Await RestoreLoadedContextAsync()
@@ -1050,6 +1061,14 @@ Public Class frmAIChat
                 End If
             End If
 
+            ' Tell the model that per-message index excerpts may be supplied when an index is loaded.
+            If HasLoadedIndex() Then
+                SystemPrompt &= vbLf &
+                    "The user has loaded a searchable index. The most relevant original excerpts for the current message " &
+                    "will be provided inside <INDEX_EXCERPTS> if available. Answer also based on those excerpts, preserve exact terms, " &
+                    "and never expose internal source IDs."
+            End If
+
             If My.Settings.DoCommands AndAlso (chkIncludeDocText.Checked Or chkIncludeselection.Checked) Then
                 Dim activeDocumentNameForCommands As String = ""
 
@@ -1199,15 +1218,8 @@ Public Class frmAIChat
                 fullPrompt.AppendLine("</LOADED_CONTEXT>")
             End If
 
-            ' Add current user message
-            fullPrompt.AppendLine("User: " & userPrompt)
-
-            ' Add conversation history for context
-            fullPrompt.AppendLine($"The conversation so far (not including any previously added text document):{vbLf}{conversationSoFar}")
-
-            ' Debug logging
-            Debug.WriteLine("Document=" & Globals.ThisAddIn.Application.ActiveDocument.Name)
-            Debug.WriteLine(fullPrompt.ToString())
+            ' The user message and conversation history are appended after any index retrieval
+            ' (see Step 8b) so the index excerpts can be inserted before them.
 
             ' ──────────────────────────────────────────────────────────────
             ' STEP 6: Update UI - Show User Message
@@ -1324,6 +1336,40 @@ Public Class frmAIChat
             Await UpdateUIAsync(Sub()
                                     ShowAssistantThinking(useTooling)
                                 End Sub)
+
+            ' ──────────────────────────────────────────────────────────────
+            ' STEP 8b: Query the loaded semantic index (if any) with live progress
+            ' ──────────────────────────────────────────────────────────────
+            If HasLoadedIndex() Then
+                Dim indexExcerpt As String = Await BuildIndexExcerptAsync(
+                    userPrompt,
+                    conversationSoFar,
+                    Sub(status)
+                        Try
+                            Me.BeginInvoke(New MethodInvoker(Sub() UpdateAssistantThinking(status)))
+                        Catch
+                        End Try
+                    End Sub)
+
+                If Not String.IsNullOrWhiteSpace(indexExcerpt) Then
+                    fullPrompt.AppendLine("The user loaded a searchable index. The following are the most relevant original excerpts for this message:")
+                    fullPrompt.AppendLine("<INDEX_EXCERPTS>")
+                    fullPrompt.AppendLine(indexExcerpt)
+                    fullPrompt.AppendLine("</INDEX_EXCERPTS>")
+                End If
+
+                ' Restore the neutral thinking caption once retrieval progress is complete.
+                Await UpdateUIAsync(Sub()
+                                        UpdateAssistantThinking(If(useTooling,
+                                            $"Thinking (using {Globals.ThisAddIn.ToolFriendlyName.ToLower})...",
+                                            "Thinking..."))
+                                    End Sub)
+            End If
+
+            ' Finalize the prompt with the current user message and conversation history.
+            fullPrompt.AppendLine("User: " & userPrompt)
+            fullPrompt.AppendLine($"The conversation so far (not including any previously added text document):{vbLf}{conversationSoFar}")
+            Debug.WriteLine(fullPrompt.ToString())
 
             ' ──────────────────────────────────────────────────────────────
             ' STEP 9: Call LLM Asynchronously (with optional Tooling)
@@ -4857,7 +4903,11 @@ Partial Public Class frmAIChat
 
     Private Sub UpdatePersistContextTooltip()
         If chkPersistContext.Checked Then
-            _contextToolTip.SetToolTip(chkPersistContext, "Currently stored in: " & GetPersistedContextFilePath())
+            If HasLoadedIndex() Then
+                _contextToolTip.SetToolTip(chkPersistContext, "Index currently stored in: " & GetPersistedIndexFilePath())
+            Else
+                _contextToolTip.SetToolTip(chkPersistContext, "Currently stored in: " & GetPersistedContextFilePath())
+            End If
         Else
             _contextToolTip.SetToolTip(chkPersistContext, "")
         End If
@@ -4883,6 +4933,255 @@ Partial Public Class frmAIChat
         If String.IsNullOrWhiteSpace(_loadedContextContent) Then Return
         System.IO.File.WriteAllText(GetPersistedContextFilePath(), _loadedContextContent, System.Text.Encoding.UTF8)
     End Sub
+
+    ' =========================================================================
+    ' Loaded Semantic Index (either a document context or an index is active)
+    ' =========================================================================
+
+    ''' <summary>Full path of the durably persisted index copy under %AppData%\redink\.</summary>
+    Private Function GetPersistedIndexFilePath() As String
+        Return System.IO.Path.Combine(GetRedInkStorageDirectoryPath(), PersistedIndexFileName)
+    End Function
+
+    ''' <summary>True when a semantic index is currently attached to the session.</summary>
+    Private Function HasLoadedIndex() As Boolean
+        Return Not String.IsNullOrWhiteSpace(_loadedIndexSourcePath) OrElse
+               Not String.IsNullOrWhiteSpace(_loadedIndexDisplayName)
+    End Function
+
+    ''' <summary>
+    ''' Resolves the index file to search: the original source when available, otherwise the
+    ''' durably persisted copy. Returns Nothing when neither is present on disk.
+    ''' </summary>
+    Private Function GetActiveIndexPath() As String
+        If Not String.IsNullOrWhiteSpace(_loadedIndexSourcePath) AndAlso System.IO.File.Exists(_loadedIndexSourcePath) Then
+            Return _loadedIndexSourcePath
+        End If
+
+        Dim persisted As String = GetPersistedIndexFilePath()
+        If System.IO.File.Exists(persisted) Then
+            Return persisted
+        End If
+
+        Return Nothing
+    End Function
+
+    ''' <summary>Attaches a semantic index, replacing any loaded document context.</summary>
+    Private Function AttachLoadedIndex(indexPath As String) As Boolean
+        If String.IsNullOrWhiteSpace(indexPath) OrElse Not System.IO.File.Exists(indexPath) Then
+            AppendSystemMessage("The selected index file does not exist.")
+            Return False
+        End If
+
+        ' Loading an index replaces any plain document context (either a document or an index).
+        ClearLoadedContextOnly()
+
+        _loadedIndexSourcePath = indexPath
+        _loadedIndexDisplayName = System.IO.Path.GetFileName(indexPath)
+        _cachedLoadedIndexPath = _loadedIndexSourcePath
+        _cachedLoadedIndexDisplayName = _loadedIndexDisplayName
+        _semanticConversationState = New SharedMethods.SemanticSearchConversationState()
+
+        Try
+            My.Settings.ChatContextPath = indexPath
+            My.Settings.Save()
+        Catch
+        End Try
+
+        Return True
+    End Function
+
+    ''' <summary>Clears the in-memory document context and its persisted file, leaving the index intact.</summary>
+    Private Sub ClearLoadedContextOnly()
+        _loadedContextContent = Nothing
+        _loadedContextPath = Nothing
+        _cachedLoadedContextContent = Nothing
+        _cachedLoadedContextPath = Nothing
+        DeletePersistedContextFile(False)
+    End Sub
+
+    ''' <summary>Clears the loaded index, its cache, retrieval state, and persisted copy.</summary>
+    Private Sub ClearLoadedIndexOnly()
+        _loadedIndexSourcePath = Nothing
+        _loadedIndexDisplayName = Nothing
+        _cachedLoadedIndexPath = Nothing
+        _cachedLoadedIndexDisplayName = Nothing
+        _semanticConversationState = New SharedMethods.SemanticSearchConversationState()
+        DeletePersistedIndexFile(False)
+    End Sub
+
+    ''' <summary>Deletes the durably persisted index copy under %AppData%\redink\.</summary>
+    Private Sub DeletePersistedIndexFile(showMessage As Boolean)
+        Try
+            Dim persistPath As String = GetPersistedIndexFilePath()
+            If System.IO.File.Exists(persistPath) Then
+                System.IO.File.Delete(persistPath)
+                If showMessage Then
+                    AppendSystemMessage("Persisted index file deleted.")
+                End If
+            End If
+        Catch ex As System.Exception
+            If showMessage Then
+                AppendSystemMessage($"Failed to delete persisted index: {ex.Message}")
+            End If
+        End Try
+    End Sub
+
+    ''' <summary>Copies the active index (exact bytes) into durable %AppData%\redink\ storage.</summary>
+    Private Sub PersistLoadedIndexToAppData()
+        Dim active As String = GetActiveIndexPath()
+        If String.IsNullOrWhiteSpace(active) OrElse Not System.IO.File.Exists(active) Then Return
+
+        Dim persistPath As String = GetPersistedIndexFilePath()
+        If String.Equals(System.IO.Path.GetFullPath(active), System.IO.Path.GetFullPath(persistPath), StringComparison.OrdinalIgnoreCase) Then
+            Return
+        End If
+
+        System.IO.File.Copy(active, persistPath, True)
+    End Sub
+
+    ''' <summary>Offers to persist a newly attached index when persistence is currently off.</summary>
+    Private Sub OfferIndexPersistence()
+        Dim answer = ShowCustomYesNoBox(
+            $"The index '{_loadedIndexDisplayName}' is currently referenced from its original location only. " &
+            "Do you want to persist a copy to durable storage so it is retained across restarts?",
+            "Yes, persist",
+            "No, keep temporary")
+
+        If answer <> 1 Then Return
+
+        _isUpdatingPersistContextCheckbox = True
+        chkPersistContext.Checked = True
+        _isUpdatingPersistContextCheckbox = False
+
+        Try
+            PersistLoadedIndexToAppData()
+            AppendSystemMessage($"Index '{_loadedIndexDisplayName}' persisted to durable storage.")
+        Catch ex As System.Exception
+            AppendSystemMessage($"Failed to persist index: {ex.Message}")
+        End Try
+
+        Try
+            My.Settings.ChatPersistContext = True
+            My.Settings.Save()
+        Catch
+        End Try
+
+        UpdatePersistContextTooltip()
+    End Sub
+
+    ''' <summary>
+    ''' Handles the persist checkbox for the index channel: persists a copy when enabled, or deletes
+    ''' the persisted copy when disabled (falling back to the original source, or warning if gone).
+    ''' </summary>
+    Private Sub HandleIndexPersistenceToggle()
+        Dim persistPath As String = GetPersistedIndexFilePath()
+
+        If chkPersistContext.Checked Then
+            Dim active As String = GetActiveIndexPath()
+            If Not String.IsNullOrWhiteSpace(active) AndAlso System.IO.File.Exists(active) Then
+                Try
+                    PersistLoadedIndexToAppData()
+                    AppendSystemMessage($"Index '{_loadedIndexDisplayName}' persisted to durable storage.")
+                Catch ex As System.Exception
+                    AppendSystemMessage($"Failed to persist index: {ex.Message}")
+                End Try
+            Else
+                AppendSystemMessage("No index available to persist.")
+            End If
+        Else
+            If System.IO.File.Exists(persistPath) Then
+                Dim answer = ShowCustomYesNoBox(
+                    "Do you want to delete the persisted index file? The chatbot will then rely on the original index file, if still available.",
+                    "Yes, delete",
+                    "No, keep it")
+
+                If answer = 1 Then
+                    DeletePersistedIndexFile(True)
+                    If String.IsNullOrWhiteSpace(_loadedIndexSourcePath) OrElse Not System.IO.File.Exists(_loadedIndexSourcePath) Then
+                        _loadedIndexSourcePath = Nothing
+                        _loadedIndexDisplayName = Nothing
+                        _cachedLoadedIndexPath = Nothing
+                        _cachedLoadedIndexDisplayName = Nothing
+                        _semanticConversationState = New SharedMethods.SemanticSearchConversationState()
+
+                        Try
+                            My.Settings.ChatContextPath = ""
+                            My.Settings.Save()
+                        Catch
+                        End Try
+
+                        AppendSystemMessage("The original index file is no longer available. The loaded index was removed.")
+                        UpdateLoadContextButtonText()
+                    End If
+                Else
+                    _isUpdatingPersistContextCheckbox = True
+                    chkPersistContext.Checked = True
+                    _isUpdatingPersistContextCheckbox = False
+                    Return
+                End If
+            End If
+        End If
+
+        My.Settings.ChatPersistContext = chkPersistContext.Checked
+        My.Settings.Save()
+        UpdatePersistContextTooltip()
+    End Sub
+
+    ''' <summary>
+    ''' Retrieves the most relevant original excerpts from the loaded index for the current message,
+    ''' reporting per-step progress through the supplied callback (mirrors DiscussInky's behavior).
+    ''' </summary>
+    Private Async Function BuildIndexExcerptAsync(queryText As String,
+                                                  conversation As String,
+                                                  reportStatus As System.Action(Of String)) As Task(Of String)
+        Dim activePath As String = GetActiveIndexPath()
+        If String.IsNullOrWhiteSpace(activePath) OrElse Not System.IO.File.Exists(activePath) Then
+            reportStatus?.Invoke("The loaded index is unavailable.")
+            Return ""
+        End If
+
+        If String.IsNullOrWhiteSpace(queryText) Then Return ""
+
+        reportStatus?.Invoke($"Searching index '{_loadedIndexDisplayName}' ...")
+
+        Try
+            Dim options As New SharedMethods.SemanticSearchRetrievalOptions() With {
+                .SpecialTaskName = "Indexer"
+            }
+
+            Dim retrieval As SharedMethods.SemanticSearchRetrievalResult =
+                Await SharedMethods.RetrieveSemanticSearchAsync(
+                    activePath,
+                    _context,
+                    queryText,
+                    If(conversation, ""),
+                    _semanticConversationState,
+                    options).ConfigureAwait(False)
+
+            If retrieval IsNot Nothing AndAlso
+               retrieval.IsIndexed AndAlso
+               Not String.IsNullOrWhiteSpace(retrieval.ReducedSourceText) Then
+
+                Dim matchCount As Integer =
+                    If(retrieval.SelectedEntryIds IsNot Nothing, retrieval.SelectedEntryIds.Count, 0)
+
+                reportStatus?.Invoke($"Index '{_loadedIndexDisplayName}' — {matchCount:N0} relevant segment(s) found.")
+
+                Dim sb As New StringBuilder()
+                sb.AppendLine($"<document name=""{_loadedIndexDisplayName}"">")
+                sb.AppendLine(retrieval.ReducedSourceText)
+                sb.AppendLine("</document>")
+                Return sb.ToString().TrimEnd()
+            Else
+                reportStatus?.Invoke($"Index '{_loadedIndexDisplayName}' — no relevant material found.")
+                Return ""
+            End If
+        Catch ex As System.Exception
+            reportStatus?.Invoke($"Index retrieval failed: {ex.Message}")
+            Return ""
+        End Try
+    End Function
 
     Private Async Function LoadSingleContextFileAsync(filePath As String, askUser As Boolean) As Task(Of (Content As String, PdfMayBeIncomplete As Boolean))
         If String.IsNullOrWhiteSpace(filePath) OrElse Not System.IO.File.Exists(filePath) Then
@@ -5031,6 +5330,48 @@ Partial Public Class frmAIChat
     End Function
 
     Private Async Function RestoreLoadedContextAsync() As System.Threading.Tasks.Task
+        ' Restore a previously loaded semantic index first (either a document OR an index is active).
+        If Not String.IsNullOrWhiteSpace(_cachedLoadedIndexPath) OrElse Not String.IsNullOrWhiteSpace(_cachedLoadedIndexDisplayName) Then
+            _loadedIndexSourcePath = _cachedLoadedIndexPath
+            _loadedIndexDisplayName = If(_cachedLoadedIndexDisplayName, "(Persisted Index)")
+            AppendSystemMessage("Index restored from cache.")
+            Return
+        End If
+
+        Dim persistedIndexPath As String = GetPersistedIndexFilePath()
+
+        Dim savedIndexPath As String = ""
+        Try
+            savedIndexPath = My.Settings.ChatContextPath
+        Catch
+        End Try
+
+        Dim savedIndexPathIsIndex As Boolean =
+            Not String.IsNullOrWhiteSpace(savedIndexPath) AndAlso
+            System.IO.File.Exists(savedIndexPath) AndAlso
+            SharedMethods.IsPotentiallySemanticSearchIndexedTextFile(savedIndexPath)
+
+        If chkPersistContext.Checked AndAlso System.IO.File.Exists(persistedIndexPath) Then
+            _loadedIndexSourcePath = If(savedIndexPathIsIndex, savedIndexPath, Nothing)
+            _loadedIndexDisplayName =
+                If(Not String.IsNullOrWhiteSpace(_loadedIndexSourcePath),
+                   System.IO.Path.GetFileName(_loadedIndexSourcePath),
+                   "(Persisted Index)")
+            _cachedLoadedIndexPath = _loadedIndexSourcePath
+            _cachedLoadedIndexDisplayName = _loadedIndexDisplayName
+            AppendSystemMessage("Index restored from persisted storage.")
+            Return
+        End If
+
+        If savedIndexPathIsIndex Then
+            _loadedIndexSourcePath = savedIndexPath
+            _loadedIndexDisplayName = System.IO.Path.GetFileName(savedIndexPath)
+            _cachedLoadedIndexPath = _loadedIndexSourcePath
+            _cachedLoadedIndexDisplayName = _loadedIndexDisplayName
+            AppendSystemMessage($"Index restored from saved path: {_loadedIndexDisplayName}.")
+            Return
+        End If
+
         If Not String.IsNullOrWhiteSpace(_cachedLoadedContextContent) AndAlso Not String.IsNullOrWhiteSpace(_cachedLoadedContextPath) Then
             _loadedContextContent = _cachedLoadedContextContent
             _loadedContextPath = _cachedLoadedContextPath
@@ -5091,7 +5432,7 @@ Partial Public Class frmAIChat
     End Function
 
     Private Async Sub btnLoadContext_Click(sender As Object, e As EventArgs)
-        If Not String.IsNullOrWhiteSpace(_loadedContextContent) Then
+        If Not String.IsNullOrWhiteSpace(_loadedContextContent) OrElse HasLoadedIndex() Then
             RemoveLoadedContext()
         Else
             Await PromptForLoadedContextAsync()
@@ -5102,18 +5443,23 @@ Partial Public Class frmAIChat
     ''' Updates the Load Context button caption to reflect whether external context is loaded.
     ''' </summary>
     Private Sub UpdateLoadContextButtonText()
-        btnLoadContext.Text = If(String.IsNullOrWhiteSpace(_loadedContextContent), "Load Context", "Remove Context")
+        btnLoadContext.Text = If(String.IsNullOrWhiteSpace(_loadedContextContent) AndAlso Not HasLoadedIndex(), "Load Context", "Remove Context")
     End Sub
 
     ''' <summary>
     ''' Removes any loaded external context (in-memory, cache, persisted file, and saved path).
     ''' </summary>
     Private Sub RemoveLoadedContext()
+        Dim hadIndex As Boolean = HasLoadedIndex()
+
         _loadedContextContent = Nothing
         _loadedContextPath = Nothing
         _cachedLoadedContextContent = Nothing
         _cachedLoadedContextPath = Nothing
         DeletePersistedContextFile(False)
+
+        ' Removing the context also removes any loaded index and its persisted files.
+        ClearLoadedIndexOnly()
 
         Try
             My.Settings.ChatContextPath = ""
@@ -5121,7 +5467,7 @@ Partial Public Class frmAIChat
         Catch
         End Try
 
-        AppendSystemMessage("Loaded context removed.")
+        AppendSystemMessage(If(hadIndex, "Loaded index removed.", "Loaded context removed."))
         UpdateLoadContextButtonText()
     End Sub
 
@@ -5142,6 +5488,29 @@ Partial Public Class frmAIChat
             Globals.ThisAddIn.DragDropFormFilter = ""
 
             If String.IsNullOrWhiteSpace(selectedPath) Then
+                Return
+            End If
+
+            ' If the selected file is already a semantic-search index, attach it as an index source
+            ' instead of inlining its bytes (the Word Chatbot uses either a document OR an index).
+            If System.IO.File.Exists(selectedPath) AndAlso
+               SharedMethods.IsPotentiallySemanticSearchIndexedTextFile(selectedPath) Then
+
+                If AttachLoadedIndex(selectedPath) Then
+                    If chkPersistContext.Checked Then
+                        Try
+                            PersistLoadedIndexToAppData()
+                            AppendSystemMessage($"Index '{_loadedIndexDisplayName}' loaded and persisted. It will be searched for each message.")
+                        Catch ex As System.Exception
+                            AppendSystemMessage($"Index '{_loadedIndexDisplayName}' loaded but failed to persist: {ex.Message}")
+                        End Try
+                    Else
+                        AppendSystemMessage($"Index '{_loadedIndexDisplayName}' loaded. It will be searched for each message.")
+                        OfferIndexPersistence()
+                    End If
+                End If
+
+                UpdateLoadContextButtonText()
                 Return
             End If
 
@@ -5167,6 +5536,9 @@ Partial Public Class frmAIChat
                 AppendSystemMessage("Failed to load context or all files are empty.")
                 Return
             End If
+
+            ' Loading a document context replaces any previously loaded index (either a document or an index).
+            ClearLoadedIndexOnly()
 
             _loadedContextContent = loaded.CombinedContent
             _loadedContextPath = loaded.DisplayPath
@@ -5202,13 +5574,23 @@ Partial Public Class frmAIChat
     Private Sub chkPersistContext_CheckedChanged(sender As Object, e As EventArgs)
         If _isUpdatingPersistContextCheckbox Then Return
 
+        ' When an index is loaded, persistence applies to the index file rather than inlined context.
+        If HasLoadedIndex() Then
+            Try
+                HandleIndexPersistenceToggle()
+            Catch ex As System.Exception
+                AppendSystemMessage($"Error handling persist index setting: {ex.Message}")
+            End Try
+            Return
+        End If
+
         Try
             Dim persistPath = GetPersistedContextFilePath()
 
             If chkPersistContext.Checked Then
                 If Not String.IsNullOrWhiteSpace(_cachedLoadedContextContent) Then
                     System.IO.File.WriteAllText(persistPath, _cachedLoadedContextContent, System.Text.Encoding.UTF8)
-                    AppendSystemMessage($"Context persisted to temporary storage ({_cachedLoadedContextContent.Length:N0} characters).")
+                    AppendSystemMessage($"Context persisted to durable storage ({_cachedLoadedContextContent.Length:N0} characters).")
                 Else
                     AppendSystemMessage("No context loaded to persist. Load context first, then check this box.")
                 End If
@@ -5422,6 +5804,13 @@ function removeById(id) {{
   if (!el || !el.parentNode) return;
   el.parentNode.removeChild(el);
 }}
+function setThinking(id, text) {{
+  var el = document.getElementById(id);
+  if (!el) return;
+  var parts = el.getElementsByClassName ? el.getElementsByClassName('content') : null;
+  if (parts && parts.length > 0) {{ parts[0].innerHTML = text; }}
+  window.scrollTo(0, document.body.scrollHeight);
+}}
 </script>
 </head>
 <body>
@@ -5617,6 +6006,21 @@ function removeById(id) {{
             ' Best-effort; ignore errors
         Finally
             _lastThinkingId = Nothing
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Updates the text of the current "Thinking..." placeholder to show retrieval progress
+    ''' (used while the loaded semantic index is being searched).
+    ''' </summary>
+    Public Sub UpdateAssistantThinking(statusText As String)
+        If String.IsNullOrEmpty(_lastThinkingId) Then Return
+        Try
+            If wbChat IsNot Nothing AndAlso wbChat.Document IsNot Nothing Then
+                wbChat.Document.InvokeScript("setThinking", New Object() {_lastThinkingId, HtmlEncode(statusText)})
+            End If
+        Catch
+            ' Best-effort; ignore errors
         End Try
     End Sub
 

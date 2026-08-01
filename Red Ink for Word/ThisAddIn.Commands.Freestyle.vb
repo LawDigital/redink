@@ -116,9 +116,15 @@ Partial Public Class ThisAddIn
         }
     End Class
 
-    Private Async Function GenerateSemanticSearchIndexForHelpMeAsync() As System.Threading.Tasks.Task
+    Private Async Function GenerateSemanticSearchIndexAsync() As System.Threading.Tasks.Task
         Dim sourceTxtPath As String = ""
         Dim indexedTxtPath As String = ""
+        Dim selectedProfile As SharedMethods.SemanticSearchMetadataProfile =
+            SharedMethods.SemanticSearchMetadataProfile.Generic
+        Dim targetBytes As Integer = SharedMethods.SemanticSearchDefaultTargetBytes
+        Dim minimumBytes As Integer = SharedMethods.SemanticSearchDefaultMinimumBytes
+        Dim maximumBytes As Integer = SharedMethods.SemanticSearchDefaultMaximumBytes
+        Dim overwriteOutput As Boolean = False
 
         DragDropFormLabel = "Select the text file to process for semantic indexing."
         DragDropFormFilter =
@@ -148,6 +154,85 @@ Partial Public Class ThisAddIn
         Dim detectedSourceEncoding As System.Text.Encoding = DetectSemanticSearchSourceEncoding(sourceTxtPath)
 
         indexedTxtPath = System.IO.Path.Combine(sourceDirectory, sourceFileNameWithoutExtension & ".indexed.txt")
+
+        Dim availableProfiles As System.Collections.Generic.List(Of SharedMethods.SemanticSearchMetadataProfile) =
+            SharedMethods.GetSemanticSearchMetadataProfiles()
+        Dim profileDisplayMap As New System.Collections.Generic.Dictionary(Of String, SharedMethods.SemanticSearchMetadataProfile)(
+            StringComparer.Ordinal)
+        Dim profileDisplayOptions As New System.Collections.Generic.List(Of String)()
+
+        For Each profile As SharedMethods.SemanticSearchMetadataProfile In availableProfiles
+            Dim displayName As String = SharedMethods.GetSemanticSearchMetadataProfileDisplayName(profile)
+            If Not profileDisplayMap.ContainsKey(displayName) Then
+                profileDisplayMap.Add(displayName, profile)
+                profileDisplayOptions.Add(displayName)
+            End If
+        Next
+
+        Dim selectedProfileDisplay As String =
+            SharedMethods.GetSemanticSearchMetadataProfileDisplayName(selectedProfile)
+
+        Dim generationParameters() As SLib.InputParameter = {
+            New SLib.InputParameter("Profile", selectedProfileDisplay, profileDisplayOptions),
+            New SLib.InputParameter("Target bytes", targetBytes),
+            New SLib.InputParameter("Minimum bytes", minimumBytes),
+            New SLib.InputParameter("Maximum bytes", maximumBytes)
+        }
+
+        Dim generationPrompt As String =
+            "Please configure the semantic-search index generation settings." & vbCrLf & vbCrLf &
+            "All size values are UTF-8 byte counts, not character counts." & vbCrLf & vbCrLf &
+            "Profile: chooses what kind of metadata the indexer should emphasize for each segment." & vbCrLf &
+            "Target bytes: the preferred segment size. The generator tries to end each segment near this size." & vbCrLf &
+            "Minimum bytes: the lower bound before the generator starts looking for a natural break point." & vbCrLf &
+            "Maximum bytes: the hard segment-size ceiling. A segment will not intentionally exceed this size."
+
+        If Not ShowCustomVariableInputForm(
+            generationPrompt,
+            $"{AN} Semantic-search index",
+            generationParameters) Then
+            Return
+        End If
+
+        selectedProfileDisplay = CStr(generationParameters(0).Value)
+        targetBytes = CInt(generationParameters(1).Value)
+        minimumBytes = CInt(generationParameters(2).Value)
+        maximumBytes = CInt(generationParameters(3).Value)
+
+        If Not profileDisplayMap.TryGetValue(selectedProfileDisplay, selectedProfile) Then
+            ShowCustomMessageBox("The selected semantic-search profile could not be resolved.")
+            Return
+        End If
+
+        If targetBytes <= 0 OrElse minimumBytes <= 0 OrElse maximumBytes <= 0 Then
+            ShowCustomMessageBox("Target bytes, minimum bytes, and maximum bytes must all be greater than zero.")
+            Return
+        End If
+
+        If minimumBytes > targetBytes Then
+            ShowCustomMessageBox("Minimum bytes must be less than or equal to target bytes.")
+            Return
+        End If
+
+        If targetBytes > maximumBytes Then
+            ShowCustomMessageBox("Target bytes must be less than or equal to maximum bytes.")
+            Return
+        End If
+
+        If System.IO.File.Exists(indexedTxtPath) Then
+            Dim overwriteAnswer As Integer = ShowCustomYesNoBox(
+                "The target output file already exists:" & vbCrLf & vbCrLf &
+                indexedTxtPath & vbCrLf & vbCrLf &
+                "Do you want to overwrite it?",
+                "Yes, overwrite",
+                "No, cancel")
+
+            If overwriteAnswer <> 1 Then
+                Return
+            End If
+
+            overwriteOutput = True
+        End If
 
         Using progressScope As New ProgressScope(
             "Generating semantic-search index",
@@ -185,14 +270,15 @@ Partial Public Class ThisAddIn
                         indexedTxtPath,
                         _context,
                         New SharedMethods.SemanticSearchIndexGeneratorOptions() With {
-                            .TargetBytes = 32 * 1024,
-                            .MinimumBytes = 16 * 1024,
-                            .MaximumBytes = 48 * 1024,
+                            .TargetBytes = targetBytes,
+                            .MinimumBytes = minimumBytes,
+                            .MaximumBytes = maximumBytes,
                             .SourceEncoding = detectedSourceEncoding,
                             .GeneratorVersion = "1.0.0",
-                            .SpecialTaskName = "HelpMe",
+                            .SpecialTaskName = "Indexer",
+                            .MetadataProfile = selectedProfile,
                             .MaximumMetadataAttempts = 2,
-                            .OverwriteOutput = False
+                            .OverwriteOutput = overwriteOutput
                         },
                         generationProgress,
                         progressScope.Token).ConfigureAwait(False)
@@ -207,6 +293,11 @@ Partial Public Class ThisAddIn
                     "Output file:" & vbCrLf &
                     generationResult.OutputPath & vbCrLf & vbCrLf &
                     "Detected source encoding: " & detectedSourceEncoding.EncodingName & "." & vbCrLf &
+                    "Profile: " & SharedMethods.GetSemanticSearchMetadataProfileDisplayName(selectedProfile) & "." & vbCrLf &
+                    "Segment sizing (target/min/max bytes): " &
+                    targetBytes.ToString(System.Globalization.CultureInfo.InvariantCulture) & " / " &
+                    minimumBytes.ToString(System.Globalization.CultureInfo.InvariantCulture) & " / " &
+                    maximumBytes.ToString(System.Globalization.CultureInfo.InvariantCulture) & "." & vbCrLf &
                     "Segments generated: " &
                     generationResult.SegmentCount.ToString(System.Globalization.CultureInfo.InvariantCulture) & ".")
             Catch ex As System.OperationCanceledException
@@ -2403,7 +2494,7 @@ Partial Public Class ThisAddIn
             End If
 
             If String.Equals(OtherPrompt.Trim(), "generateindex", StringComparison.OrdinalIgnoreCase) Then
-                Await GenerateSemanticSearchIndexForHelpMeAsync()
+                Await GenerateSemanticSearchIndexAsync()
                 Return
             End If
 

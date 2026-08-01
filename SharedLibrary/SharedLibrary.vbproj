@@ -606,6 +606,7 @@
     <Compile Include="Code\Core\LLM\ModelSelection\MultiModelSelectorForm.vb">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="Code\Core\Texthandling\SharedMethods.SemanticSearch.Interactive.vb" />
     <Compile Include="Code\Core\Texthandling\SharedMethods.SemanticSearch.Retriever.vb" />
     <Compile Include="Code\Core\Texthandling\SharedMethods.TextHandling.vb" />
     <Compile Include="Code\Core\Texthandling\SharedMethods.TextHandlingExcel.vb" />
