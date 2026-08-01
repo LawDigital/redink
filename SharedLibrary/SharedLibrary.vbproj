@@ -473,6 +473,7 @@
     <Compile Include="Code\Agents\SubAgentRuntimeHardening.vb" />
     <Compile Include="Code\Agents\SubAgentToolScopeInitializer.vb" />
     <Compile Include="Code\Agents\TaskStatusFooterParser.vb" />
+    <Compile Include="Code\Agents\TextTools.SemanticAndExport.vb" />
     <Compile Include="Code\Agents\TextTools.vb" />
     <Compile Include="Code\Agents\ToolCallSequencing.vb" />
     <Compile Include="Code\Agents\ToolDescribeTool.vb" />

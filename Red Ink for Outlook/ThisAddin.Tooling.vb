@@ -4514,7 +4514,7 @@ Partial Public Class ThisAddIn
             ' Agent layer (memory_*, skill_use, agent_*) — single-line dispatcher.
             If SharedLibrary.Agents.AgentToolRouter.IsAgentLayerTool(toolCall.ToolName) Then
                 Dim __agentJson = Await SharedLibrary.Agents.AgentToolRouter.TryHandleAsync(
-        toolCall.ToolName, toolCall.Arguments, CType(Me, SharedLibrary.Agents.ISubAgentHost), cancellationToken).ConfigureAwait(False)
+        toolCall.ToolName, toolCall.Arguments, CType(Me, SharedLibrary.Agents.ISubAgentHost), cancellationToken, _context).ConfigureAwait(False)
 
                 response.Response = If(__agentJson, "")
                 response.Success = Not String.IsNullOrWhiteSpace(response.Response)

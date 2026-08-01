@@ -21,12 +21,15 @@ Option Explicit On
 Imports System.IO
 Imports System.Text
 Imports System.Text.RegularExpressions
+Imports System.Threading
+Imports System.Threading.Tasks
 Imports Newtonsoft.Json
 Imports SharedLibrary.SharedLibrary
+Imports SharedLibrary.SharedLibrary.SharedContext
 
 Namespace Agents
 
-    Public NotInheritable Class TextTools
+    Partial Public NotInheritable Class TextTools
 
         Private Sub New()
         End Sub
@@ -38,29 +41,73 @@ Namespace Agents
         Public Shared Function IsTextTool(name As String) As Boolean
             If String.IsNullOrWhiteSpace(name) Then Return False
             Select Case name
-                Case ToolRead, ToolWrite, ToolSearch : Return True
-                Case Else : Return False
+                Case ToolRead, ToolWrite, ToolSearch
+                    Return True
+                Case Else
+                    Return IsExtendedTextTool(name)
             End Select
         End Function
 
         Public Shared Function BuildAll() As List(Of ModelConfig)
-            Return New List(Of ModelConfig) From {BuildRead(), BuildWrite(), BuildSearch()}
+            Dim tools As New List(Of ModelConfig) From {
+                BuildRead(),
+                BuildWrite(),
+                BuildSearch()
+            }
+
+            tools.AddRange(BuildExtendedTools())
+            Return tools
         End Function
 
         ' --------------------------------------------------------------- dispatch
 
         Public Shared Function Execute(toolName As String, arguments As IDictionary(Of String, Object)) As String
+            Return ExecuteAsync(toolName, arguments, Nothing, CancellationToken.None).GetAwaiter().GetResult()
+        End Function
+
+        Public Shared Async Function ExecuteAsync(toolName As String,
+                                                  arguments As IDictionary(Of String, Object),
+                                                  context As ISharedContext,
+                                                  Optional cancellationToken As CancellationToken = Nothing) As Task(Of String)
             Try
                 Select Case toolName
-                    Case ToolRead : Return ExecuteRead(arguments)
-                    Case ToolWrite : Return ExecuteWrite(arguments)
-                    Case ToolSearch : Return ExecuteSearch(arguments)
-                    Case Else : Return JsonConvert.SerializeObject(New With {Key .error = "unknown_text_tool", Key .tool = toolName})
+                    Case ToolRead
+                        Return ExecuteRead(arguments)
+
+                    Case ToolWrite
+                        Return ExecuteWrite(arguments)
+
+                    Case ToolSearch
+                        Return ExecuteSearch(arguments)
+
+                    Case Else
+                        Dim extendedResult As String =
+                            Await ExecuteExtendedAsync(toolName, arguments, context, cancellationToken).ConfigureAwait(False)
+
+                        If extendedResult IsNot Nothing Then
+                            Return extendedResult
+                        End If
+
+                        Return JsonConvert.SerializeObject(New With {
+                            Key .error = "unknown_text_tool",
+                            Key .tool = toolName
+                        })
                 End Select
             Catch uae As UnauthorizedAccessException
-                Return JsonConvert.SerializeObject(New With {Key .error = "access_denied", Key .message = uae.Message})
+                Return JsonConvert.SerializeObject(New With {
+                    Key .error = "access_denied",
+                    Key .message = uae.Message
+                })
+            Catch oce As OperationCanceledException
+                Return JsonConvert.SerializeObject(New With {
+                    Key .error = "cancelled",
+                    Key .message = "The operation was cancelled."
+                })
             Catch ex As Exception
-                Return JsonConvert.SerializeObject(New With {Key .error = "text_tool_failed", Key .message = ex.Message})
+                Return JsonConvert.SerializeObject(New With {
+                    Key .error = "text_tool_failed",
+                    Key .message = ex.Message
+                })
             End Try
         End Function
 

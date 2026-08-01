@@ -1388,13 +1388,16 @@ Partial Public Class ThisAddIn
         Try
             If doc.Revisions Is Nothing OrElse doc.Revisions.Count = 0 Then Exit Sub
 
-            For i As Integer = doc.Revisions.Count To 1 Step -1
-                Dim rev As Word.Revision = Nothing
-                Try
-                    rev = doc.Revisions(i)
-                Catch
-                    Continue For
-                End Try
+            ' Snapshot revisions first (O(1) enumerator access instead of O(n) ordinal
+            ' seeks per item), then reject from the end so removals do not shift the
+            ' indices of items still to be processed.
+            Dim allRevisions As New List(Of Word.Revision)()
+            For Each snapRev As Word.Revision In doc.Revisions
+                allRevisions.Add(snapRev)
+            Next
+
+            For i As Integer = allRevisions.Count - 1 To 0 Step -1
+                Dim rev As Word.Revision = allRevisions(i)
                 If rev Is Nothing Then Continue For
 
                 ' Check by enum value, not string

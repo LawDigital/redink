@@ -27,6 +27,17 @@ Notes:
 | `text_read` | Reads a UTF-8 text file within the allowed workspace boundary. | Yes | Yes | Yes |
 | `text_write` | Writes, replaces, or appends a UTF-8 text file. | Yes | Yes | Yes |
 | `text_search` | Searches text files for substring or regex matches. | Yes | Yes | Yes |
+| `text_export_to_text` | Silently extracts readable text from a supported file or from supported files in a directory and writes UTF-8 `.txt` outputs without host UI prompts. | Yes | Yes | Yes |
+| `semantic_index_create_from_file` | Creates a self-indexed semantic-search text file from an existing text file. | Yes | Yes | Yes |
+| `semantic_index_create_from_text` | Creates a self-indexed semantic-search text file from supplied in-memory text. | Yes | Yes | Yes |
+| `semantic_index_validate` | Validates whether a file is a readable semantic-search index and returns basic counts. | Yes | Yes | Yes |
+| `semantic_index_search` | Runs an initial semantic retrieval against an indexed text file and returns grounded source excerpts plus internal handles for continuation and verification. | Yes | Yes | Yes |
+| `semantic_index_search_continuation` | Continues a semantic retrieval conversation using a prior `conversation_handle`. | Yes | Yes | Yes |
+| `semantic_index_load_entries` | Loads exact source ranges for trusted semantic-index entry IDs without re-running semantic selection. | Yes | Yes | Yes |
+| `semantic_index_verify_answer` | Verifies whether a drafted answer is supported by the exact excerpts returned by a prior retrieval handle. | Yes | Yes | Yes |
+| `semantic_index_retrieve_after_verification` | Retrieves additional semantic-index evidence after verification reports that more sources are needed. | Yes | Yes | Yes |
+| `semantic_index_reset_conversation` | Resets and removes a stored semantic-search conversation handle. | Yes | Yes | Yes |
+| `semantic_index_invalidate_cache` | Invalidates one indexed-file cache entry or the full semantic-search cache. | Yes | Yes | Yes |
 | `js_run` | Executes sandboxed JavaScript in a hidden WebView2 environment. | Yes | Yes | Yes |
 | `python_execute` | Executes sandboxed Python code through the configured secure Python agent and may return structured results or published output files.1) | Yes | Yes | Yes |
 | `skill_use` | Loads a skill's instructions and file inventory for guided execution. Word and Outlook Local Chat expose this generic loader directly. AutoPilot does not advertise the generic `skill_use` tool, but it can still run selected skills through dynamic `skill_<name>` tools that route internally to the same skill loader. | Yes | Yes | No |
