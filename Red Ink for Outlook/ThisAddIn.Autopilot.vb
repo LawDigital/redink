@@ -184,7 +184,7 @@ Partial Public Class ThisAddIn
 
     Private Const SP_AutoPilot_HoldingResponse As String =
         "Thank you for your message. This is an automated acknowledgement — your request has not yet been processed. " &
-        "I will respond with a substantive reply once your request has been handled. {StatusMessage}" &
+        "I will respond with a substantive reply once your request has been handled. {StatusMessage} " &
         "If you need immediate assistance, you can also use the " & AN & " add-in's corresponding feature to have your tasks done right away. Use 'Help me, Inky' or the chatbot on https://redink.ai if you need instructions. Last but not least, a similar 'agent mode' is available in the Local Chat feature in the Outlook add-in if configured accordingly. " &
         "— " & AN6
 
@@ -2367,7 +2367,9 @@ Partial Public Class ThisAddIn
 
                         Dim attachmentsToSend = If(hasPartialOutput, resultAttachmentsAbort, Nothing)
                         Await SwitchToUi(Sub() SendReplyToSender(mi, abortMessage, attachmentsToSend, tagAsAutoReply:=True, isHoldingOnly:=True))
-                        ' Do NOT tag as processed — allow catch-up to pick it up again
+                        Await SwitchToUi(Sub() MarkMailGroupRepliesAsAnsweredAndEligible(mi))
+                        ' Do NOT tag the original mail as processed — allow catch-up to pick it up again.
+                        ' Only the sent reply copies are promoted to cleanup-eligible status.
                         Interlocked.Increment(_apSessionReplyCount)
                         RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
                         ApDashboardLog($"✉ Abort notice sent to: {mailInfo.SenderEmail}" & If(hasPartialOutput, $" (with {resultAttachmentsAbort.Count} partial attachment(s))", ""), "info")
@@ -2456,6 +2458,7 @@ Partial Public Class ThisAddIn
                     End If
 
                     Await SwitchToUi(Sub() SendReplyToSender(mi, holdingResponse, Nothing, tagAsAutoReply:=True, isHoldingOnly:=True))
+                    Await SwitchToUi(Sub() MarkMailGroupRepliesAsAnsweredAndEligible(mi))
                     _apHoldingOnlyEntryIds.TryAdd(entryId, True)
 
                     ApDashboardLog("Holding response sent to: " & mailInfo.SenderEmail, "step")

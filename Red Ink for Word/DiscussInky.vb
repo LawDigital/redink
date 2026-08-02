@@ -1027,43 +1027,44 @@ Public Class DiscussInky
             Return True
         End If
 
-        ' Determine if the loaded knowledge AND all attached indexes are persisted durably.
+        ' Determine if every currently loaded knowledge source is persisted durably.
         Dim persistPath As String = GetPersistedKnowledgeFilePath()
-        Dim knowledgePersisted As Boolean = _chkPersistKnowledge.Checked AndAlso File.Exists(persistPath)
+
+        Dim currentHasKnowledge As Boolean =
+            Not String.IsNullOrWhiteSpace(_knowledgeContent) OrElse
+            Not String.IsNullOrWhiteSpace(_cachedKnowledgeContent)
+
+        Dim currentHasIndexes As Boolean = _attachedIndexes.Count > 0
+
+        Dim knowledgePersisted As Boolean =
+            Not currentHasKnowledge OrElse
+            (_chkPersistKnowledge.Checked AndAlso File.Exists(persistPath))
+
         Dim indexesPersisted As Boolean =
-            _attachedIndexes.Count = 0 OrElse
+            Not currentHasIndexes OrElse
             (_chkPersistKnowledge.Checked AndAlso Directory.Exists(GetSessionIndexDirectoryPath()))
+
         Dim isPersistedToFile As Boolean = knowledgePersisted AndAlso indexesPersisted
 
-        Dim message As String
+        If isPersistedToFile Then
+            Return True
+        End If
+
+        Dim message As String =
+            "DiscussInky is about to close." &
+            vbCrLf &
+            vbCrLf &
+            "⚠ The loaded knowledge is NOT persisted and will not be available when you return, " &
+            "unless the original source documents still exist in their original location or the current knowledge/indexes are already stored in the archive." &
+            vbCrLf &
+            vbCrLf &
+            "The current chat will be stored." &
+            vbCrLf &
+            vbCrLf &
+            "You can activate persistence with the applicable checkbox or use 'Archive' to store the chat. Do you want to close now? "
+
         Dim closeButtonText As String = "Close"
         Dim keepOpenButtonText As String = "Keep open"
-
-        If isPersistedToFile Then
-            ' Knowledge IS persisted - safe to close
-            message = "DiscussInky is about to close." &
-                      vbCrLf &
-                      vbCrLf &
-                      "✓ Knowledge has been persisted." &
-                      vbCrLf &
-                      "✓ The current chat will be stored." &
-                      vbCrLf &
-                      vbCrLf &
-                      "You can safely close now. Both will be available when you return. However, for longer term storage of your chat, use 'Archive'. "
-        Else
-            ' Knowledge is NOT persisted - warn user
-            message = "DiscussInky is about to close." &
-                      vbCrLf &
-                      vbCrLf &
-                      "⚠ The loaded knowledge is NOT persisted and will not be available when you return, " &
-                      "unless the original source documents still exist in their original location or the current knowledge/indexes are already stored in the archive." &
-                      vbCrLf &
-                      vbCrLf &
-                      "The current chat will be stored." &
-                      vbCrLf &
-                      vbCrLf &
-                      "You can activate persistence with the applicable checkbox or use 'Archive' to store the chat. Do you want to close now? "
-        End If
 
         Dim answer As Integer = ShowCustomYesNoBox(message, closeButtonText, keepOpenButtonText)
 

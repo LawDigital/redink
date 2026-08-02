@@ -126,6 +126,136 @@ Namespace SharedLibrary
             End Try
         End Sub
 
+        ''' <summary>
+        ''' Attaches a lightweight, self-disposing watchdog to a TopMost shared dialog
+        ''' so it can surface a same-process foreground window (e.g. Word's native
+        ''' "Save changes?" prompt) that would otherwise stay hidden behind it.
+        '''
+        ''' A single Deactivate check is unreliable: Windows may report
+        ''' GetForegroundWindow() as zero or still our own handle while activation is
+        ''' in transit, so the foreign prompt can be missed permanently. This helper
+        ''' polls on a short WinForms timer that runs on the dialog's own UI thread
+        ''' through the message pump ShowDialog is already spinning, then calls the
+        ''' existing PromoteForeignForegroundDialog logic. The timer is created,
+        ''' started, and — via the dialog's FormClosed event — stopped and disposed
+        ''' automatically, so callers do not have to change their ShowDialog control
+        ''' flow. Ownership and TopMost policy are untouched. Safe no-op on failure.
+        ''' </summary>
+        Public Shared Sub AttachForeignForegroundWatchdog(dialog As Form)
+            If dialog Is Nothing Then Return
+            Try
+                Dim watchdog As New System.Windows.Forms.Timer()
+                watchdog.Interval = 100
+
+                Dim tick As EventHandler = Nothing
+                tick =
+                    Sub(s As Object, ev As System.EventArgs)
+                        PromoteForeignForegroundDialog(dialog)
+                    End Sub
+
+                Dim closed As System.Windows.Forms.FormClosedEventHandler = Nothing
+                closed =
+                    Sub(s As Object, ev As System.Windows.Forms.FormClosedEventArgs)
+                        Try
+                            RemoveHandler dialog.FormClosed, closed
+                            RemoveHandler watchdog.Tick, tick
+                            watchdog.Stop()
+                            watchdog.Dispose()
+                        Catch
+                        End Try
+                    End Sub
+
+                AddHandler watchdog.Tick, tick
+                AddHandler dialog.FormClosed, closed
+                watchdog.Start()
+            Catch
+                ' Never throw from dialog setup.
+            End Try
+        End Sub
+
+
+        ''' <summary>
+        ''' When a TopMost shared dialog is showing and a window belonging to the
+        ''' SAME (host) process — e.g. Word's native "Save changes?" prompt raised
+        ''' while the user is closing the application — steals the input focus, that
+        ''' native prompt can end up hidden behind our TopMost dialog. It then holds
+        ''' focus but is invisible, so the UI appears deadlocked.
+        '''
+        ''' This helper detects that situation from the dialog's Deactivate event and
+        ''' promotes the foreign foreground window above our dialog (making it visible
+        ''' and foreground) so the user can act on it. It only touches windows of our
+        ''' own process and does NOT change the dialog's TopMost state or its owner,
+        ''' so it introduces no Z-order/owner regressions. Safe no-op on failure.
+        ''' </summary>
+        Public Shared Sub PromoteForeignForegroundDialog(dialog As Form)
+            If dialog Is Nothing Then Return
+            Try
+                System.Diagnostics.Debug.WriteLine("[PromoteForeign] Deactivate fired.")
+
+                Dim fg As IntPtr = NativeMethods.GetForegroundWindow()
+                System.Diagnostics.Debug.WriteLine("[PromoteForeign] fg=" & fg.ToString() & " dialog=" & dialog.Handle.ToString())
+                If fg = IntPtr.Zero OrElse fg = dialog.Handle Then
+                    System.Diagnostics.Debug.WriteLine("[PromoteForeign] EXIT: fg is zero or is our own dialog.")
+                    Return
+                End If
+
+                ' Restrict to windows of our own (host) process, e.g. Word's prompts.
+                Dim fgPid As Integer = 0
+                NativeMethods.GetWindowThreadProcessId(fg, fgPid)
+                If fgPid = 0 Then
+                    System.Diagnostics.Debug.WriteLine("[PromoteForeign] EXIT: fgPid is 0.")
+                    Return
+                End If
+
+                Dim ourPid As Integer = System.Diagnostics.Process.GetCurrentProcess().Id
+                System.Diagnostics.Debug.WriteLine("[PromoteForeign] fgPid=" & fgPid & " ourPid=" & ourPid)
+                If fgPid <> ourPid Then
+                    System.Diagnostics.Debug.WriteLine("[PromoteForeign] EXIT: foreground window belongs to a different process.")
+                    Return
+                End If
+
+                System.Diagnostics.Debug.WriteLine("[PromoteForeign] Proceeding to move/demote our dialog.")
+
+                ' A same-process window (e.g. Word's native "Save changes?" or
+                ' "You cannot close Microsoft Word because a dialogue box is open"
+                ' prompt) has taken the foreground. Because our dialog is TopMost, it
+                ' shares the topmost band with — and keeps covering — that prompt, so
+                ' merely re-promoting the prompt does not surface it. Instead, drop our
+                ' own dialog out of the topmost band so the foreign prompt can come to
+                ' the front, and remember to restore TopMost once we are re-activated
+                ' (i.e. after the user dismisses that prompt).
+                If dialog.TopMost Then
+                    dialog.TopMost = False
+
+                    ' One-shot restore: when our dialog regains activation, put it back
+                    ' into the topmost band so later focus changes still keep it above
+                    ' the host. Detaches itself so it only fires once per demotion.
+                    Dim restore As EventHandler = Nothing
+                    restore =
+                        Sub(s As Object, ev As System.EventArgs)
+                            Try
+                                RemoveHandler dialog.Activated, restore
+                                dialog.TopMost = True
+                            Catch
+                            End Try
+                        End Sub
+                    AddHandler dialog.Activated, restore
+                End If
+
+                Const HWND_TOP As Integer = 0
+                Const SWP_NOMOVE As UInteger = &H2UI
+                Const SWP_NOSIZE As UInteger = &H1UI
+                Const SWP_SHOWWINDOW As UInteger = &H40UI
+
+                NativeMethods.SetWindowPos(fg, New IntPtr(HWND_TOP), 0, 0, 0, 0,
+                                           SWP_NOMOVE Or SWP_NOSIZE Or SWP_SHOWWINDOW)
+                NativeMethods.SetForegroundWindow(fg)
+            Catch
+                ' Never throw from an event-driven watchdog.
+            End Try
+        End Sub
+
+
         Public Shared Function IfOwnerOnCurrentThread(owner As IWin32Window) As IWin32Window
             If owner Is Nothing Then Return Nothing
 

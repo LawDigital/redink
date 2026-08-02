@@ -403,6 +403,14 @@ Public Class frmAIChat
     }
 
     ''' <summary>
+    ''' Maximum active-document size (in characters) allowed when "Include document"
+    ''' is checked. Documents above this threshold cause btnSend_Click to abort early
+    ''' and automatically uncheck chkIncludeDocText, avoiding UI stalls on very large
+    ''' documents. Empirically, roughly 2,000,000 characters still performs well.
+    ''' </summary>
+    Private Const MaxIncludeDocumentCharacters As Integer = 2000000
+
+    ''' <summary>
     ''' When checked, includes current selection or cursor context in prompt.
     ''' If no selection exists, GetCursorContext() extracts CursorPositionCount chars before/after cursor.
     ''' Mutually exclusive with chkIncludeDocText in UI logic.
@@ -1110,6 +1118,28 @@ Public Class frmAIChat
 
                 ShowCustomMessageBox("There is no active Word document. Please open or activate a document, then try again.")
                 Return
+            End If
+
+            ' ──────────────────────────────────────────────────────────────
+            ' STEP 3b: Guard Against Oversized Documents (Include Document)
+            ' ──────────────────────────────────────────────────────────────
+            ' Including the entire document for very large files can stall Word.
+            ' Read the character count cheaply via Content.End (O(1), no text
+            ' extraction), and if it exceeds the threshold, automatically uncheck
+            ' "Include document" and abort with a message before any expensive work.
+            If chkIncludeDocText.Checked Then
+                Dim documentCharacterCount As Integer = 0
+                Try
+                    documentCharacterCount = appGuard.ActiveDocument.Content.End
+                Catch
+                    documentCharacterCount = 0
+                End Try
+
+                If documentCharacterCount > MaxIncludeDocumentCharacters Then
+                    chkIncludeDocText.Checked = False
+                    ShowCustomMessageBox($"The active document is too large to include in full ({documentCharacterCount:N0} characters, limit is {MaxIncludeDocumentCharacters:N0}). ""Include document"" has been unchecked. Please use 'Include selection' instead after selecting the relevant portion of the document, and try again.")
+                    Return
+                End If
             End If
 
             ' ──────────────────────────────────────────────────────────────
