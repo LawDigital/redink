@@ -23,6 +23,7 @@ Option Explicit On
 
 Imports System.Threading
 Imports System.Threading.Tasks
+Imports SharedLibrary.SharedLibrary.SharedContext
 
 Namespace Agents
 
@@ -40,7 +41,8 @@ Namespace Agents
         Public Shared Async Function TryHandleAsync(toolName As String,
                                                     arguments As IDictionary(Of String, Object),
                                                     host As ISubAgentHost,
-                                                    Optional cancellationToken As CancellationToken = Nothing) As Task(Of String)
+                                                    Optional cancellationToken As CancellationToken = Nothing,
+                                                    Optional sharedContext As ISharedContext = Nothing) As Task(Of String)
             If String.IsNullOrWhiteSpace(toolName) Then Return Nothing
 
             If MemoryTools.IsMemoryTool(toolName) Then
@@ -48,7 +50,7 @@ Namespace Agents
             End If
 
             If TextTools.IsTextTool(toolName) Then
-                Return TextTools.Execute(toolName, arguments)
+                Return Await TextTools.ExecuteAsync(toolName, arguments, sharedContext, cancellationToken).ConfigureAwait(False)
             End If
 
             If FileTools.IsFileTool(toolName) Then

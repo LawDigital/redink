@@ -473,6 +473,7 @@
     <Compile Include="Code\Agents\SubAgentRuntimeHardening.vb" />
     <Compile Include="Code\Agents\SubAgentToolScopeInitializer.vb" />
     <Compile Include="Code\Agents\TaskStatusFooterParser.vb" />
+    <Compile Include="Code\Agents\TextTools.SemanticAndExport.vb" />
     <Compile Include="Code\Agents\TextTools.vb" />
     <Compile Include="Code\Agents\ToolCallSequencing.vb" />
     <Compile Include="Code\Agents\ToolDescribeTool.vb" />
@@ -595,6 +596,7 @@
     <Compile Include="Code\Core\LLM\SharedMethods.MCP.vb" />
     <Compile Include="Code\Core\LLM\SharedMethods.MCPOAuth.vb" />
     <Compile Include="Code\Core\LLM\SharedMethods.Signing.vb" />
+    <Compile Include="Code\Core\Texthandling\SharedMethods.SemanticSearch.CoreAndGenerator.vb" />
     <Compile Include="Code\Core\Texthandling\SharedMethods.Diff.vb" />
     <Compile Include="Code\Core\LLM\ImageDecoder.vb" />
     <Compile Include="Code\Core\LLM\JsonTemplateFormatter.vb" />
@@ -605,6 +607,8 @@
     <Compile Include="Code\Core\LLM\ModelSelection\MultiModelSelectorForm.vb">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="Code\Core\Texthandling\SharedMethods.SemanticSearch.Interactive.vb" />
+    <Compile Include="Code\Core\Texthandling\SharedMethods.SemanticSearch.Retriever.vb" />
     <Compile Include="Code\Core\Texthandling\SharedMethods.TextHandling.vb" />
     <Compile Include="Code\Core\Texthandling\SharedMethods.TextHandlingExcel.vb" />
     <Compile Include="Code\Core\UI\MCPOAuthBrowserForm.vb">

@@ -124,7 +124,7 @@
     <value>True</value>
   </metadata>
   <data name="RI_ConvertDocToTxt.ScreenTip" xml:space="preserve">
-    <value>Will convert PDFs and other supported files in a directory (and subdirectories) to TXT files for easier analysis by AI (will do OCR, if available, and you can also have Markdown formatted files created in this case)</value>
+    <value>Will convert PDFs and other supported files in a directory (and subdirectories) to Txt files for easier analysis by AI (will do OCR, if available, and you can also have Markdown formatted files created in this case); generation of semantic search indexes also supported</value>
   </data>
   <metadata name="Group2.Locked" type="System.Boolean, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089">
     <value>True</value>

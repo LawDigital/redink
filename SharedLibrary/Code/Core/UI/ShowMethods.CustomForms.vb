@@ -339,6 +339,9 @@ Namespace SharedLibrary
 
             ' Show dialog.
             inputForm.TopMost = True
+
+            SharedMethods.AttachForeignForegroundWatchdog(inputForm)
+
             Dim ownerWnd As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
             If ownerWnd IsNot Nothing Then
                 inputForm.ShowDialog(ownerWnd)
@@ -685,8 +688,13 @@ Namespace SharedLibrary
             inputForm.BringToFront()
             inputForm.Focus()
 
-            ' Show the dialog, must be owned by Outlook (only then the title may contains "Browser").
+            SharedMethods.AttachForeignForegroundWatchdog(inputForm)
+
             Dim Result As DialogResult
+
+
+            ' Show the dialog, must be owned by Outlook (only then the title may contains "Browser").
+
             If title.Contains("Browser") Then
                 ' Activate Outlook window via Win32 (no COM object needed since we're already in-process).
                 Dim outlookHwnd As IntPtr = FindWindow("rctrl_renwnd32", Nothing)
@@ -1063,7 +1071,9 @@ Namespace SharedLibrary
 
                 messageForm.Dispose()
             Else
-                ' Show modal (original behavior)
+                ' Show modal.
+                SharedMethods.AttachForeignForegroundWatchdog(messageForm)
+
                 Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
                 If __owner IsNot Nothing Then
                     messageForm.ShowDialog(__owner)
@@ -1267,6 +1277,8 @@ Namespace SharedLibrary
             clientW = System.Math.Min(clientW, maxWindowWidth)
             clientH = System.Math.Min(clientH, maxWindowHeight)
             messageForm.ClientSize = New System.Drawing.Size(clientW, clientH)
+
+            SharedMethods.AttachForeignForegroundWatchdog(messageForm)
 
             If autoCloseSeconds.HasValue Then
                 Dim remaining As System.Int32 = autoCloseSeconds.Value
@@ -1533,6 +1545,8 @@ Namespace SharedLibrary
                         End Try
                     End Sub
             End If
+
+            SharedMethods.AttachForeignForegroundWatchdog(RTFMessageForm)
 
             If autoCloseSeconds.HasValue AndAlso autoCloseSeconds > 0 Then
                 Dim remainingTime As Integer = autoCloseSeconds.Value
@@ -1945,13 +1959,15 @@ Namespace SharedLibrary
             HTMLMessageForm.Controls.Add(htmlBrowser)
             HTMLMessageForm.Controls.Add(bottomFlow)
 
-            ' Keep topmost on deactivate
+            ' Keep topmost on deactivate.
             AddHandler HTMLMessageForm.Deactivate, Sub(sender, e)
                                                        Try
                                                            HTMLMessageForm.TopMost = True
                                                        Catch
                                                        End Try
                                                    End Sub
+
+            SharedMethods.AttachForeignForegroundWatchdog(HTMLMessageForm)
 
             ' Signal when closed and invoke onClose
             AddHandler HTMLMessageForm.FormClosed, Sub(sender, e)
@@ -2124,13 +2140,15 @@ Namespace SharedLibrary
             HTMLMessageForm.Controls.Add(htmlBrowser)
             HTMLMessageForm.Controls.Add(bottomFlow)
 
-            ' Keep topmost on deactivate
+            ' Keep topmost on deactivate.
             AddHandler HTMLMessageForm.Deactivate, Sub(sender, e)
                                                        Try
                                                            HTMLMessageForm.TopMost = True
                                                        Catch
                                                        End Try
                                                    End Sub
+
+            SharedMethods.AttachForeignForegroundWatchdog(HTMLMessageForm)
 
             ' Signal when closed
             AddHandler HTMLMessageForm.FormClosed, Sub(sender, e)
@@ -2889,6 +2907,8 @@ Namespace SharedLibrary
         End Sub
 
             ' Show dialog.
+            SharedMethods.AttachForeignForegroundWatchdog(styledForm)
+
             styledForm.BringToFront()
             styledForm.Focus()
             styledForm.Activate()

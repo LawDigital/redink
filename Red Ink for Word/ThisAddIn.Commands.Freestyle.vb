@@ -116,6 +116,265 @@ Partial Public Class ThisAddIn
         }
     End Class
 
+    Private Async Function GenerateSemanticSearchIndexAsync() As System.Threading.Tasks.Task
+        Dim sourceTxtPath As String = ""
+        Dim indexedTxtPath As String = ""
+        Dim selectedProfile As SharedMethods.SemanticSearchMetadataProfile =
+            SharedMethods.SemanticSearchMetadataProfile.Generic
+        Dim targetBytes As Integer = SharedMethods.SemanticSearchDefaultTargetBytes
+        Dim minimumBytes As Integer = SharedMethods.SemanticSearchDefaultMinimumBytes
+        Dim maximumBytes As Integer = SharedMethods.SemanticSearchDefaultMaximumBytes
+        Dim overwriteOutput As Boolean = False
+
+        DragDropFormLabel = "Select the text file to process for semantic indexing."
+        DragDropFormFilter =
+            "Text files|*.txt;*.md;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.yaml;*.yml|" &
+            "All files (*.*)|*.*"
+
+        Try
+            Using form As New DragDropForm(DragDropMode.FileOnly)
+                If form.ShowDialog() <> DialogResult.OK Then
+                    Return
+                End If
+
+                sourceTxtPath = form.SelectedFilePath
+            End Using
+        Finally
+            DragDropFormLabel = ""
+            DragDropFormFilter = ""
+        End Try
+
+        If String.IsNullOrWhiteSpace(sourceTxtPath) Then
+            ShowCustomMessageBox("No source file was selected.")
+            Return
+        End If
+
+        Dim sourceDirectory As String = System.IO.Path.GetDirectoryName(sourceTxtPath)
+        Dim sourceFileNameWithoutExtension As String = System.IO.Path.GetFileNameWithoutExtension(sourceTxtPath)
+        Dim detectedSourceEncoding As System.Text.Encoding = DetectSemanticSearchSourceEncoding(sourceTxtPath)
+
+        indexedTxtPath = System.IO.Path.Combine(sourceDirectory, sourceFileNameWithoutExtension & ".indexed.txt")
+
+        Dim availableProfiles As System.Collections.Generic.List(Of SharedMethods.SemanticSearchMetadataProfile) =
+            SharedMethods.GetSemanticSearchMetadataProfiles()
+        Dim profileDisplayMap As New System.Collections.Generic.Dictionary(Of String, SharedMethods.SemanticSearchMetadataProfile)(
+            StringComparer.Ordinal)
+        Dim profileDisplayOptions As New System.Collections.Generic.List(Of String)()
+
+        For Each profile As SharedMethods.SemanticSearchMetadataProfile In availableProfiles
+            Dim displayName As String = SharedMethods.GetSemanticSearchMetadataProfileDisplayName(profile)
+            If Not profileDisplayMap.ContainsKey(displayName) Then
+                profileDisplayMap.Add(displayName, profile)
+                profileDisplayOptions.Add(displayName)
+            End If
+        Next
+
+        Dim selectedProfileDisplay As String =
+            SharedMethods.GetSemanticSearchMetadataProfileDisplayName(selectedProfile)
+
+        Dim generationParameters() As SLib.InputParameter = {
+            New SLib.InputParameter("Profile", selectedProfileDisplay, profileDisplayOptions),
+            New SLib.InputParameter("Target bytes", targetBytes),
+            New SLib.InputParameter("Minimum bytes", minimumBytes),
+            New SLib.InputParameter("Maximum bytes", maximumBytes)
+        }
+
+        Dim generationPrompt As String =
+            "Please configure the semantic-search index generation settings." & vbCrLf & vbCrLf &
+            "All size values are UTF-8 byte counts, not character counts." & vbCrLf & vbCrLf &
+            "Profile: chooses what kind of metadata the indexer should emphasize for each segment." & vbCrLf &
+            "Target bytes: the preferred segment size. The generator tries to end each segment near this size." & vbCrLf &
+            "Minimum bytes: the lower bound before the generator starts looking for a natural break point." & vbCrLf &
+            "Maximum bytes: the hard segment-size ceiling. A segment will not intentionally exceed this size."
+
+        If Not ShowCustomVariableInputForm(
+            generationPrompt,
+            $"{AN} Semantic-search index",
+            generationParameters) Then
+            Return
+        End If
+
+        selectedProfileDisplay = CStr(generationParameters(0).Value)
+        targetBytes = CInt(generationParameters(1).Value)
+        minimumBytes = CInt(generationParameters(2).Value)
+        maximumBytes = CInt(generationParameters(3).Value)
+
+        If Not profileDisplayMap.TryGetValue(selectedProfileDisplay, selectedProfile) Then
+            ShowCustomMessageBox("The selected semantic-search profile could not be resolved.")
+            Return
+        End If
+
+        If targetBytes <= 0 OrElse minimumBytes <= 0 OrElse maximumBytes <= 0 Then
+            ShowCustomMessageBox("Target bytes, minimum bytes, and maximum bytes must all be greater than zero.")
+            Return
+        End If
+
+        If minimumBytes > targetBytes Then
+            ShowCustomMessageBox("Minimum bytes must be less than or equal to target bytes.")
+            Return
+        End If
+
+        If targetBytes > maximumBytes Then
+            ShowCustomMessageBox("Target bytes must be less than or equal to maximum bytes.")
+            Return
+        End If
+
+        If System.IO.File.Exists(indexedTxtPath) Then
+            Dim overwriteAnswer As Integer = ShowCustomYesNoBox(
+                "The target output file already exists:" & vbCrLf & vbCrLf &
+                indexedTxtPath & vbCrLf & vbCrLf &
+                "Do you want to overwrite it?",
+                "Yes, overwrite",
+                "No, cancel")
+
+            If overwriteAnswer <> 1 Then
+                Return
+            End If
+
+            overwriteOutput = True
+        End If
+
+        Using progressScope As New ProgressScope(
+            "Generating semantic-search index",
+            "Preparing source file ...",
+            1)
+
+            Try
+                ProgressScope.Report(
+                    0,
+                    1,
+                    "Preparing '" & System.IO.Path.GetFileName(sourceTxtPath) & "' ...")
+
+                Dim generationProgress As New System.Progress(Of SharedMethods.SemanticSearchIndexGenerationProgress)(
+                    Sub(update As SharedMethods.SemanticSearchIndexGenerationProgress)
+                        Dim segmentCount As Integer = System.Math.Max(1, update.SegmentCount)
+                        Dim segmentNumber As Integer = System.Math.Max(0, System.Math.Min(update.SegmentNumber, segmentCount))
+                        Dim statusMessage As String = If(update.Message, "").Trim()
+
+                        If String.IsNullOrWhiteSpace(statusMessage) Then
+                            statusMessage = "Generating semantic metadata"
+                        End If
+
+                        ProgressScope.Report(
+                            segmentNumber,
+                            segmentCount,
+                            statusMessage & " (" &
+                            segmentNumber.ToString(System.Globalization.CultureInfo.InvariantCulture) & "/" &
+                            segmentCount.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                            If(String.IsNullOrWhiteSpace(update.SegmentId), "", ", " & update.SegmentId) & ")")
+                    End Sub)
+
+                Dim generationResult As SharedMethods.SemanticSearchIndexGenerationResult =
+                    Await SharedMethods.CreateSemanticSearchIndexedTextFileAsync(
+                        sourceTxtPath,
+                        indexedTxtPath,
+                        _context,
+                        New SharedMethods.SemanticSearchIndexGeneratorOptions() With {
+                            .TargetBytes = targetBytes,
+                            .MinimumBytes = minimumBytes,
+                            .MaximumBytes = maximumBytes,
+                            .SourceEncoding = detectedSourceEncoding,
+                            .GeneratorVersion = "1.0.0",
+                            .SpecialTaskName = "Indexer",
+                            .MetadataProfile = selectedProfile,
+                            .MaximumMetadataAttempts = 2,
+                            .OverwriteOutput = overwriteOutput
+                        },
+                        generationProgress,
+                        progressScope.Token).ConfigureAwait(False)
+
+                ProgressScope.Report(
+                    System.Math.Max(1, generationResult.SegmentCount),
+                    System.Math.Max(1, generationResult.SegmentCount),
+                    "Completed successfully.")
+
+                ShowCustomMessageBox(
+                    "Semantic-search index created successfully." & vbCrLf & vbCrLf &
+                    "Output file:" & vbCrLf &
+                    generationResult.OutputPath & vbCrLf & vbCrLf &
+                    "Detected source encoding: " & detectedSourceEncoding.EncodingName & "." & vbCrLf &
+                    "Profile: " & SharedMethods.GetSemanticSearchMetadataProfileDisplayName(selectedProfile) & "." & vbCrLf &
+                    "Segment sizing (target/min/max bytes): " &
+                    targetBytes.ToString(System.Globalization.CultureInfo.InvariantCulture) & " / " &
+                    minimumBytes.ToString(System.Globalization.CultureInfo.InvariantCulture) & " / " &
+                    maximumBytes.ToString(System.Globalization.CultureInfo.InvariantCulture) & "." & vbCrLf &
+                    "Segments generated: " &
+                    generationResult.SegmentCount.ToString(System.Globalization.CultureInfo.InvariantCulture) & ".")
+            Catch ex As System.OperationCanceledException
+                ProgressScope.Report(0, 1, "Cancelled.")
+                ShowCustomMessageBox("Semantic-search index generation was cancelled.")
+            Catch ex As System.Exception
+                ProgressScope.Report(0, 1, "Failed: " & ex.Message)
+                ShowCustomMessageBox(
+                    "The semantic-search index could not be created." & vbCrLf & vbCrLf &
+                    "Target output file:" & vbCrLf &
+                    indexedTxtPath & vbCrLf & vbCrLf &
+                    "Error:" & vbCrLf &
+                    ex.Message)
+            End Try
+        End Using
+    End Function
+
+    Private Shared Function DetectSemanticSearchSourceEncoding(path As String) As System.Text.Encoding
+        Dim fileBytes As Byte() = System.IO.File.ReadAllBytes(path)
+
+        If fileBytes.Length >= 4 Then
+            If fileBytes(0) = &HFF AndAlso
+               fileBytes(1) = &HFE AndAlso
+               fileBytes(2) = &H0 AndAlso
+               fileBytes(3) = &H0 Then
+                Return New System.Text.UTF32Encoding(False, True)
+            End If
+
+            If fileBytes(0) = &H0 AndAlso
+               fileBytes(1) = &H0 AndAlso
+               fileBytes(2) = &HFE AndAlso
+               fileBytes(3) = &HFF Then
+                Return New System.Text.UTF32Encoding(True, True)
+            End If
+        End If
+
+        If fileBytes.Length >= 3 Then
+            If fileBytes(0) = &HEF AndAlso
+               fileBytes(1) = &HBB AndAlso
+               fileBytes(2) = &HBF Then
+                Return New System.Text.UTF8Encoding(True, True)
+            End If
+        End If
+
+        If fileBytes.Length >= 2 Then
+            If fileBytes(0) = &HFF AndAlso
+               fileBytes(1) = &HFE Then
+                Return System.Text.Encoding.Unicode
+            End If
+
+            If fileBytes(0) = &HFE AndAlso
+               fileBytes(1) = &HFF Then
+                Return System.Text.Encoding.BigEndianUnicode
+            End If
+        End If
+
+        If fileBytes.Length = 0 Then
+            Return New System.Text.UTF8Encoding(False, True)
+        End If
+
+        If IsValidSemanticSearchUtf8(fileBytes) Then
+            Return New System.Text.UTF8Encoding(False, True)
+        End If
+
+        Return System.Text.Encoding.Default
+    End Function
+
+    Private Shared Function IsValidSemanticSearchUtf8(data As Byte()) As Boolean
+        Try
+            Dim utf8 As New System.Text.UTF8Encoding(False, True)
+            utf8.GetCharCount(data, 0, data.Length)
+            Return True
+        Catch ex As System.Text.DecoderFallbackException
+            Return False
+        End Try
+    End Function
+
     ''' <summary>
     ''' Checks if a trigger placeholder at a given index is wrapped in XML tags.
     ''' </summary>
@@ -1386,6 +1645,7 @@ Partial Public Class ThisAddIn
                 ' JSON / TEMPLATES (selection required)
                 AddItem("generateresponsetemplate", "Generate a JSON response template from selected JSON + description.")
                 AddItem("generateresponsekey", "Generate a JSON response key from selected JSON + description.")
+                AddItem("generateindex", "Create a semantic-search indexed text file from a selected source file and point HelpMeInky to it.")
                 AddItem("mcp", "Import tools from an MCP server and generate INI sections.")
 
                 ' CLIPBOARD / INSERTION
@@ -2230,6 +2490,11 @@ Partial Public Class ThisAddIn
 
             If String.Equals(OtherPrompt.Trim(), "mcp", StringComparison.OrdinalIgnoreCase) Then
                 ImportMCPServer()
+                Return
+            End If
+
+            If String.Equals(OtherPrompt.Trim(), "generateindex", StringComparison.OrdinalIgnoreCase) Then
+                Await GenerateSemanticSearchIndexAsync()
                 Return
             End If
 

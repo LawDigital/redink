@@ -485,6 +485,25 @@ Partial Public Class ThisAddIn
             "step")
     End Sub
 
+    Friend Sub MarkMailGroupRepliesAsAnsweredAndEligible(originalMail As MailItem)
+        If originalMail Is Nothing Then Return
+
+        Dim deleteAfterUtc = GetAutoDeleteCutoffUtc()
+        If Not deleteAfterUtc.HasValue Then Return
+
+        Dim groupId = GetOrCreateCleanupGroupId(originalMail)
+        If String.IsNullOrWhiteSpace(groupId) Then Return
+
+        Dim answeredUtc = DateTime.UtcNow
+        Dim stampedCount As Integer = 0
+
+        ApplyEligibilityToGroupInAllStores(groupId, answeredUtc, deleteAfterUtc.Value, stampedCount)
+
+        ApDashboardLog(
+            $"🗑 Auto-delete scheduled for sent replies in group {groupId} in {_apConfig.AutoDeleteAfterHours}h ({stampedCount} item(s) marked).",
+            "step")
+    End Sub
+
     Private Sub ApplyEligibilityToGroupInAllStores(groupId As String,
                                                    answeredUtc As DateTime,
                                                    deleteAfterUtc As DateTime,

@@ -126,6 +126,12 @@ Namespace SharedLibrary
         ''' <summary>Conversation history used to build transcript and LLM context.</summary>
         Private ReadOnly _history As New List(Of (Role As String, Content As String))()
 
+        ''' <summary>
+        ''' Wiederverwendbarer Status für Quellen-IDs, Quellenbereiche, Thema und Suchintention.
+        ''' </summary>
+        Private ReadOnly _semanticConversationState As New SharedMethods.SemanticSearchConversationState()
+
+
         ''' <summary>Cached manual text for the currently configured manual path/URL.</summary>
         Private _manualCache As String = Nothing
 
@@ -247,6 +253,30 @@ Namespace SharedLibrary
         Private Sub Dbg(msg As String)
             Debug.WriteLine($"[HelpMeInky {DateTime.Now:HH:mm:ss.fff}] {msg}")
         End Sub
+
+        ''' <summary>
+        ''' Removes a trailing internal Sources line from an answer and returns it for diagnostics.
+        ''' </summary>
+        Private Shared Function RemoveTrailingSourcesLine(answer As String, ByRef sourcesLine As String) As String
+            Dim value As String = If(answer, "").TrimEnd()
+            sourcesLine = ""
+
+            If value.Length = 0 Then
+                Return value
+            End If
+
+            Dim match As Match = Regex.Match(
+                value,
+                "(?is)^(.*?)(?:\r\n|\r|\n){0,2}(Sources:\s*[^\r\n]+)\s*$",
+                RegexOptions.IgnoreCase)
+
+            If Not match.Success Then
+                Return value
+            End If
+
+            sourcesLine = match.Groups(2).Value.Trim()
+            Return match.Groups(1).Value.TrimEnd()
+        End Function
 
         ''' <summary>
         ''' Executes an action on the UI thread (no-op if the form is disposed).
@@ -432,7 +462,9 @@ Namespace SharedLibrary
             Dbg("OnClear start")
             Try
                 _history.Clear()
+                SharedMethods.ResetSemanticSearchConversationState(_semanticConversationState)
                 InitializeChatHtml()
+
                 My.Settings.LastHelpMeChat = ""
                 My.Settings.LastHelpMeChatHtml = ""
                 My.Settings.Save()
@@ -495,7 +527,7 @@ Namespace SharedLibrary
                                         System.Globalization.CultureInfo.CurrentUICulture.DisplayName,
                                         _hostLanguage)
             Dim partOfDay As String = GetPartOfDay()
-            Dim manualText As String = Await GetManualOnceAsync().ConfigureAwait(False)
+            Dim manualText As String = Await GetManualAvailabilityTextAsync().ConfigureAwait(False)
             Dim systemPrompt As String
             Dim userPrompt As String = ""
 
@@ -531,65 +563,354 @@ Namespace SharedLibrary
             Dbg("GenerateWelcomeAsync done")
         End Function
 
-        ''' <summary>
-        ''' Builds the user prompt (question + manual + conversation + optional config), invokes the LLM,
-        ''' and appends the response to the chat.
-        ''' </summary>
-        Private Async Function SendAsync(userText As String) As Task
-            Dbg("SendAsync start")
-            Try
-                Dim hostInfo As String = If(String.IsNullOrEmpty(_hostAppName), "", $" (Host application (and version of {AN} add-in): Microsoft {_hostAppName})")
-                Dim systemPrompt As String = _context.SP_HelpMe & hostInfo
-                Dim manualText As String = Await GetManualOnceAsync().ConfigureAwait(False)
-                Dim convo As String = BuildConversationForLlm()
+        Private Function BuildHelpMeUserPrompt(
+            userText As String,
+            sourceText As String,
+            conversation As String,
+            Optional previousDraft As String = "",
+            Optional verificationNotes As String = ""
+        ) As String
 
-                manualText = manualText.Trim()
-                If IsManualLoadError(manualText) Then
-                    systemPrompt &= " If the manual section contains an 'Error loading HelpMeInky manual...' entry, treat it as a hard failure to access the manual. Return a concise error response that clearly explains the manual could not be loaded and includes the provided failure details. Start the reply with exactly 'Manual access error:'. Do not invent manual content."
-                ElseIf manualText = "" Then
-                    manualText = "No manual configured."
+            Dim builder As New System.Text.StringBuilder()
+            builder.AppendLine("User question:")
+            builder.AppendLine(userText)
+            builder.AppendLine()
+            builder.AppendLine("Manual:")
+            builder.AppendLine(sourceText)
+            builder.AppendLine()
+            builder.AppendLine("Conversation so far:")
+            builder.AppendLine(conversation)
+
+            If Not String.IsNullOrWhiteSpace(previousDraft) Then
+                builder.AppendLine()
+                builder.AppendLine("Previous draft; rewrite it completely from the supplied original sources:")
+                builder.AppendLine(previousDraft)
+            End If
+
+            If Not String.IsNullOrWhiteSpace(verificationNotes) Then
+                builder.AppendLine()
+                builder.AppendLine("Verifier findings that must be corrected:")
+                builder.AppendLine(verificationNotes)
+            End If
+
+            If _chkIncludeConfig.Checked Then
+                Dim configContent As String = GetConfigurationContent()
+                If Not String.IsNullOrEmpty(configContent) Then
+                    builder.AppendLine()
+                    builder.AppendLine(configContent)
                 End If
+            End If
 
-                Dim sb As New StringBuilder()
-                sb.AppendLine("User question:")
-                sb.AppendLine(userText)
-                sb.AppendLine()
-                sb.AppendLine("Manual:")
-                sb.AppendLine(manualText)
-                sb.AppendLine()
-                sb.AppendLine("Conversation so far:")
-                sb.AppendLine(convo)
+            Return builder.ToString()
+        End Function
 
-                ' Include configuration files if checkbox is checked
-                If _chkIncludeConfig.Checked Then
-                    Dim configContent = GetConfigurationContent()
-                    If Not String.IsNullOrEmpty(configContent) Then
-                        sb.AppendLine()
-                        sb.AppendLine(configContent)
+        Private Shared Function ShouldForceFullSemanticScan(userText As String) As Boolean
+            Dim value As String = If(userText, "")
+            Dim indicators As String() = {
+                "gründlich",
+                "vollständig durchsuchen",
+                "alles durchsuchen",
+                "komplette suche",
+                "exhaustive",
+                "search everything",
+                "thorough search"
+            }
+
+            For Each indicator As String In indicators
+                If value.IndexOf(indicator, System.StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    Return True
+                End If
+            Next
+
+            Return False
+        End Function
+
+        Private Shared Function BuildVerificationNotes(
+            verification As SharedMethods.SemanticSearchResponseVerificationResult
+        ) As String
+
+            If verification Is Nothing Then
+                Return ""
+            End If
+
+            Dim builder As New System.Text.StringBuilder()
+
+            If verification.UnsupportedClaims IsNot Nothing AndAlso
+               verification.UnsupportedClaims.Count > 0 Then
+                builder.AppendLine("Unsupported claims:")
+                For Each value As String In verification.UnsupportedClaims
+                    builder.AppendLine("- " & value)
+                Next
+            End If
+
+            If verification.MissingDetails IsNot Nothing AndAlso
+               verification.MissingDetails.Count > 0 Then
+                builder.AppendLine("Missing details:")
+                For Each value As String In verification.MissingDetails
+                    builder.AppendLine("- " & value)
+                Next
+            End If
+
+            If Not String.IsNullOrWhiteSpace(verification.RevisedSearchIntent) Then
+                builder.AppendLine("Revised search intent: " & verification.RevisedSearchIntent)
+            End If
+
+            Return builder.ToString().Trim()
+        End Function
+
+        ''' <summary>
+        ''' Builds the user prompt, retrieves only relevant original source segments when possible,
+        ''' invokes the LLM and verifies the generated response.
+        ''' </summary>
+        Private Async Function SendAsync(userText As String) As System.Threading.Tasks.Task
+            Dbg("SendAsync start")
+
+            Try
+                Dim stopwatch As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
+                Dim hostInfo As String = If(
+                    String.IsNullOrEmpty(_hostAppName),
+                    "",
+                    $" (Host application (and version of {AN} add-in): Microsoft {_hostAppName})")
+                Dim systemPrompt As String = _context.SP_HelpMe & hostInfo
+                Dim conversation As String = BuildConversationForLlm()
+                Dim configuredPath As String = If(
+                    _context IsNot Nothing,
+                    ExpandEnvironmentVariables(_context.INI_HelpMeInkyPath),
+                    "")
+                Dim sourceText As String = ""
+                Dim retrieval As SharedMethods.SemanticSearchRetrievalResult = Nothing
+
+                Dim isRemote As Boolean =
+                    configuredPath.StartsWith("http://", System.StringComparison.OrdinalIgnoreCase) OrElse
+                    configuredPath.StartsWith("https://", System.StringComparison.OrdinalIgnoreCase)
+
+                Dim retrievalOptions As New SharedMethods.SemanticSearchRetrievalOptions() With {
+                    .MinimumSelectedSegments = 1,
+                    .MaximumSelectedSegments = 8,
+                    .MaximumTotalSegments = 24,
+                    .ContextBytesBefore = 2048,
+                    .ContextBytesAfter = 2048,
+                    .MergeGapBytes = 0,
+                    .SpecialTaskName = "HelpMe",
+                    .IncludePreviouslyUsedIds = True,
+                    .MaximumPreviouslyUsedIds = 4,
+                    .IncludeAdjacentToPreviouslyUsedIds = True,
+                    .EnableFullScanFallback = True,
+                    .ForceFullScan = ShouldForceFullSemanticScan(userText),
+                    .FallbackWhenPotentiallyMissing = True,
+                    .MinimumSelectionRelevance = 0.35R,
+                    .FullScanMinimumRelevance = 0.5R,
+                    .MaximumFullScanSegments = 8,
+                    .MaximumReloadRounds = 2,
+                    .MaximumLlmAttempts = 2,
+                    .MaximumConversationCharacters = 12000
+                }
+
+                If Not String.IsNullOrWhiteSpace(configuredPath) AndAlso
+                   Not isRemote AndAlso
+                   SharedMethods.IsPotentiallySemanticSearchIndexedTextFile(configuredPath) Then
+
+                    retrieval = Await SharedMethods.RetrieveSemanticSearchAsync(
+                        configuredPath,
+                        _context,
+                        userText,
+                        conversation,
+                        _semanticConversationState,
+                        retrievalOptions).ConfigureAwait(False)
+
+                    If retrieval IsNot Nothing AndAlso retrieval.IsIndexed Then
+                        sourceText = retrieval.ReducedSourceText
+
+                        systemPrompt &=
+                            " Answer exclusively from the supplied original SOURCE excerpts. " &
+                            "Do not invent functions, steps or UI elements. Preserve exact UI terms, " &
+                            "prerequisites, restrictions and warnings. If the excerpts are insufficient, " &
+                            "state that clearly. Do not expose internal SOURCE IDs or append a 'Sources:' line."
+
+                        If String.IsNullOrWhiteSpace(sourceText) Then
+                            sourceText =
+                                "No relevant original source excerpts were found in the indexed source. " &
+                                "Do not invent an answer; explain that the available source does not contain enough information."
+                        End If
                     End If
                 End If
 
-                Dim sw = Stopwatch.StartNew()
-                Dim answer As String = Await CallHelpMeLlmAsync(systemPrompt, sb.ToString()).ConfigureAwait(False)
-                sw.Stop()
-
-                answer = If(answer, "").Trim()
-                If IsManualLoadError(manualText) Then
-                    answer = EnsureManualAccessErrorPrefix(answer, manualText)
+                ' Normale Dateien, URLs und ungültige Indizes verwenden unverändert den bisherigen Pfad.
+                If retrieval Is Nothing OrElse Not retrieval.IsIndexed Then
+                    sourceText = Await GetManualOnceAsync().ConfigureAwait(False)
                 End If
 
-                Dbg($"SendAsync ms={sw.ElapsedMilliseconds} ansLen={answer.Length}")
+                sourceText = If(sourceText, "").Trim()
+
+                If IsManualLoadError(sourceText) Then
+                    systemPrompt &=
+                        " If the manual section contains an 'Error loading HelpMeInky manual...' entry, " &
+                        "treat it as a hard failure to access the manual. Return a concise error response " &
+                        "that includes the failure details. Start with exactly 'Manual access error:'. " &
+                        "Do not invent manual content."
+                ElseIf sourceText.Length = 0 Then
+                    sourceText = "No manual configured."
+                End If
+
+                Dim answer As String = Await CallHelpMeLlmAsync(
+                    systemPrompt,
+                    BuildHelpMeUserPrompt(userText, sourceText, conversation)).ConfigureAwait(False)
+                answer = If(answer, "").Trim()
+
+                If IsManualLoadError(sourceText) Then
+                    answer = EnsureManualAccessErrorPrefix(answer, sourceText)
+                End If
+
+                Dim lastVerification As SharedMethods.SemanticSearchResponseVerificationResult = Nothing
+
+                If retrieval IsNot Nothing AndAlso
+                   retrieval.IsIndexed AndAlso
+                   Not String.IsNullOrWhiteSpace(retrieval.ReducedSourceText) Then
+
+                    For reloadRound As Integer = 0 To retrievalOptions.MaximumReloadRounds
+                        lastVerification = Await SharedMethods.VerifySemanticSearchResponseAsync(
+                            configuredPath,
+                            _context,
+                            "HelpMe",
+                            userText,
+                            conversation,
+                            retrieval,
+                            answer,
+                            maximumLlmAttempts:=retrievalOptions.MaximumLlmAttempts,
+                            maximumConversationCharacters:=retrievalOptions.MaximumConversationCharacters).ConfigureAwait(False)
+
+                        If lastVerification Is Nothing OrElse
+                           (lastVerification.Supported AndAlso Not lastVerification.RequiresMoreSources) Then
+                            Exit For
+                        End If
+
+                        If reloadRound >= retrievalOptions.MaximumReloadRounds Then
+                            Exit For
+                        End If
+
+                        Dim additional As SharedMethods.SemanticSearchRetrievalResult =
+                            Await SharedMethods.RetrieveAdditionalSemanticSearchSourcesAsync(
+                                configuredPath,
+                                _context,
+                                userText,
+                                conversation,
+                                retrieval,
+                                lastVerification,
+                                retrievalOptions).ConfigureAwait(False)
+
+                        If additional Is Nothing OrElse
+                           String.IsNullOrWhiteSpace(additional.ReducedSourceText) Then
+                            Exit For
+                        End If
+
+                        Dim knownIds As New System.Collections.Generic.HashSet(Of String)(
+                            retrieval.SelectedEntryIds,
+                            System.StringComparer.OrdinalIgnoreCase)
+
+                        For Each id As String In additional.SelectedEntryIds
+                            If knownIds.Add(id) Then
+                                retrieval.SelectedEntryIds.Add(id)
+                            End If
+                        Next
+
+                        Dim combinedRetrieval As SharedMethods.SemanticSearchRetrievalResult =
+                            Await SharedMethods.LoadAdditionalSemanticSearchSourcesAsync(
+                                configuredPath,
+                                retrieval.SelectedEntryIds,
+                                retrievalOptions).ConfigureAwait(False)
+
+                        retrieval.LoadedSources = combinedRetrieval.LoadedSources
+                        retrieval.ReducedSourceText = combinedRetrieval.ReducedSourceText
+                        sourceText = retrieval.ReducedSourceText
+
+                        answer = Await CallHelpMeLlmAsync(
+                            systemPrompt,
+                            BuildHelpMeUserPrompt(
+                                userText,
+                                sourceText,
+                                conversation,
+                                answer,
+                                BuildVerificationNotes(lastVerification))).ConfigureAwait(False)
+                        answer = If(answer, "").Trim()
+                    Next
+
+                    ' Falls nach allen Nachladerunden noch ungestützte Aussagen vorhanden sind,
+                    ' wird ein letzter strikt quellengebundener Korrekturdurchlauf ausgeführt.
+                    If lastVerification IsNot Nothing AndAlso
+                       (Not lastVerification.Supported OrElse lastVerification.RequiresMoreSources) Then
+                        answer = Await CallHelpMeLlmAsync(
+                            systemPrompt &
+                                " Remove every unsupported claim identified by the verifier. " &
+                                "Where the sources are insufficient, explicitly say so instead of guessing.",
+                            BuildHelpMeUserPrompt(
+                                userText,
+                                sourceText,
+                                conversation,
+                                answer,
+                                BuildVerificationNotes(lastVerification))).ConfigureAwait(False)
+                        answer = If(answer, "").Trim()
+
+                        Dim finalVerification As SharedMethods.SemanticSearchResponseVerificationResult =
+                            Await SharedMethods.VerifySemanticSearchResponseAsync(
+                                configuredPath,
+                                _context,
+                                "HelpMe",
+                                userText,
+                                conversation,
+                                retrieval,
+                                answer,
+                                maximumLlmAttempts:=retrievalOptions.MaximumLlmAttempts,
+                                maximumConversationCharacters:=retrievalOptions.MaximumConversationCharacters).ConfigureAwait(False)
+
+                        If finalVerification IsNot Nothing AndAlso
+                           (Not finalVerification.Supported OrElse finalVerification.RequiresMoreSources) Then
+                            answer &= vbCrLf & vbCrLf &
+                                "*The available source excerpts do not support a more complete answer.*"
+                        End If
+                    End If
+
+                    SharedMethods.UpdateSemanticSearchConversationState(
+                        _semanticConversationState,
+                        retrieval)
+                End If
+
+                Dim semanticSourceIdsForDebug As String = ""
+                If retrieval IsNot Nothing AndAlso
+                   retrieval.IsIndexed AndAlso
+                   retrieval.SelectedEntryIds IsNot Nothing Then
+
+                    semanticSourceIdsForDebug = String.Join(
+                        ", ",
+                        retrieval.SelectedEntryIds.
+                            Where(Function(id As String) Not String.IsNullOrWhiteSpace(id)).
+                            Distinct(System.StringComparer.OrdinalIgnoreCase))
+                End If
+
+                Dim sourcesLine As String = ""
+                answer = RemoveTrailingSourcesLine(answer, sourcesLine)
+
+                If Not String.IsNullOrWhiteSpace(sourcesLine) Then
+                    Dbg("SemanticSearch LLM output " & sourcesLine)
+                End If
+
+                If Not String.IsNullOrWhiteSpace(semanticSourceIdsForDebug) Then
+                    Dbg("SemanticSearch selected IDs: " & semanticSourceIdsForDebug)
+                End If
+
+                stopwatch.Stop()
+                Dbg($"SendAsync ms={stopwatch.ElapsedMilliseconds} ansLen={answer.Length}")
 
                 RemoveAssistantThinking()
                 AppendAssistantMarkdown(answer)
                 _history.Add(("assistant", answer))
                 PersistChatHtml()
-            Catch ex As Exception
+            Catch ex As System.Exception
                 Dbg("SendAsync error: " & ex.Message)
                 RemoveAssistantThinking()
                 AppendAssistantMarkdown("*(Error: " & System.Security.SecurityElement.Escape(ex.Message) & ")*")
             End Try
         End Function
+
 
         ''' <summary>
         ''' Reads known configuration files and returns a single string block to be appended to the LLM prompt.
@@ -772,9 +1093,42 @@ Namespace SharedLibrary
         End Function
 
         ''' <summary>
+        ''' Prüft eine lokal indexierte Quelle, ohne deren vollständigen Inhalt zu laden.
+        ''' Für URLs, normale Dateien und ungültige Indizes bleibt das bisherige Verhalten erhalten.
+        ''' </summary>
+        Private Async Function GetManualAvailabilityTextAsync() As System.Threading.Tasks.Task(Of String)
+            Dim configuredPath As String = If(
+                _context IsNot Nothing,
+                ExpandEnvironmentVariables(_context.INI_HelpMeInkyPath),
+                "")
+
+            If String.IsNullOrWhiteSpace(configuredPath) Then
+                Return ""
+            End If
+
+            Dim isRemote As Boolean =
+                configuredPath.StartsWith("http://", System.StringComparison.OrdinalIgnoreCase) OrElse
+                configuredPath.StartsWith("https://", System.StringComparison.OrdinalIgnoreCase)
+
+            If Not isRemote AndAlso
+               SharedMethods.IsPotentiallySemanticSearchIndexedTextFile(configuredPath) Then
+
+                Dim cacheItem As SharedMethods.SemanticSearchIndexCacheItem =
+                    Await SharedMethods.TryGetSemanticSearchIndexAsync(configuredPath).ConfigureAwait(False)
+
+                If cacheItem IsNot Nothing Then
+                    Return "The configured indexed source is available."
+                End If
+            End If
+
+            Return Await GetManualOnceAsync().ConfigureAwait(False)
+        End Function
+
+        ''' <summary>
         ''' Returns manual text from cache when possible; otherwise loads it from the configured path/URL.
         ''' </summary>
         Private Async Function GetManualOnceAsync() As Task(Of String)
+
             Dim path = If(_context IsNot Nothing, ExpandEnvironmentVariables(_context.INI_HelpMeInkyPath), "")
             If String.IsNullOrWhiteSpace(path) Then Return ""
             If _manualCache IsNot Nothing AndAlso String.Equals(_manualCachePath, path, StringComparison.OrdinalIgnoreCase) Then

@@ -196,7 +196,7 @@ Namespace SharedLibrary
             {"Outlook", $"microsoft-edge{AppsUrl}{AppsUrlDir}outlook/" & AN5 & "%20for%20Outlook.vsto"}
         }
 
-        Public Shared Default_HelpMeInkyPath As String = $"{AppsUrl}{AppsUrlDir}Red_Ink_Guide.txt"
+        Public Shared Default_HelpMeInkyPath As String = $"{AppsUrl}{AppsUrlDir}Red_Ink_Guide.indexed.txt"
 
         Public Shared ExcelHelper As String = AN2 & "_helper.xlam"
         Public Shared WordHelper As String = AN2 & "_helper.dotm"
