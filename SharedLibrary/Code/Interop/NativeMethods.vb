@@ -42,6 +42,10 @@ Namespace SharedLibrary
         Public Shared Function AllowSetForegroundWindow(dwProcessId As Integer) As Boolean
         End Function
 
+        <Runtime.InteropServices.DllImport("user32.dll")>
+        Public Shared Function SetWindowPos(hWnd As IntPtr, hWndInsertAfter As IntPtr, X As Integer, Y As Integer, cx As Integer, cy As Integer, uFlags As UInteger) As Boolean
+        End Function
+
     End Class
 
 End Namespace

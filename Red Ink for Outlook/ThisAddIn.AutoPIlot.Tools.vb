@@ -441,19 +441,23 @@ Partial Public Class ThisAddIn
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ReadWordDocDetails,
             .ModelDescription = "Read Word Document Details (built-in)",
-            .ToolInstructionsPrompt =
+                  .ToolInstructionsPrompt =
                 AP_Tool_ReadWordDocDetails & ": Deep-reads a Word document (.docx) including body text with inline tracked changes, " &
                 "comment bubbles (with author, date, and anchored text), headers, footers, footnotes, and endnotes. " &
                 "This is a heavier tool — only use it when the user explicitly asks about comments, tracked changes, " &
-                "revisions, review history, headers/footers, or footnotes/endnotes. For general content questions, use read_attachment instead. " &
+                "revisions, review history, headers/footers, or footnotes/endnotes. For general content questions, use " & AP_Tool_ReadAttachment & " instead. " &
+                "NOTE: The body text returned by this tool is optimized for review markup and does NOT include automatic list/heading numbering, " &
+                "multilevel list restarts, resolved fields, or bookmark/cross-reference (REF) resolution. When the user needs the fully rendered " &
+                "content — numbered lists, heading numbers, field results, or cross-references — use " & AP_Tool_ReadAttachment & " instead. " &
                 "Tracked changes are shown inline using «INS|author|date»...«/INS» and «DEL|author|date»...«/DEL» markers. " &
                 "Use tracked_changes_author and tracked_changes_since to filter changes by a specific author or date.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_ReadWordDocDetails & """," &
                 """description"":""Deep-reads a Word document (.docx) with comments, tracked changes, headers/footers, and footnotes/endnotes. " &
                 "Only use when the user asks about comments, revisions, changes, review history, headers, footers, footnotes, or endnotes. " &
-                "For general content, use read_attachment instead.""," &
-                """parameters"":{""type"":""object"",""properties"":{" &
+                "For general content, use " & AP_Tool_ReadAttachment & " instead. " &
+                "The body text here omits automatic list/heading numbering, multilevel list restarts, resolved fields, and cross-references (REF); " &
+                "use " & AP_Tool_ReadAttachment & " when those are needed.""," & """parameters"":{""type"":""object"",""properties"":{" &
                 """attachment_name"":{""type"":""string"",""description"":""Filename of the .docx attachment to read""}," &
                 """include_comments"":{""type"":""boolean"",""description"":""Include comment bubbles with author, date, and anchored text (default: true)""}," &
                 """include_headers_footers"":{""type"":""boolean"",""description"":""Include headers and footers (default: false)""}," &

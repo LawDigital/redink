@@ -83,6 +83,15 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
+    ''' <summary>
+    ''' Persists AutoPilot settings to My.Settings and refreshes the registry backup.
+    ''' Keeps the reinstall-safe backup in sync with the latest saved values.
+    ''' </summary>
+    Private Sub SaveAutoPilotSettingsWithRegistryBackup()
+        My.Settings.Save()
+        BackupAutoPilotSettingsToRegistry()
+    End Sub
+
 
 
     ''' <summary>

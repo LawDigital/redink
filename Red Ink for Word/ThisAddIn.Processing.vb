@@ -961,8 +961,9 @@ Partial Public Class ThisAddIn
                     ReDim paragraphFormat(paraCount - 1)
                     Array.Clear(paragraphFormat, 0, paragraphFormat.Length)
 
-                    For i = 1 To paraCount
-                        Dim para As Word.Paragraph = rng.Paragraphs(i)
+                    i = 0
+                    For Each para As Word.Paragraph In rng.Paragraphs
+                        i += 1
                         Dim paraRange As Word.Range = para.Range
 
                         ' bodyRange = text without the paragraph mark
@@ -2212,8 +2213,7 @@ Partial Public Class ThisAddIn
                     Return id
                 End Function
 
-            For i As Integer = 1 To paras.Count
-                Dim p As Word.Paragraph = paras(i)
+            For Each p As Word.Paragraph In paras
                 Dim pr As Word.Range = p.Range
                 Dim snippet As String = MakeSnippet(pr.Text)
 
@@ -3083,11 +3083,11 @@ Partial Public Class ThisAddIn
         Dim revInfos As New List(Of RevInfo)(revCount)
 
         ' Collect all revision data in a single pass to minimize COM calls
-        For i As Integer = 1 To revCount
+        Dim i As Integer = 0
+        For Each rev As Revision In rng.Revisions
+            i += 1
             splash.UpdateMessage($"Collecting markups... {revCount - i} left")
             Try
-
-                Dim rev As Revision = rng.Revisions(i)
 
                 Try
                     Dim revRange As Range = rev.Range

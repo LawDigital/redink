@@ -2163,6 +2163,9 @@ Partial Public Class ThisAddIn
         Dim failedFiles As New List(Of String)()
         Dim emptyContentFiles As New List(Of String)()
         Dim flattenedPdfCount As Integer = 0
+        ' Collected successfully-extracted content for the optional combine/index step.
+        Dim extractedDocuments As New List(Of (Name As String, Content As String))()
+        Dim singleExtractedOutputPath As String = Nothing
 
         Try
             For i As Integer = 0 To filesToProcess.Count - 1
@@ -2253,6 +2256,10 @@ Partial Public Class ThisAddIn
 
                         IO.File.WriteAllText(outputPath, content, System.Text.Encoding.UTF8)
                         successCount += 1
+                        extractedDocuments.Add((fileName, content))
+                        If successCount = 1 Then
+                            singleExtractedOutputPath = outputPath
+                        End If
 
                     Finally
                         ' Clean up temp flattened PDF
@@ -2272,6 +2279,96 @@ Partial Public Class ThisAddIn
             ProgressBarModule.CancelOperation = True
         End Try
 
+        ' Optional: combine multiple extracted documents into a single file and/or create a
+        ' semantic-search index from them.
+        Dim combinedOutputPath As String = Nothing
+        Dim indexOutputPath As String = Nothing
+
+        If extractedDocuments.Count > 1 Then
+            Dim combineChoice As Integer = ShowCustomYesNoBox(
+                $"{extractedDocuments.Count:N0} documents were extracted." & vbCrLf & vbCrLf &
+                "Do you want to combine them into a single file using the standard document separators? " &
+                $"This is useful for feeding all documents to the AI at once or for creating a searchable index for {AN} (you can choose to create one as the next step).",
+                "Yes, combine into one file",
+                "No, keep separate files")
+
+            If combineChoice = 1 Then
+                Try
+                    ' Combine using the canonical wrapper separator so the semantic-search generator
+                    ' can align segments to document boundaries.
+                    Dim combinedBuilder As New System.Text.StringBuilder()
+                    For docIndex As Integer = 0 To extractedDocuments.Count - 1
+                        Dim docNumber As Integer = docIndex + 1
+                        Dim safeName As String = If(extractedDocuments(docIndex).Name, "").Replace("""", "'")
+                        combinedBuilder.Append($"<document{docNumber} name=""{safeName}"">").AppendLine()
+                        combinedBuilder.Append(If(extractedDocuments(docIndex).Content, "")).AppendLine()
+                        combinedBuilder.Append($"</document{docNumber}>").AppendLine()
+                        combinedBuilder.AppendLine()
+                    Next
+
+                    Dim combineBaseDir As String =
+                        If(useSubdirectory,
+                           outputBaseDir,
+                           If(isDirectory, selectedPath, IO.Path.GetDirectoryName(selectedPath)))
+
+                    Dim combineBaseName As String =
+                        If(isDirectory, IO.Path.GetFileName(selectedPath.TrimEnd(IO.Path.DirectorySeparatorChar)), IO.Path.GetFileNameWithoutExtension(selectedPath))
+                    If String.IsNullOrWhiteSpace(combineBaseName) Then
+                        combineBaseName = "combined"
+                    End If
+
+                    combinedOutputPath = IO.Path.Combine(combineBaseDir, combineBaseName & ".combined.txt")
+                    IO.File.WriteAllText(combinedOutputPath, combinedBuilder.ToString().TrimEnd(), System.Text.Encoding.UTF8)
+
+                    ' Offer to also create a semantic-search index from the combined file.
+                    Dim indexChoice As Integer = ShowCustomYesNoBox(
+                        "The documents were combined into a single file." & vbCrLf & vbCrLf &
+                        "Do you also want to create a semantic-search index file from it? " &
+                        $"This allows {AN} to find and retrieve content from the file even if it is too large to be sent to the AI at once. 'Discuss this, Inky' and the chatbot in Word supports these index files, for example.",
+                        "Yes, create an index file",
+                        "No, just keep the combined file")
+
+                    If indexChoice = 1 Then
+                        indexOutputPath = Await CreateSemanticSearchIndexWithUserOptionsAsync(
+                            combinedOutputPath,
+                            IO.Path.Combine(combineBaseDir, combineBaseName & ".indexed.txt"),
+                            "Preparing combined content ...").ConfigureAwait(True)
+                    End If
+
+                Catch ex As Exception
+                    ShowCustomMessageBox($"Failed to combine or index the extracted documents: {ex.Message}")
+                    combinedOutputPath = Nothing
+                    indexOutputPath = Nothing
+                End Try
+            End If
+        End If
+
+        If String.IsNullOrWhiteSpace(indexOutputPath) AndAlso
+           successCount = 1 AndAlso
+           Not String.IsNullOrWhiteSpace(singleExtractedOutputPath) Then
+
+            Dim singleFileIndexChoice As Integer = ShowCustomYesNoBox(
+                "One file was successfully extracted." & vbCrLf & vbCrLf &
+                "Do you also want to create a semantic-search index file from it? " &
+                $"This allows {AN} to find and retrieve content from the file even if it is too large to be sent to the AI at once. 'Discuss this, Inky' and the chatbot in Word supports these index files, for example.",
+                "Yes, create an index file",
+                "No, keep the extracted file only")
+
+            If singleFileIndexChoice = 1 Then
+                Try
+                    indexOutputPath = Await CreateSemanticSearchIndexWithUserOptionsAsync(
+                        singleExtractedOutputPath,
+                        IO.Path.Combine(
+                            IO.Path.GetDirectoryName(singleExtractedOutputPath),
+                            IO.Path.GetFileNameWithoutExtension(singleExtractedOutputPath) & ".indexed.txt"),
+                        "Preparing extracted content ...").ConfigureAwait(True)
+                Catch ex As Exception
+                    ShowCustomMessageBox($"Failed to create the semantic-search index: {ex.Message}")
+                    indexOutputPath = Nothing
+                End Try
+            End If
+        End If
+
         ' Build summary
         Dim wasCancelled As Boolean = (successCount + failedFiles.Count + emptyContentFiles.Count) < filesToProcess.Count
 
@@ -2288,7 +2385,18 @@ Partial Public Class ThisAddIn
             summary.AppendLine($"Output directory: {outputBaseDir}")
         End If
 
-        If doOcr Then
+            If Not String.IsNullOrWhiteSpace(combinedOutputPath) Then
+                summary.AppendLine()
+                summary.AppendLine($"Combined file: {combinedOutputPath}")
+                If Not String.IsNullOrWhiteSpace(indexOutputPath) Then
+                    summary.AppendLine($"Index file: {indexOutputPath}")
+                End If
+            ElseIf Not String.IsNullOrWhiteSpace(indexOutputPath) Then
+                summary.AppendLine()
+                summary.AppendLine($"Index file: {indexOutputPath}")
+            End If
+
+            If doOcr Then
             summary.AppendLine($"OCR was enabled for PDF files.")
             If flattenBeforeOcr Then
                 summary.AppendLine($"PDFs were flattened to images before OCR ({flattenedPdfCount} file(s)).")
@@ -2392,8 +2500,143 @@ Partial Public Class ThisAddIn
             summary.AppendLine("(Detailed log copied to clipboard)")
         End If
 
-        ShowCustomMessageBox(summary.ToString().TrimEnd(), AN & " Convert to Text")
+            ShowCustomMessageBox(summary.ToString().TrimEnd(), AN & " Convert to Text")
     End Sub
+
+    Private Async Function CreateSemanticSearchIndexWithUserOptionsAsync(
+        sourcePath As String,
+        defaultOutputPath As String,
+        preparationMessage As String) As System.Threading.Tasks.Task(Of String)
+
+        If String.IsNullOrWhiteSpace(sourcePath) OrElse
+           String.IsNullOrWhiteSpace(defaultOutputPath) Then
+            Return Nothing
+        End If
+
+        Dim selectedProfile As SharedMethods.SemanticSearchMetadataProfile =
+            SharedMethods.SemanticSearchMetadataProfile.Generic
+        Dim targetBytes As Integer = SharedMethods.SemanticSearchDefaultTargetBytes
+        Dim minimumBytes As Integer = SharedMethods.SemanticSearchDefaultMinimumBytes
+        Dim maximumBytes As Integer = SharedMethods.SemanticSearchDefaultMaximumBytes
+        Dim overwriteOutput As Boolean = False
+        Dim outputPath As String = defaultOutputPath
+
+        Dim availableProfiles As System.Collections.Generic.List(Of SharedMethods.SemanticSearchMetadataProfile) =
+            SharedMethods.GetSemanticSearchMetadataProfiles()
+        Dim profileDisplayMap As New System.Collections.Generic.Dictionary(Of String, SharedMethods.SemanticSearchMetadataProfile)(
+            StringComparer.Ordinal)
+        Dim profileDisplayOptions As New System.Collections.Generic.List(Of String)()
+
+        For Each profile As SharedMethods.SemanticSearchMetadataProfile In availableProfiles
+            Dim displayName As String = SharedMethods.GetSemanticSearchMetadataProfileDisplayName(profile)
+            If Not profileDisplayMap.ContainsKey(displayName) Then
+                profileDisplayMap.Add(displayName, profile)
+                profileDisplayOptions.Add(displayName)
+            End If
+        Next
+
+        Dim selectedProfileDisplay As String =
+            SharedMethods.GetSemanticSearchMetadataProfileDisplayName(selectedProfile)
+
+        Dim generationParameters() As Slib.InputParameter = {
+            New Slib.InputParameter("Profile", selectedProfileDisplay, profileDisplayOptions),
+            New Slib.InputParameter("Target bytes", targetBytes),
+            New Slib.InputParameter("Minimum bytes", minimumBytes),
+            New Slib.InputParameter("Maximum bytes", maximumBytes)
+        }
+
+        Dim generationPrompt As String =
+            "Please configure the semantic-search index generation settings." & vbCrLf & vbCrLf &
+            "All size values are UTF-8 byte counts, not character counts." & vbCrLf & vbCrLf &
+            "Profile: chooses what kind of metadata the indexer should emphasize for each segment." & vbCrLf &
+            "Target bytes: the preferred segment size. The generator tries to end each segment near this size." & vbCrLf &
+            "Minimum bytes: the lower bound before the generator starts looking for a natural break point." & vbCrLf &
+            "Maximum bytes: the hard segment-size ceiling. A segment will not intentionally exceed this size."
+
+        If Not ShowCustomVariableInputForm(
+            generationPrompt,
+            $"{AN} Semantic-search index",
+            generationParameters) Then
+            Return Nothing
+        End If
+
+        selectedProfileDisplay = CStr(generationParameters(0).Value)
+        targetBytes = CInt(generationParameters(1).Value)
+        minimumBytes = CInt(generationParameters(2).Value)
+        maximumBytes = CInt(generationParameters(3).Value)
+
+        If Not profileDisplayMap.TryGetValue(selectedProfileDisplay, selectedProfile) Then
+            Throw New System.InvalidOperationException("The selected semantic-search profile could not be resolved.")
+        End If
+
+        If targetBytes <= 0 OrElse minimumBytes <= 0 OrElse maximumBytes <= 0 Then
+            Throw New System.ArgumentException("Target bytes, minimum bytes, and maximum bytes must all be greater than zero.")
+        End If
+
+        If minimumBytes > targetBytes Then
+            Throw New System.ArgumentException("Minimum bytes must be less than or equal to target bytes.")
+        End If
+
+        If targetBytes > maximumBytes Then
+            Throw New System.ArgumentException("Target bytes must be less than or equal to maximum bytes.")
+        End If
+
+        If IO.File.Exists(outputPath) Then
+            Dim overwriteAnswer As Integer = ShowCustomYesNoBox(
+                "The target output file already exists:" & vbCrLf & vbCrLf &
+                outputPath & vbCrLf & vbCrLf &
+                "Do you want to overwrite it?",
+                "Yes, overwrite",
+                "No, cancel")
+
+            If overwriteAnswer <> 1 Then
+                Return Nothing
+            End If
+
+            overwriteOutput = True
+        End If
+
+        Using indexProgress As New ProgressScope(
+            "Generating semantic-search index",
+            preparationMessage,
+            1)
+
+            Dim generationProgress As New System.Progress(Of SharedMethods.SemanticSearchIndexGenerationProgress)(
+                Sub(update As SharedMethods.SemanticSearchIndexGenerationProgress)
+                    Dim segCount As Integer = System.Math.Max(1, update.SegmentCount)
+                    Dim segNumber As Integer = System.Math.Max(0, System.Math.Min(update.SegmentNumber, segCount))
+                    Dim statusMessage As String = If(update.Message, "").Trim()
+
+                    If String.IsNullOrWhiteSpace(statusMessage) Then
+                        statusMessage = "Generating semantic metadata"
+                    End If
+
+                    ProgressScope.Report(
+                        segNumber,
+                        segCount,
+                        statusMessage & " (" &
+                        segNumber.ToString(System.Globalization.CultureInfo.InvariantCulture) & "/" &
+                        segCount.ToString(System.Globalization.CultureInfo.InvariantCulture) & ")")
+                End Sub)
+
+            Await SharedMethods.CreateSemanticSearchIndexedTextFileAsync(
+                sourcePath,
+                outputPath,
+                _context,
+                New SharedMethods.SemanticSearchIndexGeneratorOptions() With {
+                    .TargetBytes = targetBytes,
+                    .MinimumBytes = minimumBytes,
+                    .MaximumBytes = maximumBytes,
+                    .SpecialTaskName = "Indexer",
+                    .MetadataProfile = selectedProfile,
+                    .OverwriteOutput = overwriteOutput
+                },
+                generationProgress,
+                indexProgress.Token).ConfigureAwait(True)
+        End Using
+
+        Return outputPath
+    End Function
 
 
     ''' <summary>
