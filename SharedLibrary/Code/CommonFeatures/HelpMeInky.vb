@@ -138,6 +138,9 @@ Namespace SharedLibrary
         ''' <summary>Path/URL that `_manualCache` was loaded from.</summary>
         Private _manualCachePath As String = Nothing
 
+        ''' <summary>Serializes refreshes of the local cache file for remote semantic-search indexes.</summary>
+        Private ReadOnly _semanticIndexCacheSemaphore As New Threading.SemaphoreSlim(1, 1)
+
         ''' <summary>Welcome generation state flag (0 = none, 1 = running).</summary>
         Private _welcomeInProgress As Integer = 0 ' 0 = none, 1 = running
 
@@ -683,6 +686,15 @@ Namespace SharedLibrary
                 Dim isRemote As Boolean =
                     configuredPath.StartsWith("http://", System.StringComparison.OrdinalIgnoreCase) OrElse
                     configuredPath.StartsWith("https://", System.StringComparison.OrdinalIgnoreCase)
+                Dim retrievalPath As String = configuredPath
+
+                If isRemote Then
+                    retrievalPath = Await EnsureLocalSemanticSearchIndexPathAsync(configuredPath).ConfigureAwait(False)
+                End If
+
+                Dim retrievalIndexed As Boolean =
+                    Not String.IsNullOrWhiteSpace(retrievalPath) AndAlso
+                    SharedMethods.IsPotentiallySemanticSearchIndexedTextFile(retrievalPath)
 
                 Dim retrievalOptions As New SharedMethods.SemanticSearchRetrievalOptions() With {
                     .MinimumSelectedSegments = 1,
@@ -706,12 +718,11 @@ Namespace SharedLibrary
                     .MaximumConversationCharacters = 12000
                 }
 
-                If Not String.IsNullOrWhiteSpace(configuredPath) AndAlso
-                   Not isRemote AndAlso
-                   SharedMethods.IsPotentiallySemanticSearchIndexedTextFile(configuredPath) Then
+                If retrievalIndexed Then
+                    UpdateAssistantThinking("Searching indexed manual...")
 
                     retrieval = Await SharedMethods.RetrieveSemanticSearchAsync(
-                        configuredPath,
+                        retrievalPath,
                         _context,
                         userText,
                         conversation,
@@ -728,15 +739,23 @@ Namespace SharedLibrary
                             "state that clearly. Do not expose internal SOURCE IDs or append a 'Sources:' line."
 
                         If String.IsNullOrWhiteSpace(sourceText) Then
+                            UpdateAssistantThinking("Indexed manual — no relevant material found.")
                             sourceText =
                                 "No relevant original source excerpts were found in the indexed source. " &
                                 "Do not invent an answer; explain that the available source does not contain enough information."
+                        Else
+                            Dim matchCount As Integer =
+                                If(retrieval.SelectedEntryIds IsNot Nothing, retrieval.SelectedEntryIds.Count, 0)
+                            UpdateAssistantThinking($"Indexed manual — {matchCount:N0} relevant segment(s) found. Drafting answer...")
                         End If
+                    Else
+                        UpdateAssistantThinking("Indexed manual unavailable. Falling back to the full manual...")
                     End If
                 End If
 
                 ' Normale Dateien, URLs und ungültige Indizes verwenden unverändert den bisherigen Pfad.
                 If retrieval Is Nothing OrElse Not retrieval.IsIndexed Then
+                    Dbg($"Semantic retrieval skipped (isRemote={isRemote}, indexed={retrievalIndexed}, retrievalPath='{retrievalPath}') - sending full manual")
                     sourceText = Await GetManualOnceAsync().ConfigureAwait(False)
                 End If
 
@@ -769,7 +788,7 @@ Namespace SharedLibrary
 
                     For reloadRound As Integer = 0 To retrievalOptions.MaximumReloadRounds
                         lastVerification = Await SharedMethods.VerifySemanticSearchResponseAsync(
-                            configuredPath,
+                            retrievalPath,
                             _context,
                             "HelpMe",
                             userText,
@@ -788,9 +807,11 @@ Namespace SharedLibrary
                             Exit For
                         End If
 
+                        UpdateAssistantThinking("Indexed manual — loading additional relevant segments...")
+
                         Dim additional As SharedMethods.SemanticSearchRetrievalResult =
                             Await SharedMethods.RetrieveAdditionalSemanticSearchSourcesAsync(
-                                configuredPath,
+                                retrievalPath,
                                 _context,
                                 userText,
                                 conversation,
@@ -815,13 +836,17 @@ Namespace SharedLibrary
 
                         Dim combinedRetrieval As SharedMethods.SemanticSearchRetrievalResult =
                             Await SharedMethods.LoadAdditionalSemanticSearchSourcesAsync(
-                                configuredPath,
+                                retrievalPath,
                                 retrieval.SelectedEntryIds,
                                 retrievalOptions).ConfigureAwait(False)
 
                         retrieval.LoadedSources = combinedRetrieval.LoadedSources
                         retrieval.ReducedSourceText = combinedRetrieval.ReducedSourceText
                         sourceText = retrieval.ReducedSourceText
+
+                        Dim expandedMatchCount As Integer =
+                            If(retrieval.SelectedEntryIds IsNot Nothing, retrieval.SelectedEntryIds.Count, 0)
+                        UpdateAssistantThinking($"Indexed manual — {expandedMatchCount:N0} relevant segment(s) loaded. Revising answer...")
 
                         answer = Await CallHelpMeLlmAsync(
                             systemPrompt,
@@ -852,7 +877,7 @@ Namespace SharedLibrary
 
                         Dim finalVerification As SharedMethods.SemanticSearchResponseVerificationResult =
                             Await SharedMethods.VerifySemanticSearchResponseAsync(
-                                configuredPath,
+                                retrievalPath,
                                 _context,
                                 "HelpMe",
                                 userText,
@@ -1093,8 +1118,8 @@ Namespace SharedLibrary
         End Function
 
         ''' <summary>
-        ''' Prüft eine lokal indexierte Quelle, ohne deren vollständigen Inhalt zu laden.
-        ''' Für URLs, normale Dateien und ungültige Indizes bleibt das bisherige Verhalten erhalten.
+        ''' Checks whether the configured manual is available without loading the full manual text when
+        ''' a semantic-search index can be used.
         ''' </summary>
         Private Async Function GetManualAvailabilityTextAsync() As System.Threading.Tasks.Task(Of String)
             Dim configuredPath As String = If(
@@ -1106,15 +1131,13 @@ Namespace SharedLibrary
                 Return ""
             End If
 
-            Dim isRemote As Boolean =
-                configuredPath.StartsWith("http://", System.StringComparison.OrdinalIgnoreCase) OrElse
-                configuredPath.StartsWith("https://", System.StringComparison.OrdinalIgnoreCase)
+            Dim retrievalPath As String = Await EnsureLocalSemanticSearchIndexPathAsync(configuredPath).ConfigureAwait(False)
 
-            If Not isRemote AndAlso
-               SharedMethods.IsPotentiallySemanticSearchIndexedTextFile(configuredPath) Then
+            If Not String.IsNullOrWhiteSpace(retrievalPath) AndAlso
+               SharedMethods.IsPotentiallySemanticSearchIndexedTextFile(retrievalPath) Then
 
                 Dim cacheItem As SharedMethods.SemanticSearchIndexCacheItem =
-                    Await SharedMethods.TryGetSemanticSearchIndexAsync(configuredPath).ConfigureAwait(False)
+                    Await SharedMethods.TryGetSemanticSearchIndexAsync(retrievalPath).ConfigureAwait(False)
 
                 If cacheItem IsNot Nothing Then
                     Return "The configured indexed source is available."
@@ -1122,6 +1145,149 @@ Namespace SharedLibrary
             End If
 
             Return Await GetManualOnceAsync().ConfigureAwait(False)
+        End Function
+
+        ''' <summary>
+        ''' Returns a local file path for semantic-search retrieval. Remote indexed manuals are cached to
+        ''' a deterministic temp file and refreshed at least once per day.
+        ''' </summary>
+        Private Async Function EnsureLocalSemanticSearchIndexPathAsync(pathOrUrl As String) As System.Threading.Tasks.Task(Of String)
+            Dim source As String = If(pathOrUrl, "").Trim()
+            If String.IsNullOrWhiteSpace(source) Then
+                Return ""
+            End If
+
+            Dim isRemote As Boolean =
+                source.StartsWith("http://", System.StringComparison.OrdinalIgnoreCase) OrElse
+                source.StartsWith("https://", System.StringComparison.OrdinalIgnoreCase)
+
+            If Not isRemote Then
+                Return source
+            End If
+
+            Dim cachePath As String = GetSemanticSearchRemoteCacheFilePath(source)
+            If IsFreshSemanticSearchIndexCache(cachePath) Then
+                Return cachePath
+            End If
+
+            Await _semanticIndexCacheSemaphore.WaitAsync().ConfigureAwait(False)
+
+            Try
+                If IsFreshSemanticSearchIndexCache(cachePath) Then
+                    Return cachePath
+                End If
+
+                Dim candidateUrls As List(Of String) = BuildRemoteManualCandidateUrls(source)
+                Dim lastFailure As String = ""
+
+                For Each candidateUrl As String In candidateUrls
+                    Try
+                        Dim response = Await SharedMethods.SendHttpRequestAsync(
+                            New SharedMethods.SharedHttpRequest() With {
+                                .Url = candidateUrl,
+                                .Method = "GET",
+                                .TimeoutMs = 30000,
+                                .UserAgent = "RedInk/1.0 (+https://redink.ai)",
+                                .Accept = "text/plain, application/json, text/*, application/octet-stream, */*",
+                                .StackPreference = SharedMethods.HttpStackPreference.PreferConfiguredDefault
+                            }).ConfigureAwait(False)
+
+                        If response Is Nothing Then
+                            lastFailure = "The HTTP request returned no response."
+                            Continue For
+                        End If
+
+                        If response.StatusCode < 200 OrElse response.StatusCode >= 300 Then
+                            lastFailure = $"The server returned HTTP status {response.StatusCode}."
+                            Continue For
+                        End If
+
+                        Dim data As Byte() = If(response.BodyBytes, New Byte() {})
+                        If data.Length = 0 Then
+                            lastFailure = "The download succeeded, but the response body was empty."
+                            Continue For
+                        End If
+
+                        Dim cacheDirectory As String = Path.GetDirectoryName(cachePath)
+                        If Not String.IsNullOrWhiteSpace(cacheDirectory) Then
+                            Directory.CreateDirectory(cacheDirectory)
+                        End If
+
+                        Dim stagingPath As String = cachePath & ".download"
+
+                        Try
+                            File.WriteAllBytes(stagingPath, data)
+
+                            If Not SharedMethods.IsPotentiallySemanticSearchIndexedTextFile(stagingPath) Then
+                                lastFailure = "The downloaded content is not a valid semantic-search index."
+                                Continue For
+                            End If
+
+                            File.Copy(stagingPath, cachePath, True)
+                            Dbg("Refreshed local semantic-search cache: " & cachePath)
+                            Return cachePath
+                        Finally
+                            Try
+                                If File.Exists(stagingPath) Then
+                                    File.Delete(stagingPath)
+                                End If
+                            Catch
+                            End Try
+                        End Try
+                    Catch ex As Exception
+                        lastFailure = GetExceptionSummary(ex)
+                    End Try
+                Next
+
+                If Not String.IsNullOrWhiteSpace(cachePath) AndAlso
+                   File.Exists(cachePath) AndAlso
+                   SharedMethods.IsPotentiallySemanticSearchIndexedTextFile(cachePath) Then
+                    Dbg("Semantic-search cache refresh failed; using stale local cache. " & lastFailure)
+                    Return cachePath
+                End If
+
+                If Not String.IsNullOrWhiteSpace(lastFailure) Then
+                    Dbg("Semantic-search cache refresh failed: " & lastFailure)
+                End If
+
+                Return ""
+            Finally
+                _semanticIndexCacheSemaphore.Release()
+            End Try
+        End Function
+
+        Private Shared Function IsFreshSemanticSearchIndexCache(cachePath As String) As Boolean
+            If String.IsNullOrWhiteSpace(cachePath) OrElse Not File.Exists(cachePath) Then
+                Return False
+            End If
+
+            If Not SharedMethods.IsPotentiallySemanticSearchIndexedTextFile(cachePath) Then
+                Return False
+            End If
+
+            Try
+                Dim cacheAge As TimeSpan = DateTime.UtcNow - File.GetLastWriteTimeUtc(cachePath)
+                Return cacheAge < TimeSpan.FromDays(1)
+            Catch
+                Return False
+            End Try
+        End Function
+
+        Private Shared Function GetSemanticSearchRemoteCacheFilePath(pathOrUrl As String) As String
+            Dim normalizedPathOrUrl As String = If(pathOrUrl, "").Trim()
+
+            Dim hashBytes As Byte()
+            Using sha256 As System.Security.Cryptography.SHA256 = System.Security.Cryptography.SHA256.Create()
+                hashBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(normalizedPathOrUrl))
+            End Using
+
+            Dim keyBuilder As New StringBuilder(hashBytes.Length * 2)
+            For Each value As Byte In hashBytes
+                keyBuilder.Append(value.ToString("x2", System.Globalization.CultureInfo.InvariantCulture))
+            Next
+
+            Dim cacheDirectory As String = Path.Combine(Path.GetTempPath(), "RedInk", "HelpMeInkySemanticSearch")
+            Return Path.Combine(cacheDirectory, "semantic-index-" & keyBuilder.ToString() & ".txt")
         End Function
 
         ''' <summary>
@@ -1691,6 +1857,12 @@ Namespace SharedLibrary
                           var el=document.getElementById(id); if(!el||!el.parentNode) return;
                           el.parentNode.removeChild(el);
                         }}
+                        function setThinking(id, html) {{
+                          var el=document.getElementById(id); if(!el) return;
+                          var content=el.querySelector('.content'); if(!content) return;
+                          content.innerHTML=html;
+                          window.scrollTo(0, document.body.scrollHeight);
+                        }}
                         </script>
                         </head>
                         <body><div id=""chat""></div></body>
@@ -1707,7 +1879,7 @@ Namespace SharedLibrary
             Dbg("DocumentCompleted flushQueue=" & _htmlQueue.Count)
             If _htmlQueue.Count > 0 Then
                 Try
-                    For Each frag In _htmlQueue
+                    For Each frag As String In _htmlQueue
                         _chat.Document.InvokeScript("appendMessage", New Object() {frag})
                     Next
                 Catch ex As Exception
@@ -1716,6 +1888,41 @@ Namespace SharedLibrary
                     _htmlQueue.Clear()
                 End Try
             End If
+        End Sub
+
+        ''' <summary>
+        ''' Removes the last "Thinking..." placeholder from the chat DOM (if present).
+        ''' </summary>
+        Private Sub RemoveAssistantThinking()
+            If String.IsNullOrEmpty(_lastThinkingId) Then Return
+            Ui(Sub()
+                   Try
+                       If _chat.Document IsNot Nothing Then
+                           _chat.Document.InvokeScript("removeById", New Object() {_lastThinkingId})
+                       End If
+                   Catch
+                   Finally
+                       _lastThinkingId = Nothing
+                   End Try
+               End Sub)
+        End Sub
+
+        ''' <summary>
+        ''' Updates the text of the current "Thinking..." placeholder to show semantic-search progress.
+        ''' </summary>
+        Private Sub UpdateAssistantThinking(statusText As String)
+            If String.IsNullOrEmpty(_lastThinkingId) Then Return
+
+            Ui(Sub()
+                   Try
+                       If _chat.Document IsNot Nothing Then
+                           _chat.Document.InvokeScript(
+                               "setThinking",
+                               New Object() {_lastThinkingId, WebUtility.HtmlEncode(If(statusText, ""))})
+                       End If
+                   Catch
+                   End Try
+               End Sub)
         End Sub
 
         ''' <summary>
@@ -1771,23 +1978,6 @@ Namespace SharedLibrary
         Private Sub ShowAssistantThinking()
             _lastThinkingId = "thinking-" & Guid.NewGuid().ToString("N")
             AppendHtml($"<div id=""{_lastThinkingId}"" class='msg assistant thinking'><span class='who'>{WebUtility.HtmlEncode(AssistantName)}:</span><span class='content'>Thinking...</span></div>")
-        End Sub
-
-        ''' <summary>
-        ''' Removes the last "Thinking..." placeholder from the chat DOM (if present).
-        ''' </summary>
-        Private Sub RemoveAssistantThinking()
-            If String.IsNullOrEmpty(_lastThinkingId) Then Return
-            Ui(Sub()
-                   Try
-                       If _chat.Document IsNot Nothing Then
-                           _chat.Document.InvokeScript("removeById", New Object() {_lastThinkingId})
-                       End If
-                   Catch
-                   Finally
-                       _lastThinkingId = Nothing
-                   End Try
-               End Sub)
         End Sub
 
         ''' <summary>
