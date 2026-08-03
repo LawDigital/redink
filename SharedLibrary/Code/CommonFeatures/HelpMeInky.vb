@@ -138,8 +138,8 @@ Namespace SharedLibrary
         ''' <summary>Path/URL that `_manualCache` was loaded from.</summary>
         Private _manualCachePath As String = Nothing
 
-        ''' <summary>Serializes refreshes of the local cache file for remote semantic-search indexes.</summary>
-        Private ReadOnly _semanticIndexCacheSemaphore As New Threading.SemaphoreSlim(1, 1)
+        ''' <summary>Serializes refreshes of local cache files for remote manuals and semantic-search indexes.</summary>
+        Private Shared ReadOnly _remoteManualCacheSemaphore As New Threading.SemaphoreSlim(1, 1)
 
         ''' <summary>Welcome generation state flag (0 = none, 1 = running).</summary>
         Private _welcomeInProgress As Integer = 0 ' 0 = none, 1 = running
@@ -1146,12 +1146,28 @@ Namespace SharedLibrary
 
             Return Await GetManualOnceAsync().ConfigureAwait(False)
         End Function
-
         ''' <summary>
         ''' Returns a local file path for semantic-search retrieval. Remote indexed manuals are cached to
         ''' a deterministic temp file and refreshed at least once per day.
         ''' </summary>
         Private Async Function EnsureLocalSemanticSearchIndexPathAsync(pathOrUrl As String) As System.Threading.Tasks.Task(Of String)
+            Dim localPath As String = Await EnsureLocalManualFileCopyAsync(pathOrUrl).ConfigureAwait(False)
+            If String.IsNullOrWhiteSpace(localPath) Then
+                Return ""
+            End If
+
+            If SharedMethods.IsPotentiallySemanticSearchIndexedTextFile(localPath) Then
+                Return localPath
+            End If
+
+            Return ""
+        End Function
+
+        ''' <summary>
+        ''' Returns a local file path for a manual source. Remote URLs are cached to a deterministic temp
+        ''' file and refreshed at least once per day.
+        ''' </summary>
+        Private Shared Async Function EnsureLocalManualFileCopyAsync(pathOrUrl As String) As System.Threading.Tasks.Task(Of String)
             Dim source As String = If(pathOrUrl, "").Trim()
             If String.IsNullOrWhiteSpace(source) Then
                 Return ""
@@ -1165,16 +1181,17 @@ Namespace SharedLibrary
                 Return source
             End If
 
-            Dim cachePath As String = GetSemanticSearchRemoteCacheFilePath(source)
-            If IsFreshSemanticSearchIndexCache(cachePath) Then
-                Return cachePath
+            Dim freshCachePath As String = GetFreshRemoteManualCachePath(source)
+            If Not String.IsNullOrWhiteSpace(freshCachePath) Then
+                Return freshCachePath
             End If
 
-            Await _semanticIndexCacheSemaphore.WaitAsync().ConfigureAwait(False)
+            Await _remoteManualCacheSemaphore.WaitAsync().ConfigureAwait(False)
 
             Try
-                If IsFreshSemanticSearchIndexCache(cachePath) Then
-                    Return cachePath
+                freshCachePath = GetFreshRemoteManualCachePath(source)
+                If Not String.IsNullOrWhiteSpace(freshCachePath) Then
+                    Return freshCachePath
                 End If
 
                 Dim candidateUrls As List(Of String) = BuildRemoteManualCandidateUrls(source)
@@ -1188,7 +1205,7 @@ Namespace SharedLibrary
                                 .Method = "GET",
                                 .TimeoutMs = 30000,
                                 .UserAgent = "RedInk/1.0 (+https://redink.ai)",
-                                .Accept = "text/plain, application/json, text/*, application/octet-stream, */*",
+                                .Accept = "application/pdf, application/vnd.openxmlformats-officedocument.wordprocessingml.document, application/rtf, text/*, application/octet-stream, */*",
                                 .StackPreference = SharedMethods.HttpStackPreference.PreferConfiguredDefault
                             }).ConfigureAwait(False)
 
@@ -1208,6 +1225,29 @@ Namespace SharedLibrary
                             Continue For
                         End If
 
+                        Dim mediaType As String = ""
+                        If Not String.IsNullOrEmpty(response.ContentType) Then
+                            mediaType = response.ContentType.ToLowerInvariant()
+                        End If
+
+                        Dim cachedText As String = Nothing
+                        Dim extension As String = DetectRemoteManualExtension(candidateUrl, mediaType, data)
+
+                        If String.IsNullOrWhiteSpace(extension) Then
+                            cachedText = DecodeRemoteManualText(data, response.CharSet)
+                            If String.IsNullOrWhiteSpace(cachedText) Then
+                                lastFailure = "The downloaded content is not a supported manual file format."
+                                Continue For
+                            End If
+
+                            If LooksLikeHtml(cachedText) Then
+                                extension = ".html"
+                            Else
+                                extension = ".txt"
+                            End If
+                        End If
+
+                        Dim cachePath As String = GetRemoteManualCacheFilePath(source, extension)
                         Dim cacheDirectory As String = Path.GetDirectoryName(cachePath)
                         If Not String.IsNullOrWhiteSpace(cacheDirectory) Then
                             Directory.CreateDirectory(cacheDirectory)
@@ -1216,15 +1256,22 @@ Namespace SharedLibrary
                         Dim stagingPath As String = cachePath & ".download"
 
                         Try
-                            File.WriteAllBytes(stagingPath, data)
+                            If String.Equals(extension, ".txt", StringComparison.OrdinalIgnoreCase) OrElse
+                               String.Equals(extension, ".html", StringComparison.OrdinalIgnoreCase) OrElse
+                               String.Equals(extension, ".htm", StringComparison.OrdinalIgnoreCase) Then
 
-                            If Not SharedMethods.IsPotentiallySemanticSearchIndexedTextFile(stagingPath) Then
-                                lastFailure = "The downloaded content is not a valid semantic-search index."
-                                Continue For
+                                If cachedText Is Nothing Then
+                                    cachedText = DecodeRemoteManualText(data, response.CharSet)
+                                End If
+
+                                File.WriteAllText(stagingPath, cachedText, New System.Text.UTF8Encoding(True))
+                            Else
+                                File.WriteAllBytes(stagingPath, data)
                             End If
 
                             File.Copy(stagingPath, cachePath, True)
-                            Dbg("Refreshed local semantic-search cache: " & cachePath)
+                            DeleteRemoteManualCacheVariants(source, cachePath)
+                            Debug.WriteLine($"[HelpMeInky {DateTime.Now:HH:mm:ss.fff}] Refreshed local manual cache: {cachePath}")
                             Return cachePath
                         Finally
                             Try
@@ -1239,29 +1286,84 @@ Namespace SharedLibrary
                     End Try
                 Next
 
-                If Not String.IsNullOrWhiteSpace(cachePath) AndAlso
-                   File.Exists(cachePath) AndAlso
-                   SharedMethods.IsPotentiallySemanticSearchIndexedTextFile(cachePath) Then
-                    Dbg("Semantic-search cache refresh failed; using stale local cache. " & lastFailure)
-                    Return cachePath
+                Dim staleCachePath As String = GetAnyRemoteManualCachePath(source)
+                If Not String.IsNullOrWhiteSpace(staleCachePath) Then
+                    Debug.WriteLine($"[HelpMeInky {DateTime.Now:HH:mm:ss.fff}] Remote manual cache refresh failed; using stale local cache. {lastFailure}")
+                    Return staleCachePath
                 End If
 
                 If Not String.IsNullOrWhiteSpace(lastFailure) Then
-                    Dbg("Semantic-search cache refresh failed: " & lastFailure)
+                    Debug.WriteLine($"[HelpMeInky {DateTime.Now:HH:mm:ss.fff}] Remote manual cache refresh failed: {lastFailure}")
                 End If
 
                 Return ""
             Finally
-                _semanticIndexCacheSemaphore.Release()
+                _remoteManualCacheSemaphore.Release()
             End Try
         End Function
 
-        Private Shared Function IsFreshSemanticSearchIndexCache(cachePath As String) As Boolean
-            If String.IsNullOrWhiteSpace(cachePath) OrElse Not File.Exists(cachePath) Then
-                Return False
+        Private Shared Function DecodeRemoteManualText(data As Byte(), charSet As String) As String
+            If data Is Nothing OrElse data.Length = 0 Then
+                Return ""
             End If
 
-            If Not SharedMethods.IsPotentiallySemanticSearchIndexedTextFile(cachePath) Then
+            Dim enc As Encoding = Encoding.UTF8
+            If Not String.IsNullOrEmpty(charSet) Then
+                Try
+                    enc = Encoding.GetEncoding(charSet)
+                Catch
+                    enc = Encoding.UTF8
+                End Try
+            End If
+
+            Return enc.GetString(data)
+        End Function
+
+        Private Shared Function GetFreshRemoteManualCachePath(pathOrUrl As String) As String
+            Dim cachePath As String = GetAnyRemoteManualCachePath(pathOrUrl)
+            If String.IsNullOrWhiteSpace(cachePath) Then
+                Return ""
+            End If
+
+            If IsFreshRemoteManualCacheFile(cachePath) Then
+                Return cachePath
+            End If
+
+            Return ""
+        End Function
+
+        Private Shared Function GetAnyRemoteManualCachePath(pathOrUrl As String) As String
+            Try
+                Dim cachePrefix As String = GetRemoteManualCacheFilePathPrefix(pathOrUrl)
+                Dim cacheDirectory As String = Path.GetDirectoryName(cachePrefix)
+                If String.IsNullOrWhiteSpace(cacheDirectory) OrElse Not Directory.Exists(cacheDirectory) Then
+                    Return ""
+                End If
+
+                Dim cacheBaseName As String = Path.GetFileName(cachePrefix)
+                Dim latestPath As String = ""
+                Dim latestWriteTimeUtc As DateTime = DateTime.MinValue
+
+                For Each candidatePath As String In Directory.GetFiles(cacheDirectory, cacheBaseName & ".*")
+                    If candidatePath.EndsWith(".download", StringComparison.OrdinalIgnoreCase) Then
+                        Continue For
+                    End If
+
+                    Dim writeTimeUtc As DateTime = File.GetLastWriteTimeUtc(candidatePath)
+                    If writeTimeUtc > latestWriteTimeUtc Then
+                        latestWriteTimeUtc = writeTimeUtc
+                        latestPath = candidatePath
+                    End If
+                Next
+
+                Return latestPath
+            Catch
+                Return ""
+            End Try
+        End Function
+
+        Private Shared Function IsFreshRemoteManualCacheFile(cachePath As String) As Boolean
+            If String.IsNullOrWhiteSpace(cachePath) OrElse Not File.Exists(cachePath) Then
                 Return False
             End If
 
@@ -1273,7 +1375,20 @@ Namespace SharedLibrary
             End Try
         End Function
 
-        Private Shared Function GetSemanticSearchRemoteCacheFilePath(pathOrUrl As String) As String
+        Private Shared Function GetRemoteManualCacheFilePath(pathOrUrl As String, extension As String) As String
+            Dim cachePrefix As String = GetRemoteManualCacheFilePathPrefix(pathOrUrl)
+            Dim normalizedExtension As String = If(extension, "").Trim()
+
+            If normalizedExtension.Length = 0 Then
+                normalizedExtension = ".txt"
+            ElseIf Not normalizedExtension.StartsWith(".", StringComparison.Ordinal) Then
+                normalizedExtension = "." & normalizedExtension
+            End If
+
+            Return cachePrefix & normalizedExtension.ToLowerInvariant()
+        End Function
+
+        Private Shared Function GetRemoteManualCacheFilePathPrefix(pathOrUrl As String) As String
             Dim normalizedPathOrUrl As String = If(pathOrUrl, "").Trim()
 
             Dim hashBytes As Byte()
@@ -1286,9 +1401,33 @@ Namespace SharedLibrary
                 keyBuilder.Append(value.ToString("x2", System.Globalization.CultureInfo.InvariantCulture))
             Next
 
-            Dim cacheDirectory As String = Path.Combine(Path.GetTempPath(), "RedInk", "HelpMeInkySemanticSearch")
-            Return Path.Combine(cacheDirectory, "semantic-index-" & keyBuilder.ToString() & ".txt")
+            Dim cacheDirectory As String = Path.Combine(Path.GetTempPath(), "RedInk", "HelpMeInkyRemoteManualCache")
+            Return Path.Combine(cacheDirectory, "manual-" & keyBuilder.ToString())
         End Function
+
+        Private Shared Sub DeleteRemoteManualCacheVariants(pathOrUrl As String, keepPath As String)
+            Try
+                Dim cachePrefix As String = GetRemoteManualCacheFilePathPrefix(pathOrUrl)
+                Dim cacheDirectory As String = Path.GetDirectoryName(cachePrefix)
+                If String.IsNullOrWhiteSpace(cacheDirectory) OrElse Not Directory.Exists(cacheDirectory) Then
+                    Return
+                End If
+
+                Dim cacheBaseName As String = Path.GetFileName(cachePrefix)
+
+                For Each candidatePath As String In Directory.GetFiles(cacheDirectory, cacheBaseName & ".*")
+                    If String.Equals(candidatePath, keepPath, StringComparison.OrdinalIgnoreCase) Then
+                        Continue For
+                    End If
+
+                    Try
+                        File.Delete(candidatePath)
+                    Catch
+                    End Try
+                Next
+            Catch
+            End Try
+        End Sub
 
         ''' <summary>
         ''' Returns manual text from cache when possible; otherwise loads it from the configured path/URL.
@@ -1396,6 +1535,12 @@ Namespace SharedLibrary
             ' Remote URL
             If s.StartsWith("http://", StringComparison.OrdinalIgnoreCase) OrElse s.StartsWith("https://", StringComparison.OrdinalIgnoreCase) Then
                 Try
+                    Dim localCopyPath As String = Await EnsureLocalManualFileCopyAsync(s).ConfigureAwait(False)
+                    If Not String.IsNullOrWhiteSpace(localCopyPath) AndAlso
+                       Not String.Equals(localCopyPath, s, StringComparison.OrdinalIgnoreCase) Then
+                        Return Await GetManualTextFreshAsync(localCopyPath, context).ConfigureAwait(False)
+                    End If
+
                     Dim candidateUrls As List(Of String) = BuildRemoteManualCandidateUrls(s)
                     Dim firstError As String = ""
 
@@ -1434,6 +1579,14 @@ Namespace SharedLibrary
                 Select Case Path.GetExtension(s).ToLowerInvariant()
                     Case ".txt", ".md", ".log"
                         Return File.ReadAllText(s, Encoding.UTF8)
+
+                    Case ".htm", ".html"
+                        Dim htmlText As String = File.ReadAllText(s, Encoding.UTF8)
+                        If String.IsNullOrWhiteSpace(htmlText) Then
+                            Return CreateManualLoadError(s, "The HTML file was opened, but no readable text was extracted.")
+                        End If
+
+                        Return HtmlToPlain(htmlText)
 
                     Case ".docx"
                         Dim docxText As String = SharedMethods.ReadDocxSandboxed(s)
