@@ -221,7 +221,7 @@ Partial Public Class ThisAddIn
                 AutoExtractStyleTemplate()
             End If
 
-        Catch ex As Exception
+        Catch ex As System.Exception
             ShowCustomMessageBox($"Error: {ex.Message}")
         End Try
     End Sub
@@ -304,6 +304,7 @@ Partial Public Class ThisAddIn
             Dim userStyles As New JArray()
             Dim wdStyleDefinitions As New JObject()
             Dim collectedStyles As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+            Dim openXmlContext As JObject = BuildDocStyleOpenXmlContext(doc)
             Dim processedCount As Integer = 0
             Dim errorCount As Integer = 0
             Dim unparsedStyleNameCount As Integer = 0
@@ -311,7 +312,7 @@ Partial Public Class ThisAddIn
             ' Process all paragraphs including those in tables
             For Each para As Word.Paragraph In targetRange.Paragraphs
                 Try
-                    Dim parseResult As (userStyleJson As JObject, parsedStyleName As Boolean) = ExtractUserStyleFromParagraphEx(para, processedCount + 1)
+                    Dim parseResult As (userStyleJson As JObject, parsedStyleName As Boolean) = ExtractUserStyleFromParagraphEx(para, processedCount + 1, openXmlContext)
                     If parseResult.userStyleJson IsNot Nothing Then
                         userStyles.Add(parseResult.userStyleJson)
                         processedCount += 1
@@ -326,7 +327,7 @@ Partial Public Class ThisAddIn
                             collectedStyles.Add(wdStyleName)
                         End If
                     End If
-                Catch ex As Exception
+                Catch ex As System.Exception
                     errorCount += 1
                     Debug.WriteLine($"Error processing paragraph {processedCount + 1}: {ex.Message}")
                 End Try
@@ -335,17 +336,18 @@ Partial Public Class ThisAddIn
             ' Extract full wdStyle definitions for collected styles
             For Each styleName In collectedStyles
                 Try
-                    Dim styleObj As JObject = ExtractFullStyleDefinition(doc, styleName)
+                    Dim styleObj As JObject = ExtractFullStyleDefinition(doc, styleName, openXmlContext)
                     If styleObj IsNot Nothing Then
                         wdStyleDefinitions(styleName) = styleObj
                     End If
-                Catch ex As Exception
+                Catch ex As System.Exception
                     Debug.WriteLine($"Error extracting wdStyle definition for '{styleName}': {ex.Message}")
                 End Try
             Next
 
             ' Build the complete JSON structure
             Dim result As New JObject()
+            result("schemaVersion") = DocStyleSchemaVersion
             result("templateName") = templateDisplayName
             result("description") = "Style template for intelligent document formatting. Each user style in 'userStyles' includes a 'whenToApply' field describing the situations where that style should be applied. The 'wdStyleDefinitions' section contains Word style definitions that can optionally be created/updated in target documents."
             result("documentInfo") = New JObject From {
@@ -356,6 +358,10 @@ Partial Public Class ThisAddIn
             }
             result("userStyles") = userStyles
             result("wdStyleDefinitions") = wdStyleDefinitions
+            result("numberingDefinitions") = BuildReferencedNumberingDefinitions(openXmlContext, collectedStyles)
+            If openXmlContext("documentDefaults") IsNot Nothing Then
+                result("documentDefaults") = openXmlContext("documentDefaults").DeepClone()
+            End If
 
             ' Serialize to formatted JSON
             Dim jsonString As String = JsonConvert.SerializeObject(result, Formatting.Indented)
@@ -374,7 +380,7 @@ Partial Public Class ThisAddIn
 
             Try
                 File.WriteAllText(filePath, jsonString, Encoding.UTF8)
-            Catch ioEx As Exception
+            Catch ioEx As System.Exception
                 ShowCustomMessageBox($"Could not save file: {ioEx.Message}")
                 Return
             End Try
@@ -393,7 +399,7 @@ Partial Public Class ThisAddIn
                 SLib.ShowTextFileEditor(filePath, $"{AN} - Style Template '{templateDisplayName}'", True, _context)
             End If
 
-        Catch ex As Exception
+        Catch ex As System.Exception
             ShowCustomMessageBox($"Error extracting paragraph styles: {ex.Message}")
         End Try
     End Sub
@@ -408,7 +414,9 @@ Partial Public Class ThisAddIn
     ''' <returns>
     ''' A tuple containing the extracted JSON object and a flag indicating whether the style name was parsed from text.
     ''' </returns>
-    Private Function ExtractUserStyleFromParagraphEx(para As Word.Paragraph, index As Integer) As (userStyleJson As JObject, parsedStyleName As Boolean)
+    Private Function ExtractUserStyleFromParagraphEx(para As Word.Paragraph,
+                                                     index As Integer,
+                                                     Optional openXmlContext As JObject = Nothing) As (userStyleJson As JObject, parsedStyleName As Boolean)
         Dim paraRange As Word.Range = para.Range.Duplicate
 
         ' Skip empty paragraphs (only paragraph mark)
@@ -458,6 +466,12 @@ Partial Public Class ThisAddIn
             result("wdStyleBuiltIn") = True
         End Try
 
+        Dim styleMeta As JObject = GetStyleOpenXmlMetadata(openXmlContext, If(result("wdStyleName") IsNot Nothing, CStr(result("wdStyleName")), ""))
+        If styleMeta IsNot Nothing Then
+            If styleMeta("styleId") IsNot Nothing Then result("wdStyleId") = styleMeta("styleId").DeepClone()
+            If styleMeta("numberingBinding") IsNot Nothing Then result("numberingBinding") = styleMeta("numberingBinding").DeepClone()
+        End If
+
         ' Check if in table
         Dim isInTable As Boolean = False
         Try
@@ -475,7 +489,7 @@ Partial Public Class ThisAddIn
         result("fontFormatting") = ExtractFontFormat(paraRange)
 
         ' List formatting
-        result("listFormatting") = ExtractListFormat(paraRange)
+        result("listFormatting") = ExtractListFormat(paraRange, openXmlContext)
 
         ' Tab stops (compact format)
         result("tabStops") = ExtractTabStopsCompact(para)
@@ -500,13 +514,27 @@ Partial Public Class ThisAddIn
     ''' </summary>
     ''' <param name="para">Paragraph containing tab stops.</param>
     ''' <returns>Array of tab stop definitions (position, alignment, optional leader).</returns>
+    ''' <summary>
+    ''' Extracts only explicitly defined paragraph tab stops. Generated default tab stops are represented
+    ''' once in documentDefaults.defaultTabStop and are not repeated here.
+    ''' </summary>
     Private Function ExtractTabStopsCompact(para As Word.Paragraph) As JArray
         Dim tabs As New JArray()
+        If para Is Nothing Then Return tabs
+
         Try
             For Each tabStop As Word.TabStop In para.TabStops
-                Dim tab As New JObject()
-                tab("pos") = Math.Round(tabStop.Position, 2)
-                tab("align") = tabStop.Alignment.ToString().Replace("wdAlignTab", "")
+                Dim isCustom As Boolean = True
+                Try
+                    isCustom = tabStop.CustomTab
+                Catch
+                End Try
+                If Not isCustom Then Continue For
+
+                Dim tab As New JObject From {
+                    {"pos", Math.Round(tabStop.Position, 2)},
+                    {"align", tabStop.Alignment.ToString().Replace("wdAlignTab", "")}
+                }
                 If tabStop.Leader <> WdTabLeader.wdTabLeaderSpaces Then
                     tab("leader") = tabStop.Leader.ToString().Replace("wdTabLeader", "")
                 End If
@@ -514,9 +542,825 @@ Partial Public Class ThisAddIn
             Next
         Catch
         End Try
+
         Return tabs
     End Function
 
+#Region "DocStyle Open XML metadata"
+
+    Private Const DocStyleSchemaVersion As Integer = 2
+
+    ''' <summary>
+    ''' Builds an extraction-only metadata index from Word's Flat OPC representation.
+    ''' No Open XML SDK dependency is required; only System.Xml.Linq is used.
+    ''' </summary>
+    Private Function BuildDocStyleOpenXmlContext(doc As Word.Document) As JObject
+        Dim context As New JObject From {
+            {"available", False},
+            {"stylesById", New JObject()},
+            {"styleIdsByName", New JObject()},
+            {"numberingDefinitions", New JObject()},
+            {"documentDefaults", New JObject()}
+        }
+
+        If doc Is Nothing Then Return context
+
+        Try
+            Dim flatOpcXml As String = doc.WordOpenXML
+            If String.IsNullOrWhiteSpace(flatOpcXml) Then Return context
+
+            Dim flatOpc As System.Xml.Linq.XDocument =
+                System.Xml.Linq.XDocument.Parse(flatOpcXml, System.Xml.Linq.LoadOptions.PreserveWhitespace)
+
+            Dim stylesRoot As System.Xml.Linq.XElement = GetFlatOpcPartRoot(flatOpc, "/word/styles.xml")
+            Dim numberingRoot As System.Xml.Linq.XElement = GetFlatOpcPartRoot(flatOpc, "/word/numbering.xml")
+            Dim settingsRoot As System.Xml.Linq.XElement = GetFlatOpcPartRoot(flatOpc, "/word/settings.xml")
+
+            If stylesRoot Is Nothing Then Return context
+
+            Dim w As System.Xml.Linq.XNamespace =
+                System.Xml.Linq.XNamespace.Get("http://schemas.openxmlformats.org/wordprocessingml/2006/main")
+            Dim w15 As System.Xml.Linq.XNamespace =
+                System.Xml.Linq.XNamespace.Get("http://schemas.microsoft.com/office/word/2012/wordml")
+
+            Dim stylesById As New JObject()
+            Dim styleIdsByName As New JObject()
+
+            For Each styleElement As System.Xml.Linq.XElement In stylesRoot.Elements(w + "style")
+                Dim styleId As String = GetOpenXmlAttributeValue(styleElement, w + "styleId")
+                If String.IsNullOrWhiteSpace(styleId) Then Continue For
+
+                Dim styleName As String = GetOpenXmlVal(styleElement.Element(w + "name"))
+                If String.IsNullOrWhiteSpace(styleName) Then styleName = styleId
+
+                Dim styleMeta As New JObject From {
+                    {"styleId", styleId},
+                    {"styleName", styleName},
+                    {"styleTypeOpenXml", GetOpenXmlAttributeValue(styleElement, w + "type")},
+                    {"customStyle", OpenXmlOnOffAttribute(styleElement, w + "customStyle", False)}
+                }
+
+                Dim basedOnStyleId As String = GetOpenXmlVal(styleElement.Element(w + "basedOn"))
+                If Not String.IsNullOrWhiteSpace(basedOnStyleId) Then styleMeta("basedOnStyleId") = basedOnStyleId
+
+                Dim nextStyleId As String = GetOpenXmlVal(styleElement.Element(w + "next"))
+                If Not String.IsNullOrWhiteSpace(nextStyleId) Then styleMeta("nextStyleId") = nextStyleId
+
+                Dim uiPriorityValue As String = GetOpenXmlVal(styleElement.Element(w + "uiPriority"))
+                Dim uiPriority As Integer
+                If Integer.TryParse(uiPriorityValue, uiPriority) Then styleMeta("uiPriority") = uiPriority
+
+                styleMeta("quickFormat") = (styleElement.Element(w + "qFormat") IsNot Nothing)
+
+                Dim directNumbering As New JObject()
+                Dim pPr As System.Xml.Linq.XElement = styleElement.Element(w + "pPr")
+                Dim numPr As System.Xml.Linq.XElement = If(pPr IsNot Nothing, pPr.Element(w + "numPr"), Nothing)
+                If numPr IsNot Nothing Then
+                    Dim ilvlValue As String = GetOpenXmlVal(numPr.Element(w + "ilvl"))
+                    Dim ilvlZeroBased As Integer
+                    If Integer.TryParse(ilvlValue, ilvlZeroBased) Then
+                        directNumbering("ilvlZeroBased") = ilvlZeroBased
+                        directNumbering("listLevelNumber") = ilvlZeroBased + 1
+                    End If
+
+                    Dim numIdValue As String = GetOpenXmlVal(numPr.Element(w + "numId"))
+                    Dim numId As Integer
+                    If Integer.TryParse(numIdValue, numId) Then directNumbering("numId") = numId
+                End If
+                If directNumbering.HasValues Then styleMeta("directNumbering") = directNumbering
+
+                stylesById(styleId) = styleMeta
+                styleIdsByName(styleName) = styleId
+            Next
+
+            ' Resolve display names after every style ID has been indexed.
+            For Each styleProperty As JProperty In stylesById.Properties()
+                Dim styleMeta As JObject = CType(styleProperty.Value, JObject)
+
+                If styleMeta("basedOnStyleId") IsNot Nothing Then
+                    Dim baseName As String = GetStyleNameFromContext(stylesById, CStr(styleMeta("basedOnStyleId")))
+                    If Not String.IsNullOrWhiteSpace(baseName) Then styleMeta("basedOnStyleName") = baseName
+                End If
+
+                If styleMeta("nextStyleId") IsNot Nothing Then
+                    Dim nextName As String = GetStyleNameFromContext(stylesById, CStr(styleMeta("nextStyleId")))
+                    If Not String.IsNullOrWhiteSpace(nextName) Then styleMeta("nextStyleName") = nextName
+                End If
+            Next
+
+            Dim abstractNumberingById As New JObject()
+            If numberingRoot IsNot Nothing Then
+                For Each abstractElement As System.Xml.Linq.XElement In numberingRoot.Elements(w + "abstractNum")
+                    Dim abstractNumIdText As String = GetOpenXmlAttributeValue(abstractElement, w + "abstractNumId")
+                    Dim abstractNumId As Integer
+                    If Not Integer.TryParse(abstractNumIdText, abstractNumId) Then Continue For
+
+                    Dim definition As New JObject From {
+                        {"abstractNumId", abstractNumId},
+                        {"outlineNumbered", True}
+                    }
+
+                    Dim nsid As String = GetOpenXmlVal(abstractElement.Element(w + "nsid"))
+                    If Not String.IsNullOrWhiteSpace(nsid) Then definition("nsid") = nsid
+
+                    Dim templateCode As String = GetOpenXmlVal(abstractElement.Element(w + "tmpl"))
+                    If Not String.IsNullOrWhiteSpace(templateCode) Then definition("templateCode") = templateCode
+
+                    Dim multiLevelType As String = GetOpenXmlVal(abstractElement.Element(w + "multiLevelType"))
+                    If Not String.IsNullOrWhiteSpace(multiLevelType) Then
+                        definition("multiLevelType") = multiLevelType
+                        definition("outlineNumbered") = Not String.Equals(multiLevelType, "singleLevel", StringComparison.OrdinalIgnoreCase)
+                    End If
+
+                    Dim styleLink As String = GetOpenXmlVal(abstractElement.Element(w + "styleLink"))
+                    If Not String.IsNullOrWhiteSpace(styleLink) Then definition("numberingStyleId") = styleLink
+
+                    Dim numStyleLink As String = GetOpenXmlVal(abstractElement.Element(w + "numStyleLink"))
+                    If Not String.IsNullOrWhiteSpace(numStyleLink) Then definition("numStyleLinkId") = numStyleLink
+
+                    Dim restartAfterBreakAttribute As System.Xml.Linq.XAttribute = abstractElement.Attribute(w15 + "restartNumberingAfterBreak")
+                    If restartAfterBreakAttribute IsNot Nothing Then
+                        definition("restartNumberingAfterBreak") = ParseOpenXmlOnOffValue(restartAfterBreakAttribute.Value, False)
+                    End If
+
+                    Dim levels As New JArray()
+                    For Each levelElement As System.Xml.Linq.XElement In abstractElement.Elements(w + "lvl")
+                        levels.Add(ExtractOpenXmlNumberingLevel(levelElement, stylesById, w))
+                    Next
+                    definition("levels") = levels
+                    definition("templateFingerprintV2") = ComputeJsonListTemplateFingerprintV2(definition)
+
+                    abstractNumberingById(abstractNumId.ToString(System.Globalization.CultureInfo.InvariantCulture)) = definition
+                Next
+            End If
+
+            Dim numberingDefinitions As New JObject()
+            If numberingRoot IsNot Nothing Then
+                For Each numElement As System.Xml.Linq.XElement In numberingRoot.Elements(w + "num")
+                    Dim numIdText As String = GetOpenXmlAttributeValue(numElement, w + "numId")
+                    Dim numId As Integer
+                    If Not Integer.TryParse(numIdText, numId) Then Continue For
+
+                    Dim abstractNumIdText As String = GetOpenXmlVal(numElement.Element(w + "abstractNumId"))
+                    Dim abstractNumId As Integer
+                    If Not Integer.TryParse(abstractNumIdText, abstractNumId) Then Continue For
+
+                    Dim definition As JObject = Nothing
+                    Dim abstractToken As JToken = abstractNumberingById(abstractNumId.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                    If abstractToken IsNot Nothing AndAlso TypeOf abstractToken Is JObject Then
+                        definition = CType(abstractToken.DeepClone(), JObject)
+                    Else
+                        definition = New JObject From {
+                            {"abstractNumId", abstractNumId},
+                            {"levels", New JArray()},
+                            {"outlineNumbered", True}
+                        }
+                    End If
+
+                    definition("sourceNumId") = numId
+                    definition("sharedListInstanceKey") = $"numId:{numId}"
+
+                    ApplyOpenXmlNumberingOverrides(definition, numElement, stylesById, w)
+
+                    If definition("numberingStyleId") IsNot Nothing Then
+                        Dim numberingStyleName As String = GetStyleNameFromContext(stylesById, CStr(definition("numberingStyleId")))
+                        If Not String.IsNullOrWhiteSpace(numberingStyleName) Then definition("numberingStyleName") = numberingStyleName
+                    End If
+
+                    definition("templateFingerprintV2") = ComputeJsonListTemplateFingerprintV2(definition)
+                    numberingDefinitions(CStr(definition("sharedListInstanceKey"))) = definition
+                Next
+            End If
+
+            ' Resolve effective numId and list level independently through basedOn chains.
+            For Each styleProperty As JProperty In stylesById.Properties()
+                Dim styleId As String = styleProperty.Name
+                Dim styleMeta As JObject = CType(styleProperty.Value, JObject)
+                Dim levelResolution As JObject = ResolveStyleNumberingProperty(stylesById, styleId, "listLevelNumber")
+                Dim numIdResolution As JObject = ResolveStyleNumberingProperty(stylesById, styleId, "numId")
+
+                If levelResolution IsNot Nothing OrElse numIdResolution IsNot Nothing Then
+                    Dim binding As New JObject()
+                    Dim directNumbering As JObject = TryCast(styleMeta("directNumbering"), JObject)
+
+                    binding("hasDirectListLevel") =
+                        (directNumbering IsNot Nothing AndAlso directNumbering("listLevelNumber") IsNot Nothing)
+                    binding("hasDirectNumId") =
+                        (directNumbering IsNot Nothing AndAlso directNumbering("numId") IsNot Nothing)
+                    binding("direct") = CBool(binding("hasDirectListLevel")) AndAlso CBool(binding("hasDirectNumId"))
+                    binding("inherited") = Not CBool(binding("direct"))
+
+                    If styleMeta("basedOnStyleId") IsNot Nothing Then
+                        binding("inheritedViaStyleId") = styleMeta("basedOnStyleId")
+                        If styleMeta("basedOnStyleName") IsNot Nothing Then
+                            binding("inheritedViaStyleName") = styleMeta("basedOnStyleName")
+                        End If
+                    End If
+
+                    If levelResolution IsNot Nothing Then
+                        binding("effectiveListLevel") = levelResolution("value")
+                        binding("listLevelSourceStyleId") = levelResolution("sourceStyleId")
+                        binding("listLevelSourceStyleName") = levelResolution("sourceStyleName")
+                    End If
+
+                    If numIdResolution IsNot Nothing Then
+                        Dim effectiveNumId As Integer = CInt(numIdResolution("value"))
+                        binding("numId") = effectiveNumId
+                        binding("numIdSourceStyleId") = numIdResolution("sourceStyleId")
+                        binding("numIdSourceStyleName") = numIdResolution("sourceStyleName")
+                        binding("sharedListInstanceKey") = $"numId:{effectiveNumId}"
+
+                        Dim numberingDefinition As JObject = TryCast(numberingDefinitions($"numId:{effectiveNumId}"), JObject)
+                        If numberingDefinition IsNot Nothing Then
+                            If numberingDefinition("abstractNumId") IsNot Nothing Then binding("abstractNumId") = numberingDefinition("abstractNumId")
+                            If numberingDefinition("numberingStyleId") IsNot Nothing Then binding("numberingStyleId") = numberingDefinition("numberingStyleId")
+                            If numberingDefinition("numberingStyleName") IsNot Nothing Then binding("numberingStyleName") = numberingDefinition("numberingStyleName")
+                        End If
+                    End If
+
+                    styleMeta("numberingBinding") = binding
+                End If
+            Next
+
+            context("stylesById") = stylesById
+            context("styleIdsByName") = styleIdsByName
+            context("numberingDefinitions") = numberingDefinitions
+            context("documentDefaults") = ExtractOpenXmlDocumentDefaults(stylesRoot, settingsRoot, w)
+            context("available") = True
+
+        Catch ex As System.Exception
+            context("error") = ex.Message
+            Debug.WriteLine($"[DocStyle] Open XML metadata extraction failed: {ex.Message}")
+        End Try
+
+        Return context
+    End Function
+
+    Private Function GetFlatOpcPartRoot(flatOpc As System.Xml.Linq.XDocument,
+                                        partName As String) As System.Xml.Linq.XElement
+        If flatOpc Is Nothing OrElse String.IsNullOrWhiteSpace(partName) Then Return Nothing
+
+        Dim pkg As System.Xml.Linq.XNamespace =
+            System.Xml.Linq.XNamespace.Get("http://schemas.microsoft.com/office/2006/xmlPackage")
+
+        For Each part As System.Xml.Linq.XElement In flatOpc.Descendants(pkg + "part")
+            Dim nameAttribute As System.Xml.Linq.XAttribute = part.Attribute(pkg + "name")
+            If nameAttribute Is Nothing OrElse
+               Not String.Equals(nameAttribute.Value, partName, StringComparison.OrdinalIgnoreCase) Then
+                Continue For
+            End If
+
+            Dim xmlData As System.Xml.Linq.XElement = part.Element(pkg + "xmlData")
+            If xmlData IsNot Nothing Then Return xmlData.Elements().FirstOrDefault()
+        Next
+
+        Return Nothing
+    End Function
+
+    Private Function GetOpenXmlAttributeValue(element As System.Xml.Linq.XElement,
+                                              attributeName As System.Xml.Linq.XName) As String
+        If element Is Nothing Then Return ""
+        Dim attribute As System.Xml.Linq.XAttribute = element.Attribute(attributeName)
+        Return If(attribute IsNot Nothing, attribute.Value, "")
+    End Function
+
+    Private Function GetOpenXmlVal(element As System.Xml.Linq.XElement) As String
+        If element Is Nothing Then Return ""
+        Dim w As System.Xml.Linq.XNamespace =
+            System.Xml.Linq.XNamespace.Get("http://schemas.openxmlformats.org/wordprocessingml/2006/main")
+        Return GetOpenXmlAttributeValue(element, w + "val")
+    End Function
+
+    Private Function ParseOpenXmlOnOffValue(value As String, defaultValue As Boolean) As Boolean
+        If String.IsNullOrWhiteSpace(value) Then Return defaultValue
+        Select Case value.Trim().ToLowerInvariant()
+            Case "1", "true", "on", "yes"
+                Return True
+            Case "0", "false", "off", "no"
+                Return False
+            Case Else
+                Return defaultValue
+        End Select
+    End Function
+
+    Private Function OpenXmlOnOffAttribute(element As System.Xml.Linq.XElement,
+                                           attributeName As System.Xml.Linq.XName,
+                                           defaultValue As Boolean) As Boolean
+        If element Is Nothing Then Return defaultValue
+        Dim attribute As System.Xml.Linq.XAttribute = element.Attribute(attributeName)
+        If attribute Is Nothing Then Return defaultValue
+        Return ParseOpenXmlOnOffValue(attribute.Value, True)
+    End Function
+
+    Private Function GetStyleNameFromContext(stylesById As JObject, styleId As String) As String
+        If stylesById Is Nothing OrElse String.IsNullOrWhiteSpace(styleId) Then Return ""
+        Dim styleMeta As JObject = TryCast(stylesById(styleId), JObject)
+        If styleMeta Is Nothing OrElse styleMeta("styleName") Is Nothing Then Return ""
+        Return CStr(styleMeta("styleName"))
+    End Function
+
+    Private Function GetStyleOpenXmlMetadata(openXmlContext As JObject, styleName As String) As JObject
+        If openXmlContext Is Nothing OrElse String.IsNullOrWhiteSpace(styleName) Then Return Nothing
+        Dim styleIdsByName As JObject = TryCast(openXmlContext("styleIdsByName"), JObject)
+        Dim stylesById As JObject = TryCast(openXmlContext("stylesById"), JObject)
+        If styleIdsByName Is Nothing OrElse stylesById Is Nothing Then Return Nothing
+
+        Dim styleIdToken As JToken = styleIdsByName(styleName)
+        If styleIdToken Is Nothing Then
+            For Each propertyItem As JProperty In styleIdsByName.Properties()
+                If String.Equals(propertyItem.Name, styleName, StringComparison.OrdinalIgnoreCase) Then
+                    styleIdToken = propertyItem.Value
+                    Exit For
+                End If
+            Next
+        End If
+
+        If styleIdToken Is Nothing Then Return Nothing
+        Return TryCast(stylesById(CStr(styleIdToken)), JObject)
+    End Function
+
+    Private Function ResolveStyleNumberingProperty(stylesById As JObject,
+                                                    startStyleId As String,
+                                                    propertyName As String) As JObject
+        If stylesById Is Nothing OrElse String.IsNullOrWhiteSpace(startStyleId) Then Return Nothing
+
+        Dim visited As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        Dim currentStyleId As String = startStyleId
+
+        While Not String.IsNullOrWhiteSpace(currentStyleId) AndAlso visited.Add(currentStyleId)
+            Dim styleMeta As JObject = TryCast(stylesById(currentStyleId), JObject)
+            If styleMeta Is Nothing Then Exit While
+
+            Dim directNumbering As JObject = TryCast(styleMeta("directNumbering"), JObject)
+            If directNumbering IsNot Nothing AndAlso directNumbering(propertyName) IsNot Nothing Then
+                Return New JObject From {
+                    {"value", directNumbering(propertyName).DeepClone()},
+                    {"sourceStyleId", currentStyleId},
+                    {"sourceStyleName", If(styleMeta("styleName") IsNot Nothing, CStr(styleMeta("styleName")), currentStyleId)}
+                }
+            End If
+
+            currentStyleId = If(styleMeta("basedOnStyleId") IsNot Nothing,
+                                CStr(styleMeta("basedOnStyleId")), "")
+        End While
+
+        Return Nothing
+    End Function
+
+    Private Function ExtractOpenXmlNumberingLevel(levelElement As System.Xml.Linq.XElement,
+                                                  stylesById As JObject,
+                                                  w As System.Xml.Linq.XNamespace) As JObject
+        Dim levelInfo As New JObject()
+
+        Dim ilvlText As String = GetOpenXmlAttributeValue(levelElement, w + "ilvl")
+        Dim ilvl As Integer
+        If Not Integer.TryParse(ilvlText, ilvl) Then ilvl = 0
+
+        levelInfo("level") = ilvl + 1
+        levelInfo("ilvlZeroBased") = ilvl
+
+        Dim startAt As Integer
+        If Integer.TryParse(GetOpenXmlVal(levelElement.Element(w + "start")), startAt) Then
+            levelInfo("startAt") = startAt
+        Else
+            levelInfo("startAt") = 1
+        End If
+
+        Dim numFmtOpenXml As String = GetOpenXmlVal(levelElement.Element(w + "numFmt"))
+        levelInfo("numberStyleOpenXml") = numFmtOpenXml
+        levelInfo("numberStyle") = OpenXmlNumberFormatToWordEnumName(numFmtOpenXml)
+        levelInfo("numberFormat") = GetOpenXmlVal(levelElement.Element(w + "lvlText"))
+
+        Dim alignmentOpenXml As String = GetOpenXmlVal(levelElement.Element(w + "lvlJc"))
+        levelInfo("alignmentOpenXml") = alignmentOpenXml
+        levelInfo("alignment") = OpenXmlListAlignmentToWordEnumName(alignmentOpenXml)
+
+        Dim suffixOpenXml As String = GetOpenXmlVal(levelElement.Element(w + "suff"))
+        If String.IsNullOrWhiteSpace(suffixOpenXml) Then suffixOpenXml = "tab"
+        levelInfo("trailingCharacterOpenXml") = suffixOpenXml
+        levelInfo("trailingCharacter") = OpenXmlSuffixToWordEnumName(suffixOpenXml)
+
+        Dim paragraphStyleId As String = GetOpenXmlVal(levelElement.Element(w + "pStyle"))
+        If Not String.IsNullOrWhiteSpace(paragraphStyleId) Then
+            levelInfo("paragraphStyleId") = paragraphStyleId
+            Dim paragraphStyleName As String = GetStyleNameFromContext(stylesById, paragraphStyleId)
+            If Not String.IsNullOrWhiteSpace(paragraphStyleName) Then levelInfo("paragraphStyleName") = paragraphStyleName
+        End If
+
+        Dim pPr As System.Xml.Linq.XElement = levelElement.Element(w + "pPr")
+        Dim ind As System.Xml.Linq.XElement = If(pPr IsNot Nothing, pPr.Element(w + "ind"), Nothing)
+        If ind IsNot Nothing Then
+            Dim leftTwips As Integer = ParseOpenXmlIntegerAttribute(ind, w + "left", 0)
+            Dim hangingTwips As Integer = ParseOpenXmlIntegerAttribute(ind, w + "hanging", 0)
+            Dim firstLineTwips As Integer = ParseOpenXmlIntegerAttribute(ind, w + "firstLine", 0)
+
+            levelInfo("textPosition") = CSng(leftTwips / 20.0R)
+            If hangingTwips <> 0 Then
+                levelInfo("numberPosition") = CSng((leftTwips - hangingTwips) / 20.0R)
+            ElseIf firstLineTwips <> 0 Then
+                levelInfo("numberPosition") = CSng((leftTwips + firstLineTwips) / 20.0R)
+            Else
+                levelInfo("numberPosition") = CSng(leftTwips / 20.0R)
+            End If
+        End If
+
+        Dim tabPositionFound As Boolean = False
+        If pPr IsNot Nothing Then
+            Dim tabs As System.Xml.Linq.XElement = pPr.Element(w + "tabs")
+            If tabs IsNot Nothing Then
+                For Each tabElement As System.Xml.Linq.XElement In tabs.Elements(w + "tab")
+                    Dim tabValue As String = GetOpenXmlAttributeValue(tabElement, w + "val")
+                    If String.Equals(tabValue, "num", StringComparison.OrdinalIgnoreCase) OrElse
+                       String.Equals(tabValue, "left", StringComparison.OrdinalIgnoreCase) Then
+                        Dim tabTwips As Integer = ParseOpenXmlIntegerAttribute(tabElement, w + "pos", Integer.MinValue)
+                        If tabTwips <> Integer.MinValue Then
+                            levelInfo("tabPosition") = CSng(tabTwips / 20.0R)
+                            levelInfo("tabPositionState") = "defined"
+                            tabPositionFound = True
+                            Exit For
+                        End If
+                    End If
+                Next
+            End If
+        End If
+        If Not tabPositionFound Then
+            levelInfo("tabPosition") = JValue.CreateNull()
+            levelInfo("tabPositionState") = "wdUndefined"
+        End If
+
+        Dim rPr As System.Xml.Linq.XElement = levelElement.Element(w + "rPr")
+        Dim numberRunFormatting As JObject = ExtractOpenXmlRunFormatting(rPr, w)
+        If numberRunFormatting.HasValues Then levelInfo("numberRunFormatting") = numberRunFormatting
+
+        If String.Equals(numFmtOpenXml, "bullet", StringComparison.OrdinalIgnoreCase) Then
+            Dim bulletText As String = If(levelInfo("numberFormat") IsNot Nothing, CStr(levelInfo("numberFormat")), "")
+            If Not String.IsNullOrEmpty(bulletText) Then levelInfo("bulletCharCode") = AscW(bulletText.Chars(0))
+
+            Dim bulletFont As String = ""
+            Dim fontFields As String() = {"fontAscii", "fontHighAnsi", "fontEastAsia", "fontComplexScript"}
+            For Each fontField As String In fontFields
+                If numberRunFormatting(fontField) IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(CStr(numberRunFormatting(fontField))) Then
+                    bulletFont = CStr(numberRunFormatting(fontField))
+                    Exit For
+                End If
+            Next
+            If Not String.IsNullOrWhiteSpace(bulletFont) Then levelInfo("bulletFont") = bulletFont
+        End If
+
+        Return levelInfo
+    End Function
+
+    Private Function ParseOpenXmlIntegerAttribute(element As System.Xml.Linq.XElement,
+                                                  attributeName As System.Xml.Linq.XName,
+                                                  defaultValue As Integer) As Integer
+        If element Is Nothing Then Return defaultValue
+        Dim valueText As String = GetOpenXmlAttributeValue(element, attributeName)
+        Dim value As Integer
+        If Integer.TryParse(valueText, value) Then Return value
+        Return defaultValue
+    End Function
+
+    Private Function ExtractOpenXmlRunFormatting(rPr As System.Xml.Linq.XElement,
+                                                 w As System.Xml.Linq.XNamespace) As JObject
+        Dim result As New JObject()
+        If rPr Is Nothing Then Return result
+
+        Dim rFonts As System.Xml.Linq.XElement = rPr.Element(w + "rFonts")
+        If rFonts IsNot Nothing Then
+            AddOpenXmlAttributeIfPresent(result, "fontAscii", rFonts, w + "ascii")
+            AddOpenXmlAttributeIfPresent(result, "fontHighAnsi", rFonts, w + "hAnsi")
+            AddOpenXmlAttributeIfPresent(result, "fontEastAsia", rFonts, w + "eastAsia")
+            AddOpenXmlAttributeIfPresent(result, "fontComplexScript", rFonts, w + "cs")
+            AddOpenXmlAttributeIfPresent(result, "asciiTheme", rFonts, w + "asciiTheme")
+            AddOpenXmlAttributeIfPresent(result, "highAnsiTheme", rFonts, w + "hAnsiTheme")
+            AddOpenXmlAttributeIfPresent(result, "eastAsiaTheme", rFonts, w + "eastAsiaTheme")
+            AddOpenXmlAttributeIfPresent(result, "complexScriptTheme", rFonts, w + "cstheme")
+            AddOpenXmlAttributeIfPresent(result, "fontHint", rFonts, w + "hint")
+        End If
+
+        If rPr.Element(w + "b") IsNot Nothing Then result("bold") = GetOpenXmlOnOffElementValue(rPr.Element(w + "b"), w, True)
+        If rPr.Element(w + "i") IsNot Nothing Then result("italic") = GetOpenXmlOnOffElementValue(rPr.Element(w + "i"), w, True)
+        If rPr.Element(w + "caps") IsNot Nothing Then result("allCaps") = GetOpenXmlOnOffElementValue(rPr.Element(w + "caps"), w, True)
+        If rPr.Element(w + "smallCaps") IsNot Nothing Then result("smallCaps") = GetOpenXmlOnOffElementValue(rPr.Element(w + "smallCaps"), w, True)
+
+        Dim colorElement As System.Xml.Linq.XElement = rPr.Element(w + "color")
+        If colorElement IsNot Nothing Then AddOpenXmlAttributeIfPresent(result, "colorOpenXml", colorElement, w + "val")
+
+        Dim sizeHalfPoints As Integer
+        If Integer.TryParse(GetOpenXmlVal(rPr.Element(w + "sz")), sizeHalfPoints) Then
+            result("size") = CSng(sizeHalfPoints / 2.0R)
+        End If
+
+        Return result
+    End Function
+
+    Private Function GetOpenXmlOnOffElementValue(element As System.Xml.Linq.XElement,
+                                                 w As System.Xml.Linq.XNamespace,
+                                                 defaultWhenPresent As Boolean) As Boolean
+        If element Is Nothing Then Return False
+        Dim value As String = GetOpenXmlAttributeValue(element, w + "val")
+        If String.IsNullOrWhiteSpace(value) Then Return defaultWhenPresent
+        Return ParseOpenXmlOnOffValue(value, defaultWhenPresent)
+    End Function
+
+    Private Sub AddOpenXmlAttributeIfPresent(target As JObject,
+                                             propertyName As String,
+                                             element As System.Xml.Linq.XElement,
+                                             attributeName As System.Xml.Linq.XName)
+        Dim value As String = GetOpenXmlAttributeValue(element, attributeName)
+        If Not String.IsNullOrWhiteSpace(value) Then target(propertyName) = value
+    End Sub
+
+    Private Sub ApplyOpenXmlNumberingOverrides(definition As JObject,
+                                               numElement As System.Xml.Linq.XElement,
+                                               stylesById As JObject,
+                                               w As System.Xml.Linq.XNamespace)
+        If definition Is Nothing OrElse numElement Is Nothing Then Return
+        Dim levels As JArray = TryCast(definition("levels"), JArray)
+        If levels Is Nothing Then
+            levels = New JArray()
+            definition("levels") = levels
+        End If
+
+        Dim levelOverrides As New Newtonsoft.Json.Linq.JArray()
+        For Each overrideElement As System.Xml.Linq.XElement In numElement.Elements(w + "lvlOverride")
+            Dim ilvlText As String = GetOpenXmlAttributeValue(overrideElement, w + "ilvl")
+            Dim ilvl As Integer
+            If Not Integer.TryParse(ilvlText, ilvl) Then Continue For
+
+            Dim overrideInfo As New JObject From {
+                {"level", ilvl + 1},
+                {"ilvlZeroBased", ilvl}
+            }
+
+            Dim startOverride As Integer
+            If Integer.TryParse(GetOpenXmlVal(overrideElement.Element(w + "startOverride")), startOverride) Then
+                overrideInfo("startOverride") = startOverride
+                Dim existingLevel As JObject = FindLevelDefinition(levels, ilvl + 1)
+                If existingLevel IsNot Nothing Then existingLevel("startAt") = startOverride
+            End If
+
+            Dim overrideLevelElement As System.Xml.Linq.XElement = overrideElement.Element(w + "lvl")
+            If overrideLevelElement IsNot Nothing Then
+                Dim overrideLevel As JObject = ExtractOpenXmlNumberingLevel(overrideLevelElement, stylesById, w)
+                overrideInfo("levelDefinition") = overrideLevel.DeepClone()
+                ReplaceOrAddLevelDefinition(levels, overrideLevel)
+            End If
+
+            levelOverrides.Add(overrideInfo)
+        Next
+
+        If levelOverrides.Count > 0 Then definition("levelOverrides") = levelOverrides
+    End Sub
+
+    Private Function FindLevelDefinition(levels As JArray, levelNumber As Integer) As JObject
+        If levels Is Nothing Then Return Nothing
+        For Each token As JToken In levels
+            Dim level As JObject = TryCast(token, JObject)
+            If level IsNot Nothing AndAlso level("level") IsNot Nothing AndAlso CInt(level("level")) = levelNumber Then
+                Return level
+            End If
+        Next
+        Return Nothing
+    End Function
+
+    Private Sub ReplaceOrAddLevelDefinition(levels As JArray, replacement As JObject)
+        If levels Is Nothing OrElse replacement Is Nothing OrElse replacement("level") Is Nothing Then Return
+        Dim levelNumber As Integer = CInt(replacement("level"))
+
+        For index As Integer = 0 To levels.Count - 1
+            Dim existing As JObject = TryCast(levels(index), JObject)
+            If existing IsNot Nothing AndAlso existing("level") IsNot Nothing AndAlso CInt(existing("level")) = levelNumber Then
+                levels(index) = replacement
+                Return
+            End If
+        Next
+
+        levels.Add(replacement)
+    End Sub
+
+    Private Function ExtractOpenXmlDocumentDefaults(stylesRoot As System.Xml.Linq.XElement,
+                                                    settingsRoot As System.Xml.Linq.XElement,
+                                                    w As System.Xml.Linq.XNamespace) As JObject
+        Dim defaults As New JObject()
+
+        If settingsRoot IsNot Nothing Then
+            Dim defaultTabStopTwips As Integer
+            If Integer.TryParse(GetOpenXmlVal(settingsRoot.Element(w + "defaultTabStop")), defaultTabStopTwips) Then
+                defaults("defaultTabStop") = CSng(defaultTabStopTwips / 20.0R)
+            End If
+        End If
+
+        If stylesRoot IsNot Nothing Then
+            Dim docDefaults As System.Xml.Linq.XElement = stylesRoot.Element(w + "docDefaults")
+            Dim rPrDefault As System.Xml.Linq.XElement = If(docDefaults IsNot Nothing, docDefaults.Element(w + "rPrDefault"), Nothing)
+            Dim rPr As System.Xml.Linq.XElement = If(rPrDefault IsNot Nothing, rPrDefault.Element(w + "rPr"), Nothing)
+
+            If rPr IsNot Nothing Then
+                Dim fontDefaults As JObject = ExtractOpenXmlRunFormatting(rPr, w)
+                If fontDefaults.HasValues Then defaults("fontDefaults") = fontDefaults
+
+                Dim lang As System.Xml.Linq.XElement = rPr.Element(w + "lang")
+                If lang IsNot Nothing Then
+                    Dim languageDefaults As New JObject()
+                    AddOpenXmlAttributeIfPresent(languageDefaults, "latin", lang, w + "val")
+                    AddOpenXmlAttributeIfPresent(languageDefaults, "eastAsia", lang, w + "eastAsia")
+                    AddOpenXmlAttributeIfPresent(languageDefaults, "bidi", lang, w + "bidi")
+                    If languageDefaults.HasValues Then defaults("languageDefaults") = languageDefaults
+                End If
+            End If
+        End If
+
+        ' Safe defaults: the global tab interval is applied automatically; changing Normal's
+        ' script fonts or languages remains opt-in because it can affect unrelated document content.
+        defaults("applyOnImport") = New JObject From {
+            {"defaultTabStop", True},
+            {"fontDefaultsToNormalStyle", False},
+            {"languageDefaultsToNormalStyle", False}
+        }
+
+        Return defaults
+    End Function
+
+    Private Function BuildReferencedNumberingDefinitions(openXmlContext As JObject,
+                                                         collectedStyles As IEnumerable(Of String)) As JObject
+        Dim result As New JObject()
+        If openXmlContext Is Nothing OrElse collectedStyles Is Nothing Then Return result
+
+        Dim allDefinitions As JObject = TryCast(openXmlContext("numberingDefinitions"), JObject)
+        If allDefinitions Is Nothing Then Return result
+
+        For Each styleName As String In collectedStyles
+            Dim styleMeta As JObject = GetStyleOpenXmlMetadata(openXmlContext, styleName)
+            Dim binding As JObject = If(styleMeta IsNot Nothing, TryCast(styleMeta("numberingBinding"), JObject), Nothing)
+            If binding Is Nothing OrElse binding("sharedListInstanceKey") Is Nothing Then Continue For
+
+            Dim sharedKey As String = CStr(binding("sharedListInstanceKey"))
+            If result(sharedKey) Is Nothing AndAlso allDefinitions(sharedKey) IsNot Nothing Then
+                result(sharedKey) = allDefinitions(sharedKey).DeepClone()
+            End If
+        Next
+
+        Return result
+    End Function
+
+    Private Function ComputeJsonListTemplateFingerprintV2(definition As JObject) As String
+        If definition Is Nothing Then Return ""
+        Dim fingerprint As New StringBuilder()
+
+        If definition("outlineNumbered") IsNot Nothing Then fingerprint.Append($"outline={definition("outlineNumbered")};")
+        If definition("numberingStyleId") IsNot Nothing Then fingerprint.Append($"style={definition("numberingStyleId")};")
+
+        Dim levels As JArray = TryCast(definition("levels"), JArray)
+        If levels IsNot Nothing Then
+            For Each token As JToken In levels.OrderBy(Function(item) If(item("level") IsNot Nothing, CInt(item("level")), 0))
+                Dim level As JObject = TryCast(token, JObject)
+                If level Is Nothing Then Continue For
+                fingerprint.Append(If(level("level"), "")).Append(":"c)
+                fingerprint.Append(If(level("numberStyle"), "")).Append(":"c)
+                fingerprint.Append(If(level("numberFormat"), "")).Append(":"c)
+                fingerprint.Append(If(level("numberPosition"), "")).Append(":"c)
+                fingerprint.Append(If(level("textPosition"), "")).Append(":"c)
+                fingerprint.Append(If(level("tabPosition"), "undefined")).Append(":"c)
+                fingerprint.Append(If(level("trailingCharacter"), "")).Append(":"c)
+                fingerprint.Append(If(level("paragraphStyleId"), "")).Append("|"c)
+            Next
+        End If
+
+        Return fingerprint.ToString()
+    End Function
+
+    Private Function OpenXmlNumberFormatToWordEnumName(numberFormat As String) As String
+        Select Case If(numberFormat, "").Trim().ToLowerInvariant()
+            Case "decimal" : Return "wdListNumberStyleArabic"
+            Case "upperroman" : Return "wdListNumberStyleUppercaseRoman"
+            Case "lowerroman" : Return "wdListNumberStyleLowercaseRoman"
+            Case "upperletter" : Return "wdListNumberStyleUppercaseLetter"
+            Case "lowerletter" : Return "wdListNumberStyleLowercaseLetter"
+            Case "ordinal" : Return "wdListNumberStyleOrdinal"
+            Case "cardinaltext" : Return "wdListNumberStyleCardinalText"
+            Case "ordinaltext" : Return "wdListNumberStyleOrdinalText"
+            Case "bullet" : Return "wdListNumberStyleBullet"
+            Case "none" : Return "wdListNumberStyleNone"
+            Case "decimalzero" : Return "wdListNumberStyleArabicLZ"
+            Case "chicago" : Return "wdListNumberStyleLegal"
+            Case "hebrew1" : Return "wdListNumberStyleHebrew1"
+            Case "hebrew2" : Return "wdListNumberStyleHebrew2"
+            Case "arabicalpha" : Return "wdListNumberStyleArabic1"
+            Case "arabicabjad" : Return "wdListNumberStyleArabic2"
+            Case "hindivowels" : Return "wdListNumberStyleHindiLetter1"
+            Case "hindiconsonants" : Return "wdListNumberStyleHindiLetter2"
+            Case "hindinumbers" : Return "wdListNumberStyleHindiArabic"
+            Case "hindicounting" : Return "wdListNumberStyleHindiCardinalText"
+            Case "thailetters" : Return "wdListNumberStyleThaiLetter"
+            Case "thainumbers" : Return "wdListNumberStyleThaiArabic"
+            Case "thaicounting" : Return "wdListNumberStyleThaiCardinalText"
+            Case "vietnamesecounting" : Return "wdListNumberStyleVietCardinalText"
+            Case "russianlower" : Return "wdListNumberStyleLowercaseRussian"
+            Case "russianupper" : Return "wdListNumberStyleUppercaseRussian"
+            Case Else : Return "wdListNumberStyleArabic"
+        End Select
+    End Function
+
+    Private Function OpenXmlListAlignmentToWordEnumName(alignment As String) As String
+        Select Case If(alignment, "").Trim().ToLowerInvariant()
+            Case "center" : Return "wdListLevelAlignCenter"
+            Case "right" : Return "wdListLevelAlignRight"
+            Case Else : Return "wdListLevelAlignLeft"
+        End Select
+    End Function
+
+    Private Function OpenXmlSuffixToWordEnumName(suffix As String) As String
+        Select Case If(suffix, "").Trim().ToLowerInvariant()
+            Case "space" : Return "wdTrailingSpace"
+            Case "nothing" : Return "wdTrailingNone"
+            Case Else : Return "wdTrailingTab"
+        End Select
+    End Function
+
+    Private Sub MergeOpenXmlStyleMetadata(styleDef As JObject,
+                                          styleMeta As JObject,
+                                          openXmlContext As JObject)
+        If styleDef Is Nothing OrElse styleMeta Is Nothing Then Return
+
+        Dim metadataFields As String() = {
+            "styleId", "styleTypeOpenXml", "customStyle", "basedOnStyleId", "basedOnStyleName",
+            "nextStyleId", "nextStyleName", "uiPriority", "quickFormat"
+        }
+
+        For Each fieldName As String In metadataFields
+            If styleMeta(fieldName) IsNot Nothing Then styleDef(fieldName) = styleMeta(fieldName).DeepClone()
+        Next
+
+        If styleMeta("numberingBinding") IsNot Nothing Then
+            styleDef("numberingBinding") = styleMeta("numberingBinding").DeepClone()
+
+            Dim listFormat As JObject = TryCast(styleDef("listFormat"), JObject)
+            If listFormat Is Nothing Then
+                listFormat = New JObject From {
+                    {"hasListTemplate", True}
+                }
+                styleDef("listFormat") = listFormat
+            End If
+
+            listFormat("numberingBinding") = styleMeta("numberingBinding").DeepClone()
+            If styleMeta("numberingBinding")("sharedListInstanceKey") IsNot Nothing Then
+                listFormat("sharedListInstanceKey") = styleMeta("numberingBinding")("sharedListInstanceKey").DeepClone()
+            End If
+            If styleMeta("numberingBinding")("effectiveListLevel") IsNot Nothing Then
+                listFormat("linkedLevel") = styleMeta("numberingBinding")("effectiveListLevel").DeepClone()
+            End If
+
+            Dim sharedKey As String = If(styleMeta("numberingBinding")("sharedListInstanceKey") IsNot Nothing,
+                                         CStr(styleMeta("numberingBinding")("sharedListInstanceKey")), "")
+            Dim numberingDefinitions As JObject = If(openXmlContext IsNot Nothing,
+                                                      TryCast(openXmlContext("numberingDefinitions"), JObject), Nothing)
+            Dim numberingDefinition As JObject = If(numberingDefinitions IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(sharedKey),
+                                                     TryCast(numberingDefinitions(sharedKey), JObject), Nothing)
+            If numberingDefinition IsNot Nothing Then
+                If numberingDefinition("outlineNumbered") IsNot Nothing Then listFormat("outlineNumbered") = numberingDefinition("outlineNumbered").DeepClone()
+                If numberingDefinition("numberingStyleId") IsNot Nothing Then listFormat("numberingStyleId") = numberingDefinition("numberingStyleId").DeepClone()
+                If numberingDefinition("numberingStyleName") IsNot Nothing Then listFormat("numberingStyleName") = numberingDefinition("numberingStyleName").DeepClone()
+                If numberingDefinition("templateFingerprintV2") IsNot Nothing Then listFormat("templateFingerprintV2") = numberingDefinition("templateFingerprintV2").DeepClone()
+
+                Dim sourceLevels As JArray = TryCast(numberingDefinition("levels"), JArray)
+                If sourceLevels IsNot Nothing Then
+                    Dim targetLevels As JArray = TryCast(listFormat("levels"), JArray)
+                    If targetLevels Is Nothing OrElse targetLevels.Count = 0 Then
+                        listFormat("levels") = sourceLevels.DeepClone()
+                    Else
+                        MergeNumberingLevelMetadata(targetLevels, sourceLevels)
+                    End If
+                End If
+            End If
+        End If
+    End Sub
+
+    Private Sub MergeNumberingLevelMetadata(targetLevels As JArray, sourceLevels As JArray)
+        If targetLevels Is Nothing OrElse sourceLevels Is Nothing Then Return
+
+        For Each sourceToken As JToken In sourceLevels
+            Dim sourceLevel As JObject = TryCast(sourceToken, JObject)
+            If sourceLevel Is Nothing OrElse sourceLevel("level") Is Nothing Then Continue For
+
+            Dim targetLevel As JObject = FindLevelDefinition(targetLevels, CInt(sourceLevel("level")))
+            If targetLevel Is Nothing Then
+                targetLevels.Add(sourceLevel.DeepClone())
+                Continue For
+            End If
+
+            For Each propertyItem As JProperty In sourceLevel.Properties()
+                Select Case propertyItem.Name
+                    Case "paragraphStyleId", "paragraphStyleName", "numberRunFormatting",
+                         "tabPositionState", "numberStyleOpenXml", "alignmentOpenXml",
+                         "trailingCharacterOpenXml", "ilvlZeroBased"
+                        targetLevel(propertyItem.Name) = propertyItem.Value.DeepClone()
+                End Select
+            Next
+        Next
+    End Sub
+
+#End Region
     ''' <summary>
     ''' Extracts a Word style definition (paragraph formatting, font formatting, tab stops, and list template data)
     ''' into a JSON object for inclusion in a DocStyle template.
@@ -524,7 +1368,13 @@ Partial Public Class ThisAddIn
     ''' <param name="doc">Active document containing the style.</param>
     ''' <param name="styleName">Style name to extract.</param>
     ''' <returns>Extracted style definition JSON, or Nothing if the style cannot be resolved.</returns>
-    Private Function ExtractFullStyleDefinition(doc As Word.Document, styleName As String) As JObject
+    ''' <summary>
+    ''' Extracts a Word style definition and augments it with style IDs, inheritance,
+    ''' shared numbering-instance metadata and Open XML list-level links.
+    ''' </summary>
+    Private Function ExtractFullStyleDefinition(doc As Word.Document,
+                                                styleName As String,
+                                                Optional openXmlContext As JObject = Nothing) As JObject
         Try
             Dim style As Word.Style = doc.Styles(styleName)
             If style Is Nothing Then Return Nothing
@@ -534,83 +1384,111 @@ Partial Public Class ThisAddIn
             styleDef("styleType") = style.Type.ToString()
             styleDef("builtIn") = style.BuiltIn
 
-            ' Base style hierarchy
+            Try
+                styleDef("quickFormat") = style.QuickStyle
+            Catch
+            End Try
+            Try
+                styleDef("uiPriority") = style.Priority
+            Catch
+            End Try
+
+            ' Base style hierarchy. Empty names and cycles are ignored.
             Dim baseStyles As New JArray()
+            Dim seenBaseStyles As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
             Dim currentStyle As Word.Style = style
             Try
-                While currentStyle.BaseStyle IsNot Nothing
-                    Dim baseStyle As Word.Style = CType(currentStyle.BaseStyle, Word.Style)
-                    baseStyles.Add(baseStyle.NameLocal)
+                While currentStyle IsNot Nothing AndAlso currentStyle.BaseStyle IsNot Nothing
+                    Dim baseStyle As Word.Style = TryCast(currentStyle.BaseStyle, Word.Style)
+                    If baseStyle Is Nothing Then Exit While
+                    Dim baseName As String = If(baseStyle.NameLocal, "").Trim()
+                    If String.IsNullOrWhiteSpace(baseName) OrElse Not seenBaseStyles.Add(baseName) Then Exit While
+                    baseStyles.Add(baseName)
                     currentStyle = baseStyle
                 End While
             Catch
             End Try
-            If baseStyles.Count > 0 Then
-                styleDef("baseStyleHierarchy") = baseStyles
-            End If
+            If baseStyles.Count > 0 Then styleDef("baseStyleHierarchy") = baseStyles
 
-            ' Next paragraph style
             Try
-                If style.NextParagraphStyle IsNot Nothing Then
-                    styleDef("nextParagraphStyle") = CType(style.NextParagraphStyle, Word.Style).NameLocal
+                If style.BaseStyle IsNot Nothing Then
+                    Dim directBaseStyle As Word.Style = TryCast(style.BaseStyle, Word.Style)
+                    If directBaseStyle IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(directBaseStyle.NameLocal) Then
+                        styleDef("basedOnStyleName") = directBaseStyle.NameLocal
+                    End If
                 End If
             Catch
             End Try
 
-            ' Paragraph formatting from style
             Try
-                Dim pf As Word.ParagraphFormat = style.ParagraphFormat
-                Dim paraFormat As New JObject()
-                paraFormat("alignment") = pf.Alignment.ToString()
-                paraFormat("leftIndent") = pf.LeftIndent
-                paraFormat("rightIndent") = pf.RightIndent
-                paraFormat("firstLineIndent") = pf.FirstLineIndent
-                paraFormat("spaceBefore") = pf.SpaceBefore
-                paraFormat("spaceAfter") = pf.SpaceAfter
-                paraFormat("lineSpacing") = pf.LineSpacing
-                paraFormat("lineSpacingRule") = pf.LineSpacingRule.ToString()
-                paraFormat("keepTogether") = pf.KeepTogether
-                paraFormat("keepWithNext") = pf.KeepWithNext
-                paraFormat("pageBreakBefore") = pf.PageBreakBefore
-                paraFormat("widowControl") = pf.WidowControl
-                paraFormat("outlineLevel") = pf.OutlineLevel.ToString()
-                styleDef("paragraphFormat") = paraFormat
+                If style.NextParagraphStyle IsNot Nothing Then
+                    Dim nextStyle As Word.Style = TryCast(style.NextParagraphStyle, Word.Style)
+                    If nextStyle IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(nextStyle.NameLocal) Then
+                        styleDef("nextParagraphStyle") = nextStyle.NameLocal
+                        styleDef("nextStyleName") = nextStyle.NameLocal
+                    End If
+                End If
             Catch
             End Try
 
-            ' Tab stops from style
+            Try
+                Dim pf As Word.ParagraphFormat = style.ParagraphFormat
+                styleDef("paragraphFormat") = New JObject From {
+                    {"alignment", pf.Alignment.ToString()},
+                    {"leftIndent", pf.LeftIndent},
+                    {"rightIndent", pf.RightIndent},
+                    {"firstLineIndent", pf.FirstLineIndent},
+                    {"spaceBefore", pf.SpaceBefore},
+                    {"spaceAfter", pf.SpaceAfter},
+                    {"lineSpacing", pf.LineSpacing},
+                    {"lineSpacingRule", pf.LineSpacingRule.ToString()},
+                    {"keepTogether", pf.KeepTogether},
+                    {"keepWithNext", pf.KeepWithNext},
+                    {"pageBreakBefore", pf.PageBreakBefore},
+                    {"widowControl", pf.WidowControl},
+                    {"outlineLevel", pf.OutlineLevel.ToString()}
+                }
+            Catch
+            End Try
+
+            ' Only custom tab stops are style data. Word also enumerates generated default tabs.
             Try
                 Dim tabs As New JArray()
                 For Each tabStop As Word.TabStop In style.ParagraphFormat.TabStops
-                    Dim tab As New JObject()
-                    tab("position") = Math.Round(tabStop.Position, 2)
-                    tab("alignment") = tabStop.Alignment.ToString()
-                    tab("leader") = tabStop.Leader.ToString()
-                    tabs.Add(tab)
+                    Dim isCustom As Boolean = True
+                    Try
+                        isCustom = tabStop.CustomTab
+                    Catch
+                    End Try
+                    If Not isCustom Then Continue For
+
+                    tabs.Add(New JObject From {
+                        {"position", Math.Round(tabStop.Position, 2)},
+                        {"alignment", tabStop.Alignment.ToString()},
+                        {"leader", tabStop.Leader.ToString()}
+                    })
                 Next
-                If tabs.Count > 0 Then
-                    styleDef("tabStops") = tabs
-                End If
+                styleDef("tabStops") = tabs
             Catch
             End Try
 
-            ' Font formatting from style (full extraction)
             Try
                 Dim font As Word.Font = style.Font
-                Dim fontFormat As New JObject()
-                fontFormat("name") = font.Name
-                fontFormat("size") = font.Size
-                fontFormat("bold") = (font.Bold = -1)
-                fontFormat("italic") = (font.Italic = -1)
-                fontFormat("underline") = font.Underline.ToString()
-                fontFormat("allCaps") = (font.AllCaps = -1)
-                fontFormat("smallCaps") = (font.SmallCaps = -1)
-                fontFormat("strikeThrough") = (font.StrikeThrough = -1)
-                fontFormat("doubleStrikeThrough") = (font.DoubleStrikeThrough = -1)
-                fontFormat("subscript") = (font.Subscript = -1)
-                fontFormat("superscript") = (font.Superscript = -1)
-                fontFormat("color") = font.Color.ToString()
-                fontFormat("colorRGB") = ColorToRGB(font.Color)
+                Dim fontFormat As New JObject From {
+                    {"name", font.Name},
+                    {"size", font.Size},
+                    {"bold", (font.Bold = -1)},
+                    {"italic", (font.Italic = -1)},
+                    {"underline", font.Underline.ToString()},
+                    {"allCaps", (font.AllCaps = -1)},
+                    {"smallCaps", (font.SmallCaps = -1)},
+                    {"strikeThrough", (font.StrikeThrough = -1)},
+                    {"doubleStrikeThrough", (font.DoubleStrikeThrough = -1)},
+                    {"subscript", (font.Subscript = -1)},
+                    {"superscript", (font.Superscript = -1)},
+                    {"color", font.Color.ToString()},
+                    {"colorRGB", ColorToRGB(font.Color)}
+                }
                 Try
                     fontFormat("scaling") = font.Scaling
                     fontFormat("spacing") = font.Spacing
@@ -618,32 +1496,31 @@ Partial Public Class ThisAddIn
                     fontFormat("kerning") = font.Kerning
                 Catch
                 End Try
+                AddScriptFontPropertiesToJson(font, fontFormat)
                 styleDef("fontFormat") = fontFormat
             Catch
             End Try
 
-            ' List formatting from style (linked list template)
             Try
                 Dim listTemplate As Word.ListTemplate = style.ListTemplate
                 If listTemplate IsNot Nothing Then
-                    Dim listFormat As New JObject()
-                    listFormat("hasListTemplate") = True
-                    listFormat("outlineNumbered") = listTemplate.OutlineNumbered
+                    Dim listFormat As New JObject From {
+                        {"hasListTemplate", True},
+                        {"outlineNumbered", listTemplate.OutlineNumbered}
+                    }
 
-                    ' Stores the list level this style is linked to.
                     Try
                         listFormat("linkedLevel") = style.ListLevelNumber
                     Catch
                         listFormat("linkedLevel") = 1
                     End Try
 
-                    ' Generates a fingerprint used to identify shared templates within the template JSON.
                     Try
                         Dim fingerprint As New StringBuilder()
-                        For lvl As Integer = 1 To Math.Min(9, listTemplate.ListLevels.Count)
+                        For levelNumber As Integer = 1 To Math.Min(9, listTemplate.ListLevels.Count)
                             Try
-                                Dim level As Word.ListLevel = listTemplate.ListLevels(lvl)
-                                fingerprint.Append($"{lvl}:{level.NumberStyle}:{level.NumberFormat}|")
+                                Dim level As Word.ListLevel = listTemplate.ListLevels(levelNumber)
+                                fingerprint.Append($"{levelNumber}:{level.NumberStyle}:{level.NumberFormat}|")
                             Catch
                             End Try
                         Next
@@ -651,21 +1528,27 @@ Partial Public Class ThisAddIn
                     Catch
                     End Try
 
-                    ' Extracts all list levels with level-specific information.
                     Dim levels As New JArray()
-                    For levelNum As Integer = 1 To listTemplate.ListLevels.Count
+                    For levelNumber As Integer = 1 To listTemplate.ListLevels.Count
                         Try
-                            Dim level As Word.ListLevel = listTemplate.ListLevels(levelNum)
-                            Dim levelInfo As New JObject()
-                            levelInfo("level") = levelNum
-                            levelInfo("numberStyle") = level.NumberStyle.ToString()
-                            levelInfo("textPosition") = level.TextPosition
-                            levelInfo("tabPosition") = level.TabPosition
-                            levelInfo("numberPosition") = level.NumberPosition
-                            levelInfo("alignment") = level.Alignment.ToString()
-                            levelInfo("startAt") = level.StartAt
+                            Dim level As Word.ListLevel = listTemplate.ListLevels(levelNumber)
+                            Dim levelInfo As New JObject From {
+                                {"level", levelNumber},
+                                {"numberStyle", level.NumberStyle.ToString()},
+                                {"textPosition", level.TextPosition},
+                                {"numberPosition", level.NumberPosition},
+                                {"alignment", level.Alignment.ToString()},
+                                {"startAt", level.StartAt}
+                            }
 
-                            ' Captures bullet properties (character code and font name) when a bullet style is used.
+                            If IsWordUndefinedPosition(level.TabPosition) Then
+                                levelInfo("tabPosition") = JValue.CreateNull()
+                                levelInfo("tabPositionState") = "wdUndefined"
+                            Else
+                                levelInfo("tabPosition") = level.TabPosition
+                                levelInfo("tabPositionState") = "defined"
+                            End If
+
                             If level.NumberStyle = WdListNumberStyle.wdListNumberStyleBullet Then
                                 Try
                                     Dim bulletFontName As String = ""
@@ -675,23 +1558,16 @@ Partial Public Class ThisAddIn
                                         End If
                                     Catch
                                     End Try
+                                    levelInfo("bulletFont") = If(String.IsNullOrEmpty(bulletFontName), "Symbol", bulletFontName)
 
-                                    If Not String.IsNullOrEmpty(bulletFontName) Then
-                                        levelInfo("bulletFont") = bulletFontName
-                                    Else
-                                        levelInfo("bulletFont") = "Symbol"
-                                    End If
-
-                                    If Not String.IsNullOrEmpty(level.NumberFormat) AndAlso level.NumberFormat.Length > 0 Then
-                                        Dim bulletChar As Char = level.NumberFormat.Chars(0)
-                                        levelInfo("bulletCharCode") = AscW(bulletChar)
-                                        levelInfo("numberFormat") = ""
+                                    If Not String.IsNullOrEmpty(level.NumberFormat) Then
+                                        levelInfo("bulletCharCode") = AscW(level.NumberFormat.Chars(0))
                                     Else
                                         levelInfo("bulletCharCode") = &H2022
-                                        levelInfo("numberFormat") = ""
                                     End If
-                                Catch ex As Exception
-                                    Debug.WriteLine($"Error extracting bullet info for level {levelNum}: {ex.Message}")
+                                    levelInfo("numberFormat") = ""
+                                Catch ex As System.Exception
+                                    Debug.WriteLine($"Error extracting bullet info for level {levelNumber}: {ex.Message}")
                                     levelInfo("bulletCharCode") = &H2022
                                     levelInfo("bulletFont") = "Symbol"
                                     levelInfo("numberFormat") = ""
@@ -705,25 +1581,39 @@ Partial Public Class ThisAddIn
                             Catch
                             End Try
 
+                            Try
+                                Dim numberRunFormatting As New JObject()
+                                AddScriptFontPropertiesToJson(level.Font, numberRunFormatting)
+                                If Not String.IsNullOrWhiteSpace(level.Font.Name) Then numberRunFormatting("name") = level.Font.Name
+                                If level.Font.Size > 0 Then numberRunFormatting("size") = level.Font.Size
+                                If level.Font.Bold <> CInt(WdConstants.wdUndefined) Then numberRunFormatting("bold") = (level.Font.Bold = -1)
+                                If level.Font.Italic <> CInt(WdConstants.wdUndefined) Then numberRunFormatting("italic") = (level.Font.Italic = -1)
+                                If numberRunFormatting.HasValues Then levelInfo("numberRunFormatting") = numberRunFormatting
+                            Catch
+                            End Try
+
                             levels.Add(levelInfo)
                         Catch
                         End Try
                     Next
+
                     listFormat("levels") = levels
                     styleDef("listFormat") = listFormat
                 End If
             Catch
-                ' Style has no list template.
+                ' The Open XML metadata below can still supply inherited numbering information.
             End Try
+
+            Dim styleMeta As JObject = GetStyleOpenXmlMetadata(openXmlContext, style.NameLocal)
+            If styleMeta IsNot Nothing Then MergeOpenXmlStyleMetadata(styleDef, styleMeta, openXmlContext)
 
             Return styleDef
 
-        Catch ex As Exception
+        Catch ex As System.Exception
             Debug.WriteLine($"Error extracting style definition for '{styleName}': {ex.Message}")
             Return Nothing
         End Try
     End Function
-
 #End Region
 
 #Region "Step 2: Apply Style Template"
@@ -763,6 +1653,7 @@ Partial Public Class ThisAddIn
             End If
 
             Dim doc As Word.Document = app.ActiveDocument
+            _sharedListTemplates.Clear()
             If doc Is Nothing Then
                 ShowCustomMessageBox("Active document was not found.")
                 Return
@@ -905,7 +1796,7 @@ Partial Public Class ThisAddIn
             Dim templateJson As String
             Try
                 templateJson = File.ReadAllText(chosenTemplate.FilePath, Encoding.UTF8)
-            Catch ex As Exception
+            Catch ex As System.Exception
                 ShowCustomMessageBox($"Could not read template file: {ex.Message}")
                 Return
             End Try
@@ -913,7 +1804,7 @@ Partial Public Class ThisAddIn
             Dim templateObj As JObject
             Try
                 templateObj = JObject.Parse(templateJson)
-            Catch ex As Exception
+            Catch ex As System.Exception
                 ShowCustomMessageBox($"Invalid JSON in template file: {ex.Message}")
                 Return
             End Try
@@ -928,14 +1819,17 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
-            Dim wdStyleDefinitions As JObject = Nothing
-            If templateObj("wdStyleDefinitions") IsNot Nothing Then
-                wdStyleDefinitions = CType(templateObj("wdStyleDefinitions"), JObject)
-                If settings.ApplyStyleDefinitions AndAlso wdStyleDefinitions IsNot Nothing Then
-                    ApplyWdStyleDefinitionsToDocument(doc, wdStyleDefinitions)
+            Dim wdStyleDefinitions As JObject = TryCast(templateObj("wdStyleDefinitions"), JObject)
+            Dim numberingDefinitions As JObject = TryCast(templateObj("numberingDefinitions"), JObject)
+
+            If settings.ApplyStyleDefinitions Then
+                ApplyDocumentDefaultsToDocument(doc, TryCast(templateObj("documentDefaults"), JObject))
+                If wdStyleDefinitions IsNot Nothing Then
+                    ApplyWdStyleDefinitionsToDocument(doc, wdStyleDefinitions, numberingDefinitions)
                 End If
-                templateObj.Remove("wdStyleDefinitions")
             End If
+
+            If templateObj("wdStyleDefinitions") IsNot Nothing Then templateObj.Remove("wdStyleDefinitions")
 
             Dim templateForLLM As String = CreateMinimalTemplateForLLM(templateObj)
 
@@ -975,9 +1869,10 @@ Partial Public Class ThisAddIn
                 doc.TrackRevisions = originalTrackChanges
             End Try
 
-        Catch ex As Exception
+        Catch ex As System.Exception
             ShowCustomMessageBox($"Error applying style template: {ex.Message}")
         Finally
+            _sharedListTemplates.Clear()
             If do2ndModel AndAlso originalConfigLoaded Then
                 RestoreDefaults(_context, originalConfig)
                 originalConfigLoaded = False
@@ -999,7 +1894,7 @@ Partial Public Class ThisAddIn
     Private Async Function ApplyStylesFromTemplate(doc As Word.Document, targetRange As Word.Range,
                                         templateJson As String, templateObj As JObject,
                                         settings As DocStyleSettings,
-                                        useSecondAPI As Boolean) As Task(Of String)
+                                        useSecondAPI As Boolean) As System.Threading.Tasks.Task(Of String)
         Dim report As New StringBuilder()
         report.AppendLine("=== Style Template Application Report (Fast Mode) ===")
         report.AppendLine($"Date: {DateTime.Now:yyyy-MM-dd HH:mm:ss}")
@@ -1119,7 +2014,7 @@ Partial Public Class ThisAddIn
             Try
                 response = ExtractJsonFromResponse(response)
                 mappingArray = JArray.Parse(response)
-            Catch ex As Exception
+            Catch ex As System.Exception
                 report.AppendLine($"Error parsing LLM response: {ex.Message}")
                 Return report.ToString()
             End Try
@@ -1251,7 +2146,7 @@ Partial Public Class ThisAddIn
                             If shouldRestart Then numberingRestartParas.Add(para)
                         End If
 
-                    Catch ex As Exception
+                    Catch ex As System.Exception
                         report.AppendLine($"Error applying style '{wdStyleName}' to paragraph {paraIdx + 1}: {ex.Message} | suggested='{userStyleNameRaw}' norm='{userStyleName}' wdStyle='{wdStyleName}' | text='{paraPreview}'")
                     End Try
                 Next
@@ -1270,7 +2165,7 @@ Partial Public Class ThisAddIn
             report.AppendLine($"Skipped: {skippedCount}")
             If settings.ListNumberingReset > 0 Then report.AppendLine($"Numbering restarts applied: {restartCount}")
 
-        Catch ex As Exception
+        Catch ex As System.Exception
             report.AppendLine($"Error in fast mode: {ex.Message}")
         End Try
 
@@ -1352,6 +2247,8 @@ Partial Public Class ThisAddIn
                     Dim desired As Integer = If(CBool(ff("italic")), -1, 0)
                     If rng.Font.Italic <> desired AndAlso rng.Font.Italic <> CInt(WdConstants.wdUndefined) Then Return True
                 End If
+
+                If HasScriptFontDifference(rng.Font, ff) Then Return True
             End If
 
             ' Check list formatting transitions
@@ -1366,12 +2263,19 @@ Partial Public Class ThisAddIn
                 End Try
 
                 If templateHasList <> currentHasList Then Return True
+                If templateHasList AndAlso currentHasList AndAlso lf("listLevelNumber") IsNot Nothing Then
+                    Try
+                        If para.Range.ListFormat.ListLevelNumber <> CInt(lf("listLevelNumber")) Then Return True
+                    Catch
+                        Return True
+                    End Try
+                End If
             End If
 
             ' No differences detected
             Return False
 
-        Catch ex As Exception
+        Catch ex As System.Exception
             Debug.WriteLine($"[DocStyle] WouldStyleApplicationChangeAnything error: {ex.Message}")
             ' On error, assume change is needed to be safe
             Return True
@@ -1452,12 +2356,12 @@ Partial Public Class ThisAddIn
                 ' Reject (revert) inline formatting revision
                 Try
                     rev.Reject()
-                Catch ex As Exception
+                Catch ex As System.Exception
                     Debug.WriteLine($"[DocStyle] Could not reject inline formatting revision {i}: {ex.Message}")
                 End Try
             Next
 
-        Catch ex As Exception
+        Catch ex As System.Exception
             Debug.WriteLine($"[DocStyle] UndoInlineFormattingRevisions error: {ex.Message}")
         End Try
     End Sub
@@ -1541,7 +2445,7 @@ Partial Public Class ThisAddIn
             prefixRng.Delete()
             Return True
 
-        Catch ex As Exception
+        Catch ex As System.Exception
             report.AppendLine($"Error deleting prefix for paragraph {logicalIdx1Based}: {ex.Message}")
             Return False
         End Try
@@ -1742,7 +2646,7 @@ Partial Public Class ThisAddIn
             RestoreParaProps(p, propsToRestore)
 
             Debug.WriteLine($"[DocStyle] RestartNumbering END   idx={logicalIndex1Based} preview='{preview}' styleBefore='{beforeStyle}' styleAfter='{TryGetStyleName(p)}' sigAfter='{GetListSignature(p)}'")
-        Catch ex As Exception
+        Catch ex As System.Exception
             Debug.WriteLine($"[DocStyle] RestartNumberingForParagraph error idx={logicalIndex1Based}: {ex.Message}")
         End Try
     End Sub
@@ -1973,12 +2877,12 @@ Partial Public Class ThisAddIn
                             End If
                         Next
                     End If
-                Catch ex As Exception
+                Catch ex As System.Exception
                     Debug.WriteLine($"[DocStyle] Repair after restart failed: {ex.Message}")
                 End Try
             Next
 
-        Catch ex As Exception
+        Catch ex As System.Exception
             Debug.WriteLine($"Error in ApplyNumberingRestarts: {ex.Message}")
         End Try
 
@@ -2079,6 +2983,627 @@ Partial Public Class ThisAddIn
         Return minimal.ToString(Formatting.None)
     End Function
 
+
+#Region "DocStyle metadata application helpers"
+
+    Private Function IsWordUndefinedPosition(value As Single) As Boolean
+        Return value = CSng(WdConstants.wdUndefined) OrElse Math.Abs(CDbl(value)) > 1000000.0R
+    End Function
+
+    Private Sub AddScriptFontPropertiesToJson(font As Word.Font, target As JObject)
+        If font Is Nothing OrElse target Is Nothing Then Return
+
+        Try
+            Dim fontObject As Object = font
+            AddLateBoundStringProperty(target, "nameAscii", fontObject, "NameAscii")
+            AddLateBoundStringProperty(target, "nameFarEast", fontObject, "NameFarEast")
+            AddLateBoundStringProperty(target, "nameBi", fontObject, "NameBi")
+            AddLateBoundStringProperty(target, "nameOther", fontObject, "NameOther")
+            AddLateBoundStringProperty(target, "languageId", fontObject, "LanguageID")
+            AddLateBoundStringProperty(target, "languageIdFarEast", fontObject, "LanguageIDFarEast")
+            AddLateBoundStringProperty(target, "languageIdOther", fontObject, "LanguageIDOther")
+        Catch
+        End Try
+    End Sub
+
+    Private Sub AddLateBoundStringProperty(target As JObject,
+                                           jsonPropertyName As String,
+                                           source As Object,
+                                           comPropertyName As String)
+        Try
+            Dim value As Object = source.GetType().InvokeMember(
+                comPropertyName,
+                System.Reflection.BindingFlags.GetProperty,
+                Nothing,
+                source,
+                Nothing,
+                System.Globalization.CultureInfo.InvariantCulture)
+            If value IsNot Nothing Then target(jsonPropertyName) = value.ToString()
+        Catch
+        End Try
+    End Sub
+
+    Private Sub SetLateBoundProperty(target As Object, propertyName As String, value As Object)
+        If target Is Nothing OrElse value Is Nothing Then Return
+        Try
+            target.GetType().InvokeMember(
+                propertyName,
+                System.Reflection.BindingFlags.SetProperty,
+                Nothing,
+                target,
+                New Object() {value},
+                System.Globalization.CultureInfo.InvariantCulture)
+        Catch
+        End Try
+    End Sub
+
+    Private Sub ApplyScriptFontPropertiesToFont(font As Word.Font, definition As JToken)
+        If font Is Nothing OrElse definition Is Nothing Then Return
+        Dim fontObject As Object = font
+
+        If definition("nameAscii") IsNot Nothing Then SetLateBoundProperty(fontObject, "NameAscii", CStr(definition("nameAscii")))
+        If definition("nameFarEast") IsNot Nothing Then SetLateBoundProperty(fontObject, "NameFarEast", CStr(definition("nameFarEast")))
+        If definition("nameBi") IsNot Nothing Then SetLateBoundProperty(fontObject, "NameBi", CStr(definition("nameBi")))
+        If definition("nameOther") IsNot Nothing Then SetLateBoundProperty(fontObject, "NameOther", CStr(definition("nameOther")))
+
+        If definition("languageId") IsNot Nothing Then
+            SetLateBoundProperty(fontObject, "LanguageID", ParseWdLanguageId(definition("languageId")))
+        End If
+        If definition("languageIdFarEast") IsNot Nothing Then
+            SetLateBoundProperty(fontObject, "LanguageIDFarEast", ParseWdLanguageId(definition("languageIdFarEast")))
+        End If
+        If definition("languageIdOther") IsNot Nothing Then
+            SetLateBoundProperty(fontObject, "LanguageIDOther", ParseWdLanguageId(definition("languageIdOther")))
+        End If
+    End Sub
+
+    Private Function ParseWdLanguageId(token As JToken) As Object
+        If token Is Nothing Then Return Nothing
+        Dim text As String = CStr(token)
+        Dim numericValue As Integer
+        If Integer.TryParse(text, numericValue) Then Return CType(numericValue, WdLanguageID)
+
+        If text.StartsWith("wd", StringComparison.OrdinalIgnoreCase) Then
+            Try
+                Return CType([Enum].Parse(GetType(WdLanguageID), text, True), WdLanguageID)
+            Catch
+            End Try
+        End If
+
+        Try
+            Dim culture As System.Globalization.CultureInfo = System.Globalization.CultureInfo.GetCultureInfo(text)
+            Return CType(culture.LCID, WdLanguageID)
+        Catch
+            Return Nothing
+        End Try
+    End Function
+
+    Private Function GetLateBoundPropertyString(source As Object, propertyName As String) As String
+        If source Is Nothing Then Return ""
+        Try
+            Dim value As Object = source.GetType().InvokeMember(
+                propertyName,
+                System.Reflection.BindingFlags.GetProperty,
+                Nothing,
+                source,
+                Nothing,
+                System.Globalization.CultureInfo.InvariantCulture)
+            Return If(value IsNot Nothing, value.ToString(), "")
+        Catch
+            Return ""
+        End Try
+    End Function
+
+    Private Function ApplyScriptFontPropertiesIfDifferent(font As Word.Font, definition As JToken) As Boolean
+        If font Is Nothing OrElse definition Is Nothing Then Return False
+        Dim changed As Boolean = False
+        Dim fontObject As Object = font
+
+        Dim propertyMap As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase) From {
+            {"nameAscii", "NameAscii"},
+            {"nameFarEast", "NameFarEast"},
+            {"nameBi", "NameBi"},
+            {"nameOther", "NameOther"},
+            {"languageId", "LanguageID"},
+            {"languageIdFarEast", "LanguageIDFarEast"},
+            {"languageIdOther", "LanguageIDOther"}
+        }
+
+        For Each mapping As KeyValuePair(Of String, String) In propertyMap
+            If definition(mapping.Key) Is Nothing Then Continue For
+            Dim desired As Object = If(mapping.Key.StartsWith("languageId", StringComparison.OrdinalIgnoreCase),
+                                       ParseWdLanguageId(definition(mapping.Key)),
+                                       CObj(CStr(definition(mapping.Key))))
+            If desired Is Nothing Then Continue For
+
+            Dim current As String = GetLateBoundPropertyString(fontObject, mapping.Value)
+            If Not String.Equals(current, desired.ToString(), StringComparison.OrdinalIgnoreCase) Then
+                SetLateBoundProperty(fontObject, mapping.Value, desired)
+                changed = True
+            End If
+        Next
+
+        Return changed
+    End Function
+
+    Private Function HasScriptFontDifference(font As Word.Font, definition As JToken) As Boolean
+        If font Is Nothing OrElse definition Is Nothing Then Return False
+        Dim fontObject As Object = font
+        Dim propertyMap As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase) From {
+            {"nameAscii", "NameAscii"},
+            {"nameFarEast", "NameFarEast"},
+            {"nameBi", "NameBi"},
+            {"nameOther", "NameOther"},
+            {"languageId", "LanguageID"},
+            {"languageIdFarEast", "LanguageIDFarEast"},
+            {"languageIdOther", "LanguageIDOther"}
+        }
+
+        For Each mapping As KeyValuePair(Of String, String) In propertyMap
+            If definition(mapping.Key) Is Nothing Then Continue For
+            Dim desired As Object = If(mapping.Key.StartsWith("languageId", StringComparison.OrdinalIgnoreCase),
+                                       ParseWdLanguageId(definition(mapping.Key)),
+                                       CObj(CStr(definition(mapping.Key))))
+            If desired Is Nothing Then Continue For
+            If Not String.Equals(GetLateBoundPropertyString(fontObject, mapping.Value),
+                                 desired.ToString(),
+                                 StringComparison.OrdinalIgnoreCase) Then Return True
+        Next
+
+        Return False
+    End Function
+
+    Private Sub ApplyDocumentDefaultsToDocument(doc As Word.Document, documentDefaults As JObject)
+        If doc Is Nothing OrElse documentDefaults Is Nothing Then Return
+
+        Try
+            Dim policy As JObject = TryCast(documentDefaults("applyOnImport"), JObject)
+            Dim applyDefaultTabStop As Boolean = True
+            Dim applyFontsToNormal As Boolean = False
+            Dim applyLanguagesToNormal As Boolean = False
+
+            If policy IsNot Nothing Then
+                If policy("defaultTabStop") IsNot Nothing Then applyDefaultTabStop = CBool(policy("defaultTabStop"))
+                If policy("fontDefaultsToNormalStyle") IsNot Nothing Then applyFontsToNormal = CBool(policy("fontDefaultsToNormalStyle"))
+                If policy("languageDefaultsToNormalStyle") IsNot Nothing Then applyLanguagesToNormal = CBool(policy("languageDefaultsToNormalStyle"))
+            End If
+
+            If applyDefaultTabStop AndAlso documentDefaults("defaultTabStop") IsNot Nothing Then
+                Try
+                    doc.DefaultTabStop = CSng(documentDefaults("defaultTabStop"))
+                Catch ex As System.Exception
+                    Debug.WriteLine($"[DocStyle] Could not apply default tab stop: {ex.Message}")
+                End Try
+            End If
+
+            If Not applyFontsToNormal AndAlso Not applyLanguagesToNormal Then Return
+
+            Dim normalStyle As Word.Style = Nothing
+            Try
+                normalStyle = doc.Styles(WdBuiltinStyle.wdStyleNormal)
+            Catch
+            End Try
+            If normalStyle Is Nothing Then Return
+
+            If applyFontsToNormal Then
+                Dim fontDefaults As JObject = TryCast(documentDefaults("fontDefaults"), JObject)
+                If fontDefaults IsNot Nothing Then
+                    Dim translated As New JObject()
+                    If fontDefaults("fontAscii") IsNot Nothing Then translated("nameAscii") = fontDefaults("fontAscii").DeepClone()
+                    If fontDefaults("fontHighAnsi") IsNot Nothing Then translated("nameOther") = fontDefaults("fontHighAnsi").DeepClone()
+                    If fontDefaults("fontEastAsia") IsNot Nothing Then translated("nameFarEast") = fontDefaults("fontEastAsia").DeepClone()
+                    If fontDefaults("fontComplexScript") IsNot Nothing Then translated("nameBi") = fontDefaults("fontComplexScript").DeepClone()
+                    ApplyScriptFontPropertiesToFont(normalStyle.Font, translated)
+                End If
+            End If
+
+            If applyLanguagesToNormal Then
+                Dim languageDefaults As JObject = TryCast(documentDefaults("languageDefaults"), JObject)
+                If languageDefaults IsNot Nothing Then
+                    Dim translated As New JObject()
+                    If languageDefaults("latin") IsNot Nothing Then translated("languageId") = languageDefaults("latin").DeepClone()
+                    If languageDefaults("eastAsia") IsNot Nothing Then translated("languageIdFarEast") = languageDefaults("eastAsia").DeepClone()
+                    If languageDefaults("bidi") IsNot Nothing Then translated("languageIdOther") = languageDefaults("bidi").DeepClone()
+                    ApplyScriptFontPropertiesToFont(normalStyle.Font, translated)
+                End If
+            End If
+
+        Catch ex As System.Exception
+            Debug.WriteLine($"[DocStyle] Could not apply document defaults: {ex.Message}")
+        End Try
+    End Sub
+
+    Private Function ParseStyleType(styleDef As JObject) As WdStyleType
+        Dim styleType As String = ""
+        If styleDef IsNot Nothing Then
+            If styleDef("styleType") IsNot Nothing Then
+                styleType = CStr(styleDef("styleType"))
+            ElseIf styleDef("styleTypeOpenXml") IsNot Nothing Then
+                styleType = CStr(styleDef("styleTypeOpenXml"))
+            End If
+        End If
+
+        Select Case styleType.Trim().ToLowerInvariant()
+            Case "wdstyletypecharacter", "character"
+                Return WdStyleType.wdStyleTypeCharacter
+            Case "wdstyletypetable", "table"
+                Return WdStyleType.wdStyleTypeTable
+            Case "wdstyletypelist", "numbering", "list"
+                Return WdStyleType.wdStyleTypeList
+            Case "wdstyletypelinked", "linked"
+                Return WdStyleType.wdStyleTypeParagraph
+            Case Else
+                Return WdStyleType.wdStyleTypeParagraph
+        End Select
+    End Function
+
+    Private Function ApplyStyleRelationshipMetadata(doc As Word.Document,
+                                                    style As Word.Style,
+                                                    styleDef As JObject) As Boolean
+        If doc Is Nothing OrElse style Is Nothing OrElse styleDef Is Nothing Then Return False
+        Dim changed As Boolean = False
+
+        Dim baseStyleName As String = ""
+        If styleDef("basedOnStyleName") IsNot Nothing Then
+            baseStyleName = CStr(styleDef("basedOnStyleName"))
+        ElseIf styleDef("baseStyleHierarchy") IsNot Nothing AndAlso TypeOf styleDef("baseStyleHierarchy") Is JArray Then
+            Dim hierarchy As JArray = CType(styleDef("baseStyleHierarchy"), JArray)
+            If hierarchy.Count > 0 Then baseStyleName = CStr(hierarchy(0))
+        End If
+
+        If Not String.IsNullOrWhiteSpace(baseStyleName) Then
+            Try
+                Dim desiredBase As Word.Style = doc.Styles(baseStyleName)
+                Dim currentBaseName As String = ""
+                Try
+                    Dim currentBase As Word.Style = TryCast(style.BaseStyle, Word.Style)
+                    If currentBase IsNot Nothing Then currentBaseName = currentBase.NameLocal
+                Catch
+                End Try
+
+                If Not String.Equals(currentBaseName, desiredBase.NameLocal, StringComparison.OrdinalIgnoreCase) Then
+                    style.BaseStyle = desiredBase
+                    changed = True
+                End If
+            Catch ex As System.Exception
+                Debug.WriteLine($"[DocStyle] Base style '{baseStyleName}' for '{style.NameLocal}' is unavailable: {ex.Message}")
+            End Try
+        End If
+
+        Dim nextStyleName As String = ""
+        If styleDef("nextStyleName") IsNot Nothing Then
+            nextStyleName = CStr(styleDef("nextStyleName"))
+        ElseIf styleDef("nextParagraphStyle") IsNot Nothing Then
+            nextStyleName = CStr(styleDef("nextParagraphStyle"))
+        End If
+
+        If Not String.IsNullOrWhiteSpace(nextStyleName) AndAlso style.Type = WdStyleType.wdStyleTypeParagraph Then
+            Try
+                Dim desiredNext As Word.Style = doc.Styles(nextStyleName)
+                Dim currentNextName As String = ""
+                Try
+                    Dim currentNext As Word.Style = TryCast(style.NextParagraphStyle, Word.Style)
+                    If currentNext IsNot Nothing Then currentNextName = currentNext.NameLocal
+                Catch
+                End Try
+
+                If Not String.Equals(currentNextName, desiredNext.NameLocal, StringComparison.OrdinalIgnoreCase) Then
+                    style.NextParagraphStyle = desiredNext
+                    changed = True
+                End If
+            Catch ex As System.Exception
+                Debug.WriteLine($"[DocStyle] Next style '{nextStyleName}' for '{style.NameLocal}' is unavailable: {ex.Message}")
+            End Try
+        End If
+
+        Try
+            Dim desiredQuickStyle As Boolean = If(styleDef("quickFormat") IsNot Nothing, CBool(styleDef("quickFormat")), True)
+            If style.QuickStyle <> desiredQuickStyle Then
+                style.QuickStyle = desiredQuickStyle
+                changed = True
+            End If
+        Catch
+        End Try
+
+        If styleDef("uiPriority") IsNot Nothing Then
+            Try
+                Dim desiredPriority As Integer = CInt(styleDef("uiPriority"))
+                If style.Priority <> desiredPriority Then
+                    style.Priority = desiredPriority
+                    changed = True
+                End If
+            Catch
+            End Try
+        End If
+
+        Return changed
+    End Function
+
+
+    Private Function OrderStyleDefinitionsBaseFirst(wdStyleDefinitions As JObject) As List(Of JProperty)
+        Dim ordered As New List(Of JProperty)()
+        If wdStyleDefinitions Is Nothing Then Return ordered
+
+        Dim propertiesByName As New Dictionary(Of String, JProperty)(StringComparer.OrdinalIgnoreCase)
+        For Each propertyItem As JProperty In wdStyleDefinitions.Properties()
+            propertiesByName(propertyItem.Name) = propertyItem
+        Next
+
+        Dim visiting As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        Dim visited As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+        For Each propertyItem As JProperty In wdStyleDefinitions.Properties()
+            AddStyleDefinitionBaseFirst(propertyItem.Name, propertiesByName, visiting, visited, ordered)
+        Next
+
+        Return ordered
+    End Function
+
+    Private Sub AddStyleDefinitionBaseFirst(styleName As String,
+                                            propertiesByName As Dictionary(Of String, JProperty),
+                                            visiting As HashSet(Of String),
+                                            visited As HashSet(Of String),
+                                            ordered As List(Of JProperty))
+        If String.IsNullOrWhiteSpace(styleName) OrElse visited.Contains(styleName) Then Return
+        If Not visiting.Add(styleName) Then
+            Debug.WriteLine($"[DocStyle] Cyclic basedOn relationship detected at '{styleName}'.")
+            Return
+        End If
+
+        Dim propertyItem As JProperty = Nothing
+        If propertiesByName.TryGetValue(styleName, propertyItem) Then
+            Dim styleDef As JObject = TryCast(propertyItem.Value, JObject)
+            Dim baseStyleName As String = ""
+            If styleDef IsNot Nothing Then
+                If styleDef("basedOnStyleName") IsNot Nothing Then
+                    baseStyleName = CStr(styleDef("basedOnStyleName"))
+                ElseIf styleDef("baseStyleHierarchy") IsNot Nothing AndAlso TypeOf styleDef("baseStyleHierarchy") Is JArray Then
+                    Dim hierarchy As JArray = CType(styleDef("baseStyleHierarchy"), JArray)
+                    If hierarchy.Count > 0 Then baseStyleName = CStr(hierarchy(0))
+                End If
+            End If
+
+            If Not String.IsNullOrWhiteSpace(baseStyleName) AndAlso propertiesByName.ContainsKey(baseStyleName) Then
+                AddStyleDefinitionBaseFirst(baseStyleName, propertiesByName, visiting, visited, ordered)
+            End If
+
+            If visited.Add(styleName) Then ordered.Add(propertyItem)
+        End If
+
+        visiting.Remove(styleName)
+    End Sub
+
+    Private Sub HydrateListFormatFromNumberingDefinitions(styleDef As JObject,
+                                                          numberingDefinitions As JObject)
+        If styleDef Is Nothing OrElse numberingDefinitions Is Nothing Then Return
+        Dim listFormat As JObject = TryCast(styleDef("listFormat"), JObject)
+        If listFormat Is Nothing Then Return
+
+        Dim sharedKey As String = GetSharedListInstanceKey(listFormat)
+        If String.IsNullOrWhiteSpace(sharedKey) Then Return
+        Dim definition As JObject = TryCast(numberingDefinitions(sharedKey), JObject)
+        If definition Is Nothing Then Return
+
+        Dim copiedFields As String() = {
+            "outlineNumbered", "numberingStyleId", "numberingStyleName",
+            "templateFingerprintV2", "sourceNumId", "abstractNumId"
+        }
+        For Each fieldName As String In copiedFields
+            If listFormat(fieldName) Is Nothing AndAlso definition(fieldName) IsNot Nothing Then
+                listFormat(fieldName) = definition(fieldName).DeepClone()
+            End If
+        Next
+
+        If (listFormat("levels") Is Nothing OrElse Not TypeOf listFormat("levels") Is JArray OrElse CType(listFormat("levels"), JArray).Count = 0) AndAlso
+           definition("levels") IsNot Nothing Then
+            listFormat("levels") = definition("levels").DeepClone()
+        ElseIf TypeOf listFormat("levels") Is JArray AndAlso TypeOf definition("levels") Is JArray Then
+            MergeNumberingLevelMetadata(CType(listFormat("levels"), JArray), CType(definition("levels"), JArray))
+        End If
+    End Sub
+
+    Private Function GetListTemplateCacheKey(listFormatDef As JToken) As String
+        If listFormatDef Is Nothing Then Return ""
+
+        Dim binding As JObject = TryCast(listFormatDef("numberingBinding"), JObject)
+        Dim sharedKey As String = ""
+        If binding IsNot Nothing AndAlso binding("sharedListInstanceKey") IsNot Nothing Then
+            sharedKey = CStr(binding("sharedListInstanceKey"))
+        ElseIf listFormatDef("sharedListInstanceKey") IsNot Nothing Then
+            sharedKey = CStr(listFormatDef("sharedListInstanceKey"))
+        End If
+        If Not String.IsNullOrWhiteSpace(sharedKey) Then Return "S:" & sharedKey
+
+        Dim isOutline As Boolean = If(listFormatDef("outlineNumbered") IsNot Nothing, CBool(listFormatDef("outlineNumbered")), False)
+        Dim fingerprint As String = If(listFormatDef("templateFingerprintV2") IsNot Nothing,
+                                       CStr(listFormatDef("templateFingerprintV2")),
+                                       If(listFormatDef("templateFingerprint") IsNot Nothing,
+                                          CStr(listFormatDef("templateFingerprint")), ""))
+        Return $"{If(isOutline, "O", "N")}:{fingerprint}"
+    End Function
+
+    Private Function GetSharedListInstanceKey(listFormatDef As JToken) As String
+        If listFormatDef Is Nothing Then Return ""
+        Dim binding As JObject = TryCast(listFormatDef("numberingBinding"), JObject)
+        If binding IsNot Nothing AndAlso binding("sharedListInstanceKey") IsNot Nothing Then
+            Return CStr(binding("sharedListInstanceKey"))
+        End If
+        If listFormatDef("sharedListInstanceKey") IsNot Nothing Then Return CStr(listFormatDef("sharedListInstanceKey"))
+        Return ""
+    End Function
+
+    Private Function TryGetCachedListTemplate(listFormatDef As JToken) As Word.ListTemplate
+        Dim cacheKey As String = GetListTemplateCacheKey(listFormatDef)
+        If String.IsNullOrWhiteSpace(cacheKey) Then Return Nothing
+        Dim result As Word.ListTemplate = Nothing
+        If _sharedListTemplates.TryGetValue(cacheKey, result) Then Return result
+        Return Nothing
+    End Function
+
+    Private Sub ConfigureListTemplateFromDefinition(listTemplate As Word.ListTemplate,
+                                                    listFormatDef As JToken)
+        If listTemplate Is Nothing OrElse listFormatDef Is Nothing OrElse listFormatDef("levels") Is Nothing Then Return
+
+        For Each levelDef As JObject In CType(listFormatDef("levels"), JArray)
+            Try
+                Dim levelNumber As Integer = CInt(levelDef("level"))
+                If levelNumber < 1 OrElse levelNumber > listTemplate.ListLevels.Count Then Continue For
+
+                Dim level As Word.ListLevel = listTemplate.ListLevels(levelNumber)
+                Dim numberStyleText As String = If(levelDef("numberStyle") IsNot Nothing,
+                                                   CStr(levelDef("numberStyle")),
+                                                   "wdListNumberStyleArabic")
+                Dim numberStyle As WdListNumberStyle = ParseNumberStyle(numberStyleText)
+                Dim isBullet As Boolean = (numberStyle = WdListNumberStyle.wdListNumberStyleBullet) OrElse
+                                          numberStyleText.IndexOf("bullet", StringComparison.OrdinalIgnoreCase) >= 0
+
+                If isBullet Then
+                    Dim bulletFontName As String = If(levelDef("bulletFont") IsNot Nothing, CStr(levelDef("bulletFont")), "Symbol")
+                    Dim bulletCharCode As Integer = If(levelDef("bulletCharCode") IsNot Nothing, CInt(levelDef("bulletCharCode")), &H2022)
+                    Try : level.Font.Reset() : Catch : End Try
+                    Try : level.Font.Name = bulletFontName : Catch : End Try
+                    Try : level.NumberStyle = WdListNumberStyle.wdListNumberStyleBullet : Catch : End Try
+                    Try : level.NumberFormat = ChrW(bulletCharCode) : Catch : End Try
+                Else
+                    Try : level.NumberStyle = numberStyle : Catch : End Try
+                    If levelDef("numberFormat") IsNot Nothing Then
+                        Try : level.NumberFormat = CStr(levelDef("numberFormat")) : Catch : End Try
+                    End If
+                End If
+
+                If levelDef("numberPosition") IsNot Nothing AndAlso levelDef("numberPosition").Type <> JTokenType.Null Then
+                    level.NumberPosition = CSng(levelDef("numberPosition"))
+                End If
+                If levelDef("textPosition") IsNot Nothing AndAlso levelDef("textPosition").Type <> JTokenType.Null Then
+                    level.TextPosition = CSng(levelDef("textPosition"))
+                End If
+
+                Dim tabPositionIsDefined As Boolean =
+                    levelDef("tabPosition") IsNot Nothing AndAlso
+                    levelDef("tabPosition").Type <> JTokenType.Null AndAlso
+                    (levelDef("tabPositionState") Is Nothing OrElse
+                     Not String.Equals(CStr(levelDef("tabPositionState")), "wdUndefined", StringComparison.OrdinalIgnoreCase))
+                If tabPositionIsDefined Then
+                    Dim tabPosition As Single = CSng(levelDef("tabPosition"))
+                    If Not IsWordUndefinedPosition(tabPosition) Then level.TabPosition = tabPosition
+                End If
+
+                If levelDef("startAt") IsNot Nothing Then level.StartAt = CInt(levelDef("startAt"))
+                If levelDef("alignment") IsNot Nothing Then level.Alignment = ParseListLevelAlignment(CStr(levelDef("alignment")))
+                If levelDef("trailingCharacter") IsNot Nothing Then
+                    level.TrailingCharacter = ParseTrailingCharacter(CStr(levelDef("trailingCharacter")))
+                End If
+
+                If levelDef("numberRunFormatting") IsNot Nothing Then
+                    ApplyNumberRunFormatting(level.Font, levelDef("numberRunFormatting"))
+                End If
+
+            Catch ex As System.Exception
+                Debug.WriteLine($"[DocStyle] Error configuring list level: {ex.Message}")
+            End Try
+        Next
+    End Sub
+
+    Private Sub ApplyNumberRunFormatting(font As Word.Font, definition As JToken)
+        If font Is Nothing OrElse definition Is Nothing Then Return
+        Try
+            If definition("name") IsNot Nothing Then font.Name = CStr(definition("name"))
+            If definition("fontAscii") IsNot Nothing Then SetLateBoundProperty(font, "NameAscii", CStr(definition("fontAscii")))
+            If definition("fontHighAnsi") IsNot Nothing Then SetLateBoundProperty(font, "NameOther", CStr(definition("fontHighAnsi")))
+            If definition("fontEastAsia") IsNot Nothing Then SetLateBoundProperty(font, "NameFarEast", CStr(definition("fontEastAsia")))
+            If definition("fontComplexScript") IsNot Nothing Then SetLateBoundProperty(font, "NameBi", CStr(definition("fontComplexScript")))
+            If definition("size") IsNot Nothing Then font.Size = CSng(definition("size"))
+            If definition("bold") IsNot Nothing Then font.Bold = If(CBool(definition("bold")), -1, 0)
+            If definition("italic") IsNot Nothing Then font.Italic = If(CBool(definition("italic")), -1, 0)
+            If definition("allCaps") IsNot Nothing Then font.AllCaps = If(CBool(definition("allCaps")), -1, 0)
+            If definition("smallCaps") IsNot Nothing Then font.SmallCaps = If(CBool(definition("smallCaps")), -1, 0)
+        Catch ex As System.Exception
+            Debug.WriteLine($"[DocStyle] Error applying number run formatting: {ex.Message}")
+        End Try
+    End Sub
+
+    Private Sub ApplyParagraphStyleLinksForListTemplate(doc As Word.Document,
+                                                        listTemplate As Word.ListTemplate,
+                                                        listFormatDef As JToken,
+                                                        currentStyle As Word.Style)
+        If doc Is Nothing OrElse listTemplate Is Nothing OrElse listFormatDef Is Nothing OrElse
+           listFormatDef("levels") Is Nothing OrElse currentStyle Is Nothing Then Return
+
+        ' Only touch the style currently being imported. The JSON still retains all pStyle links,
+        ' but unrelated target-document styles are not modified unless they are also imported.
+        For Each levelDef As JObject In CType(listFormatDef("levels"), JArray)
+            Dim paragraphStyleName As String = If(levelDef("paragraphStyleName") IsNot Nothing,
+                                                  CStr(levelDef("paragraphStyleName")), "")
+            If String.IsNullOrWhiteSpace(paragraphStyleName) OrElse
+               Not String.Equals(paragraphStyleName, currentStyle.NameLocal, StringComparison.OrdinalIgnoreCase) Then
+                Continue For
+            End If
+
+            Try
+                Dim levelNumber As Integer = CInt(levelDef("level"))
+                currentStyle.LinkToListTemplate(listTemplate, levelNumber)
+            Catch ex As System.Exception
+                Debug.WriteLine($"[DocStyle] Could not link list level to paragraph style '{paragraphStyleName}': {ex.Message}")
+            End Try
+        Next
+    End Sub
+
+    Private Sub EnsureNumberingStyleLinkedToTemplate(doc As Word.Document,
+                                                     listTemplate As Word.ListTemplate,
+                                                     listFormatDef As JToken)
+        If doc Is Nothing OrElse listTemplate Is Nothing OrElse listFormatDef Is Nothing Then Return
+        Dim numberingStyleName As String = If(listFormatDef("numberingStyleName") IsNot Nothing,
+                                              CStr(listFormatDef("numberingStyleName")), "")
+        If String.IsNullOrWhiteSpace(numberingStyleName) Then Return
+
+        Try
+            Dim numberingStyle As Word.Style = Nothing
+            Try
+                numberingStyle = doc.Styles(numberingStyleName)
+            Catch
+                numberingStyle = doc.Styles.Add(numberingStyleName, WdStyleType.wdStyleTypeList)
+            End Try
+            If numberingStyle IsNot Nothing Then numberingStyle.LinkToListTemplate(listTemplate)
+        Catch ex As System.Exception
+            Debug.WriteLine($"[DocStyle] Could not create/link numbering style '{numberingStyleName}': {ex.Message}")
+        End Try
+    End Sub
+
+    Private Function IsStyleMappedToListLevel(style As Word.Style,
+                                              linkedLevel As Integer,
+                                              listFormatDef As JToken) As Boolean
+        If style Is Nothing OrElse listFormatDef Is Nothing OrElse listFormatDef("levels") Is Nothing Then Return False
+
+        For Each levelDef As JObject In CType(listFormatDef("levels"), JArray)
+            If levelDef("level") Is Nothing OrElse CInt(levelDef("level")) <> linkedLevel Then Continue For
+            If levelDef("paragraphStyleName") IsNot Nothing AndAlso
+               String.Equals(CStr(levelDef("paragraphStyleName")), style.NameLocal, StringComparison.OrdinalIgnoreCase) Then
+                Return True
+            End If
+        Next
+
+        Return False
+    End Function
+
+    Private Function IsInheritedOnlyNumbering(listFormatDef As JToken) As Boolean
+        If listFormatDef Is Nothing Then Return False
+        Dim binding As JObject = TryCast(listFormatDef("numberingBinding"), JObject)
+        If binding Is Nothing Then Return False
+        Dim hasDirectLevel As Boolean = If(binding("hasDirectListLevel") IsNot Nothing, CBool(binding("hasDirectListLevel")), False)
+        Dim hasDirectNumId As Boolean = If(binding("hasDirectNumId") IsNot Nothing, CBool(binding("hasDirectNumId")), False)
+        Return Not hasDirectLevel AndAlso Not hasDirectNumId
+    End Function
+
+    Private Function TryGetStyleListTemplate(style As Word.Style) As Word.ListTemplate
+        If style Is Nothing Then Return Nothing
+        Try
+            Return style.ListTemplate
+        Catch
+            Return Nothing
+        End Try
+    End Function
+
+#End Region
 
     ''' <summary>
     ''' Applies all formatting sections from a style definition JSON object to a newly created Word style.
@@ -2223,7 +3748,7 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
-        Catch ex As Exception
+        Catch ex As System.Exception
             Debug.WriteLine($"Error comparing/applying paragraph format: {ex.Message}")
         End Try
 
@@ -2252,7 +3777,7 @@ Partial Public Class ThisAddIn
             If pf("pageBreakBefore") IsNot Nothing Then paraFormat.PageBreakBefore = CInt(pf("pageBreakBefore"))
             If pf("widowControl") IsNot Nothing Then paraFormat.WidowControl = CInt(pf("widowControl"))
             If pf("outlineLevel") IsNot Nothing Then paraFormat.OutlineLevel = ParseOutlineLevel(CStr(pf("outlineLevel")))
-        Catch ex As Exception
+        Catch ex As System.Exception
             Debug.WriteLine($"Error applying paragraph format: {ex.Message}")
         End Try
     End Sub
@@ -2268,7 +3793,9 @@ Partial Public Class ThisAddIn
             ' Build current tab stops signature
             Dim currentTabs As New List(Of String)()
             For Each tabStop As Word.TabStop In style.ParagraphFormat.TabStops
-                currentTabs.Add($"{Math.Round(tabStop.Position, 1)}:{tabStop.Alignment}:{tabStop.Leader}")
+                Dim isCustom As Boolean = True
+                Try : isCustom = tabStop.CustomTab : Catch : End Try
+                If isCustom Then currentTabs.Add($"{Math.Round(tabStop.Position, 1)}:{tabStop.Alignment}:{tabStop.Leader}")
             Next
 
             ' Build desired tab stops signature
@@ -2290,7 +3817,7 @@ Partial Public Class ThisAddIn
             ApplyTabStopsToStyle(style, tabsDef)
             Return True
 
-        Catch ex As Exception
+        Catch ex As System.Exception
             Debug.WriteLine($"Error comparing tab stops: {ex.Message}")
             Return False
         End Try
@@ -2310,7 +3837,7 @@ Partial Public Class ThisAddIn
                 Dim leader As WdTabLeader = ParseTabLeader(If(tabDef("leader") IsNot Nothing, CStr(tabDef("leader")), "wdTabLeaderSpaces"))
                 style.ParagraphFormat.TabStops.Add(position, alignment, leader)
             Next
-        Catch ex As Exception
+        Catch ex As System.Exception
             Debug.WriteLine($"Error applying tab stops: {ex.Message}")
         End Try
     End Sub
@@ -2466,7 +3993,9 @@ Partial Public Class ThisAddIn
                 End Try
             End If
 
-        Catch ex As Exception
+            changesMade = ApplyScriptFontPropertiesIfDifferent(font, ff) OrElse changesMade
+
+        Catch ex As System.Exception
             Debug.WriteLine($"Error comparing/applying font format: {ex.Message}")
         End Try
 
@@ -2501,7 +4030,8 @@ Partial Public Class ThisAddIn
                 If ff("kerning") IsNot Nothing Then font.Kerning = CSng(ff("kerning"))
             Catch
             End Try
-        Catch ex As Exception
+            ApplyScriptFontPropertiesToFont(font, ff)
+        Catch ex As System.Exception
             Debug.WriteLine($"Error applying font format: {ex.Message}")
         End Try
     End Sub
@@ -2514,244 +4044,152 @@ Partial Public Class ThisAddIn
     ''' </summary>
     ''' <param name="doc">Active document whose <c>Styles</c> collection is updated.</param>
     ''' <param name="wdStyleDefinitions">JSON object containing style definitions keyed by Word style name.</param>
-    Private Sub ApplyWdStyleDefinitionsToDocument(doc As Word.Document, wdStyleDefinitions As JObject)
-        ' Clear shared template cache at start.
+    ''' <summary>
+    ''' Creates/updates Word styles in three passes: create all styles, restore style relationships,
+    ''' then apply formatting and shared numbering definitions. Older JSON templates remain supported.
+    ''' </summary>
+    Private Sub ApplyWdStyleDefinitionsToDocument(doc As Word.Document,
+                                                  wdStyleDefinitions As JObject,
+                                                  Optional numberingDefinitions As JObject = Nothing)
+        If doc Is Nothing OrElse wdStyleDefinitions Is Nothing Then Return
+
         _sharedListTemplates.Clear()
 
-        ' First pass: Check which styles already exist.
         Dim allStylesExist As Boolean = True
         Dim existingStyles As New List(Of String)()
         Dim missingStyles As New List(Of String)()
 
-        For Each prop As JProperty In wdStyleDefinitions.Properties()
-            Dim styleName As String = prop.Name
+        For Each propertyItem As JProperty In wdStyleDefinitions.Properties()
             Try
-                Dim style As Word.Style = doc.Styles(styleName)
-                existingStyles.Add(styleName)
+                Dim existingStyle As Word.Style = doc.Styles(propertyItem.Name)
+                existingStyles.Add(propertyItem.Name)
             Catch
                 allStylesExist = False
-                missingStyles.Add(styleName)
+                missingStyles.Add(propertyItem.Name)
             End Try
         Next
 
-        ' If all styles exist, ask user for confirmation before updating.
         If allStylesExist AndAlso existingStyles.Count > 0 Then
             Dim confirmResult As Integer = ShowCustomYesNoBox(
-            $"All {existingStyles.Count} Word styles from the template already exist in this document." & vbCrLf & vbCrLf &
-            "Updating existing styles may cause formatting issues if applied multiple times (also, for the same reason, do not apply DocStyle templates twice)." & vbCrLf & vbCrLf &
-            "Do you want to update the existing styles anyway?",
-            "Yes, update styles", "No, skip style update", $"{AN} - Style Update")
+                $"All {existingStyles.Count} Word styles from the template already exist in this document." & vbCrLf & vbCrLf &
+                "Updating existing styles may cause formatting issues if applied multiple times (also, for the same reason, do not apply DocStyle templates twice)." & vbCrLf & vbCrLf &
+                "Do you want to update the existing styles anyway?",
+                "Yes, update styles", "No, skip style update", $"{AN} - Style Update")
 
             If confirmResult <> 1 Then
                 Debug.WriteLine($"[DocStyle] User skipped style update - all {existingStyles.Count} styles already exist")
                 Return
             End If
-
-            Debug.WriteLine($"[DocStyle] User confirmed style update for {existingStyles.Count} existing styles")
         End If
 
+        Dim createdStyles As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
         Dim stylesCreatedOrUpdated As New List(Of String)()
         Dim stylesSkipped As New List(Of String)()
 
-        ' Sort styles by linked level so level 1 styles (which create the template) come first.
-        Dim sortedProps = wdStyleDefinitions.Properties().OrderBy(Function(p)
-                                                                      Try
-                                                                          Dim def = CType(p.Value, JObject)
-                                                                          If def("listFormat") IsNot Nothing AndAlso
-                                                                          def("listFormat")("linkedLevel") IsNot Nothing Then
-                                                                              Return CInt(def("listFormat")("linkedLevel"))
-                                                                          End If
-                                                                      Catch
-                                                                      End Try
-                                                                      Return 0
-                                                                  End Function).ToList()
-
-        For Each prop As JProperty In sortedProps
-            Dim styleName As String = prop.Name
-            Dim styleDef As JObject = CType(prop.Value, JObject)
+        ' Pass 1: create every missing style before assigning basedOn/next relationships.
+        For Each propertyItem As JProperty In wdStyleDefinitions.Properties()
+            Dim styleName As String = propertyItem.Name
+            Dim styleDef As JObject = TryCast(propertyItem.Value, JObject)
+            If styleDef Is Nothing Then Continue For
 
             Try
-                Dim style As Word.Style = Nothing
-                Dim styleExists As Boolean = False
-                Dim isBuiltIn As Boolean = False
-
-                ' Check if style exists.
+                Dim existingStyle As Word.Style = Nothing
                 Try
-                    style = doc.Styles(styleName)
-                    styleExists = True
-                    isBuiltIn = style.BuiltIn
+                    existingStyle = doc.Styles(styleName)
                 Catch
-                    styleExists = False
                 End Try
+                If existingStyle IsNot Nothing Then Continue For
 
-                ' Detect heading style names in common UI languages.
-                Dim isHeadingStyle As Boolean = False
-                If Not String.IsNullOrEmpty(styleName) Then
-                    isHeadingStyle = styleName.StartsWith("Heading", StringComparison.OrdinalIgnoreCase) OrElse
-                                 styleName.StartsWith("Überschrift", StringComparison.OrdinalIgnoreCase) OrElse
-                                 styleName.StartsWith("Titre", StringComparison.OrdinalIgnoreCase) OrElse
-                                 styleName.StartsWith("Título", StringComparison.OrdinalIgnoreCase) OrElse
-                                 styleName.StartsWith("Titolo", StringComparison.OrdinalIgnoreCase) OrElse
-                                 Regex.IsMatch(styleName, "^(Heading|Überschrift|Titre|Título|Titolo)\s*\d", RegexOptions.IgnoreCase)
-                End If
+                Dim styleType As WdStyleType = ParseStyleType(styleDef)
+                Dim createdStyle As Word.Style = doc.Styles.Add(styleName, styleType)
+                createdStyles.Add(styleName)
+                Debug.WriteLine($"[DocStyle] Created new wdStyle: {styleName} ({styleType})")
+            Catch ex As System.Exception
+                Debug.WriteLine($"[DocStyle] Could not create wdStyle '{styleName}': {ex.Message}")
+            End Try
+        Next
 
-                ' Create style if it doesn't exist.
-                If Not styleExists Then
-                    Try
-                        style = doc.Styles.Add(styleName, WdStyleType.wdStyleTypeParagraph)
-                        Debug.WriteLine($"[DocStyle] Created new wdStyle: {styleName}")
+        Dim orderedProperties As List(Of JProperty) = OrderStyleDefinitionsBaseFirst(wdStyleDefinitions)
 
-                        ' For newly created styles, apply all formatting including list formatting.
-                        ApplyAllFormattingToNewStyle(doc, style, styleDef)
-                        stylesCreatedOrUpdated.Add($"{styleName} (created)")
+        ' Pass 2: apply style inheritance, next-style, Quick Style and priority metadata.
+        For Each propertyItem As JProperty In orderedProperties
+            Dim styleName As String = propertyItem.Name
+            Dim styleDef As JObject = TryCast(propertyItem.Value, JObject)
+            If styleDef Is Nothing Then Continue For
 
-                        ' Make style visible in Quick Styles gallery.
-                        Try
-                            style.QuickStyle = True
-                        Catch
-                        End Try
+            Try
+                Dim style As Word.Style = doc.Styles(styleName)
+                ApplyStyleRelationshipMetadata(doc, style, styleDef)
+            Catch ex As System.Exception
+                Debug.WriteLine($"[DocStyle] Could not apply style relationships for '{styleName}': {ex.Message}")
+            End Try
+        Next
 
-                        Continue For ' Skip the rest - this style has been created and initialized.
-                    Catch ex As Exception
-                        Debug.WriteLine($"[DocStyle] Could not create wdStyle '{styleName}': {ex.Message}")
-                        Continue For
-                    End Try
-                End If
+        ' Pass 3: apply visible formatting and shared list templates, base styles first.
+        For Each propertyItem As JProperty In orderedProperties
+            Dim styleName As String = propertyItem.Name
+            Dim styleDef As JObject = TryCast(propertyItem.Value, JObject)
+            If styleDef Is Nothing Then Continue For
 
+            Try
+                HydrateListFormatFromNumberingDefinitions(styleDef, numberingDefinitions)
+
+                Dim style As Word.Style = doc.Styles(styleName)
                 If style Is Nothing Then Continue For
 
-                ' For existing styles: update formatting.
-                Dim changesMade As Boolean = False
+                If createdStyles.Contains(styleName) Then
+                    ApplyAllFormattingToNewStyle(doc, style, styleDef)
+                    stylesCreatedOrUpdated.Add($"{styleName} (created)")
+                    Continue For
+                End If
 
-                ' Check and apply paragraph formatting differences.
-                If styleDef("paragraphFormat") IsNot Nothing Then
+                Dim changesMade As Boolean = ApplyStyleRelationshipMetadata(doc, style, styleDef)
+
+                If styleDef("paragraphFormat") IsNot Nothing AndAlso style.Type = WdStyleType.wdStyleTypeParagraph Then
                     changesMade = ApplyParagraphFormatIfDifferent(style, styleDef("paragraphFormat")) OrElse changesMade
                 End If
 
-                ' Check and apply tab stops differences.
-                If styleDef("tabStops") IsNot Nothing Then
+                If styleDef("tabStops") IsNot Nothing AndAlso style.Type = WdStyleType.wdStyleTypeParagraph Then
                     changesMade = ApplyTabStopsIfDifferent(style, CType(styleDef("tabStops"), JArray)) OrElse changesMade
                 End If
 
-                ' Check and apply font formatting differences.
                 If styleDef("fontFormat") IsNot Nothing Then
                     changesMade = ApplyFontFormatIfDifferent(style, styleDef("fontFormat")) OrElse changesMade
                 End If
 
-                ' Handle list formatting.
                 If styleDef("listFormat") IsNot Nothing Then
-                    Dim lfDef As JToken = styleDef("listFormat")
-                    Dim templateWantsList As Boolean = False
-                    If lfDef("hasListTemplate") IsNot Nothing Then
-                        templateWantsList = CBool(lfDef("hasListTemplate"))
-                    End If
+                    Dim listFormatDef As JToken = styleDef("listFormat")
+                    Dim templateWantsList As Boolean =
+                        listFormatDef("hasListTemplate") IsNot Nothing AndAlso CBool(listFormatDef("hasListTemplate"))
 
-                    Dim currentTpl As Word.ListTemplate = Nothing
-                    Dim styleHasListTemplate As Boolean = False
-                    Try
-                        currentTpl = style.ListTemplate
-                        styleHasListTemplate = (currentTpl IsNot Nothing)
-                    Catch
-                        styleHasListTemplate = False
-                    End Try
+                    Dim currentTemplate As Word.ListTemplate = TryGetStyleListTemplate(style)
+                    Dim styleHasListTemplate As Boolean = (currentTemplate IsNot Nothing)
 
-                    If isHeadingStyle Then
-                        ' Heading styles: apply or remove list template to match the template definition.
-                        Debug.WriteLine($"[DocStyle] Processing heading style '{styleName}' (hasTemplate={styleHasListTemplate}, templateWantsList={templateWantsList})")
-
-                        If templateWantsList Then
-                            Dim needsUpdate As Boolean = True
-
-                            If styleHasListTemplate Then
-                                Dim currentFingerprint As String = ComputeListTemplateFingerprint(currentTpl)
-                                Dim desiredFingerprint As String = If(lfDef("templateFingerprint") IsNot Nothing,
-                                                                   CStr(lfDef("templateFingerprint")), "")
-
-                                If Not String.IsNullOrEmpty(desiredFingerprint) AndAlso
-                               Not String.IsNullOrEmpty(currentFingerprint) AndAlso
-                               currentFingerprint = desiredFingerprint Then
-                                    needsUpdate = False
-                                    Debug.WriteLine($"[DocStyle] Heading '{styleName}' list template matches (fingerprints equal)")
-                                Else
-                                    Debug.WriteLine($"[DocStyle] Heading '{styleName}' list template differs:")
-                                    Debug.WriteLine($"[DocStyle]   Current:  {currentFingerprint}")
-                                    Debug.WriteLine($"[DocStyle]   Desired:  {desiredFingerprint}")
-                                End If
-                            End If
-
-                            If needsUpdate Then
-                                ApplyListFormatToStyle(doc, style, lfDef)
-                                changesMade = True
-                                Debug.WriteLine($"[DocStyle] Applied list template to heading style '{styleName}'")
-                            End If
-
-                        ElseIf styleHasListTemplate Then
-                            Try
-                                style.LinkToListTemplate(Nothing)
-                                changesMade = True
-                                Debug.WriteLine($"[DocStyle] Removed list template from heading style '{styleName}'")
-                            Catch ex As Exception
-                                Debug.WriteLine($"[DocStyle] Could not remove list from '{styleName}': {ex.Message}")
-                            End Try
-                        End If
-
-                    Else
-                        ' Non-heading styles: update list template only when it differs from the template definition.
-                        If templateWantsList Then
-                            If styleHasListTemplate Then
-                                Dim currentFingerprint As String = ComputeListTemplateFingerprint(currentTpl)
-                                Dim desiredFingerprint As String = If(lfDef("templateFingerprint") IsNot Nothing,
-                                                                   CStr(lfDef("templateFingerprint")), "")
-
-                                If String.IsNullOrEmpty(desiredFingerprint) OrElse
-                               String.IsNullOrEmpty(currentFingerprint) OrElse
-                               currentFingerprint <> desiredFingerprint Then
-                                    ApplyListFormatToStyle(doc, style, lfDef)
-                                    changesMade = True
-                                    Debug.WriteLine($"[DocStyle] Updated list template for style '{styleName}' (fingerprint mismatch)")
-                                Else
-                                    Debug.WriteLine($"[DocStyle] List template unchanged for style '{styleName}' (fingerprints match)")
-                                End If
-                            Else
-                                ApplyListFormatToStyle(doc, style, lfDef)
-                                changesMade = True
-                                Debug.WriteLine($"[DocStyle] Added list template to style '{styleName}'")
-                            End If
-
-                        ElseIf styleHasListTemplate AndAlso Not isBuiltIn Then
-                            Try
-                                style.LinkToListTemplate(Nothing)
-                                changesMade = True
-                                Debug.WriteLine($"[DocStyle] Removed list template from style '{styleName}'")
-                            Catch ex As Exception
-                                Debug.WriteLine($"[DocStyle] Could not remove list from '{styleName}': {ex.Message}")
-                            End Try
-                        End If
+                    If templateWantsList Then
+                        ApplyListFormatToStyle(doc, style, listFormatDef)
+                        changesMade = True
+                    ElseIf styleHasListTemplate AndAlso Not style.BuiltIn Then
+                        Try
+                            style.LinkToListTemplate(Nothing)
+                            changesMade = True
+                        Catch ex As System.Exception
+                            Debug.WriteLine($"[DocStyle] Could not remove list from '{styleName}': {ex.Message}")
+                        End Try
                     End If
                 End If
 
                 If changesMade Then
                     stylesCreatedOrUpdated.Add($"{styleName} (updated)")
-                    Debug.WriteLine($"[DocStyle] Updated existing wdStyle: {styleName} (BuiltIn: {isBuiltIn}, Heading: {isHeadingStyle})")
                 Else
                     stylesSkipped.Add(styleName)
-                    Debug.WriteLine($"[DocStyle] Skipped wdStyle (no changes needed): {styleName}")
                 End If
 
-                ' Make style visible in Quick Styles gallery.
-                Try
-                    style.QuickStyle = True
-                Catch
-                End Try
-
-            Catch ex As Exception
+            Catch ex As System.Exception
                 Debug.WriteLine($"[DocStyle] Error creating/updating wdStyle '{styleName}': {ex.Message}")
             End Try
         Next
 
-        ' Clear cache after processing.
-        _sharedListTemplates.Clear()
-
+        ' Deliberately keep _sharedListTemplates alive until paragraph application completes.
         If stylesCreatedOrUpdated.Count > 0 Then
             Debug.WriteLine($"[DocStyle] Word styles processed: {String.Join(", ", stylesCreatedOrUpdated)}")
         End If
@@ -2759,107 +4197,136 @@ Partial Public Class ThisAddIn
             Debug.WriteLine($"[DocStyle] Word styles unchanged: {String.Join(", ", stylesSkipped)}")
         End If
     End Sub
-
-
     ''' <summary>
     ''' Applies user style formatting (paragraph, font, list, and tab stops) from the template to a paragraph.
     ''' Formatting is applied as overrides after the Word style assignment.
     ''' </summary>
     ''' <param name="para">Paragraph to format.</param>
     ''' <param name="userStyleDef">User style JSON definition containing formatting overrides.</param>
+    ''' <summary>
+    ''' Applies paragraph/font/list/tab overrides after assigning the Word style.
+    ''' Shared numbering templates are preferred; Word defaults remain the compatibility fallback.
+    ''' </summary>
     Private Sub ApplyUserStyleFormattingFromTemplate(para As Word.Paragraph, userStyleDef As JObject)
-        If userStyleDef Is Nothing Then Return
+        If para Is Nothing OrElse userStyleDef Is Nothing Then Return
 
         Try
-            ' Keep a reference so we can reapply after list operations (RemoveNumbers can affect indents/tabs).
-            Dim pf As JToken = userStyleDef("paragraphFormatting")
+            Dim paragraphFormatDef As JToken = userStyleDef("paragraphFormatting")
 
-            ' 1) Apply paragraph formatting overrides (initial pass).
-            If pf IsNot Nothing Then
-                If pf("alignment") IsNot Nothing Then para.Alignment = ParseAlignment(CStr(pf("alignment")))
-                If pf("leftIndent") IsNot Nothing Then para.LeftIndent = CSng(pf("leftIndent"))
-                If pf("rightIndent") IsNot Nothing Then para.RightIndent = CSng(pf("rightIndent"))
-                If pf("firstLineIndent") IsNot Nothing Then para.FirstLineIndent = CSng(pf("firstLineIndent"))
-                If pf("spaceBefore") IsNot Nothing Then para.SpaceBefore = CSng(pf("spaceBefore"))
-                If pf("spaceAfter") IsNot Nothing Then para.SpaceAfter = CSng(pf("spaceAfter"))
-                If pf("lineSpacing") IsNot Nothing Then para.LineSpacing = CSng(pf("lineSpacing"))
-                If pf("lineSpacingRule") IsNot Nothing Then para.Format.LineSpacingRule = ParseLineSpacingRule(CStr(pf("lineSpacingRule")))
-                If pf("keepTogether") IsNot Nothing Then para.KeepTogether = CInt(pf("keepTogether"))
-                If pf("keepWithNext") IsNot Nothing Then para.KeepWithNext = CInt(pf("keepWithNext"))
+            If paragraphFormatDef IsNot Nothing Then
+                If paragraphFormatDef("alignment") IsNot Nothing Then para.Alignment = ParseAlignment(CStr(paragraphFormatDef("alignment")))
+                If paragraphFormatDef("leftIndent") IsNot Nothing Then para.LeftIndent = CSng(paragraphFormatDef("leftIndent"))
+                If paragraphFormatDef("rightIndent") IsNot Nothing Then para.RightIndent = CSng(paragraphFormatDef("rightIndent"))
+                If paragraphFormatDef("firstLineIndent") IsNot Nothing Then para.FirstLineIndent = CSng(paragraphFormatDef("firstLineIndent"))
+                If paragraphFormatDef("spaceBefore") IsNot Nothing Then para.SpaceBefore = CSng(paragraphFormatDef("spaceBefore"))
+                If paragraphFormatDef("spaceAfter") IsNot Nothing Then para.SpaceAfter = CSng(paragraphFormatDef("spaceAfter"))
+                If paragraphFormatDef("lineSpacing") IsNot Nothing Then para.LineSpacing = CSng(paragraphFormatDef("lineSpacing"))
+                If paragraphFormatDef("lineSpacingRule") IsNot Nothing Then para.Format.LineSpacingRule = ParseLineSpacingRule(CStr(paragraphFormatDef("lineSpacingRule")))
+                If paragraphFormatDef("keepTogether") IsNot Nothing Then para.KeepTogether = CInt(paragraphFormatDef("keepTogether"))
+                If paragraphFormatDef("keepWithNext") IsNot Nothing Then para.KeepWithNext = CInt(paragraphFormatDef("keepWithNext"))
             End If
 
-            ' 2) Apply font formatting overrides.
             If userStyleDef("fontFormatting") IsNot Nothing Then
-                Dim ff = userStyleDef("fontFormatting")
-                Dim rng As Word.Range = para.Range
-                If ff("fontName") IsNot Nothing AndAlso CStr(ff("fontName")) <> "mixed" Then rng.Font.Name = CStr(ff("fontName"))
-                If ff("fontSize") IsNot Nothing AndAlso CStr(ff("fontSize")) <> "mixed" Then rng.Font.Size = CSng(ff("fontSize"))
-                If ff("bold") IsNot Nothing AndAlso TypeOf ff("bold") Is JValue AndAlso ff("bold").Type = JTokenType.Boolean Then rng.Font.Bold = If(CBool(ff("bold")), -1, 0)
-                If ff("italic") IsNot Nothing AndAlso TypeOf ff("italic") Is JValue AndAlso ff("italic").Type = JTokenType.Boolean Then rng.Font.Italic = If(CBool(ff("italic")), -1, 0)
-                If ff("allCaps") IsNot Nothing AndAlso TypeOf ff("allCaps") Is JValue AndAlso ff("allCaps").Type = JTokenType.Boolean Then rng.Font.AllCaps = If(CBool(ff("allCaps")), -1, 0)
-                If ff("smallCaps") IsNot Nothing AndAlso TypeOf ff("smallCaps") Is JValue AndAlso ff("smallCaps").Type = JTokenType.Boolean Then rng.Font.SmallCaps = If(CBool(ff("smallCaps")), -1, 0)
-                If ff("underline") IsNot Nothing Then rng.Font.Underline = ParseUnderline(CStr(ff("underline")))
+                Dim fontFormatDef As JToken = userStyleDef("fontFormatting")
+                Dim range As Word.Range = para.Range
+                If fontFormatDef("fontName") IsNot Nothing AndAlso CStr(fontFormatDef("fontName")) <> "mixed" Then range.Font.Name = CStr(fontFormatDef("fontName"))
+                If fontFormatDef("fontSize") IsNot Nothing AndAlso CStr(fontFormatDef("fontSize")) <> "mixed" Then range.Font.Size = CSng(fontFormatDef("fontSize"))
+                If fontFormatDef("bold") IsNot Nothing AndAlso fontFormatDef("bold").Type = JTokenType.Boolean Then range.Font.Bold = If(CBool(fontFormatDef("bold")), -1, 0)
+                If fontFormatDef("italic") IsNot Nothing AndAlso fontFormatDef("italic").Type = JTokenType.Boolean Then range.Font.Italic = If(CBool(fontFormatDef("italic")), -1, 0)
+                If fontFormatDef("allCaps") IsNot Nothing AndAlso fontFormatDef("allCaps").Type = JTokenType.Boolean Then range.Font.AllCaps = If(CBool(fontFormatDef("allCaps")), -1, 0)
+                If fontFormatDef("smallCaps") IsNot Nothing AndAlso fontFormatDef("smallCaps").Type = JTokenType.Boolean Then range.Font.SmallCaps = If(CBool(fontFormatDef("smallCaps")), -1, 0)
+                If fontFormatDef("underline") IsNot Nothing AndAlso CStr(fontFormatDef("underline")) <> "mixed" Then range.Font.Underline = ParseUnderline(CStr(fontFormatDef("underline")))
+                ApplyScriptFontPropertiesToFont(range.Font, fontFormatDef)
             End If
 
-            ' 3) Apply list formatting transitions captured in the template.
-            Dim didRemoveNumbers As Boolean = False
+            Dim listOperationChangedFormatting As Boolean = False
             If userStyleDef("listFormatting") IsNot Nothing Then
-                Dim lf = userStyleDef("listFormatting")
-                Dim templateHasList As Boolean = If(lf("hasList") IsNot Nothing, CBool(lf("hasList")), False)
+                Dim listFormatDef As JToken = userStyleDef("listFormatting")
+                Dim templateHasList As Boolean = If(listFormatDef("hasList") IsNot Nothing,
+                                                    CBool(listFormatDef("hasList")), False)
 
                 Dim currentHasList As Boolean = False
+                Dim currentLevel As Integer = 0
                 Try
-                    currentHasList = (para.Range.ListFormat.ListType <> WdListType.wdListNoNumbering)
+                    currentHasList = para.Range.ListFormat.ListType <> WdListType.wdListNoNumbering
+                    If currentHasList Then currentLevel = para.Range.ListFormat.ListLevelNumber
                 Catch
                 End Try
 
                 If Not templateHasList AndAlso currentHasList Then
                     para.Range.ListFormat.RemoveNumbers()
-                    didRemoveNumbers = True
-                ElseIf templateHasList AndAlso Not currentHasList Then
-                    Dim listType As String = If(lf("listType") IsNot Nothing, CStr(lf("listType")), "")
-                    If listType.Contains("Bullet") Then
-                        para.Range.ListFormat.ApplyBulletDefault()
-                    ElseIf listType.Contains("Outline") Then
-                        para.Range.ListFormat.ApplyOutlineNumberDefault()
-                    ElseIf listType.Contains("Number") Then
-                        para.Range.ListFormat.ApplyNumberDefault()
+                    listOperationChangedFormatting = True
+                ElseIf templateHasList Then
+                    Dim desiredLevel As Integer = 1
+                    If listFormatDef("listLevelNumber") IsNot Nothing Then
+                        desiredLevel = CInt(listFormatDef("listLevelNumber"))
+                    Else
+                        Dim binding As JObject = TryCast(listFormatDef("numberingBinding"), JObject)
+                        If binding IsNot Nothing AndAlso binding("effectiveListLevel") IsNot Nothing Then
+                            desiredLevel = CInt(binding("effectiveListLevel"))
+                        End If
+                    End If
+                    desiredLevel = Math.Max(1, Math.Min(9, desiredLevel))
+
+                    If Not currentHasList OrElse currentLevel <> desiredLevel Then
+                        Dim listTemplate As Word.ListTemplate = Nothing
+                        Try
+                            Dim paragraphStyle As Word.Style = TryCast(para.Style, Word.Style)
+                            listTemplate = TryGetStyleListTemplate(paragraphStyle)
+                        Catch
+                        End Try
+                        If listTemplate Is Nothing Then listTemplate = TryGetCachedListTemplate(listFormatDef)
+
+                        If listTemplate IsNot Nothing Then
+                            para.Range.ListFormat.ApplyListTemplateWithLevel(
+                                ListTemplate:=listTemplate,
+                                ContinuePreviousList:=True,
+                                ApplyTo:=WdListApplyTo.wdListApplyToSelection,
+                                DefaultListBehavior:=WdDefaultListBehavior.wdWord10ListBehavior,
+                                ApplyLevel:=desiredLevel)
+                            listOperationChangedFormatting = True
+                        ElseIf Not currentHasList Then
+                            ' Backward-compatible fallback for old JSON files or disabled style-definition import.
+                            Dim listType As String = If(listFormatDef("listType") IsNot Nothing, CStr(listFormatDef("listType")), "")
+                            If listType.IndexOf("Bullet", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                                para.Range.ListFormat.ApplyBulletDefault()
+                            ElseIf listType.IndexOf("Outline", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                                para.Range.ListFormat.ApplyOutlineNumberDefault()
+                            ElseIf listType.IndexOf("Number", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                                para.Range.ListFormat.ApplyNumberDefault()
+                            End If
+                            listOperationChangedFormatting = True
+                        End If
                     End If
                 End If
             End If
 
-            ' 4) Re-apply paragraph indents after list removal (list operations can change indentation).
-            If didRemoveNumbers AndAlso pf IsNot Nothing Then
-                If pf("leftIndent") IsNot Nothing Then para.LeftIndent = CSng(pf("leftIndent"))
-                If pf("rightIndent") IsNot Nothing Then para.RightIndent = CSng(pf("rightIndent"))
-                If pf("firstLineIndent") IsNot Nothing Then para.FirstLineIndent = CSng(pf("firstLineIndent"))
+            ' List operations may alter paragraph indents. Restore the extracted effective values.
+            If listOperationChangedFormatting AndAlso paragraphFormatDef IsNot Nothing Then
+                If paragraphFormatDef("leftIndent") IsNot Nothing Then para.LeftIndent = CSng(paragraphFormatDef("leftIndent"))
+                If paragraphFormatDef("rightIndent") IsNot Nothing Then para.RightIndent = CSng(paragraphFormatDef("rightIndent"))
+                If paragraphFormatDef("firstLineIndent") IsNot Nothing Then para.FirstLineIndent = CSng(paragraphFormatDef("firstLineIndent"))
             End If
 
-            ' 5) Apply tab stops if specified.
             If userStyleDef("tabStops") IsNot Nothing Then
                 Try
                     para.TabStops.ClearAll()
                     For Each tabDef As JObject In CType(userStyleDef("tabStops"), JArray)
                         Dim position As Single = CSng(tabDef("pos"))
-                        Dim alignStr As String = If(tabDef("align") IsNot Nothing, CStr(tabDef("align")), "Left")
-                        Dim alignment As WdTabAlignment = ParseTabAlignment("wdAlignTab" & alignStr)
-                        Dim leader As WdTabLeader = WdTabLeader.wdTabLeaderSpaces
-                        If tabDef("leader") IsNot Nothing Then
-                            leader = ParseTabLeader("wdTabLeader" & CStr(tabDef("leader")))
-                        End If
+                        Dim alignment As WdTabAlignment = ParseTabAlignment(
+                            "wdAlignTab" & If(tabDef("align") IsNot Nothing, CStr(tabDef("align")), "Left"))
+                        Dim leader As WdTabLeader = ParseTabLeader(
+                            "wdTabLeader" & If(tabDef("leader") IsNot Nothing, CStr(tabDef("leader")), "Spaces"))
                         para.TabStops.Add(position, alignment, leader)
                     Next
                 Catch
                 End Try
             End If
 
-        Catch ex As Exception
+        Catch ex As System.Exception
             Debug.WriteLine($"Error applying user style formatting: {ex.Message}")
         End Try
     End Sub
-
-
-
     ''' <summary>
     ''' Applies list formatting to a style, including list template creation and linking of the template at the configured list level.
     ''' Shared templates are cached to reduce redundant template creation within the current run.
@@ -2867,112 +4334,76 @@ Partial Public Class ThisAddIn
     ''' <param name="doc">Active document that owns the created list templates.</param>
     ''' <param name="style">Style to link to a list template.</param>
     ''' <param name="listFormatDef">List-format JSON definition.</param>
-    Private Sub ApplyListFormatToStyle(doc As Word.Document, style As Word.Style, listFormatDef As JToken)
-        If listFormatDef Is Nothing Then Return
+    ''' <summary>
+    ''' Applies or reuses a list template. New templates use sharedListInstanceKey (normally source numId)
+    ''' before falling back to the legacy fingerprint cache key.
+    ''' </summary>
+    Private Sub ApplyListFormatToStyle(doc As Word.Document,
+                                       style As Word.Style,
+                                       listFormatDef As JToken)
+        If doc Is Nothing OrElse style Is Nothing OrElse listFormatDef Is Nothing Then Return
         If listFormatDef("hasListTemplate") Is Nothing OrElse Not CBool(listFormatDef("hasListTemplate")) Then Return
 
         Try
-            Dim isOutline As Boolean = If(listFormatDef("outlineNumbered") IsNot Nothing, CBool(listFormatDef("outlineNumbered")), False)
-            Dim linkedLevel As Integer = If(listFormatDef("linkedLevel") IsNot Nothing, CInt(listFormatDef("linkedLevel")), 1)
-            Dim fingerprint As String = If(listFormatDef("templateFingerprint") IsNot Nothing, CStr(listFormatDef("templateFingerprint")), "")
+            Dim isOutline As Boolean = If(listFormatDef("outlineNumbered") IsNot Nothing,
+                                          CBool(listFormatDef("outlineNumbered")), False)
+            Dim linkedLevel As Integer = If(listFormatDef("linkedLevel") IsNot Nothing,
+                                            CInt(listFormatDef("linkedLevel")), 1)
+            linkedLevel = Math.Max(1, Math.Min(9, linkedLevel))
 
-            ' Check if this is a bullet-only template (all levels are bullets).
-            Dim isBulletTemplate As Boolean = False
-            If listFormatDef("levels") IsNot Nothing Then
-                isBulletTemplate = True
-                For Each levelDef As JObject In CType(listFormatDef("levels"), JArray)
-                    Dim ns As String = If(levelDef("numberStyle") IsNot Nothing, CStr(levelDef("numberStyle")), "")
-                    If Not ns.ToLower().Contains("bullet") Then
-                        isBulletTemplate = False
-                        Exit For
-                    End If
-                Next
-            End If
-
-            ' Include outline flag and bullet-only flag in cache key.
-            Dim cacheKey As String = $"{If(isOutline, "O", "N")}:{If(isBulletTemplate, "B", "N")}:{fingerprint}"
-
+            Dim cacheKey As String = GetListTemplateCacheKey(listFormatDef)
+            Dim desiredLegacyFingerprint As String = If(listFormatDef("templateFingerprint") IsNot Nothing,
+                                                         CStr(listFormatDef("templateFingerprint")), "")
             Dim listTemplate As Word.ListTemplate = Nothing
 
-            ' Reuse a previously created template when a fingerprint exists and a cached template is available.
-            If Not String.IsNullOrEmpty(fingerprint) Then
-                If _sharedListTemplates.ContainsKey(cacheKey) Then
-                    listTemplate = _sharedListTemplates(cacheKey)
-                    Debug.WriteLine($"Reusing shared list template for style '{style.NameLocal}' at level {linkedLevel}")
-                End If
+            If Not String.IsNullOrWhiteSpace(cacheKey) Then
+                _sharedListTemplates.TryGetValue(cacheKey, listTemplate)
             End If
 
-            ' Create new template if needed.
+            ' Seed the shared cache from an already-correct target template when possible.
             If listTemplate Is Nothing Then
-                ' Always create a new list template instance in the document.
+                Dim currentTemplate As Word.ListTemplate = TryGetStyleListTemplate(style)
+                If currentTemplate IsNot Nothing Then
+                    Dim currentFingerprint As String = ComputeListTemplateFingerprint(currentTemplate)
+                    If String.IsNullOrWhiteSpace(desiredLegacyFingerprint) OrElse
+                       String.Equals(currentFingerprint, desiredLegacyFingerprint, StringComparison.Ordinal) Then
+                        listTemplate = currentTemplate
+                        If Not String.IsNullOrWhiteSpace(cacheKey) Then _sharedListTemplates(cacheKey) = listTemplate
+                    End If
+                End If
+            End If
+
+            If listTemplate Is Nothing Then
                 listTemplate = doc.ListTemplates.Add(OutlineNumbered:=isOutline)
-
-                Debug.WriteLine($"Created new list template for style '{style.NameLocal}' (outline={isOutline}, bullet={isBulletTemplate}, levels={listTemplate.ListLevels.Count})")
-
-                If listFormatDef("levels") IsNot Nothing Then
-                    For Each levelDef As JObject In CType(listFormatDef("levels"), JArray)
-                        Try
-                            Dim levelNum As Integer = CInt(levelDef("level"))
-                            If levelNum > listTemplate.ListLevels.Count Then Continue For
-
-                            Dim level As Word.ListLevel = listTemplate.ListLevels(levelNum)
-
-                            Dim numberStyleStr As String = If(levelDef("numberStyle") IsNot Nothing, CStr(levelDef("numberStyle")), "")
-                            Dim isBulletLevel As Boolean = numberStyleStr.ToLower().Contains("bullet")
-
-                            If isBulletLevel OrElse isBulletTemplate Then
-                                Dim bulletFontName As String = If(levelDef("bulletFont") IsNot Nothing, CStr(levelDef("bulletFont")), "Symbol")
-                                Dim bulletCharCode As Integer = If(levelDef("bulletCharCode") IsNot Nothing, CInt(levelDef("bulletCharCode")), &H2022)
-
-                                Try : level.Font.Reset() : Catch : End Try
-                                Try : level.Font.Name = bulletFontName : Catch : End Try
-                                Try : level.NumberStyle = WdListNumberStyle.wdListNumberStyleBullet : Catch : End Try
-                                Try : level.NumberFormat = ChrW(bulletCharCode) : Catch : End Try
-                            Else
-                                Dim numberStyle As WdListNumberStyle = ParseNumberStyle(If(levelDef("numberStyle") IsNot Nothing, CStr(levelDef("numberStyle")), "wdListNumberStyleArabic"))
-                                Try : level.NumberStyle = numberStyle : Catch : End Try
-                                If levelDef("numberFormat") IsNot Nothing AndAlso Not String.IsNullOrEmpty(CStr(levelDef("numberFormat"))) Then
-                                    Try : level.NumberFormat = CStr(levelDef("numberFormat")) : Catch : End Try
-                                End If
-                            End If
-
-                            If levelDef("numberPosition") IsNot Nothing Then level.NumberPosition = CSng(levelDef("numberPosition"))
-                            If levelDef("textPosition") IsNot Nothing Then level.TextPosition = CSng(levelDef("textPosition"))
-                            If levelDef("tabPosition") IsNot Nothing Then level.TabPosition = CSng(levelDef("tabPosition"))
-                            If levelDef("startAt") IsNot Nothing Then level.StartAt = CInt(levelDef("startAt"))
-                            If levelDef("alignment") IsNot Nothing Then level.Alignment = ParseListLevelAlignment(CStr(levelDef("alignment")))
-
-                            If levelDef("trailingCharacter") IsNot Nothing Then
-                                Try
-                                    level.TrailingCharacter = ParseTrailingCharacter(CStr(levelDef("trailingCharacter")))
-                                Catch
-                                End Try
-                            End If
-
-                        Catch ex As Exception
-                            Debug.WriteLine($"Error configuring list level: {ex.Message}")
-                        End Try
-                    Next
-                End If
-
-                ' Cache templates for reuse.
-                If Not String.IsNullOrEmpty(fingerprint) AndAlso listTemplate IsNot Nothing Then
-                    _sharedListTemplates(cacheKey) = listTemplate
-                    Debug.WriteLine($"Cached list template for style '{style.NameLocal}' (key={cacheKey})")
-                End If
+                ConfigureListTemplateFromDefinition(listTemplate, listFormatDef)
+                If Not String.IsNullOrWhiteSpace(cacheKey) Then _sharedListTemplates(cacheKey) = listTemplate
+                Debug.WriteLine($"[DocStyle] Created shared list template for '{style.NameLocal}' (key={cacheKey})")
+            Else
+                ' Existing target templates are not destructively rewritten when the legacy fingerprint matches.
+                ' A cached template created in this run was already configured at creation time.
+                Debug.WriteLine($"[DocStyle] Reusing shared list template for '{style.NameLocal}' (key={cacheKey})")
             End If
 
-            ' Link template to style at the configured level.
-            If listTemplate IsNot Nothing Then
+            ApplyParagraphStyleLinksForListTemplate(doc, listTemplate, listFormatDef, style)
+            EnsureNumberingStyleLinkedToTemplate(doc, listTemplate, listFormatDef)
+
+            Dim inheritedOnly As Boolean = IsInheritedOnlyNumbering(listFormatDef)
+            Dim mappedByLevel As Boolean = IsStyleMappedToListLevel(style, linkedLevel, listFormatDef)
+
+            If inheritedOnly Then
+                ' Preserve inheritance where possible. If the target base chain does not yield a list,
+                ' fall back to a direct link so older/incomplete templates still work.
+                If TryGetStyleListTemplate(style) Is Nothing Then
+                    style.LinkToListTemplate(listTemplate, linkedLevel)
+                End If
+            ElseIf Not mappedByLevel Then
                 style.LinkToListTemplate(listTemplate, linkedLevel)
-                Debug.WriteLine($"Linked list template to style '{style.NameLocal}' at level {linkedLevel}")
             End If
 
-        Catch ex As Exception
+        Catch ex As System.Exception
             Debug.WriteLine($"Error applying list template to style '{style.NameLocal}': {ex.Message}")
         End Try
     End Sub
-
     ''' <summary>
     ''' Parses a line spacing rule name into a <see cref="WdLineSpacing"/> enum value.
     ''' </summary>
@@ -3213,12 +4644,12 @@ Partial Public Class ThisAddIn
                 Try
                     parasToDelete(i).Delete()
                     removedCount += 1
-                Catch ex As Exception
+                Catch ex As System.Exception
                     Debug.WriteLine($"[DocStyle] Could not delete empty paragraph: {ex.Message}")
                 End Try
             Next
 
-        Catch ex As Exception
+        Catch ex As System.Exception
             Debug.WriteLine($"[DocStyle] RemoveEmptyParagraphs error: {ex.Message}")
         End Try
 
@@ -3394,7 +4825,7 @@ Partial Public Class ThisAddIn
             Catch
             End Try
 
-        Catch ex As Exception
+        Catch ex As System.Exception
             pf("error") = ex.Message
         End Try
         Return pf
@@ -3471,7 +4902,9 @@ Partial Public Class ThisAddIn
             Catch
             End Try
 
-        Catch ex As Exception
+            AddScriptFontPropertiesToJson(font, ff)
+
+        Catch ex As System.Exception
             ff("error") = ex.Message
         End Try
         Return ff
@@ -3482,46 +4915,124 @@ Partial Public Class ThisAddIn
     ''' </summary>
     ''' <param name="rng">Range to inspect.</param>
     ''' <returns>JSON object describing list presence and current list level details when available.</returns>
-    Private Function ExtractListFormat(rng As Word.Range) As JObject
-        Dim lf As New JObject()
+    ''' <summary>
+    ''' Extracts effective paragraph list formatting and adds the source style's shared numbering binding.
+    ''' Legacy fields are retained for backward compatibility.
+    ''' </summary>
+    Private Function ExtractListFormat(rng As Word.Range,
+                                       Optional openXmlContext As JObject = Nothing) As JObject
+        Dim listResult As New JObject()
+        If rng Is Nothing Then Return listResult
+
         Try
             Dim listFormat As Word.ListFormat = rng.ListFormat
 
             If listFormat.ListType = WdListType.wdListNoNumbering Then
-                lf("hasList") = False
-                lf("listType") = "none"
+                listResult("hasList") = False
+                listResult("listType") = "none"
             Else
-                lf("hasList") = True
-                lf("listType") = listFormat.ListType.ToString()
-                lf("listLevelNumber") = listFormat.ListLevelNumber
-                lf("listString") = listFormat.ListString
+                listResult("hasList") = True
+                listResult("listType") = listFormat.ListType.ToString()
+                listResult("listLevelNumber") = listFormat.ListLevelNumber
+
+                ' Kept for old consumers; appliedState is the semantically correct location.
+                listResult("listString") = listFormat.ListString
+                listResult("appliedState") = New JObject From {
+                    {"listString", listFormat.ListString},
+                    {"listLevelNumber", listFormat.ListLevelNumber}
+                }
 
                 Try
                     If listFormat.ListTemplate IsNot Nothing Then
-                        Dim template As Word.ListTemplate = listFormat.ListTemplate
-                        lf("listTemplateOutlineNumbered") = template.OutlineNumbered
+                        Dim listTemplate As Word.ListTemplate = listFormat.ListTemplate
+                        listResult("listTemplateOutlineNumbered") = listTemplate.OutlineNumbered
 
-                        Dim level As Word.ListLevel = template.ListLevels(listFormat.ListLevelNumber)
-                        Dim levelInfo As New JObject()
-                        levelInfo("numberFormat") = level.NumberFormat
-                        levelInfo("numberStyle") = level.NumberStyle.ToString()
-                        levelInfo("textPosition") = level.TextPosition
-                        levelInfo("tabPosition") = level.TabPosition
-                        levelInfo("numberPosition") = level.NumberPosition
-                        levelInfo("alignment") = level.Alignment.ToString()
-                        levelInfo("startAt") = level.StartAt
-                        lf("currentLevelFormat") = levelInfo
+                        Dim level As Word.ListLevel = listTemplate.ListLevels(listFormat.ListLevelNumber)
+                        Dim levelInfo As New JObject From {
+                            {"numberFormat", level.NumberFormat},
+                            {"numberStyle", level.NumberStyle.ToString()},
+                            {"textPosition", level.TextPosition},
+                            {"numberPosition", level.NumberPosition},
+                            {"alignment", level.Alignment.ToString()},
+                            {"startAt", level.StartAt}
+                        }
+
+                        If IsWordUndefinedPosition(level.TabPosition) Then
+                            levelInfo("tabPosition") = JValue.CreateNull()
+                            levelInfo("tabPositionState") = "wdUndefined"
+                        Else
+                            levelInfo("tabPosition") = level.TabPosition
+                            levelInfo("tabPositionState") = "defined"
+                        End If
+
+                        listResult("currentLevelFormat") = levelInfo
                     End If
                 Catch
                 End Try
             End If
 
-        Catch ex As Exception
-            lf("error") = ex.Message
-        End Try
-        Return lf
-    End Function
+            Dim styleName As String = ""
+            Try
+                If rng.Paragraphs.Count > 0 Then
+                    Dim style As Word.Style = TryCast(rng.Paragraphs(1).Style, Word.Style)
+                    If style IsNot Nothing Then styleName = style.NameLocal
+                End If
+            Catch
+            End Try
 
+            Dim styleMeta As JObject = GetStyleOpenXmlMetadata(openXmlContext, styleName)
+            If styleMeta IsNot Nothing Then
+                If styleMeta("styleId") IsNot Nothing Then listResult("wdStyleId") = styleMeta("styleId").DeepClone()
+                If styleMeta("numberingBinding") IsNot Nothing Then
+                    listResult("numberingBinding") = styleMeta("numberingBinding").DeepClone()
+                    If styleMeta("numberingBinding")("sharedListInstanceKey") IsNot Nothing Then
+                        listResult("sharedListInstanceKey") = styleMeta("numberingBinding")("sharedListInstanceKey").DeepClone()
+                    End If
+
+                    Dim sharedKey As String = If(styleMeta("numberingBinding")("sharedListInstanceKey") IsNot Nothing,
+                                                 CStr(styleMeta("numberingBinding")("sharedListInstanceKey")), "")
+                    Dim numberingDefinitions As JObject = If(openXmlContext IsNot Nothing,
+                                                              TryCast(openXmlContext("numberingDefinitions"), JObject), Nothing)
+                    Dim numberingDefinition As JObject = If(numberingDefinitions IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(sharedKey),
+                                                             TryCast(numberingDefinitions(sharedKey), JObject), Nothing)
+                    If numberingDefinition IsNot Nothing Then
+                        If numberingDefinition("numberingStyleId") IsNot Nothing Then listResult("numberingStyleId") = numberingDefinition("numberingStyleId").DeepClone()
+                        If numberingDefinition("numberingStyleName") IsNot Nothing Then listResult("numberingStyleName") = numberingDefinition("numberingStyleName").DeepClone()
+
+                        Dim currentLevelNumber As Integer = If(listResult("listLevelNumber") IsNot Nothing,
+                                                              CInt(listResult("listLevelNumber")),
+                                                              If(styleMeta("numberingBinding")("effectiveListLevel") IsNot Nothing,
+                                                                 CInt(styleMeta("numberingBinding")("effectiveListLevel")), 1))
+                        Dim sourceLevels As JArray = TryCast(numberingDefinition("levels"), JArray)
+                        Dim sourceLevel As JObject = FindLevelDefinition(sourceLevels, currentLevelNumber)
+                        Dim currentLevelFormat As JObject = TryCast(listResult("currentLevelFormat"), JObject)
+                        If sourceLevel IsNot Nothing Then
+                            If currentLevelFormat Is Nothing Then
+                                currentLevelFormat = New JObject()
+                                listResult("currentLevelFormat") = currentLevelFormat
+                            End If
+
+                            Dim metadataFields As String() = {
+                                "paragraphStyleId", "paragraphStyleName", "numberRunFormatting",
+                                "tabPositionState", "numberStyleOpenXml", "alignmentOpenXml",
+                                "trailingCharacterOpenXml", "ilvlZeroBased"
+                            }
+                            For Each fieldName As String In metadataFields
+                                If sourceLevel(fieldName) IsNot Nothing Then
+                                    currentLevelFormat(fieldName) = sourceLevel(fieldName).DeepClone()
+                                End If
+                            Next
+                        End If
+                    End If
+                End If
+            End If
+
+        Catch ex As System.Exception
+            listResult("error") = ex.Message
+        End Try
+
+        Return listResult
+    End Function
     ''' <summary>
     ''' Extracts paragraph border formatting.
     ''' </summary>
@@ -3563,7 +5074,7 @@ Partial Public Class ThisAddIn
             Catch
             End Try
 
-        Catch ex As Exception
+        Catch ex As System.Exception
             borders("error") = ex.Message
         End Try
         Return borders
@@ -3591,7 +5102,7 @@ Partial Public Class ThisAddIn
                 shading("foregroundColorRGB") = ColorToRGB(s.ForegroundPatternColor)
             End If
 
-        Catch ex As Exception
+        Catch ex As System.Exception
             shading("error") = ex.Message
         End Try
         Return shading
@@ -3769,6 +5280,7 @@ Partial Public Class ThisAddIn
             End If
 
             Dim targetRange As Word.Range
+            Dim openXmlContext As JObject = BuildDocStyleOpenXmlContext(doc)
 
             ' Use selection if available, otherwise entire document
             If app.Selection.Type = WdSelectionType.wdSelectionIP Then
@@ -3937,7 +5449,7 @@ Partial Public Class ThisAddIn
                         styleDescriptions(sName) = (userStyleName, whenToApply)
                     End If
                 Next
-            Catch ex As Exception
+            Catch ex As System.Exception
                 Debug.WriteLine($"[DocStyle] Auto-extract LLM parse error: {ex.Message}")
                 ' Fall back to using style names as descriptions
             End Try
@@ -3968,7 +5480,7 @@ Partial Public Class ThisAddIn
                 ' Validate the cached paragraph is still accessible
                 Try
                     Dim checkText As String = representativePara.Range.Text
-                Catch ex As Exception
+                Catch ex As System.Exception
                     Debug.WriteLine($"[DocStyle] Auto-extract: Representative paragraph for style '{group.StyleName}' is no longer accessible ({ex.Message}) — skipping")
                     Continue For
                 End Try
@@ -3997,6 +5509,12 @@ Partial Public Class ThisAddIn
                     result("wdStyleBuiltIn") = False
                 End Try
 
+                Dim styleMeta As JObject = GetStyleOpenXmlMetadata(openXmlContext, If(result("wdStyleName") IsNot Nothing, CStr(result("wdStyleName")), group.StyleName))
+                If styleMeta IsNot Nothing Then
+                    If styleMeta("styleId") IsNot Nothing Then result("wdStyleId") = styleMeta("styleId").DeepClone()
+                    If styleMeta("numberingBinding") IsNot Nothing Then result("numberingBinding") = styleMeta("numberingBinding").DeepClone()
+                End If
+
                 ' Table context
                 Dim isInTable As Boolean = False
                 Try
@@ -4010,7 +5528,7 @@ Partial Public Class ThisAddIn
                 ' Reuse the same extraction helpers
                 result("paragraphFormatting") = ExtractParagraphFormat(representativePara, representativePara.Range.Duplicate)
                 result("fontFormatting") = ExtractFontFormat(representativePara.Range)
-                result("listFormatting") = ExtractListFormat(representativePara.Range)
+                result("listFormatting") = ExtractListFormat(representativePara.Range, openXmlContext)
                 result("tabStops") = ExtractTabStopsCompact(representativePara)
 
                 Dim borders As JObject = ExtractBorders(representativePara)
@@ -4040,11 +5558,11 @@ Partial Public Class ThisAddIn
             ' Extract full wdStyle definitions
             For Each styleName In collectedStyles
                 Try
-                    Dim styleObj As JObject = ExtractFullStyleDefinition(doc, styleName)
+                    Dim styleObj As JObject = ExtractFullStyleDefinition(doc, styleName, openXmlContext)
                     If styleObj IsNot Nothing Then
                         wdStyleDefinitions(styleName) = styleObj
                     End If
-                Catch ex As Exception
+                Catch ex As System.Exception
                     Debug.WriteLine($"[DocStyle] Auto-extract: Error extracting wdStyle definition for '{styleName}': {ex.Message}")
                 End Try
             Next
@@ -4053,6 +5571,7 @@ Partial Public Class ThisAddIn
             ' Phase 4: Assemble and save the template
             ' ──────────────────────────────────────────────────────────────────
             Dim templateResult As New JObject()
+            templateResult("schemaVersion") = DocStyleSchemaVersion
             templateResult("templateName") = templateDisplayName
             templateResult("description") = "Style template auto-extracted from a formatted document. Each user style includes an AI-generated 'whenToApply' field. Review and refine the 'userStyleName' and 'whenToApply' fields for best results. The 'wdStyleDefinitions' section contains Word style definitions that can optionally be created/updated in target documents."
             templateResult("documentInfo") = New JObject From {
@@ -4065,6 +5584,10 @@ Partial Public Class ThisAddIn
             }
             templateResult("userStyles") = userStyles
             templateResult("wdStyleDefinitions") = wdStyleDefinitions
+            templateResult("numberingDefinitions") = BuildReferencedNumberingDefinitions(openXmlContext, collectedStyles)
+            If openXmlContext("documentDefaults") IsNot Nothing Then
+                templateResult("documentDefaults") = openXmlContext("documentDefaults").DeepClone()
+            End If
 
             Dim jsonString As String = JsonConvert.SerializeObject(templateResult, Formatting.Indented)
 
@@ -4081,7 +5604,7 @@ Partial Public Class ThisAddIn
 
             Try
                 File.WriteAllText(filePath, jsonString, Encoding.UTF8)
-            Catch ioEx As Exception
+            Catch ioEx As System.Exception
                 ShowCustomMessageBox($"Could not save file: {ioEx.Message}")
                 Return
             End Try
@@ -4101,7 +5624,7 @@ Partial Public Class ThisAddIn
                 SLib.ShowTextFileEditor(filePath, $"{AN} - Style Template '{templateDisplayName}'", True, _context)
             End If
 
-        Catch ex As Exception
+        Catch ex As System.Exception
             ShowCustomMessageBox($"Error auto-extracting style template: {ex.Message}")
         End Try
     End Sub
