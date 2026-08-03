@@ -242,15 +242,42 @@ Public Module WordSearchHelper
                     .MatchCase = False : .MatchWildcards = True
                     .Format = False : .IgnoreSpace = True
                 End With
-                If rngFull.Find.Execute() Then
+                ' A full wildcard probe such as "\[*\]" (produced for a bracketed
+                ' token like "[TestA]") matches any bracketed run and would wrongly
+                ' hit "[TestB]". Validate each candidate against the needle using the
+                ' same exact canonical-equality contract that strategies 3 and 4 use,
+                ' and skip forward on a mismatch so a later valid hit is not lost.
+                ' Dash/whitespace tolerance is preserved because Canonicalise folds
+                ' those variants away, so legitimate fuzzy matches still compare equal.
+                Dim s2Found As System.Boolean : Try : s2Found = rngFull.Find.Execute() : Catch : s2Found = False : End Try
+                Dim s2Guard As System.Int32 = 0
+                Do While s2Found
+                    s2Guard += 1
+                    If s2Guard > 10000 Then Exit Do
+
                     If rngFull.Start < area.Start OrElse rngFull.End > area.End Then
                         LogHelperDiag($"STRATEGY 2 REJECTED out-of-range hit area=[{area.Start},{area.End}] hit=[{rngFull.Start},{rngFull.End}]")
-                    Else
+                        Exit Do
+                    End If
+
+                    Dim canonFound As System.String = Canonicalise(rngFull.Text, True)
+                    If System.String.Equals(canonFound, canonNeedle, System.StringComparison.Ordinal) Then
                         LogHelperDiag($"STRATEGY 2 HIT area=[{area.Start},{area.End}] hit=[{rngFull.Start},{rngFull.End}]")
                         sel.SetRange(rngFull.Start, rngFull.End)
                         Return True
                     End If
-                Else
+
+                    LogHelperDiag($"STRATEGY 2 REJECTED canonical mismatch hit=[{rngFull.Start},{rngFull.End}] canonFoundLen={canonFound.Length} canonNeedleLen={canonNeedle.Length}")
+
+                    Dim s2NextStart As System.Int32 = rngFull.End
+                    If s2NextStart <= rngFull.Start Then s2NextStart = rngFull.Start + 1
+                    If s2NextStart >= area.End Then Exit Do
+
+                    rngFull.SetRange(s2NextStart, area.End)
+                    Try : s2Found = rngFull.Find.Execute() : Catch : s2Found = False : End Try
+                Loop
+
+                If Not s2Found Then
                     LogHelperDiag($"STRATEGY 2 MISS fullWildcardLen={fullWildcardPattern.Length}")
                 End If
             End If
