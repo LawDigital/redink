@@ -79,7 +79,7 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Const ApplyStylesResponseFormat_Minimal As String =
                 "[" & vbCrLf &
-                "  {""paragraphIndex"": 1, ""userStyleName"": ""<user style name>"", ""confidence"": <0-100>, ""preserveList"": <true|false>, ""restartNumbering"": <true|false>}," & vbCrLf &
+                "  {""paragraphIndex"": 1, ""userStyleName"": ""<user style name>"", ""confidence"": <0-100>, ""preserveList"": <true|false>, ""restartNumbering"": <true|false>, ""continuePreviousList"": <true|false>}," & vbCrLf &
                 "  ..." & vbCrLf &
                 "]"
 
@@ -88,12 +88,14 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Const ApplyStylesResponseFormat_Extended As String =
                 "[" & vbCrLf &
-                "  {""paragraphIndex"": 1, ""userStyleName"": ""<user style name>"", ""confidence"": <0-100>, ""preserveList"": <true|false>, ""restartNumbering"": <true|false>," & vbCrLf &
+                "  {""paragraphIndex"": 1, ""userStyleName"": ""<user style name>"", ""confidence"": <0-100>, ""preserveList"": <true|false>, ""restartNumbering"": <true|false>, ""continuePreviousList"": <true|false>," & vbCrLf &
                 "   ""deletePrefix"": { ""kind"": ""HeadingNumber|ListNumber|Bullet|None"", ""text"": ""<exact leading text to remove (incl. trailing space) or empty>"", ""charCount"": <0 if none> }" & vbCrLf &
                 "  }," & vbCrLf &
                 "  ..." & vbCrLf &
                 "]"
 
+
+    Private Const CurrentSchema As Integer = 2
 
 
 #Region "DocStyle Settings Class"
@@ -304,6 +306,7 @@ Partial Public Class ThisAddIn
             Dim userStyles As New JArray()
             Dim wdStyleDefinitions As New JObject()
             Dim collectedStyles As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+            Dim primaryStyles As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
             Dim openXmlContext As JObject = BuildDocStyleOpenXmlContext(doc)
             Dim processedCount As Integer = 0
             Dim errorCount As Integer = 0
@@ -323,7 +326,8 @@ Partial Public Class ThisAddIn
 
                         ' Collect wdStyle name for style definitions
                         Dim wdStyleName As String = If(parseResult.userStyleJson("wdStyleName") IsNot Nothing, parseResult.userStyleJson("wdStyleName").ToString(), "")
-                        If Not String.IsNullOrWhiteSpace(wdStyleName) AndAlso Not collectedStyles.Contains(wdStyleName) Then
+                        If Not String.IsNullOrWhiteSpace(wdStyleName) Then
+                            primaryStyles.Add(wdStyleName)
                             collectedStyles.Add(wdStyleName)
                         End If
                     End If
@@ -333,11 +337,14 @@ Partial Public Class ThisAddIn
                 End Try
             Next
 
+            ExpandCollectedStyleDependencies(doc, collectedStyles, openXmlContext)
+
             ' Extract full wdStyle definitions for collected styles
             For Each styleName In collectedStyles
                 Try
                     Dim styleObj As JObject = ExtractFullStyleDefinition(doc, styleName, openXmlContext)
                     If styleObj IsNot Nothing Then
+                        styleObj("dependencyOnly") = Not primaryStyles.Contains(styleName)
                         wdStyleDefinitions(styleName) = styleObj
                     End If
                 Catch ex As System.Exception
@@ -348,6 +355,8 @@ Partial Public Class ThisAddIn
             ' Build the complete JSON structure
             Dim result As New JObject()
             result("schemaVersion") = DocStyleSchemaVersion
+            result("schemaRevision") = DocStyleSchemaRevision
+            result("applicationPolicy") = CreateDefaultDocStyleApplicationPolicy()
             result("templateName") = templateDisplayName
             result("description") = "Style template for intelligent document formatting. Each user style in 'userStyles' includes a 'whenToApply' field describing the situations where that style should be applied. The 'wdStyleDefinitions' section contains Word style definitions that can optionally be created/updated in target documents."
             result("documentInfo") = New JObject From {
@@ -494,17 +503,9 @@ Partial Public Class ThisAddIn
         ' Tab stops (compact format)
         result("tabStops") = ExtractTabStopsCompact(para)
 
-        ' Borders (only if present)
-        Dim borders As JObject = ExtractBorders(para)
-        If borders.Properties().Any(Function(p) p.Name <> "distanceFromText" AndAlso p.Name <> "error") Then
-            result("borders") = borders
-        End If
-
-        ' Shading (only if non-default)
-        Dim shading As JObject = ExtractShading(para)
-        If shading("backgroundColor") IsNot Nothing OrElse shading("foregroundColor") IsNot Nothing Then
-            result("shading") = shading
-        End If
+        ' Borders and shading include explicit captured/empty states so existing target formatting can be cleared safely.
+        result("borders") = ExtractBorders(para)
+        result("shading") = ExtractShading(para)
 
         Return (result, parsedStyleName)
     End Function
@@ -548,7 +549,9 @@ Partial Public Class ThisAddIn
 
 #Region "DocStyle Open XML metadata"
 
+    Private Const Minimum_DocStyleSchemaVersion As Integer = 2
     Private Const DocStyleSchemaVersion As Integer = 2
+    Private Const DocStyleSchemaRevision As Integer = 0
 
     ''' <summary>
     ''' Builds an extraction-only metadata index from Word's Flat OPC representation.
@@ -940,6 +943,15 @@ Partial Public Class ThisAddIn
         levelInfo("trailingCharacterOpenXml") = suffixOpenXml
         levelInfo("trailingCharacter") = OpenXmlSuffixToWordEnumName(suffixOpenXml)
 
+        If levelElement.Element(w + "isLgl") IsNot Nothing Then levelInfo("legal") = True
+        Dim levelRestartText As String = GetOpenXmlVal(levelElement.Element(w + "lvlRestart"))
+        If Not String.IsNullOrWhiteSpace(levelRestartText) Then
+            Dim levelRestartValue As Integer
+            If Integer.TryParse(levelRestartText, levelRestartValue) Then
+                levelInfo("levelRestartOpenXml") = levelRestartValue
+            End If
+        End If
+
         Dim paragraphStyleId As String = GetOpenXmlVal(levelElement.Element(w + "pStyle"))
         If Not String.IsNullOrWhiteSpace(paragraphStyleId) Then
             levelInfo("paragraphStyleId") = paragraphStyleId
@@ -1020,6 +1032,28 @@ Partial Public Class ThisAddIn
         Return defaultValue
     End Function
 
+    Private Function OpenXmlUnderlineToWordEnumName(value As String) As String
+        Select Case If(value, "").Trim().ToLowerInvariant()
+            Case "none" : Return "wdUnderlineNone"
+            Case "words" : Return "wdUnderlineWords"
+            Case "double" : Return "wdUnderlineDouble"
+            Case "dotted" : Return "wdUnderlineDotted"
+            Case "thick" : Return "wdUnderlineThick"
+            Case "dash" : Return "wdUnderlineDash"
+            Case "dotdash" : Return "wdUnderlineDotDash"
+            Case "dotdotdash" : Return "wdUnderlineDotDotDash"
+            Case "wave" : Return "wdUnderlineWavy"
+            Case "wavyheavy" : Return "wdUnderlineWavyHeavy"
+            Case "wavydouble" : Return "wdUnderlineWavyDouble"
+            Case "dashlong" : Return "wdUnderlineDashLong"
+            Case "dashheavy" : Return "wdUnderlineDashHeavy"
+            Case "dotdashheavy" : Return "wdUnderlineDotDashHeavy"
+            Case "dotdotdashheavy" : Return "wdUnderlineDotDotDashHeavy"
+            Case "dashlongheavy" : Return "wdUnderlineDashLongHeavy"
+            Case Else : Return "wdUnderlineSingle"
+        End Select
+    End Function
+
     Private Function ExtractOpenXmlRunFormatting(rPr As System.Xml.Linq.XElement,
                                                  w As System.Xml.Linq.XNamespace) As JObject
         Dim result As New JObject()
@@ -1042,14 +1076,46 @@ Partial Public Class ThisAddIn
         If rPr.Element(w + "i") IsNot Nothing Then result("italic") = GetOpenXmlOnOffElementValue(rPr.Element(w + "i"), w, True)
         If rPr.Element(w + "caps") IsNot Nothing Then result("allCaps") = GetOpenXmlOnOffElementValue(rPr.Element(w + "caps"), w, True)
         If rPr.Element(w + "smallCaps") IsNot Nothing Then result("smallCaps") = GetOpenXmlOnOffElementValue(rPr.Element(w + "smallCaps"), w, True)
+        If rPr.Element(w + "strike") IsNot Nothing Then result("strikeThrough") = GetOpenXmlOnOffElementValue(rPr.Element(w + "strike"), w, True)
+        If rPr.Element(w + "dstrike") IsNot Nothing Then result("doubleStrikeThrough") = GetOpenXmlOnOffElementValue(rPr.Element(w + "dstrike"), w, True)
+        If rPr.Element(w + "vanish") IsNot Nothing Then result("hidden") = GetOpenXmlOnOffElementValue(rPr.Element(w + "vanish"), w, True)
+        If rPr.Element(w + "outline") IsNot Nothing Then result("outline") = GetOpenXmlOnOffElementValue(rPr.Element(w + "outline"), w, True)
+        If rPr.Element(w + "shadow") IsNot Nothing Then result("shadow") = GetOpenXmlOnOffElementValue(rPr.Element(w + "shadow"), w, True)
+        If rPr.Element(w + "emboss") IsNot Nothing Then result("emboss") = GetOpenXmlOnOffElementValue(rPr.Element(w + "emboss"), w, True)
+        If rPr.Element(w + "imprint") IsNot Nothing Then result("engrave") = GetOpenXmlOnOffElementValue(rPr.Element(w + "imprint"), w, True)
+
+        Dim underlineElement As System.Xml.Linq.XElement = rPr.Element(w + "u")
+        If underlineElement IsNot Nothing Then
+            Dim underlineValue As String = GetOpenXmlAttributeValue(underlineElement, w + "val")
+            If String.IsNullOrWhiteSpace(underlineValue) Then underlineValue = "single"
+            result("underline") = OpenXmlUnderlineToWordEnumName(underlineValue)
+            Dim underlineColor As String = GetOpenXmlAttributeValue(underlineElement, w + "color")
+            If Not String.IsNullOrWhiteSpace(underlineColor) Then result("underlineColorRGB") = If(underlineColor.Equals("auto", StringComparison.OrdinalIgnoreCase), "auto", "#" & underlineColor)
+        End If
+
+        Dim verticalAlign As String = GetOpenXmlVal(rPr.Element(w + "vertAlign"))
+        If verticalAlign.Equals("subscript", StringComparison.OrdinalIgnoreCase) Then result("subscript") = True
+        If verticalAlign.Equals("superscript", StringComparison.OrdinalIgnoreCase) Then result("superscript") = True
 
         Dim colorElement As System.Xml.Linq.XElement = rPr.Element(w + "color")
-        If colorElement IsNot Nothing Then AddOpenXmlAttributeIfPresent(result, "colorOpenXml", colorElement, w + "val")
+        If colorElement IsNot Nothing Then
+            Dim colorValue As String = GetOpenXmlAttributeValue(colorElement, w + "val")
+            If Not String.IsNullOrWhiteSpace(colorValue) Then
+                result("colorOpenXml") = colorValue
+                result("colorRGB") = If(colorValue.Equals("auto", StringComparison.OrdinalIgnoreCase), "auto", "#" & colorValue)
+            End If
+        End If
 
         Dim sizeHalfPoints As Integer
-        If Integer.TryParse(GetOpenXmlVal(rPr.Element(w + "sz")), sizeHalfPoints) Then
-            result("size") = CSng(sizeHalfPoints / 2.0R)
-        End If
+        If Integer.TryParse(GetOpenXmlVal(rPr.Element(w + "sz")), sizeHalfPoints) Then result("size") = CSng(sizeHalfPoints / 2.0R)
+        Dim spacingTwentiethPoints As Integer
+        If Integer.TryParse(GetOpenXmlVal(rPr.Element(w + "spacing")), spacingTwentiethPoints) Then result("spacing") = CSng(spacingTwentiethPoints / 20.0R)
+        Dim positionHalfPoints As Integer
+        If Integer.TryParse(GetOpenXmlVal(rPr.Element(w + "position")), positionHalfPoints) Then result("position") = CSng(positionHalfPoints / 2.0R)
+        Dim kerningHalfPoints As Integer
+        If Integer.TryParse(GetOpenXmlVal(rPr.Element(w + "kern")), kerningHalfPoints) Then result("kerning") = CSng(kerningHalfPoints / 2.0R)
+        Dim scalingPercent As Integer
+        If Integer.TryParse(GetOpenXmlVal(rPr.Element(w + "w")), scalingPercent) Then result("scaling") = scalingPercent
 
         Return result
     End Function
@@ -1082,7 +1148,7 @@ Partial Public Class ThisAddIn
             definition("levels") = levels
         End If
 
-        Dim levelOverrides As New Newtonsoft.Json.Linq.JArray()
+        Dim levelOverrides As New JArray()
         For Each overrideElement As System.Xml.Linq.XElement In numElement.Elements(w + "lvlOverride")
             Dim ilvlText As String = GetOpenXmlAttributeValue(overrideElement, w + "ilvl")
             Dim ilvl As Integer
@@ -1174,7 +1240,7 @@ Partial Public Class ThisAddIn
         ' Safe defaults: the global tab interval is applied automatically; changing Normal's
         ' script fonts or languages remains opt-in because it can affect unrelated document content.
         defaults("applyOnImport") = New JObject From {
-            {"defaultTabStop", True},
+            {"defaultTabStop", False},
             {"fontDefaultsToNormalStyle", False},
             {"languageDefaultsToNormalStyle", False}
         }
@@ -1223,12 +1289,127 @@ Partial Public Class ThisAddIn
                 fingerprint.Append(If(level("textPosition"), "")).Append(":"c)
                 fingerprint.Append(If(level("tabPosition"), "undefined")).Append(":"c)
                 fingerprint.Append(If(level("trailingCharacter"), "")).Append(":"c)
+                fingerprint.Append(If(level("resetOnHigher"), "")).Append(":"c)
+                fingerprint.Append(If(level("legal"), "")).Append(":"c)
                 fingerprint.Append(If(level("paragraphStyleId"), "")).Append("|"c)
             Next
         End If
 
         Return fingerprint.ToString()
     End Function
+
+    Private Function ExtractListTemplateDefinition(listTemplate As Word.ListTemplate,
+                                                   linkedLevel As Integer) As JObject
+        Dim listDefinition As New JObject From {
+            {"hasListTemplate", (listTemplate IsNot Nothing)},
+            {"linkedLevel", Math.Max(1, Math.Min(9, linkedLevel))}
+        }
+        If listTemplate Is Nothing Then Return listDefinition
+
+        Try
+            listDefinition("outlineNumbered") = listTemplate.OutlineNumbered
+
+            Dim legacyFingerprint As New StringBuilder()
+            Dim levels As New JArray()
+            For levelNumber As Integer = 1 To Math.Min(9, listTemplate.ListLevels.Count)
+                Try
+                    Dim level As Word.ListLevel = listTemplate.ListLevels(levelNumber)
+                    legacyFingerprint.Append($"{levelNumber}:{level.NumberStyle}:{level.NumberFormat}|")
+
+                    Dim levelInfo As New JObject From {
+                        {"level", levelNumber},
+                        {"numberStyle", level.NumberStyle.ToString()},
+                        {"textPosition", level.TextPosition},
+                        {"numberPosition", level.NumberPosition},
+                        {"alignment", level.Alignment.ToString()},
+                        {"startAt", level.StartAt},
+                        {"numberFormat", If(level.NumberFormat, "")}
+                    }
+
+                    If IsWordUndefinedPosition(level.TabPosition) Then
+                        levelInfo("tabPosition") = JValue.CreateNull()
+                        levelInfo("tabPositionState") = "wdUndefined"
+                    Else
+                        levelInfo("tabPosition") = level.TabPosition
+                        levelInfo("tabPositionState") = "defined"
+                    End If
+
+                    Try : levelInfo("trailingCharacter") = level.TrailingCharacter.ToString() : Catch : End Try
+                    AddLateBoundPropertiesToJson(level, levelInfo, GetListLevelLateBoundPropertyMap())
+
+                    If level.NumberStyle = WdListNumberStyle.wdListNumberStyleBullet Then
+                        Try
+                            Dim bulletText As String = If(level.NumberFormat, "")
+                            levelInfo("bulletCharCode") = If(bulletText.Length > 0, AscW(bulletText.Chars(0)), &H2022)
+                            Dim bulletFontName As String = ""
+                            Try : bulletFontName = level.Font.Name : Catch : End Try
+                            levelInfo("bulletFont") = If(String.IsNullOrWhiteSpace(bulletFontName), "Symbol", bulletFontName)
+                        Catch
+                            levelInfo("bulletCharCode") = &H2022
+                            levelInfo("bulletFont") = "Symbol"
+                        End Try
+                    End If
+
+                    Try
+                        Dim numberRunFormatting As New JObject From {
+                            {"captured", True},
+                            {"complete", True}
+                        }
+                        Dim levelFont As Word.Font = level.Font
+                        If levelFont IsNot Nothing Then
+                            If levelFont.Name <> CStr(WdConstants.wdUndefined) Then numberRunFormatting("name") = levelFont.Name
+                            If levelFont.Size <> CSng(WdConstants.wdUndefined) Then numberRunFormatting("size") = levelFont.Size
+                            If levelFont.Bold <> CInt(WdConstants.wdUndefined) Then numberRunFormatting("bold") = (levelFont.Bold = -1)
+                            If levelFont.Italic <> CInt(WdConstants.wdUndefined) Then numberRunFormatting("italic") = (levelFont.Italic = -1)
+                            If levelFont.Underline <> CType(WdConstants.wdUndefined, WdUnderline) Then numberRunFormatting("underline") = levelFont.Underline.ToString()
+                            If levelFont.StrikeThrough <> CInt(WdConstants.wdUndefined) Then numberRunFormatting("strikeThrough") = (levelFont.StrikeThrough = -1)
+                            If levelFont.DoubleStrikeThrough <> CInt(WdConstants.wdUndefined) Then numberRunFormatting("doubleStrikeThrough") = (levelFont.DoubleStrikeThrough = -1)
+                            If levelFont.Subscript <> CInt(WdConstants.wdUndefined) Then numberRunFormatting("subscript") = (levelFont.Subscript = -1)
+                            If levelFont.Superscript <> CInt(WdConstants.wdUndefined) Then numberRunFormatting("superscript") = (levelFont.Superscript = -1)
+                            If levelFont.AllCaps <> CInt(WdConstants.wdUndefined) Then numberRunFormatting("allCaps") = (levelFont.AllCaps = -1)
+                            If levelFont.SmallCaps <> CInt(WdConstants.wdUndefined) Then numberRunFormatting("smallCaps") = (levelFont.SmallCaps = -1)
+                            If levelFont.Color <> CType(WdConstants.wdUndefined, WdColor) Then numberRunFormatting("colorRGB") = ColorToRGB(levelFont.Color)
+                            Try : numberRunFormatting("underlineColorRGB") = ColorToRGB(levelFont.UnderlineColor) : Catch : End Try
+                            Try : numberRunFormatting("scaling") = levelFont.Scaling : Catch : End Try
+                            Try : numberRunFormatting("spacing") = levelFont.Spacing : Catch : End Try
+                            Try : numberRunFormatting("position") = levelFont.Position : Catch : End Try
+                            Try : numberRunFormatting("kerning") = levelFont.Kerning : Catch : End Try
+                            AddScriptFontPropertiesToJson(levelFont, numberRunFormatting)
+                            AddLateBoundPropertiesToJson(levelFont, numberRunFormatting, GetFontLateBoundPropertyMap())
+                        End If
+                        If numberRunFormatting.Properties().Any(Function(propertyItem) propertyItem.Name <> "captured" AndAlso propertyItem.Name <> "complete") Then
+                            levelInfo("numberRunFormatting") = numberRunFormatting
+                        End If
+                    Catch
+                    End Try
+
+                    levels.Add(levelInfo)
+                Catch ex As System.Exception
+                    Debug.WriteLine($"[DocStyle] Could not extract list level {levelNumber}: {ex.Message}")
+                End Try
+            Next
+
+            listDefinition("templateFingerprint") = legacyFingerprint.ToString()
+            listDefinition("levels") = levels
+            listDefinition("templateFingerprintV2") = ComputeJsonListTemplateFingerprintV2(listDefinition)
+        Catch ex As System.Exception
+            listDefinition("error") = ex.Message
+        End Try
+
+        Return listDefinition
+    End Function
+
+    Private Sub MergeJsonObjectProperties(target As JObject,
+                                          source As JObject,
+                                          Optional overwriteExisting As Boolean = True)
+        If target Is Nothing OrElse source Is Nothing Then Return
+        For Each propertyItem As JProperty In source.Properties()
+            If overwriteExisting OrElse target(propertyItem.Name) Is Nothing Then
+                target(propertyItem.Name) = propertyItem.Value.DeepClone()
+            End If
+        Next
+    End Sub
+
 
     Private Function OpenXmlNumberFormatToWordEnumName(numberFormat As String) As String
         Select Case If(numberFormat, "").Trim().ToLowerInvariant()
@@ -1353,7 +1534,7 @@ Partial Public Class ThisAddIn
                 Select Case propertyItem.Name
                     Case "paragraphStyleId", "paragraphStyleName", "numberRunFormatting",
                          "tabPositionState", "numberStyleOpenXml", "alignmentOpenXml",
-                         "trailingCharacterOpenXml", "ilvlZeroBased"
+                         "trailingCharacterOpenXml", "ilvlZeroBased", "legal", "levelRestartOpenXml"
                         targetLevel(propertyItem.Name) = propertyItem.Value.DeepClone()
                 End Select
             Next
@@ -1433,21 +1614,28 @@ Partial Public Class ThisAddIn
 
             Try
                 Dim pf As Word.ParagraphFormat = style.ParagraphFormat
-                styleDef("paragraphFormat") = New JObject From {
-                    {"alignment", pf.Alignment.ToString()},
-                    {"leftIndent", pf.LeftIndent},
-                    {"rightIndent", pf.RightIndent},
-                    {"firstLineIndent", pf.FirstLineIndent},
-                    {"spaceBefore", pf.SpaceBefore},
-                    {"spaceAfter", pf.SpaceAfter},
-                    {"lineSpacing", pf.LineSpacing},
-                    {"lineSpacingRule", pf.LineSpacingRule.ToString()},
-                    {"keepTogether", pf.KeepTogether},
-                    {"keepWithNext", pf.KeepWithNext},
-                    {"pageBreakBefore", pf.PageBreakBefore},
-                    {"widowControl", pf.WidowControl},
-                    {"outlineLevel", pf.OutlineLevel.ToString()}
+                Dim paragraphFormat As New JObject From {
+                    {"captured", True},
+                    {"complete", True}
                 }
+                Try : AddDefinedWordValue(paragraphFormat, "alignment", pf.Alignment, True) : Catch : End Try
+                Try : AddDefinedWordValue(paragraphFormat, "leftIndent", pf.LeftIndent) : Catch : End Try
+                Try : AddDefinedWordValue(paragraphFormat, "rightIndent", pf.RightIndent) : Catch : End Try
+                Try : AddDefinedWordValue(paragraphFormat, "firstLineIndent", pf.FirstLineIndent) : Catch : End Try
+                Try : AddDefinedWordValue(paragraphFormat, "spaceBefore", pf.SpaceBefore) : Catch : End Try
+                Try : AddDefinedWordValue(paragraphFormat, "spaceAfter", pf.SpaceAfter) : Catch : End Try
+                Try : AddDefinedWordValue(paragraphFormat, "lineSpacingRule", pf.LineSpacingRule, True) : Catch : End Try
+                Try : AddDefinedWordValue(paragraphFormat, "lineSpacing", pf.LineSpacing) : Catch : End Try
+                Try : AddDefinedWordValue(paragraphFormat, "keepTogether", pf.KeepTogether) : Catch : End Try
+                Try : AddDefinedWordValue(paragraphFormat, "keepWithNext", pf.KeepWithNext) : Catch : End Try
+                Try : AddDefinedWordValue(paragraphFormat, "pageBreakBefore", pf.PageBreakBefore) : Catch : End Try
+                Try : AddDefinedWordValue(paragraphFormat, "widowControl", pf.WidowControl) : Catch : End Try
+                Try : AddDefinedWordValue(paragraphFormat, "outlineLevel", pf.OutlineLevel, True) : Catch : End Try
+                AddLateBoundPropertiesToJson(pf, paragraphFormat, GetParagraphLateBoundPropertyMap())
+                styleDef("paragraphFormat") = paragraphFormat
+                styleDef("borders") = ExtractBordersFromCollection(pf.Borders)
+                Dim styleShading As Word.Shading = GetStyleShading(style)
+                If styleShading IsNot Nothing Then styleDef("shading") = ExtractShadingFromObject(styleShading)
             Catch
             End Try
 
@@ -1475,28 +1663,44 @@ Partial Public Class ThisAddIn
             Try
                 Dim font As Word.Font = style.Font
                 Dim fontFormat As New JObject From {
-                    {"name", font.Name},
-                    {"size", font.Size},
-                    {"bold", (font.Bold = -1)},
-                    {"italic", (font.Italic = -1)},
-                    {"underline", font.Underline.ToString()},
-                    {"allCaps", (font.AllCaps = -1)},
-                    {"smallCaps", (font.SmallCaps = -1)},
-                    {"strikeThrough", (font.StrikeThrough = -1)},
-                    {"doubleStrikeThrough", (font.DoubleStrikeThrough = -1)},
-                    {"subscript", (font.Subscript = -1)},
-                    {"superscript", (font.Superscript = -1)},
-                    {"color", font.Color.ToString()},
-                    {"colorRGB", ColorToRGB(font.Color)}
+                    {"captured", True},
+                    {"complete", True}
                 }
+                Try : AddDefinedWordValue(fontFormat, "name", font.Name) : Catch : End Try
+                Try : AddDefinedWordValue(fontFormat, "size", font.Size) : Catch : End Try
+                Try : AddDefinedWordBoolean(fontFormat, "bold", font.Bold) : Catch : End Try
+                Try : AddDefinedWordBoolean(fontFormat, "italic", font.Italic) : Catch : End Try
+                Try : AddDefinedWordValue(fontFormat, "underline", font.Underline, True) : Catch : End Try
+                Try : AddDefinedWordBoolean(fontFormat, "allCaps", font.AllCaps) : Catch : End Try
+                Try : AddDefinedWordBoolean(fontFormat, "smallCaps", font.SmallCaps) : Catch : End Try
+                Try : AddDefinedWordBoolean(fontFormat, "strikeThrough", font.StrikeThrough) : Catch : End Try
+                Try : AddDefinedWordBoolean(fontFormat, "doubleStrikeThrough", font.DoubleStrikeThrough) : Catch : End Try
+                Try : AddDefinedWordBoolean(fontFormat, "subscript", font.Subscript) : Catch : End Try
+                Try : AddDefinedWordBoolean(fontFormat, "superscript", font.Superscript) : Catch : End Try
                 Try
-                    fontFormat("scaling") = font.Scaling
-                    fontFormat("spacing") = font.Spacing
-                    fontFormat("position") = font.Position
-                    fontFormat("kerning") = font.Kerning
+                    If IsWordUndefinedObject(font.Color) Then
+                        fontFormat("color") = "mixed"
+                    Else
+                        fontFormat("color") = font.Color.ToString()
+                        fontFormat("colorRGB") = ColorToRGB(font.Color)
+                    End If
                 Catch
                 End Try
+                Try
+                    If IsWordUndefinedObject(font.UnderlineColor) Then
+                        fontFormat("underlineColor") = "mixed"
+                    Else
+                        fontFormat("underlineColor") = font.UnderlineColor.ToString()
+                        fontFormat("underlineColorRGB") = ColorToRGB(font.UnderlineColor)
+                    End If
+                Catch
+                End Try
+                Try : AddDefinedWordValue(fontFormat, "scaling", font.Scaling) : Catch : End Try
+                Try : AddDefinedWordValue(fontFormat, "spacing", font.Spacing) : Catch : End Try
+                Try : AddDefinedWordValue(fontFormat, "position", font.Position) : Catch : End Try
+                Try : AddDefinedWordValue(fontFormat, "kerning", font.Kerning) : Catch : End Try
                 AddScriptFontPropertiesToJson(font, fontFormat)
+                AddLateBoundPropertiesToJson(font, fontFormat, GetFontLateBoundPropertyMap())
                 styleDef("fontFormat") = fontFormat
             Catch
             End Try
@@ -1580,6 +1784,7 @@ Partial Public Class ThisAddIn
                                 levelInfo("trailingCharacter") = level.TrailingCharacter.ToString()
                             Catch
                             End Try
+                            AddLateBoundPropertiesToJson(level, levelInfo, GetListLevelLateBoundPropertyMap())
 
                             Try
                                 Dim numberRunFormatting As New JObject()
@@ -1709,8 +1914,20 @@ Partial Public Class ThisAddIn
 
             Dim p7 As New SLib.InputParameter("Apply only style, no text updating (faster, safer)", settings.FastModeStylesOnly)
 
-            Dim listResetOptions As New List(Of String) From {"Off", "Rule-based (after non-list paragraphs)", "LLM-assisted (semantic analysis)"}
-            Dim p8b As New SLib.InputParameter("List numbering reset", listResetOptions(settings.ListNumberingReset))
+            Dim listResetOptions As New List(Of String) From {
+    "Off — recommended; keep numbering defined by the style template",
+    "Rule-based — automatically restart simple new lists",
+    "AI-assisted — determine continuation or restart based on content"}
+
+            Dim selectedListResetIndex As Integer = settings.ListNumberingReset
+            If selectedListResetIndex < 0 OrElse selectedListResetIndex >= listResetOptions.Count Then
+                selectedListResetIndex = 0
+            End If
+
+            Dim p8b As New SLib.InputParameter(
+    "List numbering reset",
+    listResetOptions(selectedListResetIndex))
+
             p8b.Options = listResetOptions
 
             Dim headingOutlineLevelOptions As New List(Of String) From {
@@ -1745,11 +1962,18 @@ Partial Public Class ThisAddIn
 
             Dim p9 As New SLib.InputParameter("Show report at end", settings.ShowReport)
 
-            Dim params() As SLib.InputParameter = {p0, p2, p3, p4, p5, p6, p7, p8b, p8c, p10, p11, p1, p1b, p1c, p9}
-            If Not ShowCustomVariableInputForm("Configure Style Template Application:", $"{AN} - Apply Style Template", params) Then
+            Dim params() As SLib.InputParameter = {
+    p0, p2, p3, p4, p5, p6, p7,
+    p8b, p8c, p10, p11, p1, p1b, p1c, p9
+}
+
+            If Not ShowCustomVariableInputForm(
+    "Configure Style Template Application:",
+    $"{AN} - Apply Style Template",
+    params) Then
+
                 Return
             End If
-
             ' Read back values
             Dim chosenDisplay As String = System.Convert.ToString(params(0).Value)
 
@@ -1761,9 +1985,14 @@ Partial Public Class ThisAddIn
             settings.ProcessTables = System.Convert.ToBoolean(params(5).Value)
             settings.FastModeStylesOnly = System.Convert.ToBoolean(params(6).Value)
 
-            settings.ListNumberingReset = listResetOptions.IndexOf(System.Convert.ToString(params(7).Value))
-            If settings.ListNumberingReset < 0 Then settings.ListNumberingReset = 0
+            settings.ListNumberingReset =
+    listResetOptions.IndexOf(System.Convert.ToString(params(7).Value))
 
+            If settings.ListNumberingReset < 0 OrElse
+   settings.ListNumberingReset >= listResetOptions.Count Then
+
+                settings.ListNumberingReset = 0
+            End If
             Dim headingMaxRaw As String = System.Convert.ToString(params(8).Value)
             Dim m As Match = Regex.Match(headingMaxRaw, "^\s*(\d+)")
             If m.Success Then
@@ -1804,10 +2033,31 @@ Partial Public Class ThisAddIn
             Dim templateObj As JObject
             Try
                 templateObj = JObject.Parse(templateJson)
-            Catch ex As System.Exception
+            Catch ex As Exception
                 ShowCustomMessageBox($"Invalid JSON in template file: {ex.Message}")
                 Return
             End Try
+
+            ' Reject templates whose schema version is older than the minimum supported version.
+            Dim schemaVersion As Integer = 1
+
+            If templateObj("schemaVersion") IsNot Nothing Then
+                Integer.TryParse(
+        System.Convert.ToString(templateObj("schemaVersion")),
+        schemaVersion)
+            End If
+
+            If schemaVersion < Minimum_DocStyleSchemaVersion Then
+                ShowCustomMessageBox(
+        "This style template uses a schema version that is no longer supported." &
+        vbCrLf & vbCrLf &
+        $"Detected schema version: {schemaVersion}" & vbCrLf &
+        $"Minimum supported schema version: {Minimum_DocStyleSchemaVersion}" &
+        vbCrLf & vbCrLf &
+        $"Please recreate the style template with the current version of {AN} for Word.")
+
+                Return
+            End If
 
             If do2ndModel Then
                 If Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
@@ -1821,11 +2071,13 @@ Partial Public Class ThisAddIn
 
             Dim wdStyleDefinitions As JObject = TryCast(templateObj("wdStyleDefinitions"), JObject)
             Dim numberingDefinitions As JObject = TryCast(templateObj("numberingDefinitions"), JObject)
+            Dim applicationPolicy As JObject = TryCast(templateObj("applicationPolicy"), JObject)
+            If applicationPolicy Is Nothing Then applicationPolicy = CreateDefaultDocStyleApplicationPolicy()
 
             If settings.ApplyStyleDefinitions Then
-                ApplyDocumentDefaultsToDocument(doc, TryCast(templateObj("documentDefaults"), JObject))
+                ApplyDocumentDefaultsToDocument(doc, TryCast(templateObj("documentDefaults"), JObject), applicationPolicy)
                 If wdStyleDefinitions IsNot Nothing Then
-                    ApplyWdStyleDefinitionsToDocument(doc, wdStyleDefinitions, numberingDefinitions)
+                    ApplyWdStyleDefinitionsToDocument(doc, wdStyleDefinitions, numberingDefinitions, applicationPolicy)
                 End If
             End If
 
@@ -1896,6 +2148,8 @@ Partial Public Class ThisAddIn
                                         settings As DocStyleSettings,
                                         useSecondAPI As Boolean) As System.Threading.Tasks.Task(Of String)
         Dim report As New StringBuilder()
+        Dim applicationPolicy As JObject = TryCast(templateObj("applicationPolicy"), JObject)
+        If applicationPolicy Is Nothing Then applicationPolicy = CreateDefaultDocStyleApplicationPolicy()
         report.AppendLine("=== Style Template Application Report (Fast Mode) ===")
         report.AppendLine($"Date: {DateTime.Now:yyyy-MM-dd HH:mm:ss}")
         report.AppendLine()
@@ -2029,6 +2283,7 @@ Partial Public Class ThisAddIn
 
             Dim numberingRestartParas As New List(Of Word.Paragraph)()
             Dim templateBaselineByIndex As New Dictionary(Of Integer, JObject)()
+            Dim verificationItems As New List(Of Tuple(Of Integer, Word.Paragraph, String, JObject, JObject))()
 
             Try
                 For Each mapping As JObject In mappingArray
@@ -2068,7 +2323,7 @@ Partial Public Class ThisAddIn
                     userStyleNameToDef.TryGetValue(userStyleName, userStyleDef)
 
                     ' Skip if no actual changes would occur
-                    Dim wouldChange As Boolean = WouldStyleApplicationChangeAnything(para, doc, wdStyleName, userStyleDef)
+                    Dim wouldChange As Boolean = WouldStyleApplicationChangeAnything(para, doc, wdStyleName, userStyleDef, applicationPolicy, mapping)
                     If Not wouldChange Then
                         skippedCount += 1
                         report.AppendLine($"Skipped paragraph {paraIdx + 1}: no changes needed | style='{wdStyleName}' | text='{paraPreview}'")
@@ -2130,12 +2385,13 @@ Partial Public Class ThisAddIn
                         para.Style = doc.Styles(wdStyleName)
 
                         If userStyleDef IsNot Nothing Then
-                            ApplyUserStyleFormattingFromTemplate(para, userStyleDef)
+                            ApplyUserStyleFormattingFromTemplate(para, userStyleDef, mapping, applicationPolicy)
                         Else
                             Debug.WriteLine($"[DocStyle] FastMode: No userStyleDef for para {paraIdx + 1}: raw='{userStyleNameRaw}' norm='{userStyleName}' wdStyle='{wdStyleName}' preview='{paraPreview}'")
                         End If
 
                         templateBaselineByIndex(paraIdx) = CaptureParaProps(para)
+                        verificationItems.Add(Tuple.Create(paraIdx, para, wdStyleName, userStyleDef, mapping))
                         appliedCount += 1
 
                         If settings.ListNumberingReset > 0 Then
@@ -2155,8 +2411,83 @@ Partial Public Class ThisAddIn
             End Try
 
             Dim restartCount As Integer = 0
+
             If settings.ListNumberingReset > 0 Then
-                restartCount = ApplyNumberingRestarts(doc, paragraphList, paragraphHasList, settings, numberingRestartParas, templateBaselineByIndex)
+                restartCount = ApplyNumberingRestarts(
+        doc,
+        paragraphList,
+        paragraphHasList,
+        settings,
+        numberingRestartParas,
+        templateBaselineByIndex)
+
+                ' Restarting numbering can cause Word to replace the intended paragraph
+                ' style with the style linked to the list level. It can also disturb
+                ' character formatting and the effective trailing tab.
+                '
+                ' Restore the final mapped state after all restart operations have finished.
+                If restartCount > 0 Then
+                    For Each verificationItem As Tuple(
+            Of Integer,
+               Word.Paragraph,
+               String,
+               JObject,
+               JObject) In verificationItems
+
+                        Try
+                            Dim paraIdx As Integer = verificationItem.Item1
+                            Dim para As Word.Paragraph = verificationItem.Item2
+                            Dim wdStyleName As String = verificationItem.Item3
+                            Dim userStyleDef As JObject = verificationItem.Item4
+                            Dim mapping As JObject = verificationItem.Item5
+
+                            If para Is Nothing OrElse
+                   String.IsNullOrWhiteSpace(wdStyleName) Then
+                                Continue For
+                            End If
+
+                            ' Restore the style selected by the LLM mapping.
+                            para.Style = doc.Styles(wdStyleName)
+
+                            ' Restore paragraph, font, list and tab formatting after Word's
+                            ' numbering restart side effects.
+                            If userStyleDef IsNot Nothing Then
+                                ApplyUserStyleFormattingFromTemplate(
+                        para,
+                        userStyleDef,
+                        mapping,
+                        applicationPolicy)
+                            End If
+
+                            ' Store the actual final state for any subsequent repair logic.
+                            templateBaselineByIndex(paraIdx) = CaptureParaProps(para)
+
+                        Catch ex As System.Exception
+                            Debug.WriteLine(
+                    $"[DocStyle] Could not restore formatting after numbering restart: {ex.Message}")
+                        End Try
+                    Next
+                End If
+            End If
+
+            Dim verificationMismatchCount As Integer = 0
+            If GetPolicyBoolean(applicationPolicy, "verifyAfterApply", True) Then
+                For Each verificationItem As Tuple(Of Integer, Word.Paragraph, String, JObject, JObject) In verificationItems
+                    Try
+                        If WouldStyleApplicationChangeAnything(verificationItem.Item2,
+                                                               doc,
+                                                               verificationItem.Item3,
+                                                               verificationItem.Item4,
+                                                               applicationPolicy,
+                                                               verificationItem.Item5) Then
+                            verificationMismatchCount += 1
+                            report.AppendLine($"Verification warning for paragraph {verificationItem.Item1 + 1}: one or more captured format properties differ after application.")
+                        End If
+                    Catch ex As System.Exception
+                        verificationMismatchCount += 1
+                        report.AppendLine($"Verification error for paragraph {verificationItem.Item1 + 1}: {ex.Message}")
+                    End Try
+                Next
             End If
 
             report.AppendLine()
@@ -2164,6 +2495,7 @@ Partial Public Class ThisAddIn
             report.AppendLine($"Styles applied: {appliedCount}")
             report.AppendLine($"Skipped: {skippedCount}")
             If settings.ListNumberingReset > 0 Then report.AppendLine($"Numbering restarts applied: {restartCount}")
+            If GetPolicyBoolean(applicationPolicy, "verifyAfterApply", True) Then report.AppendLine($"Verification warnings: {verificationMismatchCount}")
 
         Catch ex As System.Exception
             report.AppendLine($"Error in fast mode: {ex.Message}")
@@ -2181,103 +2513,43 @@ Partial Public Class ThisAddIn
     ''' <param name="wdStyleName">Word style name to apply.</param>
     ''' <param name="userStyleDef">User style definition containing formatting overrides.</param>
     ''' <returns>True if applying the style would change the paragraph; otherwise False.</returns>
-    Private Function WouldStyleApplicationChangeAnything(para As Word.Paragraph, doc As Word.Document, wdStyleName As String, userStyleDef As JObject) As Boolean
+    Private Function WouldStyleApplicationChangeAnything(para As Word.Paragraph,
+                                                           doc As Word.Document,
+                                                           wdStyleName As String,
+                                                           userStyleDef As JObject,
+                                                           Optional applicationPolicy As JObject = Nothing,
+                                                           Optional mapping As JObject = Nothing) As Boolean
+        If para Is Nothing Then Return False
+
         Try
-            ' Check if style would change
             Dim currentStyleName As String = ""
             Try
-                currentStyleName = para.Style.NameLocal
+                Dim currentStyle As Word.Style = TryCast(para.Style, Word.Style)
+                If currentStyle IsNot Nothing Then currentStyleName = currentStyle.NameLocal
             Catch
-                currentStyleName = ""
             End Try
 
-            If Not String.Equals(currentStyleName, wdStyleName, StringComparison.OrdinalIgnoreCase) Then
-                Return True ' Style name differs
-            End If
+            If Not String.Equals(currentStyleName, wdStyleName, StringComparison.OrdinalIgnoreCase) Then Return True
+            If userStyleDef Is Nothing Then Return False
 
-            ' Check paragraph formatting differences if userStyleDef is provided
-            If userStyleDef IsNot Nothing AndAlso userStyleDef("paragraphFormatting") IsNot Nothing Then
-                Dim pf = userStyleDef("paragraphFormatting")
+            If HasParagraphFormatDifference(para.Format, userStyleDef("paragraphFormatting"), para) Then Return True
+            If HasFontFormatDifference(para.Range.Font, userStyleDef("fontFormatting"), para.Range) Then Return True
 
-                If pf("alignment") IsNot Nothing Then
-                    Dim desired = ParseAlignment(CStr(pf("alignment")))
-                    If para.Alignment <> desired Then Return True
-                End If
+            If TypeOf userStyleDef("tabStops") Is JArray AndAlso
+               HasTabStopDifference(para.TabStops, CType(userStyleDef("tabStops"), JArray), True) Then Return True
 
-                If pf("leftIndent") IsNot Nothing Then
-                    If Math.Abs(para.LeftIndent - CSng(pf("leftIndent"))) > 0.5 Then Return True
-                End If
+            If TypeOf userStyleDef("borders") Is JObject AndAlso
+               HasBorderDifference(para.Borders, CType(userStyleDef("borders"), JObject)) Then Return True
 
-                If pf("rightIndent") IsNot Nothing Then
-                    If Math.Abs(para.RightIndent - CSng(pf("rightIndent"))) > 0.5 Then Return True
-                End If
+            If TypeOf userStyleDef("shading") Is JObject AndAlso
+               HasShadingDifference(para.Shading, CType(userStyleDef("shading"), JObject)) Then Return True
 
-                If pf("firstLineIndent") IsNot Nothing Then
-                    If Math.Abs(para.FirstLineIndent - CSng(pf("firstLineIndent"))) > 0.5 Then Return True
-                End If
+            Dim preserveList As Boolean = mapping IsNot Nothing AndAlso mapping("preserveList") IsNot Nothing AndAlso CBool(mapping("preserveList"))
+            If Not preserveList AndAlso HasListFormattingDifference(para, userStyleDef("listFormatting")) Then Return True
 
-                If pf("spaceBefore") IsNot Nothing Then
-                    If Math.Abs(para.SpaceBefore - CSng(pf("spaceBefore"))) > 0.5 Then Return True
-                End If
-
-                If pf("spaceAfter") IsNot Nothing Then
-                    If Math.Abs(para.SpaceAfter - CSng(pf("spaceAfter"))) > 0.5 Then Return True
-                End If
-            End If
-
-            ' Check font formatting differences
-            If userStyleDef IsNot Nothing AndAlso userStyleDef("fontFormatting") IsNot Nothing Then
-                Dim ff = userStyleDef("fontFormatting")
-                Dim rng As Word.Range = para.Range
-
-                If ff("fontName") IsNot Nothing AndAlso CStr(ff("fontName")) <> "mixed" Then
-                    If rng.Font.Name <> CStr(ff("fontName")) Then Return True
-                End If
-
-                If ff("fontSize") IsNot Nothing AndAlso CStr(ff("fontSize")) <> "mixed" Then
-                    If Math.Abs(rng.Font.Size - CSng(ff("fontSize"))) > 0.1 Then Return True
-                End If
-
-                If ff("bold") IsNot Nothing AndAlso ff("bold").Type = JTokenType.Boolean Then
-                    Dim desired As Integer = If(CBool(ff("bold")), -1, 0)
-                    If rng.Font.Bold <> desired AndAlso rng.Font.Bold <> CInt(WdConstants.wdUndefined) Then Return True
-                End If
-
-                If ff("italic") IsNot Nothing AndAlso ff("italic").Type = JTokenType.Boolean Then
-                    Dim desired As Integer = If(CBool(ff("italic")), -1, 0)
-                    If rng.Font.Italic <> desired AndAlso rng.Font.Italic <> CInt(WdConstants.wdUndefined) Then Return True
-                End If
-
-                If HasScriptFontDifference(rng.Font, ff) Then Return True
-            End If
-
-            ' Check list formatting transitions
-            If userStyleDef IsNot Nothing AndAlso userStyleDef("listFormatting") IsNot Nothing Then
-                Dim lf = userStyleDef("listFormatting")
-                Dim templateHasList As Boolean = If(lf("hasList") IsNot Nothing, CBool(lf("hasList")), False)
-
-                Dim currentHasList As Boolean = False
-                Try
-                    currentHasList = (para.Range.ListFormat.ListType <> WdListType.wdListNoNumbering)
-                Catch
-                End Try
-
-                If templateHasList <> currentHasList Then Return True
-                If templateHasList AndAlso currentHasList AndAlso lf("listLevelNumber") IsNot Nothing Then
-                    Try
-                        If para.Range.ListFormat.ListLevelNumber <> CInt(lf("listLevelNumber")) Then Return True
-                    Catch
-                        Return True
-                    End Try
-                End If
-            End If
-
-            ' No differences detected
             Return False
-
         Catch ex As System.Exception
             Debug.WriteLine($"[DocStyle] WouldStyleApplicationChangeAnything error: {ex.Message}")
-            ' On error, assume change is needed to be safe
             Return True
         End Try
     End Function
@@ -3018,7 +3290,13 @@ Partial Public Class ThisAddIn
                 source,
                 Nothing,
                 System.Globalization.CultureInfo.InvariantCulture)
-            If value IsNot Nothing Then target(jsonPropertyName) = value.ToString()
+            If value IsNot Nothing Then
+                If IsWordUndefinedObject(value) Then
+                    target(jsonPropertyName) = "mixed"
+                Else
+                    target(jsonPropertyName) = value.ToString()
+                End If
+            End If
         Catch
         End Try
     End Sub
@@ -3153,20 +3431,1108 @@ Partial Public Class ThisAddIn
         Return False
     End Function
 
-    Private Sub ApplyDocumentDefaultsToDocument(doc As Word.Document, documentDefaults As JObject)
-        If doc Is Nothing OrElse documentDefaults Is Nothing Then Return
+    Private Function CreateDefaultDocStyleApplicationPolicy() As JObject
+        Return New JObject From {
+            {"applyDocumentDefaults", False},
+            {"applyDefaultTabStop", False},
+            {"applyDefaultFontsToNormalStyle", False},
+            {"applyDefaultLanguagesToNormalStyle", False},
+            {"materializeEffectiveStyleFormatting", True},
+            {"updateExistingDependencyStyles", False},
+            {"clearCapturedBorders", True},
+            {"clearCapturedShading", True},
+            {"verifyAfterApply", True},
+            {"continuePreviousListByDefault", True}
+        }
+    End Function
+
+    Private Function GetPolicyBoolean(policy As JObject,
+                                      propertyName As String,
+                                      defaultValue As Boolean) As Boolean
+        If policy Is Nothing OrElse policy(propertyName) Is Nothing Then Return defaultValue
+        Try
+            Return CBool(policy(propertyName))
+        Catch
+            Return defaultValue
+        End Try
+    End Function
+
+    Private Function GetFirstJsonToken(definition As JToken,
+                                       ParamArray propertyNames() As String) As JToken
+        If definition Is Nothing OrElse propertyNames Is Nothing Then Return Nothing
+        For Each propertyName As String In propertyNames
+            If Not String.IsNullOrWhiteSpace(propertyName) AndAlso definition(propertyName) IsNot Nothing Then
+                Return definition(propertyName)
+            End If
+        Next
+        Return Nothing
+    End Function
+
+    Private Function IsApplicableJsonToken(token As JToken) As Boolean
+        If token Is Nothing OrElse token.Type = JTokenType.Null OrElse token.Type = JTokenType.Undefined Then Return False
+        If token.Type = JTokenType.String Then
+            Dim value As String = CStr(token).Trim()
+            If value.Length = 0 OrElse
+               value.Equals("mixed", StringComparison.OrdinalIgnoreCase) OrElse
+               value.Equals("default", StringComparison.OrdinalIgnoreCase) OrElse
+               value.Equals("undefined", StringComparison.OrdinalIgnoreCase) Then Return False
+        End If
+        Return True
+    End Function
+
+    Private Function NearlyEqual(leftValue As Single,
+                                 rightValue As Single,
+                                 Optional tolerance As Single = 0.1F) As Boolean
+        Return Math.Abs(CDbl(leftValue) - CDbl(rightValue)) <= tolerance
+    End Function
+
+    Private Function TryGetLateBoundProperty(source As Object,
+                                             propertyName As String,
+                                             ByRef value As Object) As Boolean
+        value = Nothing
+        If source Is Nothing OrElse String.IsNullOrWhiteSpace(propertyName) Then Return False
+        Try
+            value = source.GetType().InvokeMember(
+                propertyName,
+                System.Reflection.BindingFlags.GetProperty,
+                Nothing,
+                source,
+                Nothing,
+                System.Globalization.CultureInfo.InvariantCulture)
+            Return True
+        Catch
+            Return False
+        End Try
+    End Function
+
+    Private Function ConvertJsonTokenForComProperty(token As JToken,
+                                                    currentValue As Object) As Object
+        If token Is Nothing OrElse currentValue Is Nothing Then Return Nothing
+        Try
+            Dim targetType As System.Type = currentValue.GetType()
+            If targetType.IsEnum Then
+                If token.Type = JTokenType.String Then Return System.Enum.Parse(targetType, CStr(token), True)
+                Return System.Enum.ToObject(targetType, System.Convert.ToInt32(token))
+            End If
+            If targetType Is GetType(Boolean) Then Return System.Convert.ToBoolean(token)
+            If targetType Is GetType(Integer) Then Return System.Convert.ToInt32(token)
+            If targetType Is GetType(Short) Then Return System.Convert.ToInt16(token)
+            If targetType Is GetType(Long) Then Return System.Convert.ToInt64(token)
+            If targetType Is GetType(Single) Then Return System.Convert.ToSingle(token)
+            If targetType Is GetType(Double) Then Return System.Convert.ToDouble(token)
+            If targetType Is GetType(Decimal) Then Return System.Convert.ToDecimal(token)
+            If targetType Is GetType(String) Then Return CStr(token)
+            Return token.ToObject(targetType)
+        Catch
+            Return Nothing
+        End Try
+    End Function
+
+    Private Function HasLateBoundFormatDifference(source As Object,
+                                                  definition As JToken,
+                                                  jsonPropertyName As String,
+                                                  comPropertyName As String) As Boolean
+        If source Is Nothing OrElse definition Is Nothing OrElse
+           Not IsApplicableJsonToken(definition(jsonPropertyName)) Then Return False
+
+        Dim currentValue As Object = Nothing
+        If Not TryGetLateBoundProperty(source, comPropertyName, currentValue) OrElse currentValue Is Nothing Then Return False
+        Dim desiredValue As Object = ConvertJsonTokenForComProperty(definition(jsonPropertyName), currentValue)
+        If desiredValue Is Nothing Then Return False
+        Return LateBoundPropertyDiffers(source, comPropertyName, desiredValue)
+    End Function
+
+    Private Function ApplyLateBoundFormatProperty(source As Object,
+                                                  definition As JToken,
+                                                  jsonPropertyName As String,
+                                                  comPropertyName As String) As Boolean
+        If source Is Nothing OrElse definition Is Nothing OrElse
+           Not IsApplicableJsonToken(definition(jsonPropertyName)) Then Return False
+
+        Dim currentValue As Object = Nothing
+        If Not TryGetLateBoundProperty(source, comPropertyName, currentValue) OrElse currentValue Is Nothing Then Return False
+        Dim desiredValue As Object = ConvertJsonTokenForComProperty(definition(jsonPropertyName), currentValue)
+        If desiredValue Is Nothing OrElse Not LateBoundPropertyDiffers(source, comPropertyName, desiredValue) Then Return False
+        SetLateBoundProperty(source, comPropertyName, desiredValue)
+        Return True
+    End Function
+
+    Private Function GetParagraphLateBoundPropertyMap() As Dictionary(Of String, String)
+        Return New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase) From {
+            {"spaceBeforeAuto", "SpaceBeforeAuto"},
+            {"spaceAfterAuto", "SpaceAfterAuto"},
+            {"hyphenation", "Hyphenation"},
+            {"suppressAutoHyphens", "SuppressAutoHyphens"},
+            {"noSpaceBetweenParagraphsOfSameStyle", "NoSpaceBetweenParagraphsOfSameStyle"},
+            {"mirrorIndents", "MirrorIndents"},
+            {"contextualSpacing", "ContextualSpacing"},
+            {"suppressLineNumbers", "SuppressLineNumbers"},
+            {"autoAdjustRightIndent", "AutoAdjustRightIndent"},
+            {"farEastLineBreakControl", "FarEastLineBreakControl"},
+            {"hangingPunctuation", "HangingPunctuation"},
+            {"halfWidthPunctuationOnTopOfLine", "HalfWidthPunctuationOnTopOfLine"},
+            {"addSpaceBetweenFarEastAndAlpha", "AddSpaceBetweenFarEastAndAlpha"},
+            {"addSpaceBetweenFarEastAndDigit", "AddSpaceBetweenFarEastAndDigit"},
+            {"disableLineHeightGrid", "DisableLineHeightGrid"},
+            {"snapToGrid", "SnapToGrid"},
+            {"wordWrap", "WordWrap"},
+            {"baseLineAlignment", "BaseLineAlignment"},
+            {"characterUnitLeftIndent", "CharacterUnitLeftIndent"},
+            {"characterUnitRightIndent", "CharacterUnitRightIndent"},
+            {"characterUnitFirstLineIndent", "CharacterUnitFirstLineIndent"},
+            {"lineUnitBefore", "LineUnitBefore"},
+            {"lineUnitAfter", "LineUnitAfter"}
+        }
+    End Function
+
+    Private Function GetFontLateBoundPropertyMap() As Dictionary(Of String, String)
+        Return New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase) From {
+            {"themeFont", "ThemeFont"},
+            {"themeColor", "ThemeColor"},
+            {"themeTint", "TintAndShade"},
+            {"hidden", "Hidden"},
+            {"emboss", "Emboss"},
+            {"engrave", "Engrave"},
+            {"shadow", "Shadow"},
+            {"outline", "Outline"},
+            {"animation", "Animation"},
+            {"disableCharacterSpaceGrid", "DisableCharacterSpaceGrid"},
+            {"boldBi", "BoldBi"},
+            {"italicBi", "ItalicBi"},
+            {"sizeBi", "SizeBi"},
+            {"diacriticColor", "DiacriticColor"},
+            {"emphasisMark", "EmphasisMark"},
+            {"ligatures", "Ligatures"},
+            {"numberForm", "NumberForm"},
+            {"numberSpacing", "NumberSpacing"},
+            {"stylisticSet", "StylisticSet"},
+            {"contextualAlternates", "ContextualAlternates"}
+        }
+    End Function
+
+    Private Function GetListLevelLateBoundPropertyMap() As Dictionary(Of String, String)
+        Return New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase) From {
+            {"resetOnHigher", "ResetOnHigher"},
+            {"legal", "Legal"}
+        }
+    End Function
+
+    Private Function IsWordUndefinedObject(value As Object) As Boolean
+        If value Is Nothing Then Return False
+        Try
+            If TypeOf value Is Integer OrElse TypeOf value Is Short OrElse TypeOf value Is Long Then
+                Return System.Convert.ToInt64(value) = System.Convert.ToInt64(WdConstants.wdUndefined)
+            End If
+            If TypeOf value Is Single OrElse TypeOf value Is Double OrElse TypeOf value Is Decimal Then
+                Return Math.Abs(System.Convert.ToDouble(value) - System.Convert.ToDouble(WdConstants.wdUndefined)) < 0.01R
+            End If
+            Return value.ToString().Equals(CStr(WdConstants.wdUndefined), StringComparison.OrdinalIgnoreCase)
+        Catch
+            Return False
+        End Try
+    End Function
+
+    Private Sub AddDefinedWordValue(target As JObject,
+                                    propertyName As String,
+                                    value As Object,
+                                    Optional storeEnumName As Boolean = False)
+        If target Is Nothing OrElse String.IsNullOrWhiteSpace(propertyName) OrElse value Is Nothing Then Return
+        If IsWordUndefinedObject(value) Then
+            target(propertyName) = "mixed"
+            Return
+        End If
 
         Try
-            Dim policy As JObject = TryCast(documentDefaults("applyOnImport"), JObject)
-            Dim applyDefaultTabStop As Boolean = True
-            Dim applyFontsToNormal As Boolean = False
-            Dim applyLanguagesToNormal As Boolean = False
-
-            If policy IsNot Nothing Then
-                If policy("defaultTabStop") IsNot Nothing Then applyDefaultTabStop = CBool(policy("defaultTabStop"))
-                If policy("fontDefaultsToNormalStyle") IsNot Nothing Then applyFontsToNormal = CBool(policy("fontDefaultsToNormalStyle"))
-                If policy("languageDefaultsToNormalStyle") IsNot Nothing Then applyLanguagesToNormal = CBool(policy("languageDefaultsToNormalStyle"))
+            If storeEnumName AndAlso value.GetType().IsEnum Then
+                target(propertyName) = value.ToString()
+            Else
+                target(propertyName) = JToken.FromObject(value)
             End If
+        Catch
+            target(propertyName) = value.ToString()
+        End Try
+    End Sub
+
+    Private Sub AddDefinedWordBoolean(target As JObject,
+                                      propertyName As String,
+                                      value As Integer)
+        If target Is Nothing OrElse String.IsNullOrWhiteSpace(propertyName) Then Return
+        If value = CInt(WdConstants.wdUndefined) Then
+            target(propertyName) = "mixed"
+        Else
+            target(propertyName) = (value <> 0)
+        End If
+    End Sub
+
+    Private Sub AddLateBoundPropertiesToJson(source As Object,
+                                             target As JObject,
+                                             propertyMap As Dictionary(Of String, String))
+        If source Is Nothing OrElse target Is Nothing OrElse propertyMap Is Nothing Then Return
+        For Each pair As KeyValuePair(Of String, String) In propertyMap
+            Dim value As Object = Nothing
+            If TryGetLateBoundProperty(source, pair.Value, value) AndAlso value IsNot Nothing Then
+                If IsWordUndefinedObject(value) Then
+                    target(pair.Key) = "mixed"
+                    Continue For
+                End If
+                Try
+                    target(pair.Key) = JToken.FromObject(value)
+                Catch
+                    target(pair.Key) = value.ToString()
+                End Try
+            End If
+        Next
+    End Sub
+
+
+    Private Function LateBoundPropertyDiffers(source As Object,
+                                              propertyName As String,
+                                              desiredValue As Object) As Boolean
+        Dim currentValue As Object = Nothing
+        If Not TryGetLateBoundProperty(source, propertyName, currentValue) Then Return False
+        If currentValue Is Nothing AndAlso desiredValue Is Nothing Then Return False
+        If currentValue Is Nothing OrElse desiredValue Is Nothing Then Return True
+
+        If TypeOf currentValue Is Single OrElse TypeOf currentValue Is Double OrElse
+           TypeOf currentValue Is Decimal Then
+            Return Math.Abs(System.Convert.ToDouble(currentValue) - System.Convert.ToDouble(desiredValue)) > 0.1R
+        End If
+
+        Return Not String.Equals(currentValue.ToString(), desiredValue.ToString(), StringComparison.OrdinalIgnoreCase)
+    End Function
+
+    Private Function ParseEnumValue(enumType As System.Type,
+                                    value As String,
+                                    defaultValue As Object) As Object
+        If enumType Is Nothing OrElse String.IsNullOrWhiteSpace(value) Then Return defaultValue
+        Try
+            Return System.Enum.Parse(enumType, value, True)
+        Catch
+            Return defaultValue
+        End Try
+    End Function
+
+    Private Function ParseColorIndex(value As String) As WdColorIndex
+        Return CType(ParseEnumValue(GetType(WdColorIndex), value, WdColorIndex.wdNoHighlight), WdColorIndex)
+    End Function
+
+    Private Function ParseReadingOrder(value As String) As WdReadingOrder
+        Return CType(ParseEnumValue(GetType(WdReadingOrder), value, WdReadingOrder.wdReadingOrderLtr), WdReadingOrder)
+    End Function
+
+    Private Function ParseBorderLineStyle(value As String) As WdLineStyle
+        Return CType(ParseEnumValue(GetType(WdLineStyle), value, WdLineStyle.wdLineStyleNone), WdLineStyle)
+    End Function
+
+    Private Function ParseBorderLineWidth(value As String) As WdLineWidth
+        Return CType(ParseEnumValue(GetType(WdLineWidth), value, WdLineWidth.wdLineWidth025pt), WdLineWidth)
+    End Function
+
+    Private Function ParseTexture(value As String) As WdTextureIndex
+        Return CType(ParseEnumValue(GetType(WdTextureIndex), value, WdTextureIndex.wdTextureNone), WdTextureIndex)
+    End Function
+
+    Private Function HasParagraphFormatDifference(paragraphFormat As Word.ParagraphFormat,
+                                                  definition As JToken,
+                                                  Optional paragraph As Word.Paragraph = Nothing) As Boolean
+        If paragraphFormat Is Nothing OrElse definition Is Nothing Then Return False
+
+        Try
+            If IsApplicableJsonToken(definition("alignment")) AndAlso
+               paragraphFormat.Alignment <> ParseAlignment(CStr(definition("alignment"))) Then Return True
+
+            Dim singleProperties As New Dictionary(Of String, System.Func(Of Single))(StringComparer.OrdinalIgnoreCase) From {
+                {"leftIndent", Function() paragraphFormat.LeftIndent},
+                {"rightIndent", Function() paragraphFormat.RightIndent},
+                {"firstLineIndent", Function() paragraphFormat.FirstLineIndent},
+                {"spaceBefore", Function() paragraphFormat.SpaceBefore},
+                {"spaceAfter", Function() paragraphFormat.SpaceAfter},
+                {"lineSpacing", Function() paragraphFormat.LineSpacing}
+            }
+            For Each pair As KeyValuePair(Of String, System.Func(Of Single)) In singleProperties
+                If IsApplicableJsonToken(definition(pair.Key)) AndAlso
+                   Not NearlyEqual(pair.Value.Invoke(), CSng(definition(pair.Key))) Then Return True
+            Next
+
+            If IsApplicableJsonToken(definition("lineSpacingRule")) AndAlso
+               paragraphFormat.LineSpacingRule <> ParseLineSpacingRule(CStr(definition("lineSpacingRule"))) Then Return True
+            If IsApplicableJsonToken(definition("keepTogether")) AndAlso paragraphFormat.KeepTogether <> CInt(definition("keepTogether")) Then Return True
+            If IsApplicableJsonToken(definition("keepWithNext")) AndAlso paragraphFormat.KeepWithNext <> CInt(definition("keepWithNext")) Then Return True
+            If IsApplicableJsonToken(definition("pageBreakBefore")) AndAlso paragraphFormat.PageBreakBefore <> CInt(definition("pageBreakBefore")) Then Return True
+            If IsApplicableJsonToken(definition("widowControl")) AndAlso paragraphFormat.WidowControl <> CInt(definition("widowControl")) Then Return True
+            If IsApplicableJsonToken(definition("outlineLevel")) AndAlso paragraphFormat.OutlineLevel <> ParseOutlineLevel(CStr(definition("outlineLevel"))) Then Return True
+
+            For Each pair As KeyValuePair(Of String, String) In GetParagraphLateBoundPropertyMap()
+                If HasLateBoundFormatDifference(paragraphFormat, definition, pair.Key, pair.Value) Then Return True
+            Next
+
+            If paragraph IsNot Nothing AndAlso IsApplicableJsonToken(definition("hyphenation")) Then
+                Try
+                    If paragraph.Hyphenation <> CInt(definition("hyphenation")) Then Return True
+                Catch
+                End Try
+            End If
+            If paragraph IsNot Nothing AndAlso IsApplicableJsonToken(definition("readingOrder")) Then
+                If paragraph.ReadingOrder <> ParseReadingOrder(CStr(definition("readingOrder"))) Then Return True
+            End If
+        Catch ex As System.Exception
+            Debug.WriteLine($"[DocStyle] Paragraph comparison failed: {ex.Message}")
+            Return True
+        End Try
+
+        Return False
+    End Function
+
+    Private Function ApplyParagraphFormatDefinition(paragraphFormat As Word.ParagraphFormat,
+                                                    definition As JToken,
+                                                    Optional paragraph As Word.Paragraph = Nothing) As Boolean
+        If paragraphFormat Is Nothing OrElse definition Is Nothing Then Return False
+        Dim changed As Boolean = False
+
+        Try
+            If IsApplicableJsonToken(definition("alignment")) Then
+                Dim desired As WdParagraphAlignment = ParseAlignment(CStr(definition("alignment")))
+                If paragraphFormat.Alignment <> desired Then
+                    paragraphFormat.Alignment = desired
+                    changed = True
+                End If
+            End If
+
+            If IsApplicableJsonToken(definition("leftIndent")) AndAlso Not NearlyEqual(paragraphFormat.LeftIndent, CSng(definition("leftIndent"))) Then
+                paragraphFormat.LeftIndent = CSng(definition("leftIndent"))
+                changed = True
+            End If
+            If IsApplicableJsonToken(definition("rightIndent")) AndAlso Not NearlyEqual(paragraphFormat.RightIndent, CSng(definition("rightIndent"))) Then
+                paragraphFormat.RightIndent = CSng(definition("rightIndent"))
+                changed = True
+            End If
+            If IsApplicableJsonToken(definition("firstLineIndent")) AndAlso Not NearlyEqual(paragraphFormat.FirstLineIndent, CSng(definition("firstLineIndent"))) Then
+                paragraphFormat.FirstLineIndent = CSng(definition("firstLineIndent"))
+                changed = True
+            End If
+            If IsApplicableJsonToken(definition("spaceBefore")) AndAlso Not NearlyEqual(paragraphFormat.SpaceBefore, CSng(definition("spaceBefore"))) Then
+                paragraphFormat.SpaceBefore = CSng(definition("spaceBefore"))
+                changed = True
+            End If
+            If IsApplicableJsonToken(definition("spaceAfter")) AndAlso Not NearlyEqual(paragraphFormat.SpaceAfter, CSng(definition("spaceAfter"))) Then
+                paragraphFormat.SpaceAfter = CSng(definition("spaceAfter"))
+                changed = True
+            End If
+
+            ' Word can reset the numeric line spacing when the rule changes.
+            If IsApplicableJsonToken(definition("lineSpacingRule")) Then
+                Dim desiredRule As WdLineSpacing = ParseLineSpacingRule(CStr(definition("lineSpacingRule")))
+                If paragraphFormat.LineSpacingRule <> desiredRule Then
+                    paragraphFormat.LineSpacingRule = desiredRule
+                    changed = True
+                End If
+            End If
+            If IsApplicableJsonToken(definition("lineSpacing")) AndAlso Not NearlyEqual(paragraphFormat.LineSpacing, CSng(definition("lineSpacing"))) Then
+                paragraphFormat.LineSpacing = CSng(definition("lineSpacing"))
+                changed = True
+            End If
+
+            If IsApplicableJsonToken(definition("keepTogether")) AndAlso paragraphFormat.KeepTogether <> CInt(definition("keepTogether")) Then
+                paragraphFormat.KeepTogether = CInt(definition("keepTogether"))
+                changed = True
+            End If
+            If IsApplicableJsonToken(definition("keepWithNext")) AndAlso paragraphFormat.KeepWithNext <> CInt(definition("keepWithNext")) Then
+                paragraphFormat.KeepWithNext = CInt(definition("keepWithNext"))
+                changed = True
+            End If
+            If IsApplicableJsonToken(definition("pageBreakBefore")) AndAlso paragraphFormat.PageBreakBefore <> CInt(definition("pageBreakBefore")) Then
+                paragraphFormat.PageBreakBefore = CInt(definition("pageBreakBefore"))
+                changed = True
+            End If
+            If IsApplicableJsonToken(definition("widowControl")) AndAlso paragraphFormat.WidowControl <> CInt(definition("widowControl")) Then
+                paragraphFormat.WidowControl = CInt(definition("widowControl"))
+                changed = True
+            End If
+            If IsApplicableJsonToken(definition("outlineLevel")) Then
+                Dim desiredOutline As WdOutlineLevel = ParseOutlineLevel(CStr(definition("outlineLevel")))
+                If paragraphFormat.OutlineLevel <> desiredOutline Then
+                    paragraphFormat.OutlineLevel = desiredOutline
+                    changed = True
+                End If
+            End If
+
+            For Each pair As KeyValuePair(Of String, String) In GetParagraphLateBoundPropertyMap()
+                changed = ApplyLateBoundFormatProperty(paragraphFormat, definition, pair.Key, pair.Value) OrElse changed
+            Next
+
+            If paragraph IsNot Nothing AndAlso IsApplicableJsonToken(definition("hyphenation")) Then
+                Try
+                    Dim desiredHyphenation As Integer = CInt(definition("hyphenation"))
+                    If paragraph.Hyphenation <> desiredHyphenation Then
+                        paragraph.Hyphenation = desiredHyphenation
+                        changed = True
+                    End If
+                Catch
+                End Try
+            End If
+            If paragraph IsNot Nothing AndAlso IsApplicableJsonToken(definition("readingOrder")) Then
+                Dim desiredReadingOrder As WdReadingOrder = ParseReadingOrder(CStr(definition("readingOrder")))
+                If paragraph.ReadingOrder <> desiredReadingOrder Then
+                    paragraph.ReadingOrder = desiredReadingOrder
+                    changed = True
+                End If
+            End If
+        Catch ex As System.Exception
+            Debug.WriteLine($"[DocStyle] Paragraph formatting application failed: {ex.Message}")
+        End Try
+
+        Return changed
+    End Function
+
+    Private Function GetFontNameToken(definition As JToken) As JToken
+        Return GetFirstJsonToken(definition, "fontName", "name")
+    End Function
+
+    Private Function GetFontSizeToken(definition As JToken) As JToken
+        Return GetFirstJsonToken(definition, "fontSize", "size")
+    End Function
+
+    Private Function HasFontFormatDifference(font As Word.Font,
+                                             definition As JToken,
+                                             Optional range As Word.Range = Nothing) As Boolean
+        If font Is Nothing OrElse definition Is Nothing Then Return False
+
+        Try
+            Dim nameToken As JToken = GetFontNameToken(definition)
+            If IsApplicableJsonToken(nameToken) AndAlso Not String.Equals(font.Name, CStr(nameToken), StringComparison.OrdinalIgnoreCase) Then Return True
+
+            Dim sizeToken As JToken = GetFontSizeToken(definition)
+            If IsApplicableJsonToken(sizeToken) AndAlso Not NearlyEqual(font.Size, CSng(sizeToken)) Then Return True
+
+            Dim booleanMap As New Dictionary(Of String, System.Func(Of Integer))(StringComparer.OrdinalIgnoreCase) From {
+                {"bold", Function() font.Bold},
+                {"italic", Function() font.Italic},
+                {"allCaps", Function() font.AllCaps},
+                {"smallCaps", Function() font.SmallCaps},
+                {"strikeThrough", Function() font.StrikeThrough},
+                {"doubleStrikeThrough", Function() font.DoubleStrikeThrough},
+                {"subscript", Function() font.Subscript},
+                {"superscript", Function() font.Superscript}
+            }
+            For Each pair As KeyValuePair(Of String, System.Func(Of Integer)) In booleanMap
+                If definition(pair.Key) Is Nothing OrElse definition(pair.Key).Type <> JTokenType.Boolean Then Continue For
+                Dim desired As Integer = If(CBool(definition(pair.Key)), -1, 0)
+                Dim current As Integer = pair.Value.Invoke()
+                If current = CInt(WdConstants.wdUndefined) OrElse current <> desired Then Return True
+            Next
+
+            If IsApplicableJsonToken(definition("underline")) AndAlso font.Underline <> ParseUnderline(CStr(definition("underline"))) Then Return True
+            If IsApplicableJsonToken(definition("underlineColorRGB")) AndAlso font.UnderlineColor <> ParseColorFromRGB(CStr(definition("underlineColorRGB"))) Then Return True
+            If IsApplicableJsonToken(definition("colorRGB")) AndAlso font.Color <> ParseColorFromRGB(CStr(definition("colorRGB"))) Then Return True
+            If IsApplicableJsonToken(definition("scaling")) AndAlso font.Scaling <> CInt(definition("scaling")) Then Return True
+            If IsApplicableJsonToken(definition("spacing")) AndAlso Not NearlyEqual(font.Spacing, CSng(definition("spacing"))) Then Return True
+            If IsApplicableJsonToken(definition("position")) AndAlso Not NearlyEqual(font.Position, CSng(definition("position"))) Then Return True
+            If IsApplicableJsonToken(definition("kerning")) AndAlso Not NearlyEqual(font.Kerning, CSng(definition("kerning"))) Then Return True
+
+            If range IsNot Nothing AndAlso IsApplicableJsonToken(definition("highlightColor")) AndAlso
+               Not CStr(definition("highlightColor")).Equals("mixed", StringComparison.OrdinalIgnoreCase) Then
+                If range.HighlightColorIndex <> ParseColorIndex(CStr(definition("highlightColor"))) Then Return True
+            End If
+
+            If HasScriptFontDifference(font, definition) Then Return True
+
+            For Each pair As KeyValuePair(Of String, String) In GetFontLateBoundPropertyMap()
+                If HasLateBoundFormatDifference(font, definition, pair.Key, pair.Value) Then Return True
+            Next
+        Catch ex As System.Exception
+            Debug.WriteLine($"[DocStyle] Font comparison failed: {ex.Message}")
+            Return True
+        End Try
+
+        Return False
+    End Function
+
+    Private Function ApplyFontFormatDefinition(font As Word.Font,
+                                               definition As JToken,
+                                               Optional range As Word.Range = Nothing) As Boolean
+        If font Is Nothing OrElse definition Is Nothing Then Return False
+        Dim changed As Boolean = False
+
+        Try
+            Dim nameToken As JToken = GetFontNameToken(definition)
+            If IsApplicableJsonToken(nameToken) AndAlso Not String.Equals(font.Name, CStr(nameToken), StringComparison.OrdinalIgnoreCase) Then
+                font.Name = CStr(nameToken)
+                changed = True
+            End If
+
+            Dim sizeToken As JToken = GetFontSizeToken(definition)
+            If IsApplicableJsonToken(sizeToken) AndAlso Not NearlyEqual(font.Size, CSng(sizeToken)) Then
+                font.Size = CSng(sizeToken)
+                changed = True
+            End If
+
+            If definition("bold") IsNot Nothing AndAlso definition("bold").Type = JTokenType.Boolean Then
+                Dim desired As Integer = If(CBool(definition("bold")), -1, 0)
+                If font.Bold <> desired Then font.Bold = desired : changed = True
+            End If
+            If definition("italic") IsNot Nothing AndAlso definition("italic").Type = JTokenType.Boolean Then
+                Dim desired As Integer = If(CBool(definition("italic")), -1, 0)
+                If font.Italic <> desired Then font.Italic = desired : changed = True
+            End If
+            If definition("allCaps") IsNot Nothing AndAlso definition("allCaps").Type = JTokenType.Boolean Then
+                Dim desired As Integer = If(CBool(definition("allCaps")), -1, 0)
+                If font.AllCaps <> desired Then font.AllCaps = desired : changed = True
+            End If
+            If definition("smallCaps") IsNot Nothing AndAlso definition("smallCaps").Type = JTokenType.Boolean Then
+                Dim desired As Integer = If(CBool(definition("smallCaps")), -1, 0)
+                If font.SmallCaps <> desired Then font.SmallCaps = desired : changed = True
+            End If
+            If definition("strikeThrough") IsNot Nothing AndAlso definition("strikeThrough").Type = JTokenType.Boolean Then
+                Dim desired As Integer = If(CBool(definition("strikeThrough")), -1, 0)
+                If font.StrikeThrough <> desired Then font.StrikeThrough = desired : changed = True
+            End If
+            If definition("doubleStrikeThrough") IsNot Nothing AndAlso definition("doubleStrikeThrough").Type = JTokenType.Boolean Then
+                Dim desired As Integer = If(CBool(definition("doubleStrikeThrough")), -1, 0)
+                If font.DoubleStrikeThrough <> desired Then font.DoubleStrikeThrough = desired : changed = True
+            End If
+            If definition("subscript") IsNot Nothing AndAlso definition("subscript").Type = JTokenType.Boolean Then
+                Dim desired As Integer = If(CBool(definition("subscript")), -1, 0)
+                If font.Subscript <> desired Then font.Subscript = desired : changed = True
+            End If
+            If definition("superscript") IsNot Nothing AndAlso definition("superscript").Type = JTokenType.Boolean Then
+                Dim desired As Integer = If(CBool(definition("superscript")), -1, 0)
+                If font.Superscript <> desired Then font.Superscript = desired : changed = True
+            End If
+
+            If IsApplicableJsonToken(definition("underline")) Then
+                Dim desired As WdUnderline = ParseUnderline(CStr(definition("underline")))
+                If font.Underline <> desired Then font.Underline = desired : changed = True
+            End If
+            If IsApplicableJsonToken(definition("underlineColorRGB")) Then
+                Dim desired As WdColor = ParseColorFromRGB(CStr(definition("underlineColorRGB")))
+                If font.UnderlineColor <> desired Then font.UnderlineColor = desired : changed = True
+            End If
+            If IsApplicableJsonToken(definition("colorRGB")) Then
+                Dim desired As WdColor = ParseColorFromRGB(CStr(definition("colorRGB")))
+                If font.Color <> desired Then font.Color = desired : changed = True
+            End If
+            If IsApplicableJsonToken(definition("scaling")) AndAlso font.Scaling <> CInt(definition("scaling")) Then
+                font.Scaling = CInt(definition("scaling"))
+                changed = True
+            End If
+            If IsApplicableJsonToken(definition("spacing")) AndAlso Not NearlyEqual(font.Spacing, CSng(definition("spacing"))) Then
+                font.Spacing = CSng(definition("spacing"))
+                changed = True
+            End If
+            If IsApplicableJsonToken(definition("position")) AndAlso Not NearlyEqual(font.Position, CSng(definition("position"))) Then
+                font.Position = CSng(definition("position"))
+                changed = True
+            End If
+            If IsApplicableJsonToken(definition("kerning")) AndAlso Not NearlyEqual(font.Kerning, CSng(definition("kerning"))) Then
+                font.Kerning = CSng(definition("kerning"))
+                changed = True
+            End If
+
+            If range IsNot Nothing AndAlso IsApplicableJsonToken(definition("highlightColor")) AndAlso
+               Not CStr(definition("highlightColor")).Equals("mixed", StringComparison.OrdinalIgnoreCase) Then
+                Dim desiredHighlight As WdColorIndex = ParseColorIndex(CStr(definition("highlightColor")))
+                If range.HighlightColorIndex <> desiredHighlight Then
+                    range.HighlightColorIndex = desiredHighlight
+                    changed = True
+                End If
+            End If
+
+            changed = ApplyScriptFontPropertiesIfDifferent(font, definition) OrElse changed
+
+            For Each pair As KeyValuePair(Of String, String) In GetFontLateBoundPropertyMap()
+                changed = ApplyLateBoundFormatProperty(font, definition, pair.Key, pair.Value) OrElse changed
+            Next
+        Catch ex As System.Exception
+            Debug.WriteLine($"[DocStyle] Font formatting application failed: {ex.Message}")
+        End Try
+
+        Return changed
+    End Function
+
+    Private Function GetBorderTypes() As WdBorderType()
+        Return New WdBorderType() {
+            WdBorderType.wdBorderTop,
+            WdBorderType.wdBorderBottom,
+            WdBorderType.wdBorderLeft,
+            WdBorderType.wdBorderRight,
+            WdBorderType.wdBorderHorizontal,
+            WdBorderType.wdBorderVertical,
+            WdBorderType.wdBorderDiagonalDown,
+            WdBorderType.wdBorderDiagonalUp
+        }
+    End Function
+
+    Private Function GetBorderNames() As String()
+        Return New String() {"top", "bottom", "left", "right", "horizontal", "vertical", "diagonalDown", "diagonalUp"}
+    End Function
+
+    Private Function ExtractBordersFromCollection(borders As Word.Borders) As JObject
+        Dim result As New JObject From {
+            {"captured", True},
+            {"complete", True},
+            {"hasBorders", False}
+        }
+        If borders Is Nothing Then Return result
+
+        Try
+            Dim types() As WdBorderType = GetBorderTypes()
+            Dim names() As String = GetBorderNames()
+            For index As Integer = 0 To types.Length - 1
+                Try
+                    Dim border As Word.Border = borders(types(index))
+                    Dim borderInfo As New JObject From {
+                        {"lineStyle", border.LineStyle.ToString()},
+                        {"lineWidth", border.LineWidth.ToString()},
+                        {"color", border.Color.ToString()},
+                        {"colorRGB", ColorToRGB(border.Color)},
+                        {"visible", border.Visible}
+                    }
+                    result(names(index)) = borderInfo
+                    If border.LineStyle <> WdLineStyle.wdLineStyleNone Then result("hasBorders") = True
+                Catch
+                    result("complete") = False
+                End Try
+            Next
+
+            result("distanceFromText") = New JObject From {
+                {"top", borders.DistanceFromTop},
+                {"bottom", borders.DistanceFromBottom},
+                {"left", borders.DistanceFromLeft},
+                {"right", borders.DistanceFromRight}
+            }
+            Try : result("shadow") = borders.Shadow : Catch : End Try
+            Try : result("enable") = borders.Enable : Catch : End Try
+        Catch ex As System.Exception
+            result("complete") = False
+            result("error") = ex.Message
+        End Try
+
+        Return result
+    End Function
+
+    Private Function HasBorderDifference(borders As Word.Borders, definition As JObject) As Boolean
+        If borders Is Nothing OrElse definition Is Nothing OrElse
+           Not GetPolicyBoolean(definition, "captured", False) Then Return False
+
+        Try
+            Dim types() As WdBorderType = GetBorderTypes()
+            Dim names() As String = GetBorderNames()
+            Dim complete As Boolean = GetPolicyBoolean(definition, "complete", False)
+
+            For index As Integer = 0 To types.Length - 1
+                Dim border As Word.Border = borders(types(index))
+                Dim borderDef As JObject = TryCast(definition(names(index)), JObject)
+                If borderDef Is Nothing Then
+                    If complete AndAlso border.LineStyle <> WdLineStyle.wdLineStyleNone Then Return True
+                    Continue For
+                End If
+
+                Dim desiredLineStyle As WdLineStyle = If(IsApplicableJsonToken(borderDef("lineStyle")),
+                                                       ParseBorderLineStyle(CStr(borderDef("lineStyle"))),
+                                                       border.LineStyle)
+                If border.LineStyle <> desiredLineStyle Then Return True
+                If desiredLineStyle = WdLineStyle.wdLineStyleNone Then Continue For
+                If IsApplicableJsonToken(borderDef("lineWidth")) AndAlso border.LineWidth <> ParseBorderLineWidth(CStr(borderDef("lineWidth"))) Then Return True
+                If IsApplicableJsonToken(borderDef("colorRGB")) AndAlso border.Color <> ParseColorFromRGB(CStr(borderDef("colorRGB"))) Then Return True
+                If IsApplicableJsonToken(borderDef("visible")) AndAlso border.Visible <> CBool(borderDef("visible")) Then Return True
+            Next
+
+            Dim distanceDef As JObject = TryCast(definition("distanceFromText"), JObject)
+            If distanceDef IsNot Nothing Then
+                If IsApplicableJsonToken(distanceDef("top")) AndAlso Not NearlyEqual(borders.DistanceFromTop, CSng(distanceDef("top"))) Then Return True
+                If IsApplicableJsonToken(distanceDef("bottom")) AndAlso Not NearlyEqual(borders.DistanceFromBottom, CSng(distanceDef("bottom"))) Then Return True
+                If IsApplicableJsonToken(distanceDef("left")) AndAlso Not NearlyEqual(borders.DistanceFromLeft, CSng(distanceDef("left"))) Then Return True
+                If IsApplicableJsonToken(distanceDef("right")) AndAlso Not NearlyEqual(borders.DistanceFromRight, CSng(distanceDef("right"))) Then Return True
+            End If
+        Catch ex As System.Exception
+            Debug.WriteLine($"[DocStyle] Border comparison failed: {ex.Message}")
+            Return True
+        End Try
+
+        Return False
+    End Function
+
+    Private Function ApplyBorderDefinition(borders As Word.Borders,
+                                           definition As JObject,
+                                           clearCapturedBorders As Boolean) As Boolean
+        If borders Is Nothing OrElse definition Is Nothing OrElse
+           Not GetPolicyBoolean(definition, "captured", False) Then Return False
+        Dim changed As Boolean = False
+
+        Try
+            Dim types() As WdBorderType = GetBorderTypes()
+            Dim names() As String = GetBorderNames()
+            Dim complete As Boolean = GetPolicyBoolean(definition, "complete", False)
+
+            For index As Integer = 0 To types.Length - 1
+                Dim border As Word.Border = borders(types(index))
+                Dim borderDef As JObject = TryCast(definition(names(index)), JObject)
+                If borderDef Is Nothing Then
+                    If clearCapturedBorders AndAlso complete AndAlso border.LineStyle <> WdLineStyle.wdLineStyleNone Then
+                        border.LineStyle = WdLineStyle.wdLineStyleNone
+                        changed = True
+                    End If
+                    Continue For
+                End If
+
+                Dim desiredLineStyle As WdLineStyle = If(IsApplicableJsonToken(borderDef("lineStyle")),
+                                                       ParseBorderLineStyle(CStr(borderDef("lineStyle"))),
+                                                       border.LineStyle)
+                If border.LineStyle <> desiredLineStyle Then
+                    border.LineStyle = desiredLineStyle
+                    changed = True
+                End If
+                If desiredLineStyle = WdLineStyle.wdLineStyleNone Then Continue For
+
+                If IsApplicableJsonToken(borderDef("lineWidth")) Then
+                    Dim desired As WdLineWidth = ParseBorderLineWidth(CStr(borderDef("lineWidth")))
+                    If border.LineWidth <> desired Then border.LineWidth = desired : changed = True
+                End If
+                If IsApplicableJsonToken(borderDef("colorRGB")) Then
+                    Dim desired As WdColor = ParseColorFromRGB(CStr(borderDef("colorRGB")))
+                    If border.Color <> desired Then border.Color = desired : changed = True
+                End If
+                If IsApplicableJsonToken(borderDef("visible")) Then
+                    Dim desired As Boolean = CBool(borderDef("visible"))
+                    If border.Visible <> desired Then border.Visible = desired : changed = True
+                End If
+            Next
+
+            Dim distanceDef As JObject = TryCast(definition("distanceFromText"), JObject)
+            If distanceDef IsNot Nothing Then
+                If IsApplicableJsonToken(distanceDef("top")) AndAlso Not NearlyEqual(borders.DistanceFromTop, CSng(distanceDef("top"))) Then borders.DistanceFromTop = CSng(distanceDef("top")) : changed = True
+                If IsApplicableJsonToken(distanceDef("bottom")) AndAlso Not NearlyEqual(borders.DistanceFromBottom, CSng(distanceDef("bottom"))) Then borders.DistanceFromBottom = CSng(distanceDef("bottom")) : changed = True
+                If IsApplicableJsonToken(distanceDef("left")) AndAlso Not NearlyEqual(borders.DistanceFromLeft, CSng(distanceDef("left"))) Then borders.DistanceFromLeft = CSng(distanceDef("left")) : changed = True
+                If IsApplicableJsonToken(distanceDef("right")) AndAlso Not NearlyEqual(borders.DistanceFromRight, CSng(distanceDef("right"))) Then borders.DistanceFromRight = CSng(distanceDef("right")) : changed = True
+            End If
+            If IsApplicableJsonToken(definition("shadow")) AndAlso borders.Shadow <> CBool(definition("shadow")) Then borders.Shadow = CBool(definition("shadow")) : changed = True
+            If IsApplicableJsonToken(definition("enable")) AndAlso borders.Enable <> CInt(definition("enable")) Then borders.Enable = CInt(definition("enable")) : changed = True
+        Catch ex As System.Exception
+            Debug.WriteLine($"[DocStyle] Border application failed: {ex.Message}")
+        End Try
+
+        Return changed
+    End Function
+
+    Private Function ExtractShadingFromObject(shading As Word.Shading) As JObject
+        Dim result As New JObject From {
+            {"captured", True},
+            {"complete", True},
+            {"hasShading", False}
+        }
+        If shading Is Nothing Then Return result
+
+        Try
+            result("texture") = shading.Texture.ToString()
+            result("backgroundColor") = shading.BackgroundPatternColor.ToString()
+            result("backgroundColorRGB") = ColorToRGB(shading.BackgroundPatternColor)
+            result("foregroundColor") = shading.ForegroundPatternColor.ToString()
+            result("foregroundColorRGB") = ColorToRGB(shading.ForegroundPatternColor)
+            result("hasShading") = (shading.Texture <> WdTextureIndex.wdTextureNone OrElse
+                                    shading.BackgroundPatternColor <> WdColor.wdColorAutomatic OrElse
+                                    shading.ForegroundPatternColor <> WdColor.wdColorAutomatic)
+        Catch ex As System.Exception
+            result("complete") = False
+            result("error") = ex.Message
+        End Try
+
+        Return result
+    End Function
+
+    Private Function HasShadingDifference(shading As Word.Shading, definition As JObject) As Boolean
+        If shading Is Nothing OrElse definition Is Nothing OrElse
+           Not GetPolicyBoolean(definition, "captured", False) Then Return False
+        Try
+            If IsApplicableJsonToken(definition("texture")) AndAlso shading.Texture <> ParseTexture(CStr(definition("texture"))) Then Return True
+            If IsApplicableJsonToken(definition("backgroundColorRGB")) AndAlso shading.BackgroundPatternColor <> ParseColorFromRGB(CStr(definition("backgroundColorRGB"))) Then Return True
+            If IsApplicableJsonToken(definition("foregroundColorRGB")) AndAlso shading.ForegroundPatternColor <> ParseColorFromRGB(CStr(definition("foregroundColorRGB"))) Then Return True
+        Catch ex As System.Exception
+            Debug.WriteLine($"[DocStyle] Shading comparison failed: {ex.Message}")
+            Return True
+        End Try
+        Return False
+    End Function
+
+    Private Function ApplyShadingDefinition(shading As Word.Shading,
+                                            definition As JObject,
+                                            clearCapturedShading As Boolean) As Boolean
+        If shading Is Nothing OrElse definition Is Nothing OrElse
+           Not GetPolicyBoolean(definition, "captured", False) Then Return False
+        Dim changed As Boolean = False
+
+        Try
+            If clearCapturedShading AndAlso Not GetPolicyBoolean(definition, "hasShading", False) Then
+                If shading.Texture <> WdTextureIndex.wdTextureNone Then shading.Texture = WdTextureIndex.wdTextureNone : changed = True
+                If shading.BackgroundPatternColor <> WdColor.wdColorAutomatic Then shading.BackgroundPatternColor = WdColor.wdColorAutomatic : changed = True
+                If shading.ForegroundPatternColor <> WdColor.wdColorAutomatic Then shading.ForegroundPatternColor = WdColor.wdColorAutomatic : changed = True
+                Return changed
+            End If
+
+            If IsApplicableJsonToken(definition("texture")) Then
+                Dim desired As WdTextureIndex = ParseTexture(CStr(definition("texture")))
+                If shading.Texture <> desired Then shading.Texture = desired : changed = True
+            End If
+            If IsApplicableJsonToken(definition("backgroundColorRGB")) Then
+                Dim desired As WdColor = ParseColorFromRGB(CStr(definition("backgroundColorRGB")))
+                If shading.BackgroundPatternColor <> desired Then shading.BackgroundPatternColor = desired : changed = True
+            End If
+            If IsApplicableJsonToken(definition("foregroundColorRGB")) Then
+                Dim desired As WdColor = ParseColorFromRGB(CStr(definition("foregroundColorRGB")))
+                If shading.ForegroundPatternColor <> desired Then shading.ForegroundPatternColor = desired : changed = True
+            End If
+        Catch ex As System.Exception
+            Debug.WriteLine($"[DocStyle] Shading application failed: {ex.Message}")
+        End Try
+
+        Return changed
+    End Function
+
+    Private Function GetStyleShading(style As Word.Style) As Word.Shading
+        If style Is Nothing Then Return Nothing
+        Dim shadingObject As Object = Nothing
+        If TryGetLateBoundProperty(style.ParagraphFormat, "Shading", shadingObject) Then
+            Return TryCast(shadingObject, Word.Shading)
+        End If
+        Return Nothing
+    End Function
+
+    Private Function HasTabStopDifference(tabStops As Word.TabStops,
+                                          definitions As JArray,
+                                          compactNames As Boolean) As Boolean
+        If tabStops Is Nothing OrElse definitions Is Nothing Then Return False
+        Try
+            Dim current As New List(Of String)()
+            For Each tabStop As Word.TabStop In tabStops
+                Dim isCustom As Boolean = True
+                Try : isCustom = tabStop.CustomTab : Catch : End Try
+                If Not isCustom Then Continue For
+                current.Add($"{Math.Round(tabStop.Position, 2)}:{tabStop.Alignment}:{tabStop.Leader}")
+            Next
+
+            Dim desired As New List(Of String)()
+            For Each tabDef As JObject In definitions
+                Dim positionToken As JToken = GetFirstJsonToken(tabDef, If(compactNames, "pos", "position"), "position", "pos")
+                If Not IsApplicableJsonToken(positionToken) Then Continue For
+                Dim alignmentText As String = If(compactNames,
+                                                 "wdAlignTab" & If(tabDef("align") IsNot Nothing, CStr(tabDef("align")), "Left"),
+                                                 If(tabDef("alignment") IsNot Nothing, CStr(tabDef("alignment")), "wdAlignTabLeft"))
+                Dim leaderText As String = If(compactNames,
+                                              "wdTabLeader" & If(tabDef("leader") IsNot Nothing, CStr(tabDef("leader")), "Spaces"),
+                                              If(tabDef("leader") IsNot Nothing, CStr(tabDef("leader")), "wdTabLeaderSpaces"))
+                desired.Add($"{Math.Round(CSng(positionToken), 2)}:{ParseTabAlignment(alignmentText)}:{ParseTabLeader(leaderText)}")
+            Next
+
+            Return Not current.SequenceEqual(desired)
+        Catch ex As System.Exception
+            Debug.WriteLine($"[DocStyle] Tab-stop comparison failed: {ex.Message}")
+            Return True
+        End Try
+    End Function
+
+    Private Function ApplyTabStopDefinitions(tabStops As Word.TabStops,
+                                             definitions As JArray,
+                                             compactNames As Boolean) As Boolean
+        If tabStops Is Nothing OrElse definitions Is Nothing Then Return False
+        If Not HasTabStopDifference(tabStops, definitions, compactNames) Then Return False
+
+        Try
+            tabStops.ClearAll()
+            For Each tabDef As JObject In definitions
+                Dim positionToken As JToken = GetFirstJsonToken(tabDef, If(compactNames, "pos", "position"), "position", "pos")
+                If Not IsApplicableJsonToken(positionToken) Then Continue For
+                Dim alignmentText As String = If(compactNames,
+                                                 "wdAlignTab" & If(tabDef("align") IsNot Nothing, CStr(tabDef("align")), "Left"),
+                                                 If(tabDef("alignment") IsNot Nothing, CStr(tabDef("alignment")), "wdAlignTabLeft"))
+                Dim leaderText As String = If(compactNames,
+                                              "wdTabLeader" & If(tabDef("leader") IsNot Nothing, CStr(tabDef("leader")), "Spaces"),
+                                              If(tabDef("leader") IsNot Nothing, CStr(tabDef("leader")), "wdTabLeaderSpaces"))
+                tabStops.Add(CSng(positionToken), ParseTabAlignment(alignmentText), ParseTabLeader(leaderText))
+            Next
+            Return True
+        Catch ex As System.Exception
+            Debug.WriteLine($"[DocStyle] Tab-stop application failed: {ex.Message}")
+            Return False
+        End Try
+    End Function
+
+    Private Function AreSameComObject(firstObject As Object, secondObject As Object) As Boolean
+        If firstObject Is Nothing OrElse secondObject Is Nothing Then Return firstObject Is secondObject
+        Dim firstPointer As System.IntPtr = System.IntPtr.Zero
+        Dim secondPointer As System.IntPtr = System.IntPtr.Zero
+        Try
+            firstPointer = System.Runtime.InteropServices.Marshal.GetIUnknownForObject(firstObject)
+            secondPointer = System.Runtime.InteropServices.Marshal.GetIUnknownForObject(secondObject)
+            Return firstPointer = secondPointer
+        Catch
+            Return Object.ReferenceEquals(firstObject, secondObject)
+        Finally
+            If firstPointer <> System.IntPtr.Zero Then System.Runtime.InteropServices.Marshal.Release(firstPointer)
+            If secondPointer <> System.IntPtr.Zero Then System.Runtime.InteropServices.Marshal.Release(secondPointer)
+        End Try
+    End Function
+
+    Private Function GetDesiredListTemplateForUserStyle(paragraph As Word.Paragraph,
+                                                        listDefinition As JToken,
+                                                        Optional createIfMissing As Boolean = True) As Word.ListTemplate
+        If paragraph Is Nothing OrElse listDefinition Is Nothing Then Return Nothing
+
+        Dim cacheKey As String = GetListTemplateCacheKey(listDefinition)
+        Dim cachedTemplate As Word.ListTemplate = Nothing
+        If Not String.IsNullOrWhiteSpace(cacheKey) AndAlso _sharedListTemplates.TryGetValue(cacheKey, cachedTemplate) Then
+            Return cachedTemplate
+        End If
+
+        ' Prefer the list template already attached to the destination style when its
+        ' definition is equivalent. This avoids creating duplicate list instances merely
+        ' for comparison and preserves existing numbering continuity.
+        Try
+            Dim style As Word.Style = TryCast(paragraph.Style, Word.Style)
+            Dim styleTemplate As Word.ListTemplate = If(style IsNot Nothing, TryGetStyleListTemplate(style), Nothing)
+            If styleTemplate IsNot Nothing Then
+                Dim desiredLegacyFingerprint As String = If(listDefinition("templateFingerprint") IsNot Nothing,
+                                                             CStr(listDefinition("templateFingerprint")), "")
+                Dim currentLegacyFingerprint As String = ComputeListTemplateFingerprint(styleTemplate)
+                If String.IsNullOrWhiteSpace(desiredLegacyFingerprint) OrElse
+                   String.Equals(currentLegacyFingerprint, desiredLegacyFingerprint, StringComparison.Ordinal) Then
+                    If Not String.IsNullOrWhiteSpace(cacheKey) Then _sharedListTemplates(cacheKey) = styleTemplate
+                    Return styleTemplate
+                End If
+            End If
+        Catch
+        End Try
+
+        If Not createIfMissing Then Return Nothing
+
+        If TypeOf listDefinition("levels") Is JArray AndAlso CType(listDefinition("levels"), JArray).Count > 0 Then
+            Try
+                Dim owningDocument As Word.Document = paragraph.Range.Document
+                If owningDocument IsNot Nothing Then
+                    Dim isOutline As Boolean = listDefinition("outlineNumbered") IsNot Nothing AndAlso CBool(listDefinition("outlineNumbered"))
+                    Dim createdTemplate As Word.ListTemplate = owningDocument.ListTemplates.Add(OutlineNumbered:=isOutline)
+                    ConfigureListTemplateFromDefinition(createdTemplate, listDefinition)
+                    If Not String.IsNullOrWhiteSpace(cacheKey) Then _sharedListTemplates(cacheKey) = createdTemplate
+                    Return createdTemplate
+                End If
+            Catch ex As System.Exception
+                Debug.WriteLine($"[DocStyle] Could not create a paragraph-level list template: {ex.Message}")
+            End Try
+        End If
+
+        Return Nothing
+    End Function
+
+    Private Function HasListFormattingDifference(paragraph As Word.Paragraph,
+                                                 listDefinition As JToken) As Boolean
+        If paragraph Is Nothing OrElse listDefinition Is Nothing Then Return False
+        Dim templateHasList As Boolean = listDefinition("hasList") IsNot Nothing AndAlso CBool(listDefinition("hasList"))
+        Dim currentHasList As Boolean = False
+        Try
+            currentHasList = paragraph.Range.ListFormat.ListType <> WdListType.wdListNoNumbering
+        Catch
+        End Try
+
+        If templateHasList <> currentHasList Then Return True
+        If Not templateHasList Then Return False
+
+        Dim desiredLevel As Integer = If(listDefinition("listLevelNumber") IsNot Nothing,
+                                         CInt(listDefinition("listLevelNumber")),
+                                         If(listDefinition("linkedLevel") IsNot Nothing, CInt(listDefinition("linkedLevel")), 1))
+        Try
+            If paragraph.Range.ListFormat.ListLevelNumber <> desiredLevel Then Return True
+        Catch
+            Return True
+        End Try
+
+        Try
+            Dim currentTemplate As Word.ListTemplate = paragraph.Range.ListFormat.ListTemplate
+            If currentTemplate Is Nothing Then Return True
+
+            Dim desiredLegacyFingerprint As String = If(listDefinition("templateFingerprint") IsNot Nothing,
+                                                         CStr(listDefinition("templateFingerprint")), "")
+            If Not String.IsNullOrWhiteSpace(desiredLegacyFingerprint) AndAlso
+               Not String.Equals(ComputeListTemplateFingerprint(currentTemplate),
+                                 desiredLegacyFingerprint,
+                                 StringComparison.Ordinal) Then Return True
+
+            Dim desiredTemplate As Word.ListTemplate = GetDesiredListTemplateForUserStyle(paragraph, listDefinition, False)
+            If desiredTemplate IsNot Nothing AndAlso Not AreSameComObject(currentTemplate, desiredTemplate) Then Return True
+        Catch
+            Return True
+        End Try
+
+        Return False
+    End Function
+
+    Private Sub ExpandCollectedStyleDependencies(doc As Word.Document,
+                                                  collectedStyles As HashSet(Of String),
+                                                  openXmlContext As JObject)
+        If doc Is Nothing OrElse collectedStyles Is Nothing Then Return
+
+        Dim queue As New Queue(Of String)(collectedStyles)
+        While queue.Count > 0
+            Dim styleName As String = queue.Dequeue()
+            Try
+                Dim style As Word.Style = doc.Styles(styleName)
+                If style Is Nothing Then Continue While
+
+                Try
+                    Dim baseStyle As Word.Style = TryCast(style.BaseStyle, Word.Style)
+                    If baseStyle IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(baseStyle.NameLocal) AndAlso collectedStyles.Add(baseStyle.NameLocal) Then queue.Enqueue(baseStyle.NameLocal)
+                Catch
+                End Try
+                Try
+                    Dim nextStyle As Word.Style = TryCast(style.NextParagraphStyle, Word.Style)
+                    If nextStyle IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(nextStyle.NameLocal) AndAlso collectedStyles.Add(nextStyle.NameLocal) Then queue.Enqueue(nextStyle.NameLocal)
+                Catch
+                End Try
+
+                Dim metadata As JObject = GetStyleOpenXmlMetadata(openXmlContext, styleName)
+                Dim binding As JObject = If(metadata IsNot Nothing, TryCast(metadata("numberingBinding"), JObject), Nothing)
+                If binding Is Nothing Then Continue While
+                Dim sharedKey As String = If(binding("sharedListInstanceKey") IsNot Nothing, CStr(binding("sharedListInstanceKey")), "")
+                Dim numberingDefinitions As JObject = If(openXmlContext IsNot Nothing, TryCast(openXmlContext("numberingDefinitions"), JObject), Nothing)
+                Dim numberingDefinition As JObject = If(numberingDefinitions IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(sharedKey), TryCast(numberingDefinitions(sharedKey), JObject), Nothing)
+                If numberingDefinition Is Nothing Then Continue While
+
+                If numberingDefinition("numberingStyleName") IsNot Nothing Then
+                    Dim dependencyName As String = CStr(numberingDefinition("numberingStyleName"))
+                    If Not String.IsNullOrWhiteSpace(dependencyName) AndAlso collectedStyles.Add(dependencyName) Then queue.Enqueue(dependencyName)
+                End If
+
+                Dim levels As JArray = TryCast(numberingDefinition("levels"), JArray)
+                If levels Is Nothing Then Continue While
+                For Each levelToken As JToken In levels
+                    Dim level As JObject = TryCast(levelToken, JObject)
+                    If level Is Nothing OrElse level("paragraphStyleName") Is Nothing Then Continue For
+                    Dim dependencyName As String = CStr(level("paragraphStyleName"))
+                    If Not String.IsNullOrWhiteSpace(dependencyName) AndAlso collectedStyles.Add(dependencyName) Then queue.Enqueue(dependencyName)
+                Next
+            Catch
+            End Try
+        End While
+    End Sub
+
+
+    Private Sub ApplyDocumentDefaultsToDocument(doc As Word.Document,
+                                                    documentDefaults As JObject,
+                                                    Optional applicationPolicy As JObject = Nothing)
+        If doc Is Nothing OrElse documentDefaults Is Nothing Then Return
+        If Not GetPolicyBoolean(applicationPolicy, "applyDocumentDefaults", False) Then Return
+
+        Try
+            Dim embeddedPolicy As JObject = TryCast(documentDefaults("applyOnImport"), JObject)
+            Dim applyDefaultTabStop As Boolean =
+                GetPolicyBoolean(applicationPolicy,
+                                 "applyDefaultTabStop",
+                                 GetPolicyBoolean(embeddedPolicy, "defaultTabStop", False))
+            Dim applyFontsToNormal As Boolean =
+                GetPolicyBoolean(applicationPolicy,
+                                 "applyDefaultFontsToNormalStyle",
+                                 GetPolicyBoolean(embeddedPolicy, "fontDefaultsToNormalStyle", False))
+            Dim applyLanguagesToNormal As Boolean =
+                GetPolicyBoolean(applicationPolicy,
+                                 "applyDefaultLanguagesToNormalStyle",
+                                 GetPolicyBoolean(embeddedPolicy, "languageDefaultsToNormalStyle", False))
 
             If applyDefaultTabStop AndAlso documentDefaults("defaultTabStop") IsNot Nothing Then
                 Try
@@ -3207,7 +4573,6 @@ Partial Public Class ThisAddIn
                     ApplyScriptFontPropertiesToFont(normalStyle.Font, translated)
                 End If
             End If
-
         Catch ex As System.Exception
             Debug.WriteLine($"[DocStyle] Could not apply document defaults: {ex.Message}")
         End Try
@@ -3223,15 +4588,26 @@ Partial Public Class ThisAddIn
             End If
         End If
 
+        If Not String.IsNullOrWhiteSpace(styleType) Then
+            Try
+                Return CType(System.Enum.Parse(GetType(WdStyleType), styleType, True), WdStyleType)
+            Catch
+            End Try
+        End If
+
         Select Case styleType.Trim().ToLowerInvariant()
-            Case "wdstyletypecharacter", "character"
+            Case "character"
                 Return WdStyleType.wdStyleTypeCharacter
-            Case "wdstyletypetable", "table"
+            Case "table"
                 Return WdStyleType.wdStyleTypeTable
-            Case "wdstyletypelist", "numbering", "list"
+            Case "numbering", "list"
                 Return WdStyleType.wdStyleTypeList
-            Case "wdstyletypelinked", "linked"
-                Return WdStyleType.wdStyleTypeParagraph
+            Case "linked"
+                Try
+                    Return CType(System.Enum.Parse(GetType(WdStyleType), "wdStyleTypeLinked", True), WdStyleType)
+                Catch
+                    Return WdStyleType.wdStyleTypeParagraph
+                End Try
             Case Else
                 Return WdStyleType.wdStyleTypeParagraph
         End Select
@@ -3494,6 +4870,10 @@ Partial Public Class ThisAddIn
                     level.TrailingCharacter = ParseTrailingCharacter(CStr(levelDef("trailingCharacter")))
                 End If
 
+                For Each propertyPair As KeyValuePair(Of String, String) In GetListLevelLateBoundPropertyMap()
+                    ApplyLateBoundFormatProperty(level, levelDef, propertyPair.Key, propertyPair.Value)
+                Next
+
                 If levelDef("numberRunFormatting") IsNot Nothing Then
                     ApplyNumberRunFormatting(level.Font, levelDef("numberRunFormatting"))
                 End If
@@ -3517,6 +4897,7 @@ Partial Public Class ThisAddIn
             If definition("italic") IsNot Nothing Then font.Italic = If(CBool(definition("italic")), -1, 0)
             If definition("allCaps") IsNot Nothing Then font.AllCaps = If(CBool(definition("allCaps")), -1, 0)
             If definition("smallCaps") IsNot Nothing Then font.SmallCaps = If(CBool(definition("smallCaps")), -1, 0)
+            ApplyFontFormatDefinition(font, definition)
         Catch ex As System.Exception
             Debug.WriteLine($"[DocStyle] Error applying number run formatting: {ex.Message}")
         End Try
@@ -3611,26 +4992,36 @@ Partial Public Class ThisAddIn
     ''' <param name="doc">Active document that owns the created style.</param>
     ''' <param name="style">Style to update.</param>
     ''' <param name="styleDef">Style definition JSON object.</param>
-    Private Sub ApplyAllFormattingToNewStyle(doc As Word.Document, style As Word.Style, styleDef As JObject)
-        ' Apply paragraph formatting
-        If styleDef("paragraphFormat") IsNot Nothing Then
-            ApplyParagraphFormatToStyle(style, styleDef("paragraphFormat"))
+    Private Sub ApplyAllFormattingToNewStyle(doc As Word.Document,
+                                                  style As Word.Style,
+                                                  styleDef As JObject,
+                                                  Optional applicationPolicy As JObject = Nothing)
+        If doc Is Nothing OrElse style Is Nothing OrElse styleDef Is Nothing Then Return
+
+        If style.Type = WdStyleType.wdStyleTypeParagraph Then
+            If styleDef("paragraphFormat") IsNot Nothing Then ApplyParagraphFormatToStyle(style, styleDef("paragraphFormat"))
+            If TypeOf styleDef("tabStops") Is JArray Then ApplyTabStopsToStyle(style, CType(styleDef("tabStops"), JArray))
+
+            If TypeOf styleDef("borders") Is JObject Then
+                Try
+                    ApplyBorderDefinition(style.ParagraphFormat.Borders,
+                                          CType(styleDef("borders"), JObject),
+                                          GetPolicyBoolean(applicationPolicy, "clearCapturedBorders", True))
+                Catch
+                End Try
+            End If
+            If TypeOf styleDef("shading") Is JObject Then
+                Dim styleShading As Word.Shading = GetStyleShading(style)
+                If styleShading IsNot Nothing Then
+                    ApplyShadingDefinition(styleShading,
+                                           CType(styleDef("shading"), JObject),
+                                           GetPolicyBoolean(applicationPolicy, "clearCapturedShading", True))
+                End If
+            End If
         End If
 
-        ' Apply tab stops
-        If styleDef("tabStops") IsNot Nothing Then
-            ApplyTabStopsToStyle(style, CType(styleDef("tabStops"), JArray))
-        End If
-
-        ' Apply font formatting
-        If styleDef("fontFormat") IsNot Nothing Then
-            ApplyFontFormatToStyle(style, styleDef("fontFormat"))
-        End If
-
-        ' Apply list formatting
-        If styleDef("listFormat") IsNot Nothing Then
-            ApplyListFormatToStyle(doc, style, styleDef("listFormat"))
-        End If
+        If styleDef("fontFormat") IsNot Nothing Then ApplyFontFormatToStyle(style, styleDef("fontFormat"))
+        If styleDef("listFormat") IsNot Nothing Then ApplyListFormatToStyle(doc, style, styleDef("listFormat"))
     End Sub
 
     ''' <summary>
@@ -3640,119 +5031,13 @@ Partial Public Class ThisAddIn
     ''' <param name="pf">Desired paragraph-format JSON token.</param>
     ''' <returns>True if any changes were applied; otherwise False.</returns>
     Private Function ApplyParagraphFormatIfDifferent(style As Word.Style, pf As JToken) As Boolean
-        Dim changesMade As Boolean = False
-        Dim paraFormat As Word.ParagraphFormat = style.ParagraphFormat
-
+        If style Is Nothing OrElse pf Is Nothing Then Return False
         Try
-            If pf("alignment") IsNot Nothing Then
-                Dim desired As WdParagraphAlignment = ParseAlignment(CStr(pf("alignment")))
-                If paraFormat.Alignment <> desired Then
-                    paraFormat.Alignment = desired
-                    changesMade = True
-                End If
-            End If
-
-            If pf("leftIndent") IsNot Nothing Then
-                Dim desired As Single = CSng(pf("leftIndent"))
-                If Math.Abs(paraFormat.LeftIndent - desired) > 0.1 Then
-                    paraFormat.LeftIndent = desired
-                    changesMade = True
-                End If
-            End If
-
-            If pf("rightIndent") IsNot Nothing Then
-                Dim desired As Single = CSng(pf("rightIndent"))
-                If Math.Abs(paraFormat.RightIndent - desired) > 0.1 Then
-                    paraFormat.RightIndent = desired
-                    changesMade = True
-                End If
-            End If
-
-            If pf("firstLineIndent") IsNot Nothing Then
-                Dim desired As Single = CSng(pf("firstLineIndent"))
-                If Math.Abs(paraFormat.FirstLineIndent - desired) > 0.1 Then
-                    paraFormat.FirstLineIndent = desired
-                    changesMade = True
-                End If
-            End If
-
-            If pf("spaceBefore") IsNot Nothing Then
-                Dim desired As Single = CSng(pf("spaceBefore"))
-                If Math.Abs(paraFormat.SpaceBefore - desired) > 0.1 Then
-                    paraFormat.SpaceBefore = desired
-                    changesMade = True
-                End If
-            End If
-
-            If pf("spaceAfter") IsNot Nothing Then
-                Dim desired As Single = CSng(pf("spaceAfter"))
-                If Math.Abs(paraFormat.SpaceAfter - desired) > 0.1 Then
-                    paraFormat.SpaceAfter = desired
-                    changesMade = True
-                End If
-            End If
-
-            If pf("lineSpacing") IsNot Nothing Then
-                Dim desired As Single = CSng(pf("lineSpacing"))
-                If Math.Abs(paraFormat.LineSpacing - desired) > 0.1 Then
-                    paraFormat.LineSpacing = desired
-                    changesMade = True
-                End If
-            End If
-
-            If pf("lineSpacingRule") IsNot Nothing Then
-                Dim desired As WdLineSpacing = ParseLineSpacingRule(CStr(pf("lineSpacingRule")))
-                If paraFormat.LineSpacingRule <> desired Then
-                    paraFormat.LineSpacingRule = desired
-                    changesMade = True
-                End If
-            End If
-
-            If pf("keepTogether") IsNot Nothing Then
-                Dim desired As Integer = CInt(pf("keepTogether"))
-                If paraFormat.KeepTogether <> desired Then
-                    paraFormat.KeepTogether = desired
-                    changesMade = True
-                End If
-            End If
-
-            If pf("keepWithNext") IsNot Nothing Then
-                Dim desired As Integer = CInt(pf("keepWithNext"))
-                If paraFormat.KeepWithNext <> desired Then
-                    paraFormat.KeepWithNext = desired
-                    changesMade = True
-                End If
-            End If
-
-            If pf("pageBreakBefore") IsNot Nothing Then
-                Dim desired As Integer = CInt(pf("pageBreakBefore"))
-                If paraFormat.PageBreakBefore <> desired Then
-                    paraFormat.PageBreakBefore = desired
-                    changesMade = True
-                End If
-            End If
-
-            If pf("widowControl") IsNot Nothing Then
-                Dim desired As Integer = CInt(pf("widowControl"))
-                If paraFormat.WidowControl <> desired Then
-                    paraFormat.WidowControl = desired
-                    changesMade = True
-                End If
-            End If
-
-            If pf("outlineLevel") IsNot Nothing Then
-                Dim desired As WdOutlineLevel = ParseOutlineLevel(CStr(pf("outlineLevel")))
-                If paraFormat.OutlineLevel <> desired Then
-                    paraFormat.OutlineLevel = desired
-                    changesMade = True
-                End If
-            End If
-
+            Return ApplyParagraphFormatDefinition(style.ParagraphFormat, pf)
         Catch ex As System.Exception
             Debug.WriteLine($"Error comparing/applying paragraph format: {ex.Message}")
+            Return False
         End Try
-
-        Return changesMade
     End Function
 
     ''' <summary>
@@ -3761,25 +5046,8 @@ Partial Public Class ThisAddIn
     ''' <param name="style">Style to update.</param>
     ''' <param name="pf">Desired paragraph-format JSON token.</param>
     Private Sub ApplyParagraphFormatToStyle(style As Word.Style, pf As JToken)
-        Dim paraFormat As Word.ParagraphFormat = style.ParagraphFormat
-
-        Try
-            If pf("alignment") IsNot Nothing Then paraFormat.Alignment = ParseAlignment(CStr(pf("alignment")))
-            If pf("leftIndent") IsNot Nothing Then paraFormat.LeftIndent = CSng(pf("leftIndent"))
-            If pf("rightIndent") IsNot Nothing Then paraFormat.RightIndent = CSng(pf("rightIndent"))
-            If pf("firstLineIndent") IsNot Nothing Then paraFormat.FirstLineIndent = CSng(pf("firstLineIndent"))
-            If pf("spaceBefore") IsNot Nothing Then paraFormat.SpaceBefore = CSng(pf("spaceBefore"))
-            If pf("spaceAfter") IsNot Nothing Then paraFormat.SpaceAfter = CSng(pf("spaceAfter"))
-            If pf("lineSpacing") IsNot Nothing Then paraFormat.LineSpacing = CSng(pf("lineSpacing"))
-            If pf("lineSpacingRule") IsNot Nothing Then paraFormat.LineSpacingRule = ParseLineSpacingRule(CStr(pf("lineSpacingRule")))
-            If pf("keepTogether") IsNot Nothing Then paraFormat.KeepTogether = CInt(pf("keepTogether"))
-            If pf("keepWithNext") IsNot Nothing Then paraFormat.KeepWithNext = CInt(pf("keepWithNext"))
-            If pf("pageBreakBefore") IsNot Nothing Then paraFormat.PageBreakBefore = CInt(pf("pageBreakBefore"))
-            If pf("widowControl") IsNot Nothing Then paraFormat.WidowControl = CInt(pf("widowControl"))
-            If pf("outlineLevel") IsNot Nothing Then paraFormat.OutlineLevel = ParseOutlineLevel(CStr(pf("outlineLevel")))
-        Catch ex As System.Exception
-            Debug.WriteLine($"Error applying paragraph format: {ex.Message}")
-        End Try
+        If style Is Nothing OrElse pf Is Nothing Then Return
+        ApplyParagraphFormatDefinition(style.ParagraphFormat, pf)
     End Sub
 
     ''' <summary>
@@ -3789,38 +5057,8 @@ Partial Public Class ThisAddIn
     ''' <param name="tabsDef">Desired tab-stop JSON array.</param>
     ''' <returns>True if any changes were applied; otherwise False.</returns>
     Private Function ApplyTabStopsIfDifferent(style As Word.Style, tabsDef As JArray) As Boolean
-        Try
-            ' Build current tab stops signature
-            Dim currentTabs As New List(Of String)()
-            For Each tabStop As Word.TabStop In style.ParagraphFormat.TabStops
-                Dim isCustom As Boolean = True
-                Try : isCustom = tabStop.CustomTab : Catch : End Try
-                If isCustom Then currentTabs.Add($"{Math.Round(tabStop.Position, 1)}:{tabStop.Alignment}:{tabStop.Leader}")
-            Next
-
-            ' Build desired tab stops signature
-            Dim desiredTabs As New List(Of String)()
-            For Each tabDef As JObject In tabsDef
-                Dim pos As Single = CSng(tabDef("position"))
-                Dim align As String = If(tabDef("alignment") IsNot Nothing, CStr(tabDef("alignment")), "wdAlignTabLeft")
-                Dim leader As String = If(tabDef("leader") IsNot Nothing, CStr(tabDef("leader")), "wdTabLeaderSpaces")
-                desiredTabs.Add($"{Math.Round(pos, 1)}:{ParseTabAlignment(align)}:{ParseTabLeader(leader)}")
-            Next
-
-            ' Compare
-            If currentTabs.Count = desiredTabs.Count AndAlso
-               currentTabs.SequenceEqual(desiredTabs) Then
-                Return False ' No changes needed
-            End If
-
-            ' Apply changes
-            ApplyTabStopsToStyle(style, tabsDef)
-            Return True
-
-        Catch ex As System.Exception
-            Debug.WriteLine($"Error comparing tab stops: {ex.Message}")
-            Return False
-        End Try
+        If style Is Nothing OrElse tabsDef Is Nothing Then Return False
+        Return ApplyTabStopDefinitions(style.ParagraphFormat.TabStops, tabsDef, False)
     End Function
 
     ''' <summary>
@@ -3829,17 +5067,8 @@ Partial Public Class ThisAddIn
     ''' <param name="style">Style to update.</param>
     ''' <param name="tabsDef">Desired tab-stop JSON array.</param>
     Private Sub ApplyTabStopsToStyle(style As Word.Style, tabsDef As JArray)
-        Try
-            style.ParagraphFormat.TabStops.ClearAll()
-            For Each tabDef As JObject In tabsDef
-                Dim position As Single = CSng(tabDef("position"))
-                Dim alignment As WdTabAlignment = ParseTabAlignment(If(tabDef("alignment") IsNot Nothing, CStr(tabDef("alignment")), "wdAlignTabLeft"))
-                Dim leader As WdTabLeader = ParseTabLeader(If(tabDef("leader") IsNot Nothing, CStr(tabDef("leader")), "wdTabLeaderSpaces"))
-                style.ParagraphFormat.TabStops.Add(position, alignment, leader)
-            Next
-        Catch ex As System.Exception
-            Debug.WriteLine($"Error applying tab stops: {ex.Message}")
-        End Try
+        If style Is Nothing OrElse tabsDef Is Nothing Then Return
+        ApplyTabStopDefinitions(style.ParagraphFormat.TabStops, tabsDef, False)
     End Sub
 
     ''' <summary>
@@ -3849,157 +5078,8 @@ Partial Public Class ThisAddIn
     ''' <param name="ff">Desired font-format JSON token.</param>
     ''' <returns>True if any changes were applied; otherwise False.</returns>
     Private Function ApplyFontFormatIfDifferent(style As Word.Style, ff As JToken) As Boolean
-        Dim changesMade As Boolean = False
-        Dim font As Word.Font = style.Font
-
-        Try
-            If ff("name") IsNot Nothing Then
-                Dim desired As String = CStr(ff("name"))
-                If font.Name <> desired Then
-                    font.Name = desired
-                    changesMade = True
-                End If
-            End If
-
-            If ff("size") IsNot Nothing Then
-                Dim desired As Single = CSng(ff("size"))
-                If Math.Abs(font.Size - desired) > 0.1 Then
-                    font.Size = desired
-                    changesMade = True
-                End If
-            End If
-
-            If ff("bold") IsNot Nothing Then
-                Dim desired As Integer = If(CBool(ff("bold")), -1, 0)
-                If font.Bold <> desired Then
-                    font.Bold = desired
-                    changesMade = True
-                End If
-            End If
-
-            If ff("italic") IsNot Nothing Then
-                Dim desired As Integer = If(CBool(ff("italic")), -1, 0)
-                If font.Italic <> desired Then
-                    font.Italic = desired
-                    changesMade = True
-                End If
-            End If
-
-            If ff("underline") IsNot Nothing Then
-                Dim desired As WdUnderline = ParseUnderline(CStr(ff("underline")))
-                If font.Underline <> desired Then
-                    font.Underline = desired
-                    changesMade = True
-                End If
-            End If
-
-            If ff("allCaps") IsNot Nothing Then
-                Dim desired As Integer = If(CBool(ff("allCaps")), -1, 0)
-                If font.AllCaps <> desired Then
-                    font.AllCaps = desired
-                    changesMade = True
-                End If
-            End If
-
-            If ff("smallCaps") IsNot Nothing Then
-                Dim desired As Integer = If(CBool(ff("smallCaps")), -1, 0)
-                If font.SmallCaps <> desired Then
-                    font.SmallCaps = desired
-                    changesMade = True
-                End If
-            End If
-
-            If ff("strikeThrough") IsNot Nothing Then
-                Dim desired As Integer = If(CBool(ff("strikeThrough")), -1, 0)
-                If font.StrikeThrough <> desired Then
-                    font.StrikeThrough = desired
-                    changesMade = True
-                End If
-            End If
-
-            If ff("doubleStrikeThrough") IsNot Nothing Then
-                Dim desired As Integer = If(CBool(ff("doubleStrikeThrough")), -1, 0)
-                If font.DoubleStrikeThrough <> desired Then
-                    font.DoubleStrikeThrough = desired
-                    changesMade = True
-                End If
-            End If
-
-            If ff("subscript") IsNot Nothing Then
-                Dim desired As Integer = If(CBool(ff("subscript")), -1, 0)
-                If font.Subscript <> desired Then
-                    font.Subscript = desired
-                    changesMade = True
-                End If
-            End If
-
-            If ff("superscript") IsNot Nothing Then
-                Dim desired As Integer = If(CBool(ff("superscript")), -1, 0)
-                If font.Superscript <> desired Then
-                    font.Superscript = desired
-                    changesMade = True
-                End If
-            End If
-
-            If ff("colorRGB") IsNot Nothing Then
-                Dim desired As WdColor = ParseColorFromRGB(CStr(ff("colorRGB")))
-                If font.Color <> desired Then
-                    font.Color = desired
-                    changesMade = True
-                End If
-            End If
-
-            If ff("scaling") IsNot Nothing Then
-                Try
-                    Dim desired As Integer = CInt(ff("scaling"))
-                    If font.Scaling <> desired Then
-                        font.Scaling = desired
-                        changesMade = True
-                    End If
-                Catch
-                End Try
-            End If
-
-            If ff("spacing") IsNot Nothing Then
-                Try
-                    Dim desired As Single = CSng(ff("spacing"))
-                    If Math.Abs(font.Spacing - desired) > 0.1 Then
-                        font.Spacing = desired
-                        changesMade = True
-                    End If
-                Catch
-                End Try
-            End If
-
-            If ff("position") IsNot Nothing Then
-                Try
-                    Dim desired As Single = CSng(ff("position"))
-                    If Math.Abs(font.Position - desired) > 0.1 Then
-                        font.Position = desired
-                        changesMade = True
-                    End If
-                Catch
-                End Try
-            End If
-
-            If ff("kerning") IsNot Nothing Then
-                Try
-                    Dim desired As Single = CSng(ff("kerning"))
-                    If Math.Abs(font.Kerning - desired) > 0.1 Then
-                        font.Kerning = desired
-                        changesMade = True
-                    End If
-                Catch
-                End Try
-            End If
-
-            changesMade = ApplyScriptFontPropertiesIfDifferent(font, ff) OrElse changesMade
-
-        Catch ex As System.Exception
-            Debug.WriteLine($"Error comparing/applying font format: {ex.Message}")
-        End Try
-
-        Return changesMade
+        If style Is Nothing OrElse ff Is Nothing Then Return False
+        Return ApplyFontFormatDefinition(style.Font, ff)
     End Function
 
     ''' <summary>
@@ -4008,32 +5088,8 @@ Partial Public Class ThisAddIn
     ''' <param name="style">Style to update.</param>
     ''' <param name="ff">Desired font-format JSON token.</param>
     Private Sub ApplyFontFormatToStyle(style As Word.Style, ff As JToken)
-        Dim font As Word.Font = style.Font
-
-        Try
-            If ff("name") IsNot Nothing Then font.Name = CStr(ff("name"))
-            If ff("size") IsNot Nothing Then font.Size = CSng(ff("size"))
-            If ff("bold") IsNot Nothing Then font.Bold = If(CBool(ff("bold")), -1, 0)
-            If ff("italic") IsNot Nothing Then font.Italic = If(CBool(ff("italic")), -1, 0)
-            If ff("underline") IsNot Nothing Then font.Underline = ParseUnderline(CStr(ff("underline")))
-            If ff("allCaps") IsNot Nothing Then font.AllCaps = If(CBool(ff("allCaps")), -1, 0)
-            If ff("smallCaps") IsNot Nothing Then font.SmallCaps = If(CBool(ff("smallCaps")), -1, 0)
-            If ff("strikeThrough") IsNot Nothing Then font.StrikeThrough = If(CBool(ff("strikeThrough")), -1, 0)
-            If ff("doubleStrikeThrough") IsNot Nothing Then font.DoubleStrikeThrough = If(CBool(ff("doubleStrikeThrough")), -1, 0)
-            If ff("subscript") IsNot Nothing Then font.Subscript = If(CBool(ff("subscript")), -1, 0)
-            If ff("superscript") IsNot Nothing Then font.Superscript = If(CBool(ff("superscript")), -1, 0)
-            If ff("colorRGB") IsNot Nothing Then font.Color = ParseColorFromRGB(CStr(ff("colorRGB")))
-            Try
-                If ff("scaling") IsNot Nothing Then font.Scaling = CInt(ff("scaling"))
-                If ff("spacing") IsNot Nothing Then font.Spacing = CSng(ff("spacing"))
-                If ff("position") IsNot Nothing Then font.Position = CSng(ff("position"))
-                If ff("kerning") IsNot Nothing Then font.Kerning = CSng(ff("kerning"))
-            Catch
-            End Try
-            ApplyScriptFontPropertiesToFont(font, ff)
-        Catch ex As System.Exception
-            Debug.WriteLine($"Error applying font format: {ex.Message}")
-        End Try
+        If style Is Nothing OrElse ff Is Nothing Then Return
+        ApplyFontFormatDefinition(style.Font, ff)
     End Sub
 
 
@@ -4049,44 +5105,42 @@ Partial Public Class ThisAddIn
     ''' then apply formatting and shared numbering definitions. Older JSON templates remain supported.
     ''' </summary>
     Private Sub ApplyWdStyleDefinitionsToDocument(doc As Word.Document,
-                                                  wdStyleDefinitions As JObject,
-                                                  Optional numberingDefinitions As JObject = Nothing)
+                                                   wdStyleDefinitions As JObject,
+                                                   Optional numberingDefinitions As JObject = Nothing,
+                                                   Optional applicationPolicy As JObject = Nothing)
         If doc Is Nothing OrElse wdStyleDefinitions Is Nothing Then Return
 
         _sharedListTemplates.Clear()
 
         Dim allStylesExist As Boolean = True
         Dim existingStyles As New List(Of String)()
-        Dim missingStyles As New List(Of String)()
-
         For Each propertyItem As JProperty In wdStyleDefinitions.Properties()
             Try
                 Dim existingStyle As Word.Style = doc.Styles(propertyItem.Name)
                 existingStyles.Add(propertyItem.Name)
             Catch
                 allStylesExist = False
-                missingStyles.Add(propertyItem.Name)
             End Try
         Next
 
         If allStylesExist AndAlso existingStyles.Count > 0 Then
             Dim confirmResult As Integer = ShowCustomYesNoBox(
                 $"All {existingStyles.Count} Word styles from the template already exist in this document." & vbCrLf & vbCrLf &
-                "Updating existing styles may cause formatting issues if applied multiple times (also, for the same reason, do not apply DocStyle templates twice)." & vbCrLf & vbCrLf &
-                "Do you want to update the existing styles anyway?",
-                "Yes, update styles", "No, skip style update", $"{AN} - Style Update")
-
-            If confirmResult <> 1 Then
-                Debug.WriteLine($"[DocStyle] User skipped style update - all {existingStyles.Count} styles already exist")
-                Return
-            End If
+                "Do you want to synchronize the existing styles with the template?",
+                "Yes, synchronize styles", "No, keep existing styles", $"{AN} - Style Update")
+            If confirmResult <> 1 Then Return
         End If
+
+        Dim updateDependencies As Boolean = GetPolicyBoolean(applicationPolicy, "updateExistingDependencyStyles", False)
+        Dim materializeEffectiveFormatting As Boolean = GetPolicyBoolean(applicationPolicy, "materializeEffectiveStyleFormatting", True)
+        Dim clearBorders As Boolean = GetPolicyBoolean(applicationPolicy, "clearCapturedBorders", True)
+        Dim clearShading As Boolean = GetPolicyBoolean(applicationPolicy, "clearCapturedShading", True)
 
         Dim createdStyles As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
         Dim stylesCreatedOrUpdated As New List(Of String)()
         Dim stylesSkipped As New List(Of String)()
 
-        ' Pass 1: create every missing style before assigning basedOn/next relationships.
+        ' Pass 1: create every missing dependency and primary style first.
         For Each propertyItem As JProperty In wdStyleDefinitions.Properties()
             Dim styleName As String = propertyItem.Name
             Dim styleDef As JObject = TryCast(propertyItem.Value, JObject)
@@ -4094,28 +5148,28 @@ Partial Public Class ThisAddIn
 
             Try
                 Dim existingStyle As Word.Style = Nothing
-                Try
-                    existingStyle = doc.Styles(styleName)
-                Catch
-                End Try
+                Try : existingStyle = doc.Styles(styleName) : Catch : End Try
                 If existingStyle IsNot Nothing Then Continue For
 
                 Dim styleType As WdStyleType = ParseStyleType(styleDef)
                 Dim createdStyle As Word.Style = doc.Styles.Add(styleName, styleType)
                 createdStyles.Add(styleName)
-                Debug.WriteLine($"[DocStyle] Created new wdStyle: {styleName} ({styleType})")
+                Debug.WriteLine($"[DocStyle] Created Word style '{styleName}' ({styleType}).")
             Catch ex As System.Exception
-                Debug.WriteLine($"[DocStyle] Could not create wdStyle '{styleName}': {ex.Message}")
+                Debug.WriteLine($"[DocStyle] Could not create Word style '{styleName}': {ex.Message}")
             End Try
         Next
 
         Dim orderedProperties As List(Of JProperty) = OrderStyleDefinitionsBaseFirst(wdStyleDefinitions)
 
-        ' Pass 2: apply style inheritance, next-style, Quick Style and priority metadata.
+        ' Pass 2: restore relationships after every referenced style exists.
         For Each propertyItem As JProperty In orderedProperties
             Dim styleName As String = propertyItem.Name
             Dim styleDef As JObject = TryCast(propertyItem.Value, JObject)
             If styleDef Is Nothing Then Continue For
+
+            Dim dependencyOnly As Boolean = styleDef("dependencyOnly") IsNot Nothing AndAlso CBool(styleDef("dependencyOnly"))
+            If dependencyOnly AndAlso Not createdStyles.Contains(styleName) AndAlso Not updateDependencies Then Continue For
 
             Try
                 Dim style As Word.Style = doc.Styles(styleName)
@@ -4125,7 +5179,7 @@ Partial Public Class ThisAddIn
             End Try
         Next
 
-        ' Pass 3: apply visible formatting and shared list templates, base styles first.
+        ' Pass 3: synchronize effective formatting and list definitions base-first.
         For Each propertyItem As JProperty In orderedProperties
             Dim styleName As String = propertyItem.Name
             Dim styleDef As JObject = TryCast(propertyItem.Value, JObject)
@@ -4133,42 +5187,65 @@ Partial Public Class ThisAddIn
 
             Try
                 HydrateListFormatFromNumberingDefinitions(styleDef, numberingDefinitions)
-
                 Dim style As Word.Style = doc.Styles(styleName)
                 If style Is Nothing Then Continue For
 
+                Dim dependencyOnly As Boolean = styleDef("dependencyOnly") IsNot Nothing AndAlso CBool(styleDef("dependencyOnly"))
+                If dependencyOnly AndAlso Not createdStyles.Contains(styleName) AndAlso Not updateDependencies Then
+                    stylesSkipped.Add($"{styleName} (dependency)")
+                    Continue For
+                End If
+
                 If createdStyles.Contains(styleName) Then
-                    ApplyAllFormattingToNewStyle(doc, style, styleDef)
+                    ApplyAllFormattingToNewStyle(doc, style, styleDef, applicationPolicy)
                     stylesCreatedOrUpdated.Add($"{styleName} (created)")
                     Continue For
                 End If
 
                 Dim changesMade As Boolean = ApplyStyleRelationshipMetadata(doc, style, styleDef)
 
-                If styleDef("paragraphFormat") IsNot Nothing AndAlso style.Type = WdStyleType.wdStyleTypeParagraph Then
-                    changesMade = ApplyParagraphFormatIfDifferent(style, styleDef("paragraphFormat")) OrElse changesMade
-                End If
-
-                If styleDef("tabStops") IsNot Nothing AndAlso style.Type = WdStyleType.wdStyleTypeParagraph Then
-                    changesMade = ApplyTabStopsIfDifferent(style, CType(styleDef("tabStops"), JArray)) OrElse changesMade
-                End If
-
-                If styleDef("fontFormat") IsNot Nothing Then
-                    changesMade = ApplyFontFormatIfDifferent(style, styleDef("fontFormat")) OrElse changesMade
+                If materializeEffectiveFormatting Then
+                    If style.Type = WdStyleType.wdStyleTypeParagraph Then
+                        If styleDef("paragraphFormat") IsNot Nothing Then
+                            changesMade = ApplyParagraphFormatIfDifferent(style, styleDef("paragraphFormat")) OrElse changesMade
+                        End If
+                        If TypeOf styleDef("tabStops") Is JArray Then
+                            changesMade = ApplyTabStopsIfDifferent(style, CType(styleDef("tabStops"), JArray)) OrElse changesMade
+                        End If
+                        If TypeOf styleDef("borders") Is JObject Then
+                            changesMade = ApplyBorderDefinition(style.ParagraphFormat.Borders,
+                                                               CType(styleDef("borders"), JObject),
+                                                               clearBorders) OrElse changesMade
+                        End If
+                        If TypeOf styleDef("shading") Is JObject Then
+                            Dim styleShading As Word.Shading = GetStyleShading(style)
+                            If styleShading IsNot Nothing Then
+                                changesMade = ApplyShadingDefinition(styleShading,
+                                                                    CType(styleDef("shading"), JObject),
+                                                                    clearShading) OrElse changesMade
+                            End If
+                        End If
+                    End If
+                    If styleDef("fontFormat") IsNot Nothing Then
+                        changesMade = ApplyFontFormatIfDifferent(style, styleDef("fontFormat")) OrElse changesMade
+                    End If
                 End If
 
                 If styleDef("listFormat") IsNot Nothing Then
                     Dim listFormatDef As JToken = styleDef("listFormat")
                     Dim templateWantsList As Boolean =
                         listFormatDef("hasListTemplate") IsNot Nothing AndAlso CBool(listFormatDef("hasListTemplate"))
-
                     Dim currentTemplate As Word.ListTemplate = TryGetStyleListTemplate(style)
-                    Dim styleHasListTemplate As Boolean = (currentTemplate IsNot Nothing)
 
                     If templateWantsList Then
-                        ApplyListFormatToStyle(doc, style, listFormatDef)
-                        changesMade = True
-                    ElseIf styleHasListTemplate AndAlso Not style.BuiltIn Then
+                        Dim desiredKey As String = GetListTemplateCacheKey(listFormatDef)
+                        Dim desiredTemplate As Word.ListTemplate = Nothing
+                        If Not String.IsNullOrWhiteSpace(desiredKey) AndAlso _sharedListTemplates.ContainsKey(desiredKey) Then desiredTemplate = _sharedListTemplates(desiredKey)
+                        If currentTemplate Is Nothing OrElse desiredTemplate Is Nothing OrElse Not AreSameComObject(currentTemplate, desiredTemplate) Then
+                            ApplyListFormatToStyle(doc, style, listFormatDef)
+                            changesMade = True
+                        End If
+                    ElseIf currentTemplate IsNot Nothing AndAlso Not style.BuiltIn Then
                         Try
                             style.LinkToListTemplate(Nothing)
                             changesMade = True
@@ -4183,20 +5260,102 @@ Partial Public Class ThisAddIn
                 Else
                     stylesSkipped.Add(styleName)
                 End If
-
             Catch ex As System.Exception
-                Debug.WriteLine($"[DocStyle] Error creating/updating wdStyle '{styleName}': {ex.Message}")
+                Debug.WriteLine($"[DocStyle] Error creating/updating Word style '{styleName}': {ex.Message}")
             End Try
         Next
 
-        ' Deliberately keep _sharedListTemplates alive until paragraph application completes.
-        If stylesCreatedOrUpdated.Count > 0 Then
-            Debug.WriteLine($"[DocStyle] Word styles processed: {String.Join(", ", stylesCreatedOrUpdated)}")
-        End If
-        If stylesSkipped.Count > 0 Then
-            Debug.WriteLine($"[DocStyle] Word styles unchanged: {String.Join(", ", stylesSkipped)}")
-        End If
+        If stylesCreatedOrUpdated.Count > 0 Then Debug.WriteLine($"[DocStyle] Word styles processed: {String.Join(", ", stylesCreatedOrUpdated)}")
+        If stylesSkipped.Count > 0 Then Debug.WriteLine($"[DocStyle] Word styles unchanged: {String.Join(", ", stylesSkipped)}")
     End Sub
+
+
+    ''' <summary>
+    ''' Ensures that a numbered paragraph whose list level ends with a tab has a
+    ''' usable tab stop at the list level's text position.
+    '''
+    ''' Word normally supplies this implicitly. Some list/style operations and
+    ''' TabStops.ClearAll can remove the effective tab behavior, especially when
+    ''' ListLevel.TabPosition is wdUndefined.
+    ''' </summary>
+    Private Sub EnsureNumberingTrailingTab(para As Word.Paragraph,
+                                       listDefinition As JToken)
+        If para Is Nothing OrElse listDefinition Is Nothing Then Return
+
+        Try
+            Dim hasList As Boolean =
+            listDefinition("hasList") IsNot Nothing AndAlso
+            CBool(listDefinition("hasList"))
+
+            If Not hasList Then Return
+
+            Dim levelDefinition As JToken = listDefinition("currentLevelFormat")
+
+            If levelDefinition Is Nothing AndAlso
+           TypeOf listDefinition("levels") Is JArray Then
+
+                Dim desiredLevel As Integer =
+                If(listDefinition("listLevelNumber") IsNot Nothing,
+                   CInt(listDefinition("listLevelNumber")),
+                   If(listDefinition("linkedLevel") IsNot Nothing,
+                      CInt(listDefinition("linkedLevel")),
+                      1))
+
+                For Each candidate As JObject In
+                CType(listDefinition("levels"), JArray)
+
+                    If candidate("level") IsNot Nothing AndAlso
+                   CInt(candidate("level")) = desiredLevel Then
+
+                        levelDefinition = candidate
+                        Exit For
+                    End If
+                Next
+            End If
+
+            If levelDefinition Is Nothing Then Return
+
+            Dim trailingCharacter As String = ""
+
+            If levelDefinition("trailingCharacter") IsNot Nothing Then
+                trailingCharacter = CStr(levelDefinition("trailingCharacter"))
+            ElseIf levelDefinition("trailingCharacterOpenXml") IsNot Nothing Then
+                trailingCharacter = CStr(levelDefinition("trailingCharacterOpenXml"))
+            End If
+
+            Dim usesTrailingTab As Boolean =
+            trailingCharacter.IndexOf("TrailingTab",
+                                      StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+            String.Equals(trailingCharacter,
+                          "tab",
+                          StringComparison.OrdinalIgnoreCase)
+
+            If Not usesTrailingTab Then Return
+            If Not IsApplicableJsonToken(levelDefinition("textPosition")) Then Return
+
+            Dim desiredPosition As Single =
+            CSng(levelDefinition("textPosition"))
+
+            If desiredPosition <= 0.0F Then Return
+
+            ' Do not add a duplicate custom tab.
+            For Each existingTab As Word.TabStop In para.TabStops
+                If Math.Abs(existingTab.Position - desiredPosition) <= 0.25F Then
+                    Return
+                End If
+            Next
+
+            para.TabStops.Add(
+            desiredPosition,
+            WdTabAlignment.wdAlignTabLeft,
+            WdTabLeader.wdTabLeaderSpaces)
+
+        Catch ex As System.Exception
+            Debug.WriteLine($"[DocStyle] Could not ensure numbering tab: {ex.Message}")
+        End Try
+    End Sub
+
+
     ''' <summary>
     ''' Applies user style formatting (paragraph, font, list, and tab stops) from the template to a paragraph.
     ''' Formatting is applied as overrides after the Word style assignment.
@@ -4207,87 +5366,67 @@ Partial Public Class ThisAddIn
     ''' Applies paragraph/font/list/tab overrides after assigning the Word style.
     ''' Shared numbering templates are preferred; Word defaults remain the compatibility fallback.
     ''' </summary>
-    Private Sub ApplyUserStyleFormattingFromTemplate(para As Word.Paragraph, userStyleDef As JObject)
+    Private Sub ApplyUserStyleFormattingFromTemplate(para As Word.Paragraph,
+                                                       userStyleDef As JObject,
+                                                       Optional mapping As JObject = Nothing,
+                                                       Optional applicationPolicy As JObject = Nothing)
         If para Is Nothing OrElse userStyleDef Is Nothing Then Return
 
         Try
+            ' Remember the style explicitly assigned by the caller.
+            ' ApplyListTemplateWithLevel may replace it with the style linked to the
+            ' selected numbering level.
+            Dim intendedStyle As Word.Style = Nothing
+            Try
+                intendedStyle = CType(para.Style, Word.Style)
+            Catch
+                intendedStyle = Nothing
+            End Try
+
             Dim paragraphFormatDef As JToken = userStyleDef("paragraphFormatting")
+            Dim fontFormatDef As JToken = userStyleDef("fontFormatting")
+            Dim listDefinition As JToken = userStyleDef("listFormatting")
 
-            If paragraphFormatDef IsNot Nothing Then
-                If paragraphFormatDef("alignment") IsNot Nothing Then para.Alignment = ParseAlignment(CStr(paragraphFormatDef("alignment")))
-                If paragraphFormatDef("leftIndent") IsNot Nothing Then para.LeftIndent = CSng(paragraphFormatDef("leftIndent"))
-                If paragraphFormatDef("rightIndent") IsNot Nothing Then para.RightIndent = CSng(paragraphFormatDef("rightIndent"))
-                If paragraphFormatDef("firstLineIndent") IsNot Nothing Then para.FirstLineIndent = CSng(paragraphFormatDef("firstLineIndent"))
-                If paragraphFormatDef("spaceBefore") IsNot Nothing Then para.SpaceBefore = CSng(paragraphFormatDef("spaceBefore"))
-                If paragraphFormatDef("spaceAfter") IsNot Nothing Then para.SpaceAfter = CSng(paragraphFormatDef("spaceAfter"))
-                If paragraphFormatDef("lineSpacing") IsNot Nothing Then para.LineSpacing = CSng(paragraphFormatDef("lineSpacing"))
-                If paragraphFormatDef("lineSpacingRule") IsNot Nothing Then para.Format.LineSpacingRule = ParseLineSpacingRule(CStr(paragraphFormatDef("lineSpacingRule")))
-                If paragraphFormatDef("keepTogether") IsNot Nothing Then para.KeepTogether = CInt(paragraphFormatDef("keepTogether"))
-                If paragraphFormatDef("keepWithNext") IsNot Nothing Then para.KeepWithNext = CInt(paragraphFormatDef("keepWithNext"))
-            End If
-
-            If userStyleDef("fontFormatting") IsNot Nothing Then
-                Dim fontFormatDef As JToken = userStyleDef("fontFormatting")
-                Dim range As Word.Range = para.Range
-                If fontFormatDef("fontName") IsNot Nothing AndAlso CStr(fontFormatDef("fontName")) <> "mixed" Then range.Font.Name = CStr(fontFormatDef("fontName"))
-                If fontFormatDef("fontSize") IsNot Nothing AndAlso CStr(fontFormatDef("fontSize")) <> "mixed" Then range.Font.Size = CSng(fontFormatDef("fontSize"))
-                If fontFormatDef("bold") IsNot Nothing AndAlso fontFormatDef("bold").Type = JTokenType.Boolean Then range.Font.Bold = If(CBool(fontFormatDef("bold")), -1, 0)
-                If fontFormatDef("italic") IsNot Nothing AndAlso fontFormatDef("italic").Type = JTokenType.Boolean Then range.Font.Italic = If(CBool(fontFormatDef("italic")), -1, 0)
-                If fontFormatDef("allCaps") IsNot Nothing AndAlso fontFormatDef("allCaps").Type = JTokenType.Boolean Then range.Font.AllCaps = If(CBool(fontFormatDef("allCaps")), -1, 0)
-                If fontFormatDef("smallCaps") IsNot Nothing AndAlso fontFormatDef("smallCaps").Type = JTokenType.Boolean Then range.Font.SmallCaps = If(CBool(fontFormatDef("smallCaps")), -1, 0)
-                If fontFormatDef("underline") IsNot Nothing AndAlso CStr(fontFormatDef("underline")) <> "mixed" Then range.Font.Underline = ParseUnderline(CStr(fontFormatDef("underline")))
-                ApplyScriptFontPropertiesToFont(range.Font, fontFormatDef)
-            End If
-
-            Dim listOperationChangedFormatting As Boolean = False
-            If userStyleDef("listFormatting") IsNot Nothing Then
-                Dim listFormatDef As JToken = userStyleDef("listFormatting")
-                Dim templateHasList As Boolean = If(listFormatDef("hasList") IsNot Nothing,
-                                                    CBool(listFormatDef("hasList")), False)
-
+            ' Initial pass. These values are applied again after list operations.
+            ApplyParagraphFormatDefinition(para.Format, paragraphFormatDef, para)
+            ApplyFontFormatDefinition(para.Range.Font, fontFormatDef, para.Range)
+            Dim didRemoveNumbers As Boolean = False
+            If listDefinition IsNot Nothing Then
+                Dim templateHasList As Boolean = listDefinition("hasList") IsNot Nothing AndAlso CBool(listDefinition("hasList"))
+                Dim preserveList As Boolean = mapping IsNot Nothing AndAlso mapping("preserveList") IsNot Nothing AndAlso CBool(mapping("preserveList"))
                 Dim currentHasList As Boolean = False
-                Dim currentLevel As Integer = 0
                 Try
                     currentHasList = para.Range.ListFormat.ListType <> WdListType.wdListNoNumbering
-                    If currentHasList Then currentLevel = para.Range.ListFormat.ListLevelNumber
                 Catch
                 End Try
 
-                If Not templateHasList AndAlso currentHasList Then
-                    para.Range.ListFormat.RemoveNumbers()
-                    listOperationChangedFormatting = True
-                ElseIf templateHasList Then
-                    Dim desiredLevel As Integer = 1
-                    If listFormatDef("listLevelNumber") IsNot Nothing Then
-                        desiredLevel = CInt(listFormatDef("listLevelNumber"))
-                    Else
-                        Dim binding As JObject = TryCast(listFormatDef("numberingBinding"), JObject)
-                        If binding IsNot Nothing AndAlso binding("effectiveListLevel") IsNot Nothing Then
-                            desiredLevel = CInt(binding("effectiveListLevel"))
+                If Not preserveList Then
+                    If Not templateHasList AndAlso currentHasList Then
+                        para.Range.ListFormat.RemoveNumbers()
+                        didRemoveNumbers = True
+                    ElseIf templateHasList AndAlso HasListFormattingDifference(para, listDefinition) Then
+                        Dim desiredTemplate As Word.ListTemplate = GetDesiredListTemplateForUserStyle(para, listDefinition)
+                        Dim desiredLevel As Integer = If(listDefinition("listLevelNumber") IsNot Nothing,
+                                                         CInt(listDefinition("listLevelNumber")),
+                                                         If(listDefinition("linkedLevel") IsNot Nothing, CInt(listDefinition("linkedLevel")), 1))
+                        desiredLevel = Math.Max(1, Math.Min(9, desiredLevel))
+
+                        Dim continuePreviousList As Boolean = GetPolicyBoolean(applicationPolicy, "continuePreviousListByDefault", True)
+                        If mapping IsNot Nothing AndAlso mapping("continuePreviousList") IsNot Nothing Then
+                            continuePreviousList = CBool(mapping("continuePreviousList"))
+                        ElseIf listDefinition("continuePreviousList") IsNot Nothing Then
+                            continuePreviousList = CBool(listDefinition("continuePreviousList"))
                         End If
-                    End If
-                    desiredLevel = Math.Max(1, Math.Min(9, desiredLevel))
 
-                    If Not currentHasList OrElse currentLevel <> desiredLevel Then
-                        Dim listTemplate As Word.ListTemplate = Nothing
-                        Try
-                            Dim paragraphStyle As Word.Style = TryCast(para.Style, Word.Style)
-                            listTemplate = TryGetStyleListTemplate(paragraphStyle)
-                        Catch
-                        End Try
-                        If listTemplate Is Nothing Then listTemplate = TryGetCachedListTemplate(listFormatDef)
-
-                        If listTemplate IsNot Nothing Then
+                        If desiredTemplate IsNot Nothing Then
                             para.Range.ListFormat.ApplyListTemplateWithLevel(
-                                ListTemplate:=listTemplate,
-                                ContinuePreviousList:=True,
+                                ListTemplate:=desiredTemplate,
+                                ContinuePreviousList:=continuePreviousList,
                                 ApplyTo:=WdListApplyTo.wdListApplyToSelection,
                                 DefaultListBehavior:=WdDefaultListBehavior.wdWord10ListBehavior,
                                 ApplyLevel:=desiredLevel)
-                            listOperationChangedFormatting = True
-                        ElseIf Not currentHasList Then
-                            ' Backward-compatible fallback for old JSON files or disabled style-definition import.
-                            Dim listType As String = If(listFormatDef("listType") IsNot Nothing, CStr(listFormatDef("listType")), "")
+                        Else
+                            Dim listType As String = If(listDefinition("listType") IsNot Nothing, CStr(listDefinition("listType")), "")
                             If listType.IndexOf("Bullet", StringComparison.OrdinalIgnoreCase) >= 0 Then
                                 para.Range.ListFormat.ApplyBulletDefault()
                             ElseIf listType.IndexOf("Outline", StringComparison.OrdinalIgnoreCase) >= 0 Then
@@ -4295,34 +5434,49 @@ Partial Public Class ThisAddIn
                             ElseIf listType.IndexOf("Number", StringComparison.OrdinalIgnoreCase) >= 0 Then
                                 para.Range.ListFormat.ApplyNumberDefault()
                             End If
-                            listOperationChangedFormatting = True
                         End If
                     End If
                 End If
             End If
 
-            ' List operations may alter paragraph indents. Restore the extracted effective values.
-            If listOperationChangedFormatting AndAlso paragraphFormatDef IsNot Nothing Then
-                If paragraphFormatDef("leftIndent") IsNot Nothing Then para.LeftIndent = CSng(paragraphFormatDef("leftIndent"))
-                If paragraphFormatDef("rightIndent") IsNot Nothing Then para.RightIndent = CSng(paragraphFormatDef("rightIndent"))
-                If paragraphFormatDef("firstLineIndent") IsNot Nothing Then para.FirstLineIndent = CSng(paragraphFormatDef("firstLineIndent"))
-            End If
-
-            If userStyleDef("tabStops") IsNot Nothing Then
+            ' Applying a list level can silently replace the paragraph style with the
+            ' paragraph style linked to that numbering level. Restore the style selected
+            ' by the mapping before restoring direct formatting.
+            If listDefinition IsNot Nothing AndAlso intendedStyle IsNot Nothing Then
                 Try
-                    para.TabStops.ClearAll()
-                    For Each tabDef As JObject In CType(userStyleDef("tabStops"), JArray)
-                        Dim position As Single = CSng(tabDef("pos"))
-                        Dim alignment As WdTabAlignment = ParseTabAlignment(
-                            "wdAlignTab" & If(tabDef("align") IsNot Nothing, CStr(tabDef("align")), "Left"))
-                        Dim leader As WdTabLeader = ParseTabLeader(
-                            "wdTabLeader" & If(tabDef("leader") IsNot Nothing, CStr(tabDef("leader")), "Spaces"))
-                        para.TabStops.Add(position, alignment, leader)
-                    Next
-                Catch
+                    para.Style = intendedStyle
+                Catch ex As System.Exception
+                    Debug.WriteLine($"[DocStyle] Could not restore intended paragraph style: {ex.Message}")
                 End Try
             End If
 
+            ' List and style operations can reset paragraph and character properties.
+            ' Always perform the final formatting pass after both operations.
+            ApplyParagraphFormatDefinition(para.Format, paragraphFormatDef, para)
+            ApplyFontFormatDefinition(para.Range.Font, fontFormatDef, para.Range)
+
+            ' An empty captured tab-stop array means that the source paragraph had no
+            ' explicit custom tabs. It must not clear the implicit tab used by numbering.
+            Dim customTabDefinitions As JArray =
+    TryCast(userStyleDef("tabStops"), JArray)
+
+            If customTabDefinitions IsNot Nothing AndAlso customTabDefinitions.Count > 0 Then
+                ApplyTabStopDefinitions(para.TabStops, customTabDefinitions, True)
+            ElseIf listDefinition IsNot Nothing Then
+                EnsureNumberingTrailingTab(para, listDefinition)
+            End If
+
+            If TypeOf userStyleDef("borders") Is JObject Then
+                ApplyBorderDefinition(para.Borders,
+                                      CType(userStyleDef("borders"), JObject),
+                                      GetPolicyBoolean(applicationPolicy, "clearCapturedBorders", True))
+            End If
+
+            If TypeOf userStyleDef("shading") Is JObject Then
+                ApplyShadingDefinition(para.Shading,
+                                       CType(userStyleDef("shading"), JObject),
+                                       GetPolicyBoolean(applicationPolicy, "clearCapturedShading", True))
+            End If
         Catch ex As System.Exception
             Debug.WriteLine($"Error applying user style formatting: {ex.Message}")
         End Try
@@ -4412,6 +5566,11 @@ Partial Public Class ThisAddIn
     Private Function ParseLineSpacingRule(rule As String) As WdLineSpacing
         If String.IsNullOrWhiteSpace(rule) Then Return WdLineSpacing.wdLineSpaceSingle
 
+        Try
+            Return CType(System.Enum.Parse(GetType(WdLineSpacing), rule, True), WdLineSpacing)
+        Catch
+        End Try
+
         Select Case rule.ToLower().Replace("wdlinespace", "").Replace("_", "")
             Case "single" : Return WdLineSpacing.wdLineSpaceSingle
             Case "1pt5" : Return WdLineSpacing.wdLineSpace1pt5
@@ -4430,6 +5589,11 @@ Partial Public Class ThisAddIn
     ''' <returns>Parsed outline level.</returns>
     Private Function ParseOutlineLevel(level As String) As WdOutlineLevel
         If String.IsNullOrWhiteSpace(level) Then Return WdOutlineLevel.wdOutlineLevelBodyText
+
+        Try
+            Return CType(System.Enum.Parse(GetType(WdOutlineLevel), level, True), WdOutlineLevel)
+        Catch
+        End Try
 
         Select Case level.ToLower().Replace("wdoutlinelevel", "").Replace("_", "")
             Case "1" : Return WdOutlineLevel.wdOutlineLevel1
@@ -4454,6 +5618,11 @@ Partial Public Class ThisAddIn
     Private Function ParseTabAlignment(alignment As String) As WdTabAlignment
         If String.IsNullOrWhiteSpace(alignment) Then Return WdTabAlignment.wdAlignTabLeft
 
+        Try
+            Return CType(System.Enum.Parse(GetType(WdTabAlignment), alignment, True), WdTabAlignment)
+        Catch
+        End Try
+
         Select Case alignment.ToLower().Replace("wdaligntab", "").Replace("_", "")
             Case "left" : Return WdTabAlignment.wdAlignTabLeft
             Case "center" : Return WdTabAlignment.wdAlignTabCenter
@@ -4473,6 +5642,11 @@ Partial Public Class ThisAddIn
     Private Function ParseTabLeader(leader As String) As WdTabLeader
         If String.IsNullOrWhiteSpace(leader) Then Return WdTabLeader.wdTabLeaderSpaces
 
+        Try
+            Return CType(System.Enum.Parse(GetType(WdTabLeader), leader, True), WdTabLeader)
+        Catch
+        End Try
+
         Select Case leader.ToLower().Replace("wdtableader", "").Replace("_", "")
             Case "spaces" : Return WdTabLeader.wdTabLeaderSpaces
             Case "dots" : Return WdTabLeader.wdTabLeaderDots
@@ -4491,6 +5665,11 @@ Partial Public Class ThisAddIn
     ''' <returns>Parsed underline value.</returns>
     Private Function ParseUnderline(underline As String) As WdUnderline
         If String.IsNullOrWhiteSpace(underline) Then Return WdUnderline.wdUnderlineNone
+
+        Try
+            Return CType(System.Enum.Parse(GetType(WdUnderline), underline, True), WdUnderline)
+        Catch
+        End Try
 
         Select Case underline.ToLower().Replace("wdunderline", "").Replace("_", "")
             Case "none" : Return WdUnderline.wdUnderlineNone
@@ -4549,6 +5728,11 @@ Partial Public Class ThisAddIn
     Private Function ParseListLevelAlignment(alignment As String) As WdListLevelAlignment
         If String.IsNullOrWhiteSpace(alignment) Then Return WdListLevelAlignment.wdListLevelAlignLeft
 
+        Try
+            Return CType(System.Enum.Parse(GetType(WdListLevelAlignment), alignment, True), WdListLevelAlignment)
+        Catch
+        End Try
+
         Select Case alignment.ToLower().Replace("wdlistlevelalign", "").Replace("_", "")
             Case "left" : Return WdListLevelAlignment.wdListLevelAlignLeft
             Case "center" : Return WdListLevelAlignment.wdListLevelAlignCenter
@@ -4565,6 +5749,11 @@ Partial Public Class ThisAddIn
     Private Function ParseTrailingCharacter(trailing As String) As WdTrailingCharacter
         If String.IsNullOrWhiteSpace(trailing) Then Return WdTrailingCharacter.wdTrailingTab
 
+        Try
+            Return CType(System.Enum.Parse(GetType(WdTrailingCharacter), trailing, True), WdTrailingCharacter)
+        Catch
+        End Try
+
         Select Case trailing.ToLower().Replace("wdtrailing", "").Replace("_", "")
             Case "tab" : Return WdTrailingCharacter.wdTrailingTab
             Case "space" : Return WdTrailingCharacter.wdTrailingSpace
@@ -4580,6 +5769,11 @@ Partial Public Class ThisAddIn
     ''' <returns>Parsed list number style value.</returns>
     Private Function ParseNumberStyle(style As String) As WdListNumberStyle
         If String.IsNullOrWhiteSpace(style) Then Return WdListNumberStyle.wdListNumberStyleArabic
+
+        Try
+            Return CType(System.Enum.Parse(GetType(WdListNumberStyle), style, True), WdListNumberStyle)
+        Catch
+        End Try
 
         Select Case style.ToLower().Replace("wdlistnumberstyle", "").Replace("_", "")
             Case "arabic" : Return WdListNumberStyle.wdListNumberStyleArabic
@@ -4769,6 +5963,11 @@ Partial Public Class ThisAddIn
     Private Function ParseAlignment(alignment As String) As WdParagraphAlignment
         If String.IsNullOrWhiteSpace(alignment) Then Return WdParagraphAlignment.wdAlignParagraphLeft
 
+        Try
+            Return CType(System.Enum.Parse(GetType(WdParagraphAlignment), alignment, True), WdParagraphAlignment)
+        Catch
+        End Try
+
         Select Case alignment.ToLower().Replace("wdalignparagraph", "").Replace("_", "")
             Case "left" : Return WdParagraphAlignment.wdAlignParagraphLeft
             Case "center" : Return WdParagraphAlignment.wdAlignParagraphCenter
@@ -4785,50 +5984,37 @@ Partial Public Class ThisAddIn
     ''' <param name="paraRange">Duplicated paragraph range (for table/cell checks and other range-based info).</param>
     ''' <returns>JSON object containing paragraph formatting properties and optional error information.</returns>
     Private Function ExtractParagraphFormat(para As Word.Paragraph, paraRange As Word.Range) As JObject
-        Dim pf As New JObject()
+        Dim result As New JObject From {
+            {"captured", True},
+            {"complete", True}
+        }
+        If para Is Nothing Then Return result
+
         Try
-            pf("alignment") = para.Alignment.ToString()
-            pf("leftIndent") = para.LeftIndent
-            pf("rightIndent") = para.RightIndent
-            pf("firstLineIndent") = para.FirstLineIndent
-            pf("spaceBefore") = para.SpaceBefore
-            pf("spaceAfter") = para.SpaceAfter
-            pf("spaceBeforeAuto") = para.SpaceBeforeAuto
-            pf("spaceAfterAuto") = para.SpaceAfterAuto
-            pf("lineSpacing") = para.LineSpacing
-            pf("lineSpacingRule") = para.LineSpacingRule.ToString()
-            pf("keepTogether") = para.KeepTogether
-            pf("keepWithNext") = para.KeepWithNext
-            pf("pageBreakBefore") = para.PageBreakBefore
-            pf("widowControl") = para.WidowControl
-            pf("outlineLevel") = para.OutlineLevel.ToString()
+            Dim paragraphFormat As Word.ParagraphFormat = para.Format
+            result("alignment") = paragraphFormat.Alignment.ToString()
+            result("leftIndent") = paragraphFormat.LeftIndent
+            result("rightIndent") = paragraphFormat.RightIndent
+            result("firstLineIndent") = paragraphFormat.FirstLineIndent
+            result("spaceBefore") = paragraphFormat.SpaceBefore
+            result("spaceAfter") = paragraphFormat.SpaceAfter
+            result("lineSpacingRule") = paragraphFormat.LineSpacingRule.ToString()
+            result("lineSpacing") = paragraphFormat.LineSpacing
+            result("keepTogether") = paragraphFormat.KeepTogether
+            result("keepWithNext") = paragraphFormat.KeepWithNext
+            result("pageBreakBefore") = paragraphFormat.PageBreakBefore
+            result("widowControl") = paragraphFormat.WidowControl
+            result("outlineLevel") = paragraphFormat.OutlineLevel.ToString()
+            result("readingOrder") = para.ReadingOrder.ToString()
+            Try : result("hyphenation") = para.Hyphenation : Catch : End Try
 
-            Try : pf("hyphenation") = para.Hyphenation : Catch : pf("hyphenation") = "default" : End Try
-
-            Try
-                Dim paraFormat As Object = para.Format
-                pf("noSpaceBetweenParagraphsOfSameStyle") = paraFormat.NoSpaceBetweenParagraphsOfSameStyle
-            Catch
-            End Try
-
-            Try
-                Dim paraFormat As Object = para.Format
-                pf("mirrorIndents") = paraFormat.MirrorIndents
-            Catch
-            End Try
-
-            Try : pf("readingOrder") = para.ReadingOrder.ToString() : Catch : End Try
-
-            Try
-                Dim paraFormat As Object = para.Format
-                pf("contextualSpacing") = paraFormat.ContextualSpacing
-            Catch
-            End Try
-
+            AddLateBoundPropertiesToJson(paragraphFormat, result, GetParagraphLateBoundPropertyMap())
         Catch ex As System.Exception
-            pf("error") = ex.Message
+            result("complete") = False
+            result("error") = ex.Message
         End Try
-        Return pf
+
+        Return result
     End Function
 
     ''' <summary>
@@ -4838,76 +6024,57 @@ Partial Public Class ThisAddIn
     ''' <param name="rng">Range to inspect.</param>
     ''' <returns>JSON object containing font formatting properties and optional error information.</returns>
     Private Function ExtractFontFormat(rng As Word.Range) As JObject
-        Dim ff As New JObject()
+        Dim result As New JObject From {
+            {"captured", True},
+            {"complete", True}
+        }
+        If rng Is Nothing Then Return result
+
         Try
             Dim font As Word.Font = rng.Font
-
-            If font.Name <> CStr(WdConstants.wdUndefined) Then ff("fontName") = font.Name Else ff("fontName") = "mixed"
-            If font.Size <> CSng(WdConstants.wdUndefined) Then ff("fontSize") = font.Size Else ff("fontSize") = "mixed"
-            If font.Bold <> CInt(WdConstants.wdUndefined) Then ff("bold") = (font.Bold = -1) Else ff("bold") = "mixed"
-            If font.Italic <> CInt(WdConstants.wdUndefined) Then ff("italic") = (font.Italic = -1) Else ff("italic") = "mixed"
-            If font.Underline <> CType(WdConstants.wdUndefined, WdUnderline) Then ff("underline") = font.Underline.ToString() Else ff("underline") = "mixed"
-
-            Try
-                If font.UnderlineColor <> CType(WdConstants.wdUndefined, WdColor) Then
-                    ff("underlineColor") = font.UnderlineColor.ToString()
-                    ff("underlineColorRGB") = ColorToRGB(font.UnderlineColor)
-                End If
-            Catch
-            End Try
-
-            If font.StrikeThrough <> CInt(WdConstants.wdUndefined) Then ff("strikeThrough") = (font.StrikeThrough = -1) Else ff("strikeThrough") = "mixed"
-            If font.DoubleStrikeThrough <> CInt(WdConstants.wdUndefined) Then ff("doubleStrikeThrough") = (font.DoubleStrikeThrough = -1) Else ff("doubleStrikeThrough") = "mixed"
-            If font.Subscript <> CInt(WdConstants.wdUndefined) Then ff("subscript") = (font.Subscript = -1) Else ff("subscript") = "mixed"
-            If font.Superscript <> CInt(WdConstants.wdUndefined) Then ff("superscript") = (font.Superscript = -1) Else ff("superscript") = "mixed"
+            If font.Name <> CStr(WdConstants.wdUndefined) Then result("fontName") = font.Name Else result("fontName") = "mixed"
+            If font.Size <> CSng(WdConstants.wdUndefined) Then result("fontSize") = font.Size Else result("fontSize") = "mixed"
+            If font.Bold <> CInt(WdConstants.wdUndefined) Then result("bold") = (font.Bold = -1) Else result("bold") = "mixed"
+            If font.Italic <> CInt(WdConstants.wdUndefined) Then result("italic") = (font.Italic = -1) Else result("italic") = "mixed"
+            If font.Underline <> CType(WdConstants.wdUndefined, WdUnderline) Then result("underline") = font.Underline.ToString() Else result("underline") = "mixed"
+            If font.StrikeThrough <> CInt(WdConstants.wdUndefined) Then result("strikeThrough") = (font.StrikeThrough = -1) Else result("strikeThrough") = "mixed"
+            If font.DoubleStrikeThrough <> CInt(WdConstants.wdUndefined) Then result("doubleStrikeThrough") = (font.DoubleStrikeThrough = -1) Else result("doubleStrikeThrough") = "mixed"
+            If font.Subscript <> CInt(WdConstants.wdUndefined) Then result("subscript") = (font.Subscript = -1) Else result("subscript") = "mixed"
+            If font.Superscript <> CInt(WdConstants.wdUndefined) Then result("superscript") = (font.Superscript = -1) Else result("superscript") = "mixed"
+            If font.AllCaps <> CInt(WdConstants.wdUndefined) Then result("allCaps") = (font.AllCaps = -1) Else result("allCaps") = "mixed"
+            If font.SmallCaps <> CInt(WdConstants.wdUndefined) Then result("smallCaps") = (font.SmallCaps = -1) Else result("smallCaps") = "mixed"
 
             If font.Color <> CType(WdConstants.wdUndefined, WdColor) Then
-                ff("color") = font.Color.ToString()
-                ff("colorRGB") = ColorToRGB(font.Color)
+                result("color") = font.Color.ToString()
+                result("colorRGB") = ColorToRGB(font.Color)
             Else
-                ff("color") = "mixed"
+                result("color") = "mixed"
             End If
-
             Try
-                If rng.HighlightColorIndex <> CType(WdConstants.wdUndefined, WdColorIndex) Then
-                    ff("highlightColor") = rng.HighlightColorIndex.ToString()
-                Else
-                    ff("highlightColor") = "mixed"
+                If font.UnderlineColor <> CType(WdConstants.wdUndefined, WdColor) Then
+                    result("underlineColor") = font.UnderlineColor.ToString()
+                    result("underlineColorRGB") = ColorToRGB(font.UnderlineColor)
                 End If
             Catch
-                ff("highlightColor") = "none"
             End Try
-
-            If font.AllCaps <> CInt(WdConstants.wdUndefined) Then ff("allCaps") = (font.AllCaps = -1) Else ff("allCaps") = "mixed"
-            If font.SmallCaps <> CInt(WdConstants.wdUndefined) Then ff("smallCaps") = (font.SmallCaps = -1) Else ff("smallCaps") = "mixed"
-
             Try
-                ff("scaling") = font.Scaling
-                ff("spacing") = font.Spacing
-                ff("position") = font.Position
-                ff("kerning") = font.Kerning
+                If rng.HighlightColorIndex <> CType(WdConstants.wdUndefined, WdColorIndex) Then result("highlightColor") = rng.HighlightColorIndex.ToString() Else result("highlightColor") = "mixed"
             Catch
             End Try
 
-            Try
-                Dim fontObj As Object = font
-                ff("themeFont") = fontObj.ThemeFont.ToString()
-            Catch
-            End Try
+            Try : result("scaling") = font.Scaling : Catch : End Try
+            Try : result("spacing") = font.Spacing : Catch : End Try
+            Try : result("position") = font.Position : Catch : End Try
+            Try : result("kerning") = font.Kerning : Catch : End Try
+            AddScriptFontPropertiesToJson(font, result)
 
-            Try
-                Dim fontObj As Object = font
-                ff("themeColor") = fontObj.ThemeColor.ToString()
-                ff("themeTint") = fontObj.TintAndShade
-            Catch
-            End Try
-
-            AddScriptFontPropertiesToJson(font, ff)
-
+            AddLateBoundPropertiesToJson(font, result, GetFontLateBoundPropertyMap())
         Catch ex As System.Exception
-            ff("error") = ex.Message
+            result("complete") = False
+            result("error") = ex.Message
         End Try
-        Return ff
+
+        Return result
     End Function
 
     ''' <summary>
@@ -4945,6 +6112,8 @@ Partial Public Class ThisAddIn
                 Try
                     If listFormat.ListTemplate IsNot Nothing Then
                         Dim listTemplate As Word.ListTemplate = listFormat.ListTemplate
+                        Dim fullTemplateDefinition As JObject = ExtractListTemplateDefinition(listTemplate, listFormat.ListLevelNumber)
+                        MergeJsonObjectProperties(listResult, fullTemplateDefinition, False)
                         listResult("listTemplateOutlineNumbered") = listTemplate.OutlineNumbered
 
                         Dim level As Word.ListLevel = listTemplate.ListLevels(listFormat.ListLevelNumber)
@@ -5015,7 +6184,7 @@ Partial Public Class ThisAddIn
                             Dim metadataFields As String() = {
                                 "paragraphStyleId", "paragraphStyleName", "numberRunFormatting",
                                 "tabPositionState", "numberStyleOpenXml", "alignmentOpenXml",
-                                "trailingCharacterOpenXml", "ilvlZeroBased"
+                                "trailingCharacterOpenXml", "ilvlZeroBased", "legal", "levelRestartOpenXml"
                             }
                             For Each fieldName As String In metadataFields
                                 If sourceLevel(fieldName) IsNot Nothing Then
@@ -5025,6 +6194,11 @@ Partial Public Class ThisAddIn
                         End If
                     End If
                 End If
+            End If
+
+            If listResult("hasList") IsNot Nothing AndAlso CBool(listResult("hasList")) AndAlso
+               listResult("sharedListInstanceKey") Is Nothing AndAlso listResult("templateFingerprintV2") IsNot Nothing Then
+                listResult("sharedListInstanceKey") = "directTemplate:" & CStr(listResult("templateFingerprintV2"))
             End If
 
         Catch ex As System.Exception
@@ -5039,45 +6213,8 @@ Partial Public Class ThisAddIn
     ''' <param name="para">Paragraph to inspect.</param>
     ''' <returns>JSON object describing borders present on the paragraph.</returns>
     Private Function ExtractBorders(para As Word.Paragraph) As JObject
-        Dim borders As New JObject()
-        Try
-            Dim borderTypes As WdBorderType() = {
-                WdBorderType.wdBorderTop,
-                WdBorderType.wdBorderBottom,
-                WdBorderType.wdBorderLeft,
-                WdBorderType.wdBorderRight
-            }
-            Dim borderNames As String() = {"top", "bottom", "left", "right"}
-
-            For i As Integer = 0 To borderTypes.Length - 1
-                Try
-                    Dim border As Word.Border = para.Borders(borderTypes(i))
-                    If border.LineStyle <> WdLineStyle.wdLineStyleNone Then
-                        Dim b As New JObject()
-                        b("lineStyle") = border.LineStyle.ToString()
-                        b("lineWidth") = border.LineWidth.ToString()
-                        b("color") = border.Color.ToString()
-                        b("colorRGB") = ColorToRGB(border.Color)
-                        borders(borderNames(i)) = b
-                    End If
-                Catch
-                End Try
-            Next
-
-            Try
-                borders("distanceFromText") = New JObject From {
-                    {"top", para.Borders.DistanceFromTop},
-                    {"bottom", para.Borders.DistanceFromBottom},
-                    {"left", para.Borders.DistanceFromLeft},
-                    {"right", para.Borders.DistanceFromRight}
-                }
-            Catch
-            End Try
-
-        Catch ex As System.Exception
-            borders("error") = ex.Message
-        End Try
-        Return borders
+        If para Is Nothing Then Return New JObject From {{"captured", False}}
+        Return ExtractBordersFromCollection(para.Borders)
     End Function
 
     ''' <summary>
@@ -5086,26 +6223,8 @@ Partial Public Class ThisAddIn
     ''' <param name="para">Paragraph to inspect.</param>
     ''' <returns>JSON object describing shading properties.</returns>
     Private Function ExtractShading(para As Word.Paragraph) As JObject
-        Dim shading As New JObject()
-        Try
-            Dim s As Word.Shading = para.Shading
-            shading("texture") = s.Texture.ToString()
-            shading("textureDescription") = "wdTextureNone, wdTextureSolid, etc."
-
-            If s.BackgroundPatternColor <> WdColor.wdColorAutomatic Then
-                shading("backgroundColor") = s.BackgroundPatternColor.ToString()
-                shading("backgroundColorRGB") = ColorToRGB(s.BackgroundPatternColor)
-            End If
-
-            If s.ForegroundPatternColor <> WdColor.wdColorAutomatic Then
-                shading("foregroundColor") = s.ForegroundPatternColor.ToString()
-                shading("foregroundColorRGB") = ColorToRGB(s.ForegroundPatternColor)
-            End If
-
-        Catch ex As System.Exception
-            shading("error") = ex.Message
-        End Try
-        Return shading
+        If para Is Nothing Then Return New JObject From {{"captured", False}}
+        Return ExtractShadingFromObject(para.Shading)
     End Function
 
 
@@ -5463,6 +6582,7 @@ Partial Public Class ThisAddIn
             Dim userStyles As New JArray()
             Dim wdStyleDefinitions As New JObject()
             Dim collectedStyles As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+            Dim primaryStyles As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
             Dim userStyleIndex As Integer = 0
 
             ' Create one userStyle entry per discovered style, using the cached representative paragraph
@@ -5531,15 +6651,8 @@ Partial Public Class ThisAddIn
                 result("listFormatting") = ExtractListFormat(representativePara.Range, openXmlContext)
                 result("tabStops") = ExtractTabStopsCompact(representativePara)
 
-                Dim borders As JObject = ExtractBorders(representativePara)
-                If borders.Properties().Any(Function(p) p.Name <> "distanceFromText" AndAlso p.Name <> "error") Then
-                    result("borders") = borders
-                End If
-
-                Dim shading As JObject = ExtractShading(representativePara)
-                If shading("backgroundColor") IsNot Nothing OrElse shading("foregroundColor") IsNot Nothing Then
-                    result("shading") = shading
-                End If
+                result("borders") = ExtractBorders(representativePara)
+                result("shading") = ExtractShading(representativePara)
 
                 ' Add usage statistics as metadata
                 result("_autoExtractInfo") = New JObject From {
@@ -5550,16 +6663,20 @@ Partial Public Class ThisAddIn
                 userStyles.Add(result)
 
                 ' Collect wdStyle name for style definitions
-                If Not String.IsNullOrWhiteSpace(group.StyleName) AndAlso Not collectedStyles.Contains(group.StyleName) Then
+                If Not String.IsNullOrWhiteSpace(group.StyleName) Then
+                    primaryStyles.Add(group.StyleName)
                     collectedStyles.Add(group.StyleName)
                 End If
             Next
+
+            ExpandCollectedStyleDependencies(doc, collectedStyles, openXmlContext)
 
             ' Extract full wdStyle definitions
             For Each styleName In collectedStyles
                 Try
                     Dim styleObj As JObject = ExtractFullStyleDefinition(doc, styleName, openXmlContext)
                     If styleObj IsNot Nothing Then
+                        styleObj("dependencyOnly") = Not primaryStyles.Contains(styleName)
                         wdStyleDefinitions(styleName) = styleObj
                     End If
                 Catch ex As System.Exception
@@ -5572,6 +6689,8 @@ Partial Public Class ThisAddIn
             ' ──────────────────────────────────────────────────────────────────
             Dim templateResult As New JObject()
             templateResult("schemaVersion") = DocStyleSchemaVersion
+            templateResult("schemaRevision") = DocStyleSchemaRevision
+            templateResult("applicationPolicy") = CreateDefaultDocStyleApplicationPolicy()
             templateResult("templateName") = templateDisplayName
             templateResult("description") = "Style template auto-extracted from a formatted document. Each user style includes an AI-generated 'whenToApply' field. Review and refine the 'userStyleName' and 'whenToApply' fields for best results. The 'wdStyleDefinitions' section contains Word style definitions that can optionally be created/updated in target documents."
             templateResult("documentInfo") = New JObject From {
