@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 3.8.2026
+' 4.8.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -61,7 +61,7 @@ Partial Public Class ThisAddIn
     Public Const AN4 As String = "redink_"
     Public Const AN3 As String = "redink"
 
-    Public Shared Version As String = "V.030826" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.040826" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -212,6 +212,19 @@ Partial Public Class ThisAddIn
     ''' Handles add-in startup. Initializes UI synchronization, UpdateHandler targets, host window handle, Explorer hooks, fallback timer, and restores last chat id.
     ''' </summary>
     Private Sub ThisAddIn_Startup() Handles Me.Startup
+
+        ' Crash diagnostics: enabled only when the user's My.Settings.CrashLog is True.
+        ' This flag is reconciled from INI_Crashlog after config load, so it takes effect
+        ' on the next host launch. When False, no handlers are installed (zero overhead).
+        Try
+            RiCrashLogger.Initialize(
+                "RedInk Outlook Add-in",
+                Me.GetType().Assembly,
+                My.Settings.CrashLog,
+                True)
+        Catch
+        End Try
+
         Try
             RemoveHandler Microsoft.Win32.SystemEvents.PowerModeChanged, AddressOf OnPowerModeChanged
         Catch
@@ -396,6 +409,16 @@ Partial Public Class ThisAddIn
         Try
             InitializeConfig(True, True)
 
+            ' Reconcile the persisted CrashLog switch with the INI parameter. Any change
+            ' takes effect on the next host launch (the INI is read after ThisAddIn_Startup).
+            Try
+                If My.Settings.CrashLog <> INI_Crashlog Then
+                    My.Settings.CrashLog = INI_Crashlog
+                    My.Settings.Save()
+                End If
+            Catch
+            End Try
+
             UpdateHandler.PeriodicCheckForUpdates(INI_UpdateCheckInterval, "Outlook", INI_UpdatePath, _context)
 
             If _context IsNot Nothing AndAlso _context.INIloaded Then
@@ -471,6 +494,11 @@ Partial Public Class ThisAddIn
     ''' Outlook add-in shutdown handler. Sequentially stops HTTP listener, watchdog, and power watch components.
     ''' </summary>
     Private Sub ThisAddIn_Shutdown() Handles Me.Shutdown
+
+        Try
+            RiCrashLogger.Shutdown("ThisAddIn_Shutdown was called.")
+        Catch
+        End Try
 
         ' Shut down Knowledge Store service
         Try

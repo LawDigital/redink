@@ -829,6 +829,18 @@ Namespace My
                 Me("AP_DashboardWindowH") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property CrashLog() As Boolean
+            Get
+                Return CType(Me("CrashLog"),Boolean)
+            End Get
+            Set
+                Me("CrashLog") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

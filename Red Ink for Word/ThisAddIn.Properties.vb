@@ -539,6 +539,15 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_Crashlog As Boolean
+        Get
+            Return _context.INI_Crashlog
+        End Get
+        Set(value As Boolean)
+            _context.INI_Crashlog = value
+        End Set
+    End Property
+
     Public Shared Property INI_AutoPilotAutoStart As Boolean
         Get
             Return _context.INI_AutoPilotAutoStart
