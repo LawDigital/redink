@@ -51,14 +51,14 @@
     <FriendlyName>Red Ink for Excel %28Develop%29</FriendlyName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Preview'">
-    <ApplicationVersion>1.6.11.200</ApplicationVersion>
+    <ApplicationVersion>1.6.12.200</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\preview\excel\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/preview/excel/</InstallUrl>
     <ProductName>Red Ink for Excel %28Preview%29</ProductName>
     <FriendlyName>Red Ink for Excel %28Preview%29</FriendlyName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'GA'">
-    <ApplicationVersion>1.0.0.1</ApplicationVersion>
+    <ApplicationVersion>1.0.0.0</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\ga\excel\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/ga/excel/</InstallUrl>
     <ProductName>Red Ink for Excel</ProductName>
