@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 3.8.2026
+' 4.8.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -54,7 +54,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.030826" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.040826" & SharedMethods.VersionQualifier
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
     Public Const AN5 As String = "RI" ' for bubble comments 
@@ -482,6 +482,18 @@ Partial Public Class ThisAddIn
 
     Private Sub ThisAddIn_Startup() Handles Me.Startup
 
+        ' Crash diagnostics: enabled only when the user's My.Settings.CrashLog is True.
+        ' This flag is reconciled from INI_Crashlog after config load, so it takes effect
+        ' on the next host launch. When False, no handlers are installed (zero overhead).
+        Try
+            RiCrashLogger.Initialize(
+                "RedInk Word Add-in",
+                Me.GetType().Assembly,
+                My.Settings.CrashLog,
+                True)
+        Catch
+        End Try
+
         ' Necessary for Update Handler to work correctly
 
         ' 1) Force the creation of the Control's handle on the Office UI thread
@@ -678,6 +690,10 @@ Partial Public Class ThisAddIn
     End Sub
 
     Private Sub ThisAddIn_Shutdown() Handles Me.Shutdown
+        Try
+            RiCrashLogger.Shutdown("ThisAddIn_Shutdown was called.")
+        Catch
+        End Try
         ShutdownTalkToMe()
         ShutdownKnowledgeStoreService()
         ShutdownHttpListener()
@@ -686,6 +702,17 @@ Partial Public Class ThisAddIn
 
     Public Sub InitializeAddInFeatures()
         InitializeConfig(True, True)
+
+        ' Reconcile the persisted CrashLog switch with the INI parameter. Any change
+        ' takes effect on the next host launch (the INI is read after ThisAddIn_Startup).
+        Try
+            If My.Settings.CrashLog <> INI_Crashlog Then
+                My.Settings.CrashLog = INI_Crashlog
+                My.Settings.Save()
+            End If
+        Catch
+        End Try
+
         If DLLDIAGNOSTICS Then WriteDllLoadDiagnosticsIfEnabled()
 
         ' Restore the previously selected primary model (if multi-model is configured)
@@ -777,17 +804,29 @@ Partial Public Class ThisAddIn
             End If
             If Not _context.INI_APIDebug Then Return
 
-            Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
-            If String.IsNullOrWhiteSpace(desktopPath) Then
-                ShowCustomMessageBox("Cannot generate RI DLL load diagnostics because the desktop path is invalid.")
-                Return
+            Dim diagnosticsDirectory As String =
+                System.IO.Path.GetDirectoryName(RiCrashLogger.LogFilePath)
+
+            If String.IsNullOrWhiteSpace(diagnosticsDirectory) Then
+                diagnosticsDirectory =
+                    System.IO.Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                        "redink")
             End If
-            If Not System.IO.Directory.Exists(desktopPath) Then
-                ShowCustomMessageBox("Cannot generate RI DLL load diagnostics because could not locate the desktop path.")
+
+            If String.IsNullOrWhiteSpace(diagnosticsDirectory) Then
+                ShowCustomMessageBox("Cannot generate RI DLL load diagnostics because the diagnostics path is invalid.")
                 Return
             End If
 
-            Dim outputPath As String = System.IO.Path.Combine(desktopPath, "RI_DLL_Loaded.txt")
+            Try
+                System.IO.Directory.CreateDirectory(diagnosticsDirectory)
+            Catch ex As Exception
+                ShowCustomMessageBox("Cannot generate RI DLL load diagnostics because the diagnostics directory could not be created.")
+                Return
+            End Try
+
+            Dim outputPath As String = System.IO.Path.Combine(diagnosticsDirectory, "RI_DLL_Loaded.txt")
             Dim report As New System.Text.StringBuilder()
 
             report.AppendLine("RI DLL Loaded Diagnostic Report")

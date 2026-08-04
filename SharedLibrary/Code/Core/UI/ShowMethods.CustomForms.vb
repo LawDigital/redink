@@ -11,6 +11,20 @@
 ' Architecture:
 '  - Native window integration: Uses `FindWindow` / `SendMessage` (user32) and
 '    `WindowWrapper` ownership to optionally parent dialogs to Office app windows.
+'  - Host-prompt visibility safeguard: several dialogs intentionally run as
+'    `TopMost` so they do not disappear behind Office. In Word/Office, this can
+'    create a specific deadlock-like UX when the host raises its own native prompt
+'    (for example "Save changes?" while the user closes Word): the native prompt
+'    gains focus but stays hidden behind our `TopMost` dialog, so the UI appears
+'    stuck until the custom dialog is moved away manually.
+'  - Centralized fix for that case: do not change owner behavior broadly and do
+'    not rely on a single `Deactivate` event, because foreground activation is
+'    transient and `GetForegroundWindow()` may briefly return zero or still point
+'    to our dialog. Instead, `AttachForeignForegroundWatchdog` starts a short
+'    WinForms timer for affected `TopMost` dialogs and repeatedly calls
+'    `PromoteForeignForegroundDialog`, which temporarily drops only that dialog
+'    out of the topmost band when a same-process host prompt takes foreground,
+'    then restores normal behavior when the dialog is re-activated.
 '  - Selection UI: `ShowSelectionForm` shows a fixed dialog with a ListBox and
 '    OK/Cancel behavior.
 '  - Text input UI: `ShowCustomInputBox` supports single-line and multi-line input,

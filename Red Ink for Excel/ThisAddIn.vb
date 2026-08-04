@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Excel"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 3.8.2026
+' 4.8.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -56,7 +56,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.030826" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.040826" & SharedMethods.VersionQualifier
 
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
@@ -160,6 +160,18 @@ Partial Public Class ThisAddIn
 
     Private Sub ThisAddIn_Startup() Handles Me.Startup
 
+        ' Crash diagnostics: enabled only when the user's My.Settings.CrashLog is True.
+        ' This flag is reconciled from INI_Crashlog after config load, so it takes effect
+        ' on the next host launch. When False, no handlers are installed (zero overhead).
+        Try
+            RiCrashLogger.Initialize(
+                "RedInk Excel Add-in",
+                Me.GetType().Assembly,
+                My.Settings.CrashLog,
+                True)
+        Catch
+        End Try
+
         ' Necessary for Update Handler to work correctly
 
         ' 1) Force the creation of the Control's handle on the Office UI thread
@@ -206,11 +218,25 @@ Partial Public Class ThisAddIn
     End Sub
 
     Private Sub ThisAddIn_Shutdown() Handles Me.Shutdown
+        Try
+            RiCrashLogger.Shutdown("ThisAddIn_Shutdown was called.")
+        Catch
+        End Try
         RemoveOldContextMenu()
     End Sub
 
     Public Sub InitializeAddInFeatures()
         InitializeConfig(True, True)
+
+        ' Reconcile the persisted CrashLog switch with the INI parameter. Any change
+        ' takes effect on the next host launch (the INI is read after ThisAddIn_Startup).
+        Try
+            If My.Settings.CrashLog <> INI_Crashlog Then
+                My.Settings.CrashLog = INI_Crashlog
+                My.Settings.Save()
+            End If
+        Catch
+        End Try
 
         ' Restore the previously selected primary model (if multi-model is configured)
         If _context.INIloaded Then
