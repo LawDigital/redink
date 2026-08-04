@@ -270,12 +270,22 @@ Namespace SharedLibrary
                 context.INI_MenuBlock = If(configDict.ContainsKey("MenuBlock"), configDict("MenuBlock"), "")
                 context.INI_WebServerBlock = If(configDict.ContainsKey("WebServerBlock"), CInt(configDict("WebServerBlock")), 0)
 
+                ' Restore shared user settings from the registry backup if My.Settings was lost.
+                TryRestoreSharedUserSettingsFromRegistry()
+
                 ' Load per-user overrides from My.Settings.
                 context.INI_DefaultPrefix = My.Settings.DefaultPrefix
                 context.INI_ReplaceText2Override = My.Settings.ReplaceText2Override
                 context.INI_MarkupMethodWordOverride = My.Settings.MarkupMethodWordOverride
                 context.INI_MarkupMethodOutlookOverride = My.Settings.MarkupMethodOutlookOverride
                 context.INI_MarkupAuthor = My.Settings.MarkupAuthor
+
+                Dim restrictedModelAccessCode As String = ""
+                If TryGetMySettingString("RestrictedModelAccessCode", restrictedModelAccessCode) Then
+                    context.INI_RestrictedModelAccessCode = restrictedModelAccessCode
+                Else
+                    context.INI_RestrictedModelAccessCode = ""
+                End If
 
                 ' Boolean parameters.
                 context.INI_DoubleS = ParseBoolean(configDict, "DoubleS")
@@ -304,6 +314,7 @@ Namespace SharedLibrary
                 End If
 
                 context.INI_APIDebug = ParseBoolean(configDict, "APIDebug")
+                context.INI_Crashlog = ParseBoolean(configDict, "Crashlog")
                 context.INI_UseHostColorOutlook = ParseBoolean(configDict, "UseHostColorOutlook")
                 context.INI_AutoPilotAutoStart = ParseBoolean(configDict, "AutoPilotAutoStart")
                 context.INI_AutoPilotSchedulerLocalChat = ParseBoolean(configDict, "AutoPilotSchedulerLocalChat")
@@ -632,6 +643,27 @@ Namespace SharedLibrary
                 End If
 
                 Return Boolean.TryParse(rawValue.ToString().Trim(), result)
+            Catch
+                Return False
+            End Try
+        End Function
+
+        Private Shared Function TryGetMySettingString(settingName As String, ByRef result As String) As Boolean
+            result = ""
+
+            If String.IsNullOrWhiteSpace(settingName) Then
+                Return False
+            End If
+
+            Try
+                Dim rawValue As Object = My.Settings.Item(settingName)
+
+                If rawValue Is Nothing Then
+                    Return False
+                End If
+
+                result = rawValue.ToString()
+                Return True
             Catch
                 Return False
             End Try

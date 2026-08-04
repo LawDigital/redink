@@ -98,6 +98,7 @@ Namespace SharedLibrary
             Property INI_OAuth2Endpoint_2 As String
             Property INI_OAuth2ATExpiry_2 As Long
             Property INI_APIDebug As Boolean
+            Property INI_Crashlog As Boolean
             Property INI_UseHostColorOutlook As Boolean
             Property INI_UsageRestrictions As String
             Property INI_LogPath As String
@@ -118,6 +119,7 @@ Namespace SharedLibrary
             Property INI_ReplaceText1 As Boolean
             Property INI_ReplaceText2 As Boolean
             Property INI_ReplaceText2Override As String
+            Property INI_RestrictedModelAccessCode As String
             Property INI_DoMarkupOutlook As Boolean
             Property INI_DoMarkupWord As Boolean
             Property INI_ChunkOCR As Integer
@@ -470,6 +472,7 @@ Namespace SharedLibrary
         Public Property INI_OAuth2Endpoint_2 As String Implements ISharedContext.INI_OAuth2Endpoint_2
         Public Property INI_OAuth2ATExpiry_2 As Long Implements ISharedContext.INI_OAuth2ATExpiry_2
         Public Property INI_APIDebug As Boolean Implements ISharedContext.INI_APIDebug
+        Public Property INI_Crashlog As Boolean Implements ISharedContext.INI_Crashlog
         Public Property INI_UseHostColorOutlook As Boolean Implements ISharedContext.INI_UseHostColorOutlook
         Public Property INI_AutoPilotAutoStart As Boolean Implements ISharedContext.INI_AutoPilotAutoStart
         Public Property INI_AutoPilotSchedulerLocalChat As Boolean Implements ISharedContext.INI_AutoPilotSchedulerLocalChat
@@ -489,6 +492,7 @@ Namespace SharedLibrary
         Public Property INI_ReplaceText1 As Boolean Implements ISharedContext.INI_ReplaceText1
         Public Property INI_ReplaceText2 As Boolean Implements ISharedContext.INI_ReplaceText2
         Public Property INI_ReplaceText2Override As String Implements ISharedContext.INI_ReplaceText2Override
+        Public Property INI_RestrictedModelAccessCode As String Implements ISharedContext.INI_RestrictedModelAccessCode
         Public Property INI_DoMarkupOutlook As Boolean Implements ISharedContext.INI_DoMarkupOutlook
         Public Property INI_DoMarkupWord As Boolean Implements ISharedContext.INI_DoMarkupWord
         Public Property INI_ChunkOCR As Integer Implements ISharedContext.INI_ChunkOCR

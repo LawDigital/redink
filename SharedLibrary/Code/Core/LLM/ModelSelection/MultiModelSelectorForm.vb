@@ -135,6 +135,11 @@ Namespace SharedLibrary
             End Get
         End Property
 
+        Protected Overrides Sub OnShown(e As System.EventArgs)
+            MyBase.OnShown(e)
+            SharedMethods.AttachForeignForegroundWatchdog(Me)
+        End Sub
+
         ''' <summary>
         ''' Initializes a new instance of the multi-model selector dialog.
         ''' </summary>

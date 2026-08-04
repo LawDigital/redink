@@ -358,6 +358,96 @@ Namespace SharedLibrary
             Return models
         End Function
 
+        Private Shared Function IsModelAccessibleForCurrentUser(ByVal configDict As Dictionary(Of String, String),
+                                                                ByVal context As ISharedContext) As Boolean
+            Dim restrictedAccess As String = GetConfigString(configDict, "RestrictedAccess")
+            If String.IsNullOrWhiteSpace(restrictedAccess) Then
+                Return True
+            End If
+
+            Dim storedUserCodes As String = ""
+            If context IsNot Nothing Then
+                storedUserCodes = If(context.INI_RestrictedModelAccessCode, "")
+            End If
+
+            Dim userCodes As HashSet(Of String) = SplitRestrictedAccessTokens(storedUserCodes)
+            If userCodes.Count = 0 Then
+                Return False
+            End If
+
+            Dim requiredCodes As HashSet(Of String) = SplitRestrictedAccessTokens(DecodeRestrictedAccessValue(restrictedAccess, context))
+            If requiredCodes.Count = 0 Then
+                Return False
+            End If
+
+            For Each requiredCode In requiredCodes
+                If userCodes.Contains(requiredCode) Then
+                    Return True
+                End If
+            Next
+
+            Return False
+        End Function
+
+        Private Shared Function SplitRestrictedAccessTokens(ByVal value As String) As HashSet(Of String)
+            Dim tokens As New HashSet(Of String)(StringComparer.Ordinal)
+
+            If String.IsNullOrWhiteSpace(value) Then
+                Return tokens
+            End If
+
+            For Each token As String In value.Split(New Char() {","c, ";"c}, StringSplitOptions.RemoveEmptyEntries)
+                Dim trimmedToken As String = token.Trim()
+                If Not String.IsNullOrWhiteSpace(trimmedToken) Then
+                    tokens.Add(trimmedToken)
+                End If
+            Next
+
+            Return tokens
+        End Function
+
+        Private Shared Function DecodeRestrictedAccessValue(ByVal value As String, ByVal context As ISharedContext) As String
+            Dim rawValue As String = RemoveCR(If(value, "")).Trim()
+            If String.IsNullOrWhiteSpace(rawValue) Then
+                Return ""
+            End If
+
+            Dim codebasis As String = ResolveRestrictedAccessCodebasis(context)
+            If String.IsNullOrWhiteSpace(codebasis) Then
+                Return rawValue
+            End If
+
+            Dim decodedValue As String = DecodeString(rawValue, codebasis)
+            If String.IsNullOrWhiteSpace(decodedValue) OrElse
+               decodedValue.StartsWith("Error:", StringComparison.OrdinalIgnoreCase) Then
+                Return rawValue
+            End If
+
+            Return RemoveCR(decodedValue).Trim()
+        End Function
+
+        Private Shared Function ResolveRestrictedAccessCodebasis(ByVal context As ISharedContext) As String
+            Dim codebasis As String = ""
+
+            If context IsNot Nothing Then
+                codebasis = If(context.Codebasis, "")
+            End If
+
+            If String.IsNullOrWhiteSpace(codebasis) Then
+                If IsEmptyOrBlank(Int_CodeBasis) Then
+                    codebasis = GetFromRegistry(RegPath_Base, RegPath_CodeBasis, False)
+                Else
+                    codebasis = Int_CodeBasis
+                End If
+
+                If context IsNot Nothing Then
+                    context.Codebasis = codebasis
+                End If
+            End If
+
+            Return If(codebasis, "").Trim()
+        End Function
+
         ''' <summary>
         ''' Processes a single INI section dictionary and adds a corresponding <see cref="ModelConfig"/> to <paramref name="models"/>
         ''' if the section passes deprecation and tool-related filters.
@@ -376,6 +466,10 @@ Namespace SharedLibrary
                                                toolsOnly As Boolean)
             ' Exclude deprecated sections.
             If ParseBoolean(currentDict, "Depreciated") OrElse ParseBoolean(currentDict, "Deprecated") Then
+                Return
+            End If
+
+            If Not IsModelAccessibleForCurrentUser(currentDict, context) Then
                 Return
             End If
 
@@ -594,6 +688,10 @@ Namespace SharedLibrary
 
                             Dim lowered = raw.ToLowerInvariant()
                             If truthy.Contains(lowered) OrElse lowered = "1" Then
+                                If Not IsModelAccessibleForCurrentUser(currentDict, context) Then
+                                    Return False
+                                End If
+
                                 Dim mc = CreateModelConfigFromDict(currentDict, context, description)
                                 ApplyModelConfig(context, mc)
                                 Return True

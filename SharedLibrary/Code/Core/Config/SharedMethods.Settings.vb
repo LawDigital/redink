@@ -687,16 +687,17 @@ Namespace SharedLibrary
             AddHandler okButton.Click, Sub(sender, e)
 
                                            Dim SaveToMySettings As New Dictionary(Of String, String) From {
-                                                    {"DefaultPrefix", "DefaultPrefix"},
-                                                    {"ReplaceText2Override", "ReplaceText2Override"},
-                                                    {"MarkupMethodWordOverride", "MarkupMethodWordOverride"},
-                                                    {"MarkupMethodOutlookOverride", "MarkupMethodOutlookOverride"},
-                                                    {"MarkupAuthor", "MarkupAuthor"},
-                                                    {"KnowledgeStoreBackgroundIndexing", "EnableKBBackgroundIndexing"},
-                                                    {"KnowledgeStoreBackgroundIndexingWindow", "KnowledgeStoreBackgroundIndexingWindow"},
-                                                    {"FormulaInstruction", "FormulaInstruction"},
-                                                    {"SimpleMenuOverride", "SimpleMenuOverride"}
-                                                }
+                                                     {"DefaultPrefix", "DefaultPrefix"},
+                                                     {"ReplaceText2Override", "ReplaceText2Override"},
+                                                     {"RestrictedModelAccessCode", "RestrictedModelAccessCode"},
+                                                     {"MarkupMethodWordOverride", "MarkupMethodWordOverride"},
+                                                     {"MarkupMethodOutlookOverride", "MarkupMethodOutlookOverride"},
+                                                     {"MarkupAuthor", "MarkupAuthor"},
+                                                     {"KnowledgeStoreBackgroundIndexing", "EnableKBBackgroundIndexing"},
+                                                     {"KnowledgeStoreBackgroundIndexingWindow", "KnowledgeStoreBackgroundIndexingWindow"},
+                                                     {"FormulaInstruction", "FormulaInstruction"},
+                                                     {"SimpleMenuOverride", "SimpleMenuOverride"}
+                                                 }
 
                                            For Each settingKey In settingControls.Keys
                                                Dim control = settingControls(settingKey)
@@ -754,6 +755,7 @@ Namespace SharedLibrary
 
                                                Try
                                                    My.Settings.Save()
+                                                   BackupSharedUserSettingsToRegistry()
                                                Catch
                                                    ' Ignore save errors silently
                                                End Try
@@ -1675,7 +1677,7 @@ Namespace SharedLibrary
             Dim booleanSettings As New List(Of String) From {
         "DoubleS", "NoEmDash", "Clean", "MarkdownBubbles", "KeepFormat1", "MarkdownConvert", "ReplaceText1", "SimpleMenuOverride",
         "KeepFormat2", "KeepParaFormatInline", "ReplaceText2", "DoMarkupOutlook", "DoMarkupWord", "SimpleMenuDefault", "UseHostColorOutlook",
-        "APIDebug", "AutoPilotAutoStart", "AutoPilotSchedulerLocalChat", "ISearch_Approve", "ISearch", "Lib", "ContextMenu", "NoLocalConfig", "SecondAPI", "APIEncrypted", "APIEncrypted_2",
+        "APIDebug", "Crashlog", "AutoPilotAutoStart", "AutoPilotSchedulerLocalChat", "ISearch_Approve", "ISearch", "Lib", "ContextMenu", "NoLocalConfig", "SecondAPI", "APIEncrypted", "APIEncrypted_2",
         "OAuth2", "OAuth2_2", "PromptLib", "Ignore", "ToolingLogWindow", "ToolingDryRun", "ForceDrawioLocal", "AllowLegacyDocFiles", "EnablePrivacyForSearch",
         "UpdateIni", "UpdateIniAllowRemote", "UpdateIniNoSignature", "UpdateIniSilentLog", "NoHelperDownload", "LicenseCounterAnon", "KnowledgeStoreUseLLMIndex", "KnowledgeStoreBackgroundIndexing"
             }
@@ -1796,6 +1798,8 @@ Namespace SharedLibrary
                     Return context.INI_ReplaceText2.ToString()
                 Case "ReplaceText2Override"
                     Return context.INI_ReplaceText2Override
+                Case "RestrictedModelAccessCode"
+                    Return context.INI_RestrictedModelAccessCode
                 Case "DoMarkupOutlook"
                     Return context.INI_DoMarkupOutlook.ToString()
                 Case "DoMarkupWord"
@@ -1906,6 +1910,8 @@ Namespace SharedLibrary
                     Return context.INI_LogoPathLarge
                 Case "APIDebug"
                     Return context.INI_APIDebug.ToString()
+                Case "Crashlog"
+                    Return context.INI_Crashlog.ToString()
                 Case "UseHostColorOutlook"
                     Return context.INI_UseHostColorOutlook.ToString()
                 Case "AutoPilotAutoStart"
@@ -2201,6 +2207,8 @@ Namespace SharedLibrary
                     context.INI_ReplaceText2 = Boolean.Parse(value)
                 Case "ReplaceText2Override"
                     context.INI_ReplaceText2Override = value
+                Case "RestrictedModelAccessCode"
+                    context.INI_RestrictedModelAccessCode = value
                 Case "DoMarkupOutlook"
                     context.INI_DoMarkupOutlook = Boolean.Parse(value)
                 Case "DoMarkupWord"
@@ -2311,6 +2319,8 @@ Namespace SharedLibrary
                     context.INI_LogoPathLarge = value
                 Case "APIDebug"
                     context.INI_APIDebug = Boolean.Parse(value)
+                Case "Crashlog"
+                    context.INI_Crashlog = Boolean.Parse(value)
                 Case "UseHostColorOutlook"
                     context.INI_UseHostColorOutlook = Boolean.Parse(value)
                 Case "AutoPilotAutoStart"
@@ -2687,6 +2697,7 @@ Namespace SharedLibrary
                     {"ChunkOCR", context.INI_ChunkOCR.ToString()},
                     {"ChatCap", context.INI_ChatCap.ToString()},
                     {"APIDebug", context.INI_APIDebug.ToString()},
+                    {"Crashlog", context.INI_Crashlog.ToString()},
                     {"UseHostColorOutlook", context.INI_UseHostColorOutlook.ToString()},
                     {"AutoPilotAutoStart", context.INI_AutoPilotAutoStart.ToString()},
                     {"AutoPilotSchedulerLocalChat", context.INI_AutoPilotSchedulerLocalChat.ToString()},
@@ -2943,6 +2954,7 @@ Namespace SharedLibrary
                 Dim SaveToMySettings As New Dictionary(Of String, String) From {
                     {"DefaultPrefix", "DefaultPrefix"},
                     {"ReplaceText2Override", "ReplaceText2Override"},
+                    {"RestrictedModelAccessCode", "RestrictedModelAccessCode"},
                     {"MarkupMethodWordOverride", "MarkupMethodWordOverride"},
                     {"MarkupMethodOutlookOverride", "MarkupMethodOutlookOverride"},
                     {"MarkupAuthor", "MarkupAuthor"},
@@ -3063,6 +3075,7 @@ Namespace SharedLibrary
                         End If
                     Next
                     My.Settings.Save()
+                    BackupSharedUserSettingsToRegistry()
                 End If
 
                 context.INIloaded = False
@@ -4204,6 +4217,7 @@ Namespace SharedLibrary
             variableValues.Add("OAuth2Endpoint_2", context.INI_OAuth2Endpoint_2)
             variableValues.Add("OAuth2ATExpiry_2", context.INI_OAuth2ATExpiry_2)
             variableValues.Add("APIDebug", context.INI_APIDebug)
+            variableValues.Add("Crashlog", context.INI_Crashlog)
             variableValues.Add("UseHostColorOutlook", context.INI_UseHostColorOutlook)
             variableValues.Add("AutoPilotAutoStart", context.INI_AutoPilotAutoStart)
             variableValues.Add("AutoPilotSchedulerLocalChat", context.INI_AutoPilotSchedulerLocalChat)
@@ -4221,6 +4235,7 @@ Namespace SharedLibrary
             variableValues.Add("ReplaceText1", context.INI_ReplaceText1)
             variableValues.Add("ReplaceText2", context.INI_ReplaceText2)
             variableValues.Add("ReplaceText2Override", context.INI_ReplaceText2Override)
+            variableValues.Add("RestrictedModelAccessCode", context.INI_RestrictedModelAccessCode)
             variableValues.Add("DoMarkupOutlook", context.INI_DoMarkupOutlook)
             variableValues.Add("DoMarkupWord", context.INI_DoMarkupWord)
             variableValues.Add("ChunkOCR", context.INI_ChunkOCR)
@@ -4506,6 +4521,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("OAuth2Endpoint_2") Then context.INI_OAuth2Endpoint_2 = CStr(updatedValues("OAuth2Endpoint_2"))
                 If updatedValues.ContainsKey("OAuth2ATExpiry_2") Then context.INI_OAuth2ATExpiry_2 = CLng(updatedValues("OAuth2ATExpiry_2"))
                 If updatedValues.ContainsKey("APIDebug") Then context.INI_APIDebug = CBool(updatedValues("APIDebug"))
+                If updatedValues.ContainsKey("Crashlog") Then context.INI_Crashlog = CBool(updatedValues("Crashlog"))
                 If updatedValues.ContainsKey("UseHostColorOutlook") Then context.INI_UseHostColorOutlook = CBool(updatedValues("UseHostColorOutlook"))
                 If updatedValues.ContainsKey("AutoPilotAutoStart") Then context.INI_AutoPilotAutoStart = CBool(updatedValues("AutoPilotAutoStart"))
                 If updatedValues.ContainsKey("AutoPilotSchedulerLocalChat") Then context.INI_AutoPilotSchedulerLocalChat = CBool(updatedValues("AutoPilotSchedulerLocalChat"))
@@ -4523,6 +4539,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("ReplaceText1") Then context.INI_ReplaceText1 = CBool(updatedValues("ReplaceText1"))
                 If updatedValues.ContainsKey("ReplaceText2") Then context.INI_ReplaceText2 = CBool(updatedValues("ReplaceText2"))
                 If updatedValues.ContainsKey("ReplaceText2Override") Then context.INI_ReplaceText2Override = CStr(updatedValues("ReplaceText2Override"))
+                If updatedValues.ContainsKey("RestrictedModelAccessCode") Then context.INI_RestrictedModelAccessCode = CStr(updatedValues("RestrictedModelAccessCode"))
                 If updatedValues.ContainsKey("DoMarkupOutlook") Then context.INI_DoMarkupOutlook = CBool(updatedValues("DoMarkupOutlook"))
                 If updatedValues.ContainsKey("DoMarkupWord") Then context.INI_DoMarkupWord = CBool(updatedValues("DoMarkupWord"))
                 If updatedValues.ContainsKey("ChunkOCR") Then context.INI_ChunkOCR = CInt(updatedValues("ChunkOCR"))

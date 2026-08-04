@@ -1115,6 +1115,13 @@
                     "description": "Enable this to write the full request and response payloads for troubleshooting to debug files on the desktop as well as more log files (e.g., for tooling). Avoid enabling it in production unless you really need diagnostics. Example: False. [APIDebug]"
                 },
                 {
+                    "key": "Crashlog",
+                    "label": "Crash Diagnostics Log",
+                    "type": "boolean",
+                    "default": "False",
+                    "description": "Enable this for selected users to collect low-overhead crash and stability diagnostics when the host application (Word, Outlook or Excel) becomes unstable. When enabled, the add-in installs process-wide exception handlers and writes a diagnostics file (ri-crashlog.txt) under %APPDATA%\\redink. A change to this setting only takes effect on the next start of the host application. When disabled, no diagnostics handlers are installed and there is no performance impact. Example: False. [Crashlog]"
+                },
+                {
                     "key": "ToolingLogWindow",
                     "label": "Tooling Log Window",
                     "type": "boolean",

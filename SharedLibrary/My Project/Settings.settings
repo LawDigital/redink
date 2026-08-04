@@ -206,5 +206,8 @@
     <Setting Name="License_AdminUserIdMappingJson" Type="System.String" Scope="User">
       <Value Profile="(Default)" />
     </Setting>
+    <Setting Name="RestrictedModelAccessCode" Type="System.String" Scope="User">
+      <Value Profile="(Default)" />
+    </Setting>
   </Settings>
 </SettingsFile>
