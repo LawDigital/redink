@@ -168,6 +168,12 @@ Partial Public Class ThisAddIn
         Public Property NormalizedCallSignature As String
         Public Property WasDuplicateReplay As Boolean
 
+        ''' <summary>True when a repair-loop advisor determined the failure is terminal (budget exhausted or non-recoverable).</summary>
+        Public Property RepairLoopTerminal As Boolean
+
+        ''' <summary>Human-readable reason for <see cref="RepairLoopTerminal"/>, surfaced to abort/finalization handling.</summary>
+        Public Property RepairLoopTerminalReason As String
+
         ''' <summary>
         ''' Initializes a new tool response instance with default success state.
         ''' </summary>
@@ -1605,6 +1611,26 @@ Partial Public Class ThisAddIn
                         toolResponse.NormalizedCallSignature = normalizedToolCallSignature
                         context.AllToolResponses.Add(toolResponse)
 
+                        ' A python_execute (or similar) repair-loop advisor may signal that the failure is
+                        ' terminal (repair budget exhausted or non-recoverable). Route into the existing
+                        ' tool-error abort path so the loop stops instead of guessing further variations.
+                        If toolResponse.RepairLoopTerminal Then
+                            Dim repairAbortReason As String =
+                                If(String.IsNullOrWhiteSpace(toolResponse.RepairLoopTerminalReason),
+                                   "The repair loop was stopped because no further automatic recovery is possible.",
+                                   toolResponse.RepairLoopTerminalReason)
+
+                            context.LogWarn($"Aborting after terminal repair-loop outcome for '{tc.ToolName}'.",
+                                            details:=repairAbortReason)
+
+                            abortDueToToolError = True
+                            abortToolName = tc.ToolName
+                            abortToolParamSummary = BuildCondensedParamSummary(tc.Arguments)
+                            abortToolRawCallJson = tc.RawJson
+                            abortToolErrorMessage = repairAbortReason
+                            Exit For
+                        End If
+
                         If Not toolResponse.WasDuplicateReplay Then
                             SharedLibrary.Agents.ToolCallSequencing.NoteToolExecutionMetadata(
                                 context.SequencingState,
@@ -1741,6 +1767,31 @@ Partial Public Class ThisAddIn
                                 context.FailedToolCallCounts(toolCallSignature) += 1
                             Else
                                 context.FailedToolCallCounts(toolCallSignature) = 1
+                            End If
+
+                            ' A repair-loop advisor may signal that the failure is terminal (repair budget
+                            ' exhausted or non-recoverable). Stop the batch and request a no-tool finalization
+                            ' so the model produces a user-facing status instead of guessing further variations.
+                            ' This serves both Outlook loops (Local Agent and AutoPilot) that share this path.
+                            If toolResponse.RepairLoopTerminal Then
+                                Dim repairAbortReason As String =
+                                    If(String.IsNullOrWhiteSpace(toolResponse.RepairLoopTerminalReason),
+                                       "The repair loop was stopped because no further automatic recovery is possible.",
+                                       toolResponse.RepairLoopTerminalReason)
+
+                                context.LogWarn($"Stopping after terminal repair-loop outcome for '{tc.ToolName}'.",
+                                                details:=repairAbortReason)
+
+                                context.ForceNoToolFinalizationRequested = True
+                                context.ForceNoToolFinalizationReason = repairAbortReason
+                                context.PendingContinuationGuardPrompt = BuildToolFailureReassessmentGuardPrompt(tc.ToolName)
+                                context.PendingGuardTitle = "HOST TOOL FAILURE RECOVERY"
+                                context.PendingRejectedTurnExplanation =
+                                    "The previous tool step cannot be automatically recovered. Do not retry it; summarize the outcome for the user."
+                                context.PendingRejectedAssistantTurn = ""
+                                context.PrematureTextRetryCount = 0
+                                stopCurrentBatchAfterTool = True
+                                Exit For
                             End If
 
                             Select Case toolConfig.ToolErrorHandling?.ToLowerInvariant()

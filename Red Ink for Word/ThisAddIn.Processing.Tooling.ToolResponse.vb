@@ -82,6 +82,12 @@ Partial Public Class ThisAddIn
         Public Property NormalizedCallSignature As String
         Public Property WasDuplicateReplay As Boolean
 
+        ''' <summary>True when a repair-loop advisor determined the failure is terminal (budget exhausted or non-recoverable).</summary>
+        Public Property RepairLoopTerminal As Boolean
+
+        ''' <summary>Human-readable reason for <see cref="RepairLoopTerminal"/>, surfaced to abort/finalization handling.</summary>
+        Public Property RepairLoopTerminalReason As String
+
         ''' <summary>
         ''' Initializes a new tool response instance with default success state.
         ''' </summary>

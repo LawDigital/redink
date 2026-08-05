@@ -1423,6 +1423,30 @@ Partial Public Class ThisAddIn
         $"Tool error ({tc.ToolName}): {toolResponse.ErrorMessage}",
         details:=$"CallId={tc.CallId}; RawCall={tc.RawJson}")
 
+                            ' A repair-loop advisor may signal that the failure is terminal (repair budget
+                            ' exhausted or non-recoverable). Stop the batch and request a no-tool finalization
+                            ' so the model produces a user-facing status instead of guessing further variations.
+                            If toolResponse.RepairLoopTerminal Then
+                                Dim repairAbortReason As String =
+                                    If(String.IsNullOrWhiteSpace(toolResponse.RepairLoopTerminalReason),
+                                       "The repair loop was stopped because no further automatic recovery is possible.",
+                                       toolResponse.RepairLoopTerminalReason)
+
+                                context.LogWarn($"Stopping after terminal repair-loop outcome for '{tc.ToolName}'.",
+                                                details:=repairAbortReason)
+
+                                context.ForceNoToolFinalizationRequested = True
+                                context.ForceNoToolFinalizationReason = repairAbortReason
+                                context.PendingContinuationGuardPrompt = BuildToolFailureReassessmentGuardPrompt(tc.ToolName)
+                                context.PendingGuardTitle = "HOST TOOL FAILURE RECOVERY"
+                                context.PendingRejectedTurnExplanation =
+                                    "The previous tool step cannot be automatically recovered. Do not retry it; summarize the outcome for the user."
+                                context.PendingRejectedAssistantTurn = ""
+                                context.PrematureTextRetryCount = 0
+                                stopCurrentBatchAfterTool = True
+                                Exit For
+                            End If
+
                             Select Case toolConfig.ToolErrorHandling?.ToLowerInvariant()
                                 Case "abort"
                                     context.LogError("Aborting due to tool error (ToolErrorHandling=abort)")

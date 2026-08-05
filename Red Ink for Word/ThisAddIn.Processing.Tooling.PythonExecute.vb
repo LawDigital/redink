@@ -159,6 +159,18 @@ Partial Public Class ThisAddIn
             response.Success = result.Success
             response.ErrorCode = If(result.Success, String.Empty, result.ErrorCode)
             response.ErrorMessage = If(result.Success, String.Empty, result.ErrorMessage)
+
+            ' Annotate the model-facing payload with retry-vs-repair semantics and attempt history so the
+            ' Word tooling loop stops guessing nonexistent APIs after deterministic Python errors. The
+            ' ToolExecutionContext keys the per-session repair history. A terminal outcome (repair budget
+            ' exhausted or non-recoverable) is flagged on the response so the tooling loop can abort via its
+            ' existing tool-error abort path instead of iterating further.
+            Dim pythonTerminalReason As String = Nothing
+            response.Response = Agents.PythonExecuteRepairAdvisor.Annotate(context, toolCall.Arguments, response.Response, response.Success, pythonTerminalReason)
+            If Not String.IsNullOrEmpty(pythonTerminalReason) Then
+                response.RepairLoopTerminal = True
+                response.RepairLoopTerminalReason = pythonTerminalReason
+            End If
         End If
 
         ToolingFileLogger.LogRawResponseStub("Internal tool (python_execute)", response.Response)
