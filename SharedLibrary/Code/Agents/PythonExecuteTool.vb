@@ -89,7 +89,8 @@ Namespace Agents
                 .ModelDescription = "Secure Python Execution" & displaySuffix,
                 .Tool = True,
                 .ToolPriority = toolPriority,
-                .ToolErrorHandling = "skip"
+                .ToolErrorHandling = "skip",
+                .PrefersSingleInvocation = True
             }
         End Function
 

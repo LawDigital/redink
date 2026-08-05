@@ -44,6 +44,11 @@ Namespace Agents
             "If a later step depends on inspecting the result of an earlier tool call, emit only the earlier call and wait for its result before deciding the next call." & vbCrLf &
             "Do not rely on the host to rewrite, infer, defer, queue, or replay omitted tool calls."
 
+        Public Const ConsolidatableToolConsolidationInstruction As String =
+            "A tool designed to complete an entire task in a single call has already run successfully in this session." & vbCrLf &
+            "Do not issue additional calls to that tool for work that could have been included in the earlier call." & vbCrLf &
+            "Only call it again if you genuinely must inspect the earlier result before deciding the next step; otherwise consolidate all remaining deterministic processing into one call."
+
         Public Const UnresolvedToolFailureCode As String = "unresolved_tool_failure"
         Public Const InvalidTextOnlyFinalizationCode As String = "invalid_text_only_finalization"
         Public Const MissingRequiredMemoryAccessCode As String = "missing_required_memory_access"
@@ -253,6 +258,35 @@ Namespace Agents
             Public Property LastToolOutputMimeType As String
             Public Property LastToolOutputKind As String
             Public Property AnyUserDeliverableProducedThisRun As Boolean
+
+            Public Property ConsolidatableToolSuccessCounts As Dictionary(Of String, Integer)
+            Public Property LastConsolidatableToolName As String
+
+            Public Function NoteConsolidatableToolSuccess(toolName As String) As Integer
+                If String.IsNullOrWhiteSpace(toolName) Then Return 0
+
+                If ConsolidatableToolSuccessCounts Is Nothing Then
+                    ConsolidatableToolSuccessCounts =
+                        New Dictionary(Of String, Integer)(StringComparer.OrdinalIgnoreCase)
+                End If
+
+                Dim current As Integer = 0
+                ConsolidatableToolSuccessCounts.TryGetValue(toolName, current)
+                current += 1
+                ConsolidatableToolSuccessCounts(toolName) = current
+                LastConsolidatableToolName = toolName
+                Return current
+            End Function
+
+            Public ReadOnly Property HasRepeatedConsolidatableToolCalls As Boolean
+                Get
+                    If ConsolidatableToolSuccessCounts Is Nothing Then Return False
+                    For Each pair In ConsolidatableToolSuccessCounts
+                        If pair.Value > 1 Then Return True
+                    Next
+                    Return False
+                End Get
+            End Property
 
             Public Property MemoryGroundingMode As MemoryGroundingMode
             Public Property MemoryGroundingAuthority As MemoryGroundingAuthority
@@ -2256,6 +2290,17 @@ Namespace Agents
                 runState.LastProcessedItemCount = If(runState.LastProcessedItemCount, 0) + 1
             End If
         End Sub
+
+        ''' <summary>
+        ''' Returns corrective guidance when a tool flagged as single-invocation-preferring has already run
+        ''' successfully in the session, so the model consolidates remaining work instead of issuing repeated,
+        ''' expensive re-invocations. Returns an empty string when no such repetition risk exists.
+        ''' </summary>
+        Public Shared Function BuildConsolidatableToolGuidance(runState As ToolingRunState) As String
+            If runState Is Nothing Then Return ""
+            If String.IsNullOrWhiteSpace(runState.LastConsolidatableToolName) Then Return ""
+            Return ConsolidatableToolConsolidationInstruction
+        End Function
 
         Public Shared Function BuildTaskStatusFooter(status As String, reason As String) As String
             Dim normalizedStatus As String = If(status, "").Trim().ToLowerInvariant()

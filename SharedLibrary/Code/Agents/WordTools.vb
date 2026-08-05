@@ -150,7 +150,17 @@ Namespace Agents
             Dim ignoreCase As Boolean = GetBool(args, "ignore_case", True)
             Dim maxHits As Integer = System.Math.Min(System.Math.Max(GetInt(args, "max_hits", 50), 1), 500)
 
-            Using doc As WordprocessingDocument = WordprocessingDocument.Open(p, isEditable:=False)
+            ' Fast-fail read: opening the package directly can block for minutes when the file is
+            ' open/locked in Word, on a slow network share, or an un-hydrated cloud placeholder.
+            ' Copy the bytes with shared read access under a bounded wait, then open from memory so
+            ' a stalled file surfaces a clear error instead of hanging the agent loop.
+            Dim documentBytes As Byte() = Nothing
+            Dim readErrorMessage As String = Nothing
+            If Not TryReadAllBytesFastFail(p, documentBytes, readErrorMessage) Then
+                Return Err_("file_unavailable", readErrorMessage)
+            End If
+
+            Using doc As WordprocessingDocument = WordprocessingDocument.Open(New MemoryStream(documentBytes, writable:=False), isEditable:=False)
                 Dim paragraphs As List(Of ParagraphRow) = ExtractParagraphs(doc)
                 Dim hits As New List(Of Object)()
                 Dim cmp As StringComparison = If(ignoreCase, StringComparison.OrdinalIgnoreCase, StringComparison.Ordinal)
@@ -1924,6 +1934,53 @@ Namespace Agents
                 Key .match = match,
                 Key .context = ctx
             }
+        End Function
+
+        ' Reads a file's bytes with shared read/write access under a bounded wait so a document
+        ' that is open/locked in Word, on a slow/unavailable network share, or an un-hydrated
+        ' cloud placeholder fails fast with a clear message instead of blocking for minutes.
+        Private Shared Function TryReadAllBytesFastFail(path As String,
+                                                        ByRef bytes As Byte(),
+                                                        ByRef errorMessage As String) As Boolean
+            bytes = Nothing
+            errorMessage = Nothing
+
+            Try
+                Dim attrs As System.IO.FileAttributes = File.GetAttributes(path)
+                If (attrs And System.IO.FileAttributes.Offline) <> 0 Then
+                    errorMessage = "The document is not available locally (offline/cloud placeholder). Open or download it first, then retry."
+                    Return False
+                End If
+            Catch
+            End Try
+
+            ' Copy ByRef parameter to a local before using it inside the lambda.
+            Dim localPath As String = path
+            Dim readTask As System.Threading.Tasks.Task(Of Byte()) =
+                System.Threading.Tasks.Task.Run(
+                    Function() As Byte()
+                        Using fs As New FileStream(localPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
+                            Using buffer As New MemoryStream()
+                                fs.CopyTo(buffer)
+                                Return buffer.ToArray()
+                            End Using
+                        End Using
+                    End Function)
+
+            If Not readTask.Wait(TimeSpan.FromSeconds(15)) Then
+                errorMessage = "Reading the document timed out (it may be locked by another application or stored on a slow/unavailable location)."
+                Return False
+            End If
+
+            If readTask.IsFaulted Then
+                Dim ex As System.Exception = readTask.Exception
+                If ex IsNot Nothing AndAlso ex.InnerException IsNot Nothing Then ex = ex.InnerException
+                errorMessage = "Could not read the document: " & If(ex Is Nothing, "unknown error", ex.Message)
+                Return False
+            End If
+
+            bytes = readTask.Result
+            Return True
         End Function
 
         Private Shared Function Err_(code As String, message As String) As String

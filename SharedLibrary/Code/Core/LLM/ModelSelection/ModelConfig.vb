@@ -73,6 +73,11 @@ Namespace SharedLibrary
         Public Property ToolErrorHandling As String = "skip"
         Public Property APICall_ToolCallPart_Template As String = ""
 
+        ' Project preference: capability-driven flag (not tool-specific) marking tools that are designed to
+        ' complete an entire logical task in a single call (e.g. sandboxed script execution). The tooling loop
+        ' uses this to discourage repeated, expensive re-invocations for work that could have been consolidated.
+        Public Property PrefersSingleInvocation As Boolean = False
+
         Public Function Clone() As ModelConfig
             Return DirectCast(Me.MemberwiseClone(), ModelConfig)
         End Function

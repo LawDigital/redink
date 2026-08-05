@@ -296,6 +296,12 @@ Partial Public Class ThisAddIn
             sb.AppendLine("Continue with any remaining requested deliverables. Do not finalize until the full request is complete, or explain briefly why it cannot be completed.")
         End If
 
+        Dim consolidationGuidance As String =
+            SharedLibrary.Agents.ToolCallSequencing.BuildConsolidatableToolGuidance(context.SequencingState)
+        If Not String.IsNullOrWhiteSpace(consolidationGuidance) Then
+            sb.AppendLine(consolidationGuidance)
+        End If
+
         sb.AppendLine("[/HOST REQUEST CONTINUITY]")
         Return sb.ToString().TrimEnd()
     End Function
@@ -1657,6 +1663,10 @@ Partial Public Class ThisAddIn
                             Else
                                 If context.SequencingState IsNot Nothing Then
                                     context.SequencingState.NoteSuccessfulProgress()
+
+                                    If toolConfig IsNot Nothing AndAlso toolConfig.PrefersSingleInvocation Then
+                                        context.SequencingState.NoteConsolidatableToolSuccess(tc.ToolName)
+                                    End If
                                 End If
                             End If
 

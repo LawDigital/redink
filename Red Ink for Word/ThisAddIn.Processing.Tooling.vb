@@ -1315,6 +1315,10 @@ Partial Public Class ThisAddIn
                             Else
                                 If context.SequencingState IsNot Nothing Then
                                     context.SequencingState.NoteSuccessfulProgress()
+
+                                    If toolConfig IsNot Nothing AndAlso toolConfig.PrefersSingleInvocation Then
+                                        context.SequencingState.NoteConsolidatableToolSuccess(tc.ToolName)
+                                    End If
                                 End If
                             End If
 
