@@ -72,6 +72,7 @@ Namespace Agents
         Public Property LastSymbol As System.String
         Public Property LastLine As System.Int32
         Public Property LastExceptionType As System.String
+        Public Property LastClassification As PythonExecuteOutcomeClass = PythonExecuteOutcomeClass.SUCCESS
     End Class
 
     Public NotInheritable Class PythonExecuteRepairAdvisor
@@ -186,6 +187,7 @@ Namespace Agents
                 AdvanceBudget(session, classification)
 
                 Dim regression As System.String = DetectSuspiciousRepair(session.LastCodeText, codeText)
+                Dim repairRejected As System.Boolean = Not System.String.IsNullOrEmpty(regression)
 
                 session.LastFingerprint = fingerprint
                 session.LastCodeHash = codeHash
@@ -193,19 +195,26 @@ Namespace Agents
                 session.LastSymbol = symbol
                 session.LastLine = line
                 session.LastExceptionType = exceptionType
+                session.LastClassification = classification
 
                 ' Surface a terminal reason so the host loop can stop offering the tool this turn.
                 If classification = PythonExecuteOutcomeClass.REPAIR_BUDGET_EXHAUSTED Then
                     terminalReason = "python_execute repair budget exhausted or no progress across attempts (fingerprint=" & fingerprint & ")."
                 ElseIf classification = PythonExecuteOutcomeClass.NON_RECOVERABLE_FAILURE Then
                     terminalReason = "python_execute reported a non-recoverable failure (code=" & code & ")."
+                ElseIf repairRejected Then
+                    ' A destructive/degrading "repair" is rejected outright instead of accepted as progress:
+                    ' stop the automatic loop and report, rather than silently continuing with degraded code
+                    ' (suppressed errors, removed outputs/validation, dummy results, deleted functionality).
+                    terminalReason = "python_execute repair rejected: the proposed change is not a minimal repair (" & regression & ")."
                 End If
 
                 ' Override the raw retryable flag: only a genuinely transient outcome may repeat unchanged.
                 errorObj("retryable") = New Newtonsoft.Json.Linq.JValue(classification = PythonExecuteOutcomeClass.TRANSIENT_FAILURE)
                 errorObj("repairable") = New Newtonsoft.Json.Linq.JValue(
-                    classification = PythonExecuteOutcomeClass.CODE_REPAIR_REQUIRED OrElse
-                    classification = PythonExecuteOutcomeClass.DIAGNOSTIC_RUN_REQUIRED)
+                    (classification = PythonExecuteOutcomeClass.CODE_REPAIR_REQUIRED OrElse
+                     classification = PythonExecuteOutcomeClass.DIAGNOSTIC_RUN_REQUIRED) AndAlso
+                    Not repairRejected)
 
                 Dim advisor As New Newtonsoft.Json.Linq.JObject(
                     New Newtonsoft.Json.Linq.JProperty("classification", classification.ToString()),
@@ -222,8 +231,9 @@ Namespace Agents
                     New Newtonsoft.Json.Linq.JProperty("max_transient_retries", session.Limits.MaxTransientRetries),
                     New Newtonsoft.Json.Linq.JProperty("diagnostic_runs_used", session.DiagnosticRunsUsed),
                     New Newtonsoft.Json.Linq.JProperty("max_diagnostic_runs", session.Limits.MaxDiagnosticRuns),
-                    New Newtonsoft.Json.Linq.JProperty("guidance", BuildGuidance(classification, exceptionType, objectType, symbol)),
+                    New Newtonsoft.Json.Linq.JProperty("guidance", BuildGuidance(classification, exceptionType, objectType, symbol, RedactSensitive(rawMessage))),
                     New Newtonsoft.Json.Linq.JProperty("suspicious_repair", ToJsonValue(regression)),
+                    New Newtonsoft.Json.Linq.JProperty("repair_rejected", repairRejected),
                     New Newtonsoft.Json.Linq.JProperty("attempt_history", BuildHistoryJson(session)))
 
                 errorObj("advisor") = advisor
@@ -232,6 +242,164 @@ Namespace Agents
             Catch ex As System.Exception
                 System.Diagnostics.Trace.WriteLine(ex.ToString())
                 Return payloadJson
+            End Try
+        End Function
+
+        ''' <summary>
+        ''' Pre-execution guard that rejects an unchanged deterministic resubmission BEFORE the worker is
+        ''' started, so a prior code-repair/diagnostic classification that produced no code change does not
+        ''' waste a worker invocation. Returns True and emits a model-facing rejection payload only when the
+        ''' previous outcome required a code change and the newly proposed code hashes identically. Never
+        ''' throws; on any problem it returns False so normal execution proceeds. A rejected submission is
+        ''' NOT counted as a worker attempt and does not mutate the session state.
+        ''' </summary>
+        ''' <param name="sessionKey">The tooling-loop session object (same key passed to Annotate).</param>
+        ''' <param name="arguments">The proposed python_execute arguments (the "code" value is hashed).</param>
+        ''' <param name="rejectionPayload">Receives the model-facing rejection JSON when True is returned.</param>
+        Public Shared Function ShouldRejectUnchangedResubmission(
+            sessionKey As System.Object,
+            arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+            ByRef rejectionPayload As System.String
+        ) As System.Boolean
+
+            rejectionPayload = System.String.Empty
+
+            Try
+                Dim session As PythonExecuteRepairSession = GetOrCreateSession(sessionKey)
+
+                ' Only a prior deterministic code-repair/diagnostic outcome may block an unchanged resubmission.
+                If session.LastClassification <> PythonExecuteOutcomeClass.CODE_REPAIR_REQUIRED AndAlso
+                   session.LastClassification <> PythonExecuteOutcomeClass.DIAGNOSTIC_RUN_REQUIRED Then
+                    Return False
+                End If
+
+                If System.String.IsNullOrEmpty(session.LastCodeHash) Then
+                    Return False
+                End If
+
+                Dim codeText As System.String = ReadCodeArgument(arguments)
+                If System.String.IsNullOrEmpty(codeText) Then
+                    Return False
+                End If
+
+                Dim codeHash As System.String = ComputeHash(codeText)
+                If Not System.String.Equals(session.LastCodeHash, codeHash, System.StringComparison.Ordinal) Then
+                    Return False
+                End If
+
+                Dim advisorObj As New Newtonsoft.Json.Linq.JObject(
+                    New Newtonsoft.Json.Linq.JProperty("classification", session.LastClassification.ToString()),
+                    New Newtonsoft.Json.Linq.JProperty("fingerprint", If(session.LastFingerprint, System.String.Empty)),
+                    New Newtonsoft.Json.Linq.JProperty("fingerprint_changed", False),
+                    New Newtonsoft.Json.Linq.JProperty("unchanged_resubmission", True),
+                    New Newtonsoft.Json.Linq.JProperty("worker_invoked", False),
+                    New Newtonsoft.Json.Linq.JProperty("guidance", "Do not resubmit the same code after a deterministic failure. State the concrete root cause and change the smallest region that caused the error, preserving all existing functionality and outputs."),
+                    New Newtonsoft.Json.Linq.JProperty("code_repairs_used", session.CodeRepairsUsed),
+                    New Newtonsoft.Json.Linq.JProperty("max_code_repairs", session.Limits.MaxCodeRepairs),
+                    New Newtonsoft.Json.Linq.JProperty("attempt_history", BuildHistoryJson(session)))
+
+                Dim errorObj As New Newtonsoft.Json.Linq.JObject(
+                    New Newtonsoft.Json.Linq.JProperty("code", "UNCHANGED_RESUBMISSION_REJECTED"),
+                    New Newtonsoft.Json.Linq.JProperty("phase", "pre_execution"),
+                    New Newtonsoft.Json.Linq.JProperty("retryable", False),
+                    New Newtonsoft.Json.Linq.JProperty("repairable", True),
+                    New Newtonsoft.Json.Linq.JProperty("source", Newtonsoft.Json.Linq.JValue.CreateNull()),
+                    New Newtonsoft.Json.Linq.JProperty("message", "The submitted Python program is unchanged from the previous deterministic failure. It will fail identically. Modify the failing code before executing it again."),
+                    New Newtonsoft.Json.Linq.JProperty("advisor", advisorObj))
+
+                Dim payload As New Newtonsoft.Json.Linq.JObject(
+                    New Newtonsoft.Json.Linq.JProperty("status", "failed"),
+                    New Newtonsoft.Json.Linq.JProperty("exit_code", 1),
+                    New Newtonsoft.Json.Linq.JProperty("duration_ms", 0),
+                    New Newtonsoft.Json.Linq.JProperty("diagnostic_id", System.Guid.NewGuid().ToString("D")),
+                    New Newtonsoft.Json.Linq.JProperty("human_log_available", False),
+                    New Newtonsoft.Json.Linq.JProperty("result", Newtonsoft.Json.Linq.JValue.CreateNull()),
+                    New Newtonsoft.Json.Linq.JProperty("output_files", New Newtonsoft.Json.Linq.JArray()),
+                    New Newtonsoft.Json.Linq.JProperty("error", errorObj))
+
+                rejectionPayload = payload.ToString(Newtonsoft.Json.Formatting.None)
+                Return True
+
+            Catch ex As System.Exception
+                System.Diagnostics.Trace.WriteLine(ex.ToString())
+                rejectionPayload = System.String.Empty
+                Return False
+            End Try
+        End Function
+
+        ''' <summary>
+        ''' Pre-execution guard that rejects a proposed "repair" whose diff against the previously failed
+        ''' program is destructive (removed publish_result/output_path, removed a function/class, a newly
+        ''' introduced broad try/except, or a large net deletion) BEFORE the worker is started. Unlike the
+        ''' post-execution enforcement in Annotate, this early rejection leaves the task repairable so the model
+        ''' can submit a correct minimal repair; it consumes no budget and does not mutate session state. Only
+        ''' applies after a prior deterministic code-repair/diagnostic outcome. Identical resubmissions are the
+        ''' concern of ShouldRejectUnchangedResubmission and are ignored here. Never throws.
+        ''' </summary>
+        Public Shared Function ShouldRejectSuspiciousRepair(
+            sessionKey As System.Object,
+            arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+            ByRef rejectionPayload As System.String
+        ) As System.Boolean
+
+            rejectionPayload = System.String.Empty
+
+            Try
+                Dim session As PythonExecuteRepairSession = GetOrCreateSession(sessionKey)
+
+                If session.LastClassification <> PythonExecuteOutcomeClass.CODE_REPAIR_REQUIRED AndAlso
+                   session.LastClassification <> PythonExecuteOutcomeClass.DIAGNOSTIC_RUN_REQUIRED Then
+                    Return False
+                End If
+                If System.String.IsNullOrEmpty(session.LastCodeText) OrElse System.String.IsNullOrEmpty(session.LastCodeHash) Then
+                    Return False
+                End If
+
+                Dim codeText As System.String = ReadCodeArgument(arguments)
+                If System.String.IsNullOrEmpty(codeText) Then Return False
+
+                ' An identical resubmission is handled by the unchanged-resubmission guard, not here.
+                If System.String.Equals(session.LastCodeHash, ComputeHash(codeText), System.StringComparison.Ordinal) Then
+                    Return False
+                End If
+
+                Dim regression As System.String = DetectSuspiciousRepair(session.LastCodeText, codeText)
+                If System.String.IsNullOrEmpty(regression) Then Return False
+
+                Dim advisorObj As New Newtonsoft.Json.Linq.JObject(
+                    New Newtonsoft.Json.Linq.JProperty("classification", PythonExecuteOutcomeClass.CODE_REPAIR_REQUIRED.ToString()),
+                    New Newtonsoft.Json.Linq.JProperty("repair_rejected", True),
+                    New Newtonsoft.Json.Linq.JProperty("unchanged_resubmission", False),
+                    New Newtonsoft.Json.Linq.JProperty("worker_invoked", False),
+                    New Newtonsoft.Json.Linq.JProperty("guidance", regression),
+                    New Newtonsoft.Json.Linq.JProperty("attempt_history", BuildHistoryJson(session)))
+
+                Dim errorObj As New Newtonsoft.Json.Linq.JObject(
+                    New Newtonsoft.Json.Linq.JProperty("code", "SUSPICIOUS_REPAIR_REJECTED"),
+                    New Newtonsoft.Json.Linq.JProperty("phase", "pre_execution"),
+                    New Newtonsoft.Json.Linq.JProperty("retryable", False),
+                    New Newtonsoft.Json.Linq.JProperty("repairable", True),
+                    New Newtonsoft.Json.Linq.JProperty("source", Newtonsoft.Json.Linq.JValue.CreateNull()),
+                    New Newtonsoft.Json.Linq.JProperty("message", "The proposed change was not executed because it is not a minimal repair. " & regression),
+                    New Newtonsoft.Json.Linq.JProperty("advisor", advisorObj))
+
+                Dim payload As New Newtonsoft.Json.Linq.JObject(
+                    New Newtonsoft.Json.Linq.JProperty("status", "failed"),
+                    New Newtonsoft.Json.Linq.JProperty("exit_code", 1),
+                    New Newtonsoft.Json.Linq.JProperty("duration_ms", 0),
+                    New Newtonsoft.Json.Linq.JProperty("diagnostic_id", System.Guid.NewGuid().ToString("D")),
+                    New Newtonsoft.Json.Linq.JProperty("human_log_available", False),
+                    New Newtonsoft.Json.Linq.JProperty("result", Newtonsoft.Json.Linq.JValue.CreateNull()),
+                    New Newtonsoft.Json.Linq.JProperty("output_files", New Newtonsoft.Json.Linq.JArray()),
+                    New Newtonsoft.Json.Linq.JProperty("error", errorObj))
+
+                rejectionPayload = payload.ToString(Newtonsoft.Json.Formatting.None)
+                Return True
+
+            Catch ex As System.Exception
+                System.Diagnostics.Trace.WriteLine(ex.ToString())
+                rejectionPayload = System.String.Empty
+                Return False
             End Try
         End Function
 
@@ -367,6 +535,7 @@ Namespace Agents
             session.LastSymbol = Nothing
             session.LastLine = 0
             session.LastExceptionType = Nothing
+            session.LastClassification = PythonExecuteOutcomeClass.SUCCESS
         End Sub
 
         ' ─────────────────────────────────────────────────────────────────────
@@ -374,6 +543,56 @@ Namespace Agents
         ' ─────────────────────────────────────────────────────────────────────
 
         Private Shared Function BuildGuidance(
+            classification As PythonExecuteOutcomeClass,
+            exceptionType As System.String,
+            objectType As System.String,
+            symbol As System.String,
+            message As System.String
+        ) As System.String
+            Dim baseGuidance As System.String = BuildGuidanceCore(classification, exceptionType, objectType, symbol)
+            Dim hint As System.String = BuildBoundaryHint(message)
+            If Not System.String.IsNullOrEmpty(hint) AndAlso
+               (classification = PythonExecuteOutcomeClass.CODE_REPAIR_REQUIRED OrElse
+                classification = PythonExecuteOutcomeClass.DIAGNOSTIC_RUN_REQUIRED) Then
+                Return hint & " " & baseGuidance
+            End If
+            Return baseGuidance
+        End Function
+
+        ''' <summary>
+        ''' Maps a sanitized error message for a known library/serialization boundary error to a specific,
+        ''' safe repair hint. Returns an empty string when no known boundary pattern matches. Operates only on
+        ''' the already-redacted message text, never on raw exception text.
+        ''' </summary>
+        Private Shared Function BuildBoundaryHint(message As System.String) As System.String
+            If System.String.IsNullOrEmpty(message) Then Return System.String.Empty
+            If ContainsCI(message, "unsupported type tuple") Then
+                Return "Published results must be JSON-compatible: convert tuples recursively to lists (or dictionaries with string keys) before publish_result()."
+            End If
+            If ContainsCI(message, "unsupported type set") Then
+                Return "Published results must be JSON-compatible: convert sets to deterministic lists before publish_result()."
+            End If
+            If ContainsCI(message, "WindowsPath") OrElse ContainsCI(message, "PosixPath") OrElse ContainsCI(message, "as a filename or file") Then
+                Return "A pathlib.Path was passed where a string filename was required: convert it with str(path) only at that third-party API boundary (for example SimpleDocTemplate(str(output_path)))."
+            End If
+            If ContainsCI(message, "has no attribute") AndAlso ContainsCI(message, "Header") AndAlso ContainsCI(message, "text") Then
+                Return "python-docx header objects have no universal .text property: read text from section.header.paragraphs (join their .text) and, if needed, section.header.tables."
+            End If
+            If ContainsCI(message, "type Path is not JSON serializable") Then
+                Return "Convert pathlib.Path values to strings with str(path) before publish_result()."
+            End If
+            If ContainsCI(message, "type datetime is not JSON serializable") Then
+                Return "Convert datetime values to ISO 8601 strings (value.isoformat()) before publish_result()."
+            End If
+            Return System.String.Empty
+        End Function
+
+        Private Shared Function ContainsCI(haystack As System.String, needle As System.String) As System.Boolean
+            If System.String.IsNullOrEmpty(haystack) OrElse System.String.IsNullOrEmpty(needle) Then Return False
+            Return haystack.IndexOf(needle, System.StringComparison.OrdinalIgnoreCase) >= 0
+        End Function
+
+        Private Shared Function BuildGuidanceCore(
             classification As PythonExecuteOutcomeClass,
             exceptionType As System.String,
             objectType As System.String,
@@ -420,7 +639,7 @@ Namespace Agents
             Select Case code
                 Case "PYTHON_SYNTAX_ERROR", "PYTHON_NAME_ERROR", "PYTHON_IMPORT_ERROR",
                      "PYTHON_ATTRIBUTE_ERROR", "PYTHON_TYPE_ERROR", "PYTHON_VALUE_ERROR",
-                     "PYTHON_KEY_ERROR", "PYTHON_INDEX_ERROR"
+                     "PYTHON_KEY_ERROR", "PYTHON_INDEX_ERROR", "TASK_POSTCONDITION_FAILED"
                     Return True
                 Case Else
                     Return False
@@ -519,6 +738,101 @@ Namespace Agents
 
             Return "The proposed change does not look like a minimal repair (" & System.String.Join("; ", warnings) &
                    "). Restore the removed functionality and outputs, then fix only the smallest region that caused the error."
+        End Function
+
+        ''' <summary>
+        ''' Task-postcondition guard, distinct from worker success: given a SUCCESS payload, verifies that the
+        ''' run actually produced a valid, observable outcome. Returns True and emits a synthetic failure
+        ''' payload (code TASK_POSTCONDITION_FAILED) when the task did not really complete, so the host can flag
+        ''' the call as unsuccessful and let the normal repair loop annotate it. Returns False (met) for a
+        ''' genuine, observable result. Never throws; on any parsing problem it returns False, so a real success
+        ''' is never turned into a spurious failure. Intentionally minimal and contract-driven: it checks only
+        ''' postconditions the payload already carries (an observable result or output file, and non-empty
+        ''' declared output files). Format-specific validation (e.g. re-opening a DOCX, verifying a PDF header)
+        ''' can be layered on by the host where it has enough information to do so safely.
+        ''' </summary>
+        Public Shared Function TryBuildIncompleteTaskPayload(
+            sessionKey As System.Object,
+            arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+            successPayloadJson As System.String,
+            ByRef incompletePayload As System.String
+        ) As System.Boolean
+
+            incompletePayload = System.String.Empty
+            If System.String.IsNullOrWhiteSpace(successPayloadJson) Then Return False
+
+            Try
+                Dim payload As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(successPayloadJson)
+
+                ' Never replace a real worker failure: only genuinely successful runs are evaluated.
+                If Not System.String.Equals(ReadString(payload("status")), "success", System.StringComparison.Ordinal) Then
+                    Return False
+                End If
+
+                ' Diagnostic runs are exempt from the observable-outcome contract.
+                Dim session As PythonExecuteRepairSession = GetOrCreateSession(sessionKey)
+                If session.LastClassification = PythonExecuteOutcomeClass.DIAGNOSTIC_RUN_REQUIRED Then
+                    Return False
+                End If
+
+                Dim resultToken As Newtonsoft.Json.Linq.JToken = payload("result")
+                Dim hasResult As System.Boolean = resultToken IsNot Nothing AndAlso resultToken.Type <> Newtonsoft.Json.Linq.JTokenType.Null
+
+                Dim outputs As Newtonsoft.Json.Linq.JArray = TryCast(payload("output_files"), Newtonsoft.Json.Linq.JArray)
+                Dim outputCount As System.Int32 = If(outputs Is Nothing, 0, outputs.Count)
+
+                Dim postcondition As System.String = Nothing
+                Dim outputName As System.String = Nothing
+                Dim message As System.String = Nothing
+
+                If Not hasResult AndAlso outputCount = 0 Then
+                    postcondition = "observable_outcome_required"
+                    message = "The Python program completed but produced no published result or output file."
+                ElseIf outputs IsNot Nothing Then
+                    For Each entry As Newtonsoft.Json.Linq.JToken In outputs
+                        Dim entryObj As Newtonsoft.Json.Linq.JObject = TryCast(entry, Newtonsoft.Json.Linq.JObject)
+                        If entryObj Is Nothing Then Continue For
+                        If ReadLong(entryObj("bytes")) <= 0L Then
+                            postcondition = "non_empty_output"
+                            outputName = ReadString(entryObj("name"))
+                            message = "The declared output file is empty."
+                            Exit For
+                        End If
+                    Next
+                End If
+
+                If postcondition Is Nothing Then Return False
+
+                Dim errorObj As New Newtonsoft.Json.Linq.JObject(
+                    New Newtonsoft.Json.Linq.JProperty("code", "TASK_POSTCONDITION_FAILED"),
+                    New Newtonsoft.Json.Linq.JProperty("phase", "postcondition"),
+                    New Newtonsoft.Json.Linq.JProperty("retryable", False),
+                    New Newtonsoft.Json.Linq.JProperty("source", Newtonsoft.Json.Linq.JValue.CreateNull()),
+                    New Newtonsoft.Json.Linq.JProperty("message", message),
+                    New Newtonsoft.Json.Linq.JProperty("postcondition", postcondition))
+                If Not System.String.IsNullOrEmpty(outputName) Then
+                    errorObj("output") = New Newtonsoft.Json.Linq.JValue(outputName)
+                End If
+                errorObj("stack") = New Newtonsoft.Json.Linq.JArray()
+
+                Dim failure As New Newtonsoft.Json.Linq.JObject(
+                    New Newtonsoft.Json.Linq.JProperty("status", "failed"),
+                    New Newtonsoft.Json.Linq.JProperty("exit_code", 1),
+                    New Newtonsoft.Json.Linq.JProperty("duration_ms", 0),
+                    New Newtonsoft.Json.Linq.JProperty("diagnostic_id", System.Guid.NewGuid().ToString("D")),
+                    New Newtonsoft.Json.Linq.JProperty("human_log_available", False),
+                    New Newtonsoft.Json.Linq.JProperty("result", Newtonsoft.Json.Linq.JValue.CreateNull()),
+                    New Newtonsoft.Json.Linq.JProperty("output_files", If(outputs Is Nothing, New Newtonsoft.Json.Linq.JArray(), CType(outputs.DeepClone(), Newtonsoft.Json.Linq.JArray))),
+                    New Newtonsoft.Json.Linq.JProperty("error", errorObj))
+
+                incompletePayload = failure.ToString(Newtonsoft.Json.Formatting.None)
+                Return True
+
+            Catch ex As System.Exception
+                System.Diagnostics.Trace.WriteLine(ex.ToString())
+                incompletePayload = System.String.Empty
+                Return False
+            End Try
         End Function
 
         Private Shared Function CountOccurrences(text As System.String, needle As System.String) As System.Int32
@@ -626,6 +940,13 @@ Namespace Agents
             Dim parsed As System.Int32
             If System.Int32.TryParse(ReadString(token), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, parsed) Then Return parsed
             Return 0
+        End Function
+
+        Private Shared Function ReadLong(token As Newtonsoft.Json.Linq.JToken) As System.Int64
+            If token Is Nothing OrElse token.Type = Newtonsoft.Json.Linq.JTokenType.Null Then Return 0L
+            Dim parsed As System.Int64
+            If System.Int64.TryParse(ReadString(token), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, parsed) Then Return parsed
+            Return 0L
         End Function
 
         Private Shared Function ReadBoolean(token As Newtonsoft.Json.Linq.JToken) As System.Boolean

@@ -113,6 +113,34 @@ Partial Public Class ThisAddIn
         Dim unexpected As Exception = Nothing
 
         cancellationToken.ThrowIfCancellationRequested()
+
+        ' Pre-execution guard: reject an unchanged deterministic resubmission before starting the worker, so a
+        ' prior code-repair/diagnostic outcome that produced no code change does not spawn another identical
+        ' worker run. This is not counted as a worker attempt and does not mutate the advisor session state.
+        Dim pythonUnchangedRejection As String = Nothing
+        If Agents.PythonExecuteRepairAdvisor.ShouldRejectUnchangedResubmission(context, toolCall.Arguments, pythonUnchangedRejection) Then
+            response.Success = False
+            response.ErrorCode = "UNCHANGED_RESUBMISSION_REJECTED"
+            response.ErrorMessage = "The submitted Python program is unchanged from the previous deterministic failure."
+            response.Response = pythonUnchangedRejection
+            context.Log("Rejected unchanged Python resubmission before worker startup.", "warn")
+            ToolingFileLogger.LogRawResponseStub("Internal tool (python_execute)", response.Response)
+            Return response
+        End If
+
+        ' Pre-execution guard: reject a destructive (non-minimal) repair before starting the worker. The task
+        ' remains repairable so the model can submit a correct minimal repair; no worker attempt is consumed.
+        Dim pythonSuspiciousRejection As String = Nothing
+        If Agents.PythonExecuteRepairAdvisor.ShouldRejectSuspiciousRepair(context, toolCall.Arguments, pythonSuspiciousRejection) Then
+            response.Success = False
+            response.ErrorCode = "SUSPICIOUS_REPAIR_REJECTED"
+            response.ErrorMessage = "The proposed change is not a minimal repair and was not executed."
+            response.Response = pythonSuspiciousRejection
+            context.Log("Rejected a non-minimal (destructive) Python repair before worker startup.", "warn")
+            ToolingFileLogger.LogRawResponseStub("Internal tool (python_execute)", response.Response)
+            Return response
+        End If
+
         context.Log("Running secure Python script...")
 
         Dim allowedOperations As New List(Of String)()
@@ -159,6 +187,21 @@ Partial Public Class ThisAddIn
             response.Success = result.Success
             response.ErrorCode = If(result.Success, String.Empty, result.ErrorCode)
             response.ErrorMessage = If(result.Success, String.Empty, result.ErrorMessage)
+
+            ' Task-postcondition gate (distinct from worker success): a clean process exit is not accepted as a
+            ' completed task when the run produced no observable/valid result (no published result and no output
+            ' file, or an empty declared output file). Convert such a run into a failure so the normal repair
+            ' loop annotates it and the model is required to actually produce the requested output.
+            If response.Success Then
+                Dim pythonIncompletePayload As String = Nothing
+                If Agents.PythonExecuteRepairAdvisor.TryBuildIncompleteTaskPayload(context, toolCall.Arguments, response.Response, pythonIncompletePayload) Then
+                    response.Success = False
+                    response.ErrorCode = "TASK_POSTCONDITION_FAILED"
+                    response.ErrorMessage = "The Python run exited successfully but did not produce a valid observable result."
+                    response.Response = pythonIncompletePayload
+                    context.Log("Python run exited successfully but produced no valid observable result; treating as incomplete.", "warn")
+                End If
+            End If
 
             ' Annotate the model-facing payload with retry-vs-repair semantics and attempt history so the
             ' Word tooling loop stops guessing nonexistent APIs after deterministic Python errors. The
