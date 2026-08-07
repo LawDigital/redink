@@ -736,6 +736,11 @@ Partial Public Class ThisAddIn
             Dim fullUserPrompt As String = ""
             Dim abortDueToRepeatedToolLoop As Boolean = False
 
+            ' Tracks the currently exposed tool set so the (potentially large) tool
+            ' definitions block is only rebuilt when the exposed tools actually change
+            ' (e.g. after tool_loader / lazy-load). Null forces the first build.
+            Dim lastExposedToolSignature As String = Nothing
+
             ' Determine if usertext is empty/whitespace
             Dim noSelectedText As Boolean = String.IsNullOrWhiteSpace(userText)
 
@@ -792,7 +797,16 @@ Partial Public Class ThisAddIn
                                         languageContractFragment
                 End If
 
-                INI_APICall_ToolInstructions_2 = BuildToolInstructionsForModel(context.SelectedTools, context.ToolingModel)
+                Dim currentExposedToolSignature As String =
+                    If(context.SelectedTools Is Nothing, "",
+                       String.Join("|", context.SelectedTools.
+                           Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
+                           Select(Function(t) t.ToolName.Trim())))
+
+                If Not String.Equals(currentExposedToolSignature, lastExposedToolSignature, StringComparison.Ordinal) Then
+                    INI_APICall_ToolInstructions_2 = BuildToolInstructionsForModel(context.SelectedTools, context.ToolingModel)
+                    lastExposedToolSignature = currentExposedToolSignature
+                End If
 
                 ' Continuation-guard injection (sysprompt addendum + rejected-turn evidence on the user side).
                 ' We append both to the user prompt so the model sees explicit conversational evidence that its
@@ -1517,7 +1531,7 @@ Partial Public Class ThisAddIn
                     Next
 
                     If restartAfterExposureMiss Then
-                        Dim preparedToolResponsesAfterExposureMiss As String = BuildToolResponsesForModel(
+                        Dim preparedToolResponsesAfterExposureMiss As String = BuildToolResponsesForModelBudgeted(
                             context.AllToolResponses,
                             context.ToolingModel,
                             compactForSubAgent:=subAgentMode)
@@ -1528,7 +1542,7 @@ Partial Public Class ThisAddIn
                     End If
 
                     If restartAfterToolLoader Then
-                        Dim preparedToolResponsesAfterLoader As String = BuildToolResponsesForModel(
+                        Dim preparedToolResponsesAfterLoader As String = BuildToolResponsesForModelBudgeted(
                             context.AllToolResponses,
                             context.ToolingModel,
                             compactForSubAgent:=subAgentMode)
@@ -1539,7 +1553,7 @@ Partial Public Class ThisAddIn
                     End If
 
                     If restartForRequiredMemoryGrounding Then
-                        Dim preparedToolResponses As String = BuildToolResponsesForModel(
+                        Dim preparedToolResponses As String = BuildToolResponsesForModelBudgeted(
                             context.AllToolResponses,
                             context.ToolingModel,
                             compactForSubAgent:=subAgentMode)
@@ -1556,7 +1570,7 @@ Partial Public Class ThisAddIn
                         Exit While
                     End If
 
-                    Dim toolResponses = BuildToolResponsesForModel(
+                    Dim toolResponses = BuildToolResponsesForModelBudgeted(
     context.AllToolResponses,
     context.ToolingModel,
     compactForSubAgent:=subAgentMode)
@@ -2171,6 +2185,17 @@ Partial Public Class ThisAddIn
             If workflowScope IsNot Nothing Then
                 workflowScope.Dispose()
                 workflowScope = Nothing
+            End If
+
+            ' Release stored large tool-result bodies for this run. Sub-agents share the
+            ' parent's WorkflowId, so only the top-level run may clear the store.
+            If Not subAgentMode Then
+                Try
+                    SharedLibrary.Agents.ToolResultStore.ClearWorkflow(context.WorkflowId)
+                    ToolingFileLogger.LogStep($"ClearWorkflow: tool result store cleared for workflow '{context.WorkflowId}'.")
+                Catch ex As Exception
+                    ToolingFileLogger.LogWarn("Failed to clear tool result store.", ex:=ex)
+                End Try
             End If
 
             If Not subAgentMode Then
@@ -3465,7 +3490,11 @@ Partial Public Class ThisAddIn
     ''' <returns>Serialized tool response payload.</returns>
     Public Function BuildToolResponsesForModel(responses As List(Of ToolResponse),
                                            toolingModel As ModelConfig,
-                                           Optional compactForSubAgent As Boolean = False) As String
+                                           Optional compactForSubAgent As Boolean = False,
+                                           Optional compactStaleLargeResponses As Boolean = False,
+                                           Optional keepRecentFullCount As Integer = 2,
+                                           Optional staleCompactionThresholdChars As Integer = -1,
+                                           Optional staleCompactionPreviewChars As Integer = -1) As String
         If toolingModel Is Nothing Then
             ToolingFileLogger.LogWarn("BuildToolResponsesForModel: toolingModel is Nothing.")
             Return ""
@@ -3490,7 +3519,21 @@ Partial Public Class ThisAddIn
         Dim firstCall As Boolean = True
         Dim firstResp As Boolean = True
 
+        Dim responseCount As Integer = If(responses Is Nothing, 0, responses.Count)
+        Dim respIndex As Integer = -1
         For Each resp In responses
+            respIndex += 1
+            ' A response whose own body exceeds the large-result threshold is always
+            ' compaction-eligible, regardless of recency: it is stored by reference and
+            ' remains fully retrievable via context_expand, so keeping it "recent-full"
+            ' would only bloat the payload. Smaller responses keep the recency exemption.
+            Dim respIsLarge As Boolean =
+                resp IsNot Nothing AndAlso
+                Not String.IsNullOrEmpty(resp.Response) AndAlso
+                resp.Response.Length > SubAgentLargeToolResponseThresholdChars
+            Dim isStaleForCompaction As Boolean =
+                compactStaleLargeResponses AndAlso
+                (respIsLarge OrElse (respIndex < responseCount - keepRecentFullCount))
             If useCallParts Then
                 ' Extract the original arguments from the parsed tool call JSON
                 Dim argsJson As String = "{}"
@@ -3528,8 +3571,16 @@ Partial Public Class ThisAddIn
                 firstCall = False
             End If
 
-            ' Build response content
-            Dim responseContent As String = BuildToolResponseContentForModel(resp, compactForSubAgent)
+            ' Build response content. Under budget pressure, older stale results may be
+            ' reference-compacted using a lower threshold/preview so medium-sized results
+            ' also move into the drawer; everything stays retrievable via context_expand.
+            Dim effStaleThresholdChars As Integer = -1
+            Dim effStalePreviewChars As Integer = -1
+            If isStaleForCompaction AndAlso staleCompactionThresholdChars > 0 Then
+                effStaleThresholdChars = staleCompactionThresholdChars
+                effStalePreviewChars = staleCompactionPreviewChars
+            End If
+            Dim responseContent As String = BuildToolResponseContentForModel(resp, compactForSubAgent OrElse isStaleForCompaction, effStaleThresholdChars, effStalePreviewChars)
 
             ' Model-agnostic handling:
             ' - If the response placeholder is quoted, emit an escaped string.
@@ -3831,6 +3882,14 @@ Partial Public Class ThisAddIn
         End If
 
         sb.AppendLine(SharedLibrary.Agents.ToolCallSequencing.DependentBatchingInstruction)
+
+        If selectedTools IsNot Nothing AndAlso selectedTools.Any(
+                Function(t) t IsNot Nothing AndAlso
+                            (SharedLibrary.Agents.ContextExpandTool.IsContextExpandTool(t.ToolName) OrElse
+                             SharedLibrary.Agents.ContextCompactTool.IsContextCompactTool(t.ToolName))) Then
+            sb.AppendLine()
+            sb.AppendLine(SharedLibrary.Agents.ToolCallSequencing.ContextDrawerInstruction)
+        End If
 
         Dim workflowAddendum As String = BuildToolWorkflowInstructionAddendum(selectedTools)
         If Not String.IsNullOrWhiteSpace(workflowAddendum) Then

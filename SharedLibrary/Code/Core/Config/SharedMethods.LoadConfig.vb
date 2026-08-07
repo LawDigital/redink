@@ -333,6 +333,10 @@ Namespace SharedLibrary
                 context.INI_ToolingLogWindow = ParseBoolean(configDict, "ToolingLogWindow", DEFAULT_BOOL_TOOLINGLOGWINDOW)
                 context.INI_ToolingDryRun = ParseBoolean(configDict, "ToolingDryRun")
                 context.INI_ToolingMaximumIterations = If(configDict.ContainsKey("ToolingMaximumIterations"), CInt(configDict("ToolingMaximumIterations")), DEFAULT_TOOLING_MAXIMUMITERATIONS)
+                context.INI_ToolResponsePayloadBudgetChars = If(configDict.ContainsKey("ToolResponsePayloadBudgetChars"), CInt(configDict("ToolResponsePayloadBudgetChars")), Agents.ToolingConstants.ToolResponsePayloadBudgetChars)
+                context.INI_BudgetMediumCompactionThresholdChars = If(configDict.ContainsKey("BudgetMediumCompactionThresholdChars"), CInt(configDict("BudgetMediumCompactionThresholdChars")), Agents.ToolingConstants.BudgetMediumCompactionThresholdChars)
+                context.INI_BudgetAggressiveCompactionThresholdChars = If(configDict.ContainsKey("BudgetAggressiveCompactionThresholdChars"), CInt(configDict("BudgetAggressiveCompactionThresholdChars")), Agents.ToolingConstants.BudgetAggressiveCompactionThresholdChars)
+                context.INI_BudgetCompactionPreviewChars = If(configDict.ContainsKey("BudgetCompactionPreviewChars"), CInt(configDict("BudgetCompactionPreviewChars")), Agents.ToolingConstants.BudgetCompactionPreviewChars)
 
                 ' M365 settings
 

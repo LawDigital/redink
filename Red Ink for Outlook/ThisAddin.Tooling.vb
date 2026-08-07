@@ -1016,6 +1016,11 @@ Partial Public Class ThisAddIn
 
             Dim abortDueToRepeatedToolLoop As Boolean = False
 
+            ' Tracks the currently exposed tool set so the (potentially large) tool
+            ' definitions block is only rebuilt when the exposed tools actually change
+            ' (e.g. after tool_loader / lazy-load). Null forces the first build.
+            Dim lastExposedToolSignature As String = Nothing
+
             Dim noSelectedText As Boolean = String.IsNullOrWhiteSpace(userText)
             While iteration < context.MaxIterations AndAlso Not context.IsCancelled
 
@@ -1079,7 +1084,31 @@ Partial Public Class ThisAddIn
                                         languageContractFragment
                 End If
 
-                INI_APICall_ToolInstructions_2 = BuildToolInstructionsForModel(context.SelectedTools, context.ToolingModel)
+                Dim currentExposedToolSignature As String =
+                    If(context.SelectedTools Is Nothing, "",
+                       String.Join("|", context.SelectedTools.
+                           Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
+                           Select(Function(t) t.ToolName.Trim())))
+
+                If Not String.Equals(currentExposedToolSignature, lastExposedToolSignature, StringComparison.Ordinal) Then
+                    INI_APICall_ToolInstructions_2 = BuildToolInstructionsForModel(context.SelectedTools, context.ToolingModel)
+                    lastExposedToolSignature = currentExposedToolSignature
+                End If
+
+                ' Payload-size diagnostic: measures per-iteration model input growth so the
+                ' large-result referencing and tool-definition rebuild gating can be verified.
+                ToolingFileLogger.LogStep(
+                    $"Payload sizes (chars): toolInstructions={If(INI_APICall_ToolInstructions_2, "").Length}; " &
+                    $"toolResponses={If(INI_APICall_ToolResponses_2, "").Length}; " &
+                    $"combined={If(INI_APICall_ToolInstructions_2, "").Length + If(INI_APICall_ToolResponses_2, "").Length}; " &
+                    $"iteration={iteration}")
+
+                Debug.WriteLine(
+                    $"[TOOLING-PAYLOAD] iteration={iteration}; " &
+                    $"toolInstructions={If(INI_APICall_ToolInstructions_2, "").Length}; " &
+                    $"toolResponses={If(INI_APICall_ToolResponses_2, "").Length}; " &
+                    $"combined={If(INI_APICall_ToolInstructions_2, "").Length + If(INI_APICall_ToolResponses_2, "").Length}")
+
 
                 Dim effectiveSysPrompt As String = enhancedSysPrompt
                 Dim effectiveUserPrompt As String = fullUserPrompt
@@ -1882,7 +1911,7 @@ Partial Public Class ThisAddIn
                     Next
 
                     If restartAfterExposureMiss Then
-                        Dim preparedToolResponsesAfterExposureMiss As String = BuildToolResponsesForModel(
+                        Dim preparedToolResponsesAfterExposureMiss As String = BuildToolResponsesForModelBudgeted(
                             context.AllToolResponses,
                             context.ToolingModel,
                             compactForSubAgent:=subAgentMode)
@@ -1893,7 +1922,7 @@ Partial Public Class ThisAddIn
                     End If
 
                     If restartAfterToolLoader Then
-                        Dim preparedToolResponsesAfterLoader As String = BuildToolResponsesForModel(
+                        Dim preparedToolResponsesAfterLoader As String = BuildToolResponsesForModelBudgeted(
                             context.AllToolResponses,
                             context.ToolingModel,
                             compactForSubAgent:=subAgentMode)
@@ -1904,7 +1933,7 @@ Partial Public Class ThisAddIn
                     End If
 
                     If restartForRequiredMemoryGrounding Then
-                        Dim preparedToolResponses As String = BuildToolResponsesForModel(
+                        Dim preparedToolResponses As String = BuildToolResponsesForModelBudgeted(
                             context.AllToolResponses,
                             context.ToolingModel,
                             compactForSubAgent:=subAgentMode)
@@ -1921,7 +1950,7 @@ Partial Public Class ThisAddIn
                         Exit While
                     End If
 
-                    Dim toolResponses = BuildToolResponsesForModel(
+                    Dim toolResponses = BuildToolResponsesForModelBudgeted(
     context.AllToolResponses,
     context.ToolingModel,
     compactForSubAgent:=subAgentMode)
@@ -2700,6 +2729,17 @@ Partial Public Class ThisAddIn
             If workflowScope IsNot Nothing Then
                 workflowScope.Dispose()
                 workflowScope = Nothing
+            End If
+
+            ' Release stored large tool-result bodies for this run. Sub-agents share the
+            ' parent's WorkflowId, so only the top-level run may clear the store.
+            If Not subAgentMode Then
+                Try
+                    SharedLibrary.Agents.ToolResultStore.ClearWorkflow(context.WorkflowId)
+                    ToolingFileLogger.LogStep($"ClearWorkflow: tool result store cleared for workflow '{context.WorkflowId}'.")
+                Catch ex As Exception
+                    ToolingFileLogger.LogWarn("Failed to clear tool result store.", ex:=ex)
+                End Try
             End If
 
             _activeToolingContext = parentToolingContext
@@ -3953,6 +3993,14 @@ Partial Public Class ThisAddIn
 
         sb.AppendLine(SharedLibrary.Agents.ToolCallSequencing.DependentBatchingInstruction)
 
+        If selectedTools IsNot Nothing AndAlso selectedTools.Any(
+                Function(t) t IsNot Nothing AndAlso
+                            (SharedLibrary.Agents.ContextExpandTool.IsContextExpandTool(t.ToolName) OrElse
+                             SharedLibrary.Agents.ContextCompactTool.IsContextCompactTool(t.ToolName))) Then
+            sb.AppendLine()
+            sb.AppendLine(SharedLibrary.Agents.ToolCallSequencing.ContextDrawerInstruction)
+        End If
+
         Dim workflowAddendum As String = BuildToolWorkflowInstructionAddendum(selectedTools)
         If Not String.IsNullOrWhiteSpace(workflowAddendum) Then
             sb.AppendLine()
@@ -4572,6 +4620,23 @@ Partial Public Class ThisAddIn
                 ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
                 GoTo __AfterDispatch
             End If
+
+            If SharedLibrary.Agents.ContextExpandTool.IsContextExpandTool(toolCall.ToolName) Then
+                response.Response = SharedLibrary.Agents.ContextExpandTool.Execute(toolCall.Arguments)
+                response.Success = Not String.IsNullOrWhiteSpace(response.Response)
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+                GoTo __AfterDispatch
+            End If
+
+            If SharedLibrary.Agents.ContextCompactTool.IsContextCompactTool(toolCall.ToolName) Then
+                response.Response = SharedLibrary.Agents.ContextCompactTool.Execute(
+                    toolCall.Arguments,
+                    SharedLibrary.Agents.WorkflowContinuity.CurrentWorkflowId)
+                response.Success = Not String.IsNullOrWhiteSpace(response.Response)
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+                GoTo __AfterDispatch
+            End If
+
             ' Agent layer (memory_*, skill_use, agent_*) — single-line dispatcher.
             If SharedLibrary.Agents.AgentToolRouter.IsAgentLayerTool(toolCall.ToolName) Then
                 Dim __agentJson = Await SharedLibrary.Agents.AgentToolRouter.TryHandleAsync(
@@ -4907,6 +4972,8 @@ __AfterDispatch:
             tools.Add(SharedLibrary.Agents.JsRunTool.Build())
             tools.Add(SharedLibrary.Agents.SkillInvokeTool.Build())
             tools.Add(SharedLibrary.Agents.ToolDescribeTool.Build())
+            tools.Add(SharedLibrary.Agents.ContextExpandTool.Build())
+            tools.Add(SharedLibrary.Agents.ContextCompactTool.Build())
 
             Dim __agentReg As New SharedLibrary.Agents.ToolRegistry()
             SharedLibrary.Agents.ToolRegistryBuilder.AddSkills(__agentReg, SharedLibrary.Agents.AgentResources.Skills)

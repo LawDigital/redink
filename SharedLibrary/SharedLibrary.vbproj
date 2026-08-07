@@ -448,7 +448,10 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Code\Agents\AgentToolRouter.vb" />
+    <Compile Include="Code\Agents\ContextCompactTool.vb" />
+    <Compile Include="Code\Agents\ContextExpandTool.vb" />
     <Compile Include="Code\Agents\FileTools.vb" />
+    <Compile Include="Code\Agents\LargeToolResultProcessor.vb" />
     <Compile Include="Code\Agents\PythonExecuteRepairAdvisor.vb" />
     <Compile Include="Code\Agents\PythonExecuteRepairAdvisorSelfTests.vb" />
     <Compile Include="Code\Agents\PythonExecuteToolConfig.vb" />
@@ -486,6 +489,7 @@
     <Compile Include="Code\Agents\ToolLoaderTool.vb" />
     <Compile Include="Code\Agents\ToolRegistry.vb" />
     <Compile Include="Code\Agents\ToolRegistryBuilder.vb" />
+    <Compile Include="Code\Agents\ToolResultStore.vb" />
     <Compile Include="Code\Agents\WebGroundingTool.vb" />
     <Compile Include="Code\Agents\WebView2JsSandbox.vb" />
     <Compile Include="Code\Agents\WordDocTools.vb" />

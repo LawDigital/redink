@@ -52,6 +52,8 @@ Namespace Agents
             JsRunTool.ToolName,
             PythonExecuteTool.ToolName,
             SkillInvokeTool.ToolName,
+            ContextExpandTool.ToolName,
+            ContextCompactTool.ToolName,
             SharedLibrary.M365ToolService.SearchToolName,
             SharedLibrary.M365ToolService.GetMailToolName,
             SharedLibrary.M365ToolService.GetMailThreadToolName,

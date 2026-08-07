@@ -2609,6 +2609,42 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_ToolResponsePayloadBudgetChars As Integer
+        Get
+            Return _context.INI_ToolResponsePayloadBudgetChars
+        End Get
+        Set(value As Integer)
+            _context.INI_ToolResponsePayloadBudgetChars = value
+        End Set
+    End Property
+
+    Public Shared Property INI_BudgetMediumCompactionThresholdChars As Integer
+        Get
+            Return _context.INI_BudgetMediumCompactionThresholdChars
+        End Get
+        Set(value As Integer)
+            _context.INI_BudgetMediumCompactionThresholdChars = value
+        End Set
+    End Property
+
+    Public Shared Property INI_BudgetAggressiveCompactionThresholdChars As Integer
+        Get
+            Return _context.INI_BudgetAggressiveCompactionThresholdChars
+        End Get
+        Set(value As Integer)
+            _context.INI_BudgetAggressiveCompactionThresholdChars = value
+        End Set
+    End Property
+
+    Public Shared Property INI_BudgetCompactionPreviewChars As Integer
+        Get
+            Return _context.INI_BudgetCompactionPreviewChars
+        End Get
+        Set(value As Integer)
+            _context.INI_BudgetCompactionPreviewChars = value
+        End Set
+    End Property
+
     Public Shared Property INI_APICall_ToolInstructions_2 As String
         Get
             Return _context.INI_APICall_ToolInstructions_2

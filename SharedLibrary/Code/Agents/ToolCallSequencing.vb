@@ -49,6 +49,17 @@ Namespace Agents
             "Do not issue additional calls to that tool for work that could have been included in the earlier call." & vbCrLf &
             "Only call it again if you genuinely must inspect the earlier result before deciding the next step; otherwise consolidate all remaining deterministic processing into one call."
 
+        ''' <summary>
+        ''' Explains the large-result 'drawer' to the model: big results are replaced by a short
+        ''' result_ref plus a preview, are re-readable via context_expand, and can be voluntarily
+        ''' shelved via context_compact when no longer needed in full. Appended only when at least
+        ''' one of those tools is advertised.
+        ''' </summary>
+        Public Const ContextDrawerInstruction As String =
+            "CONTEXT MANAGEMENT: Large tool results are not kept in full in the conversation. Each is replaced by a short 'result_ref' plus a preview, and the full text stays available." & vbCrLf &
+            "To read more of a stored result, call context_expand with its result_ref (optionally start_char and max_chars) to page through the full content." & vbCrLf &
+            "When you no longer need older results in full, you may call context_compact to move them out of the active context and free space; they remain retrievable via context_expand. Prefer letting the host manage this automatically, and use context_compact only when you know earlier results are no longer needed."
+
         Public Const UnresolvedToolFailureCode As String = "unresolved_tool_failure"
         Public Const InvalidTextOnlyFinalizationCode As String = "invalid_text_only_finalization"
         Public Const MissingRequiredMemoryAccessCode As String = "missing_required_memory_access"
