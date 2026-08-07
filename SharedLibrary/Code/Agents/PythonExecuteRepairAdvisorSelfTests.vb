@@ -66,6 +66,9 @@ Namespace AgentsXX
             RunNamedTest(NameOf(TestPostconditionDoesNotReplaceWorkerFailure), AddressOf TestPostconditionDoesNotReplaceWorkerFailure)
             RunNamedTest(NameOf(TestPostconditionEntersHistoryAndBudget), AddressOf TestPostconditionEntersHistoryAndBudget)
             RunNamedTest(NameOf(TestSuccessAfterPostconditionRepairResetsState), AddressOf TestSuccessAfterPostconditionRepairResetsState)
+            RunNamedTest(NameOf(TestInputReferenceFailureRequestsArgumentRepair), AddressOf TestInputReferenceFailureRequestsArgumentRepair)
+            RunNamedTest(NameOf(TestRequestInvalidIsNotCodeRepair), AddressOf TestRequestInvalidIsNotCodeRepair)
+            RunNamedTest(NameOf(TestArgumentUnchangedResubmissionFlagged), AddressOf TestArgumentUnchangedResubmissionFlagged)
         End Sub
 
         Public Shared Function RunAllAndReturnStatus() As String
@@ -767,6 +770,73 @@ Namespace AgentsXX
             Dim err = AnnotatedError(session, "x = 3", FailurePayload("PYTHON_VALUE_ERROR", 1, Nothing), False, terminal)
             AssertEqual("1", CType(err("advisor")("attempt_history"), JArray).Count.ToString(),
                         "A valid success after a postcondition repair must reset the advisor state.")
+        End Sub
+
+        ''' <summary>Builds a tool-argument / input-reference failure payload (the Python code was not executed).</summary>
+        Private Shared Function ArgumentFailurePayload(code As String, Optional guidance As String = Nothing) As String
+            Dim errorObj As New JObject(
+                New JProperty("code", code),
+                New JProperty("phase", "initializing"),
+                New JProperty("retryable", False),
+                New JProperty("source", JValue.CreateNull()),
+                New JProperty("message", "The supplied path is an internal published-result path and cannot be used directly as input_files."),
+                New JProperty("stack", New JArray()))
+            If guidance IsNot Nothing Then errorObj("guidance") = guidance
+            Return New JObject(
+                New JProperty("status", "failed"),
+                New JProperty("result", JValue.CreateNull()),
+                New JProperty("output_files", New JArray()),
+                New JProperty("error", errorObj)).ToString(Formatting.None)
+        End Function
+
+        Private Shared Function ArgsWithInput(code As String, inputFile As String) As System.Collections.Generic.Dictionary(Of String, Object)
+            Return New System.Collections.Generic.Dictionary(Of String, Object)(StringComparer.Ordinal) From {
+                {"code", code},
+                {"input_files", New JArray(inputFile)}}
+        End Function
+
+        ' ── Input / tool-argument failures are not Python-code repairs (#12/#13) ──
+
+        Private Shared Sub TestInputReferenceFailureRequestsArgumentRepair()
+            Dim session As New Object()
+            Dim terminal As String = Nothing
+            Dim annotated As String = PythonExecuteRepairAdvisor.Annotate(
+                session, ArgsWithInput("doc = 1", "results/abc/Vollmacht_2.docx"),
+                ArgumentFailurePayload("INPUT_REFERENCE_INVALID",
+                    "Use an attachment reference, a workspace-relative path, or an explicitly reusable published-file handle."),
+                False, terminal)
+            Dim err = CType(JObject.Parse(annotated)("error"), JObject)
+
+            AssertFalse(err.Value(Of Boolean)("retryable"), "An input-reference failure must not be retryable unchanged.")
+            AssertTrue(err.Value(Of Boolean)("repairable"), "An input-reference failure must be repairable.")
+            AssertEqual("TOOL_ARGUMENT_REPAIR_REQUIRED", err("advisor").Value(Of String)("classification"), "An input-reference failure must not be classified as a Python-code repair.")
+            AssertEqual("tool_arguments", err("advisor").Value(Of String)("failure_domain"), "An input-reference failure must be scoped to the tool arguments.")
+            Dim guidance = err("advisor").Value(Of String)("guidance")
+            AssertTrue(guidance.IndexOf("input_files", StringComparison.OrdinalIgnoreCase) >= 0, "Guidance must direct the model to correct input_files.")
+            AssertTrue(guidance.IndexOf("not executed", StringComparison.OrdinalIgnoreCase) >= 0, "Guidance must state the Python code was not executed.")
+        End Sub
+
+        Private Shared Sub TestRequestInvalidIsNotCodeRepair()
+            Dim session As New Object()
+            Dim terminal As String = Nothing
+            Dim annotated As String = PythonExecuteRepairAdvisor.Annotate(
+                session, Args("x = 1"), ArgumentFailurePayload("REQUEST_INVALID"), False, terminal)
+            Dim err = CType(JObject.Parse(annotated)("error"), JObject)
+
+            AssertEqual("TOOL_ARGUMENT_REPAIR_REQUIRED", err("advisor").Value(Of String)("classification"), "REQUEST_INVALID must be treated as a tool-argument failure, not a Python-code repair.")
+        End Sub
+
+        Private Shared Sub TestArgumentUnchangedResubmissionFlagged()
+            Dim session As New Object()
+            Dim terminal As String = Nothing
+            Dim args = ArgsWithInput("doc = 1", "results/abc/Vollmacht_2.docx")
+            PythonExecuteRepairAdvisor.Annotate(session, args, ArgumentFailurePayload("INPUT_REFERENCE_INVALID"), False, terminal)
+            Dim annotated As String = PythonExecuteRepairAdvisor.Annotate(session, args, ArgumentFailurePayload("INPUT_REFERENCE_INVALID"), False, terminal)
+            Dim err = CType(JObject.Parse(annotated)("error"), JObject)
+
+            AssertTrue(err("advisor").Value(Of Boolean)("unchanged_resubmission"), "Resubmitting identical tool arguments must be flagged as an unchanged resubmission.")
+            Dim history = CType(err("advisor")("attempt_history"), JArray)
+            AssertFalse(history(history.Count - 1).Value(Of Boolean)("args_changed"), "An unchanged-argument resubmission must record args_changed=false.")
         End Sub
 
         ' ── Test scaffolding (matches existing self-test files) ───────────────

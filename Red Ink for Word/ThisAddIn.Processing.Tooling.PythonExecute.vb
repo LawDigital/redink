@@ -203,16 +203,64 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
+            ' First-failure reroute gate: when python_execute is acting as a fallback and a specialized tool that
+            ' shares its capability is available, a first failure should re-route to the specialized tool rather
+            ' than entering the sticky Python repair loop. Fully capability-driven and tool-agnostic. Scoped, like
+            ' the redundant-success nudge, to the MAIN loop only (sub-agents/skills may use Python freely).
+            Dim pythonRerouteReason As String = Nothing
+            Dim pythonReroutePayload As String = Nothing
+            Dim isSubAgentLoopForRoute As Boolean =
+                If(context.LogPrefix, "").TrimStart().StartsWith("[subagent]", StringComparison.OrdinalIgnoreCase)
+            If Not response.Success AndAlso Not isSubAgentLoopForRoute AndAlso
+               Agents.PythonExecuteRepairAdvisor.TryBuildRerouteInsteadOfRepairPayload(
+                   context, toolCall.Arguments, response.Response,
+                   Agents.PythonExecuteRepairAdvisor.HasCapableNonFallbackAlternative(context.SelectedTools, toolCall.ToolName),
+                   pythonReroutePayload, pythonRerouteReason) Then
+
+                response.ErrorCode = "REROUTE_TO_ALTERNATIVE"
+                response.ErrorMessage = "A specialized tool can perform this operation; not entering the Python repair loop."
+                response.Response = pythonReroutePayload
+                context.Log("python_execute failed on first fallback attempt while a specialized tool is available; advising reroute instead of repair.", "warn")
+
+                If String.IsNullOrEmpty(context.PendingContinuationGuardPrompt) Then
+                    context.PendingContinuationGuardPrompt = pythonRerouteReason
+                    context.PendingGuardTitle = "HOST FALLBACK-REROUTE GUARD"
+                    context.PendingRejectedTurnExplanation =
+                        "Your previous turn used python_execute as a fallback and it failed on its first attempt, but a specialized tool for this operation is available."
+                    context.PendingRejectedAssistantTurn = ""
+                End If
+
+                ToolingFileLogger.LogRawResponseStub("Internal tool (python_execute)", response.Response)
+                Return response
+            End If
+
             ' Annotate the model-facing payload with retry-vs-repair semantics and attempt history so the
             ' Word tooling loop stops guessing nonexistent APIs after deterministic Python errors. The
             ' ToolExecutionContext keys the per-session repair history. A terminal outcome (repair budget
             ' exhausted or non-recoverable) is flagged on the response so the tooling loop can abort via its
             ' existing tool-error abort path instead of iterating further.
             Dim pythonTerminalReason As String = Nothing
-            response.Response = Agents.PythonExecuteRepairAdvisor.Annotate(context, toolCall.Arguments, response.Response, response.Success, pythonTerminalReason)
+            Dim pythonRedundantReason As String = Nothing
+            response.Response = Agents.PythonExecuteRepairAdvisor.Annotate(context, toolCall.Arguments, response.Response, response.Success, pythonTerminalReason, pythonRedundantReason)
             If Not String.IsNullOrEmpty(pythonTerminalReason) Then
                 response.RepairLoopTerminal = True
                 response.RepairLoopTerminalReason = pythonTerminalReason
+            End If
+
+            ' Soft finalization nudge for a redundant, result-less re-verification run. Scoped to the MAIN loop
+            ' only (never sub-agents/skills, which may legitimately run Python repeatedly) and only when no other
+            ' continuation guard is already pending. Advisory: the run stays successful and non-terminal.
+            Dim isSubAgentLoop As Boolean =
+                If(context.LogPrefix, "").TrimStart().StartsWith("[subagent]", StringComparison.OrdinalIgnoreCase)
+            If Not isSubAgentLoop AndAlso
+               Not String.IsNullOrEmpty(pythonRedundantReason) AndAlso
+               String.IsNullOrEmpty(context.PendingContinuationGuardPrompt) Then
+                context.PendingContinuationGuardPrompt = pythonRedundantReason
+                context.PendingGuardTitle = "HOST REDUNDANT-PYTHON GUARD"
+                context.PendingRejectedTurnExplanation =
+                    "Your previous turn re-ran python_execute only to reproduce a result that already exists and has been validated."
+                context.PendingRejectedAssistantTurn = ""
+                context.Log("Redundant successful python_execute run detected; nudging finalization on the next turn.", "warn")
             End If
         End If
 

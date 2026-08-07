@@ -90,7 +90,9 @@ Namespace Agents
                 .Tool = True,
                 .ToolPriority = toolPriority,
                 .ToolErrorHandling = "skip",
-                .PrefersSingleInvocation = True
+                .PrefersSingleInvocation = True,
+                .IsFallbackStrategy = True,
+                .CapabilityTags = "docx_edit,artifact_generation"
             }
         End Function
 

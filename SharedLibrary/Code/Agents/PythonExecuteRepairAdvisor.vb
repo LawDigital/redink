@@ -28,6 +28,7 @@
 Option Explicit On
 Option Strict On
 Option Infer On
+Imports SharedLibrary.SharedLibrary
 
 Namespace Agents
 
@@ -52,6 +53,7 @@ Namespace Agents
     Public NotInheritable Class PythonExecuteAttempt
         Public Property CodeExpression As System.String = System.String.Empty
         Public Property Modification As System.String = System.String.Empty
+        Public Property ArgsChanged As System.Boolean
         Public Property ErrorMessage As System.String = System.String.Empty
         Public Property Fingerprint As System.String = System.String.Empty
         Public Property FingerprintChanged As System.Boolean
@@ -73,6 +75,15 @@ Namespace Agents
         Public Property LastLine As System.Int32
         Public Property LastExceptionType As System.String
         Public Property LastClassification As PythonExecuteOutcomeClass = PythonExecuteOutcomeClass.SUCCESS
+        Public Property LastArgsHash As System.String
+        ' Signature of the previous SUCCESSFUL run's observable output (published result + output files).
+        ' Persisted across ResetSession so a redundant, result-less re-verification run can be detected
+        ' without capping how many times Python may legitimately run (skills producing new output differ).
+        Public Property LastSuccessObservableSignature As System.String
+        ' True once a "reroute to specialized alternative" advisory has been issued for the current task, so the
+        ' fallback tool is offered a genuine repair path on any subsequent failure (the alternative was unable to
+        ' perform the operation). Reset on success.
+        Public Property RerouteToAlternativeOffered As System.Boolean
     End Class
 
     Public NotInheritable Class PythonExecuteRepairAdvisor
@@ -87,6 +98,8 @@ Namespace Agents
 
         Private Sub New()
         End Sub
+
+
 
         ''' <summary>
         ''' Annotates the model-facing python_execute payload with retry-vs-repair semantics and a compact
@@ -104,7 +117,28 @@ Namespace Agents
             success As System.Boolean
         ) As System.String
             Dim ignoredTerminalReason As System.String = Nothing
-            Return Annotate(sessionKey, arguments, payloadJson, success, ignoredTerminalReason)
+            Dim ignoredRedundantReason As System.String = Nothing
+            Return Annotate(sessionKey, arguments, payloadJson, success, ignoredTerminalReason, ignoredRedundantReason)
+        End Function
+
+
+
+        ''' <summary>
+        ''' Backward-compatible overload that reports, via <paramref name="terminalReason"/>, a non-empty
+        ''' reason string when the outcome is terminal (REPAIR_BUDGET_EXHAUSTED or NON_RECOVERABLE_FAILURE).
+        ''' Returns an empty reason for success and for recoverable (transient / repair / diagnostic)
+        ''' outcomes. Any redundant-success advisory is ignored by this overload.
+        ''' </summary>
+        Public Shared Function Annotate(
+            sessionKey As System.Object,
+            arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+            payloadJson As System.String,
+            success As System.Boolean,
+            ByRef terminalReason As System.String
+        ) As System.String
+
+            Dim ignoredRedundantSuccessReason As System.String = Nothing
+            Return Annotate(sessionKey, arguments, payloadJson, success, terminalReason, ignoredRedundantSuccessReason)
         End Function
 
         ''' <summary>
@@ -118,10 +152,12 @@ Namespace Agents
             arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
             payloadJson As System.String,
             success As System.Boolean,
-            ByRef terminalReason As System.String
+            ByRef terminalReason As System.String,
+            ByRef redundantSuccessReason As System.String
         ) As System.String
 
             terminalReason = System.String.Empty
+            redundantSuccessReason = System.String.Empty
 
             If System.String.IsNullOrWhiteSpace(payloadJson) Then
                 Return payloadJson
@@ -132,7 +168,27 @@ Namespace Agents
                 Dim payload As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(payloadJson)
 
                 If success Then
+                    Dim observableSignature As System.String = ComputeObservableResultSignature(payload)
+                    Dim redundantRepeat As System.Boolean =
+                        Not System.String.IsNullOrEmpty(observableSignature) AndAlso
+                        session.LastSuccessObservableSignature IsNot Nothing AndAlso
+                        System.String.Equals(session.LastSuccessObservableSignature, observableSignature, System.StringComparison.Ordinal)
+
                     ResetSession(session)
+                    session.LastSuccessObservableSignature = observableSignature
+
+                    ' Advisory only: never turn a genuine success into a failure and never mark it terminal.
+                    ' Only signal when the run reproduced the exact same observable result as the previous
+                    ' successful run, i.e. a result-less re-verification loop. Skills that produce new or
+                    ' different output have a different signature and are never signalled. The reason string is
+                    ' returned so a host MAIN loop can optionally escalate it as a soft finalization nudge; the
+                    ' in-payload advisory below is always present regardless of host escalation.
+                    If redundantRepeat Then
+                        redundantSuccessReason =
+                            "The previous python_execute run succeeded but only reproduced the exact same observable result (identical published result and output files) as the run before it. The requested output already exists and has been validated. Do not call python_execute again to re-read or re-verify it. Finalize now and report completion, unless you have a concrete reason to produce a genuinely different or additional result."
+                        Return AnnotateRedundantSuccess(payload)
+                    End If
+
                     Return payloadJson
                 End If
 
@@ -142,6 +198,14 @@ Namespace Agents
                 End If
 
                 Dim code As System.String = ReadString(errorObj("code"))
+
+                ' Non-Python failures (tool-argument / input-reference errors) must not be routed through the
+                ' Python-code repair path, which would wrongly demand a code change. Annotate for argument
+                ' correction and return. The Python code was not executed in this case.
+                If IsInputOrArgumentFailure(code) Then
+                    Return AnnotateArgumentFailure(session, arguments, payload, errorObj, code)
+                End If
+
                 Dim exceptionType As System.String = FirstNonEmpty(ReadString(errorObj("exceptionType")), MapExceptionType(code))
                 Dim objectType As System.String = FirstNonEmpty(ReadString(errorObj("objectType")), ReadString(errorObj("object_type")))
                 Dim agentRetryable As System.Boolean = ReadBoolean(errorObj("retryable"))
@@ -196,6 +260,7 @@ Namespace Agents
                 session.LastLine = line
                 session.LastExceptionType = exceptionType
                 session.LastClassification = classification
+                session.LastArgsHash = ComputeArgumentsHash(arguments)
 
                 ' Surface a terminal reason so the host loop can stop offering the tool this turn.
                 If classification = PythonExecuteOutcomeClass.REPAIR_BUDGET_EXHAUSTED Then
@@ -403,6 +468,88 @@ Namespace Agents
             End Try
         End Function
 
+        ''' <summary>
+        ''' True when the failure originates in the python_execute tool arguments (for example an invalid
+        ''' input_files entry) rather than in the executed Python program. For these the Python code was NOT
+        ''' run, so the repair is a tool-argument correction, not a code change.
+        ''' </summary>
+        Private Shared Function IsInputOrArgumentFailure(code As System.String) As System.Boolean
+            Select Case code
+                Case "INPUT_REFERENCE_INVALID", "REQUEST_INVALID"
+                    Return True
+                Case Else
+                    Return False
+            End Select
+        End Function
+
+        ''' <summary>
+        ''' Annotates a tool-argument / input-reference failure: marks it non-retryable but repairable, requests
+        ''' a tool-argument correction (not a code change), preserves any additive fields the core supplied
+        ''' (e.g. guidance), and records a compact attempt with an arguments hash. Never throws.
+        ''' </summary>
+        Private Shared Function AnnotateArgumentFailure(
+            session As PythonExecuteRepairSession,
+            arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+            payload As Newtonsoft.Json.Linq.JObject,
+            errorObj As Newtonsoft.Json.Linq.JObject,
+            code As System.String
+        ) As System.String
+
+            Dim argsHash As System.String = ComputeArgumentsHash(arguments)
+            Dim unchangedArgs As System.Boolean =
+                session.LastArgsHash IsNot Nothing AndAlso
+                System.String.Equals(session.LastArgsHash, argsHash, System.StringComparison.Ordinal)
+
+            Dim rawMessage As System.String = FirstNonEmpty(ReadString(errorObj("message")), FriendlyForCode(code))
+            Dim coreGuidance As System.String = ReadString(errorObj("guidance"))
+
+            Dim guidance As System.String =
+                "The Python code was not executed. The failure is in the python_execute tool arguments, not in the Python program. Correct input_files before retrying. Do not claim the task failed if a valid output was already produced in a previous successful call."
+            If Not System.String.IsNullOrEmpty(coreGuidance) Then
+                guidance = coreGuidance & " " & guidance
+            End If
+
+            errorObj("retryable") = New Newtonsoft.Json.Linq.JValue(False)
+            errorObj("repairable") = New Newtonsoft.Json.Linq.JValue(True)
+
+            session.Attempts.Add(New PythonExecuteAttempt() With {
+                .CodeExpression = System.String.Empty,
+                .Modification = If(unchangedArgs, "tool arguments unchanged (same invalid input reference resubmitted)", "tool arguments"),
+                .ArgsChanged = Not unchangedArgs,
+                .ErrorMessage = RedactSensitive(Truncate(rawMessage, MaxMessageChars)),
+                .Fingerprint = code,
+                .FingerprintChanged = Not unchangedArgs
+            })
+            While session.Attempts.Count > MaxHistoryEntries
+                session.Attempts.RemoveAt(0)
+            End While
+
+            session.LastArgsHash = argsHash
+
+            Dim advisor As New Newtonsoft.Json.Linq.JObject(
+                New Newtonsoft.Json.Linq.JProperty("classification", "TOOL_ARGUMENT_REPAIR_REQUIRED"),
+                New Newtonsoft.Json.Linq.JProperty("failure_domain", "tool_arguments"),
+                New Newtonsoft.Json.Linq.JProperty("unchanged_resubmission", unchangedArgs),
+                New Newtonsoft.Json.Linq.JProperty("guidance", guidance),
+                New Newtonsoft.Json.Linq.JProperty("attempt_history", BuildHistoryJson(session)))
+            errorObj("advisor") = advisor
+
+            Return payload.ToString(Newtonsoft.Json.Formatting.None)
+        End Function
+
+        ''' <summary>Stable hash of the tool arguments (currently code + input_files) used to detect an unchanged argument resubmission.</summary>
+        Private Shared Function ComputeArgumentsHash(arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object)) As System.String
+            If arguments Is Nothing Then Return ComputeHash(System.String.Empty)
+            Dim builder As New System.Text.StringBuilder()
+            builder.Append(ReadCodeArgument(arguments))
+            builder.Append("|input_files=")
+            Dim value As System.Object = Nothing
+            If arguments.TryGetValue("input_files", value) AndAlso value IsNot Nothing Then
+                builder.Append(System.Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture))
+            End If
+            Return ComputeHash(builder.ToString())
+        End Function
+
         ' ─────────────────────────────────────────────────────────────────────
         ' Classification
         ' ─────────────────────────────────────────────────────────────────────
@@ -536,7 +683,72 @@ Namespace Agents
             session.LastLine = 0
             session.LastExceptionType = Nothing
             session.LastClassification = PythonExecuteOutcomeClass.SUCCESS
+            session.LastArgsHash = Nothing
+            session.RerouteToAlternativeOffered = False
         End Sub
+
+        ''' <summary>
+        ''' Computes a stable signature of a successful run's observable output: the published result plus the
+        ''' set of output-file names, byte counts and (when present) hashes. Returns an empty string when the run
+        ''' produced no observable output at all, so a result-less run is never treated as a reproducible result.
+        ''' Purely capability-driven: it reads only fields the payload already carries and is agnostic to task,
+        ''' document type, or operation.
+        ''' </summary>
+        Private Shared Function ComputeObservableResultSignature(payload As Newtonsoft.Json.Linq.JObject) As System.String
+            If payload Is Nothing Then Return System.String.Empty
+
+            Dim resultToken As Newtonsoft.Json.Linq.JToken = payload("result")
+            Dim hasResult As System.Boolean = resultToken IsNot Nothing AndAlso resultToken.Type <> Newtonsoft.Json.Linq.JTokenType.Null
+
+            Dim outputs As Newtonsoft.Json.Linq.JArray = TryCast(payload("output_files"), Newtonsoft.Json.Linq.JArray)
+            Dim hasOutputs As System.Boolean = outputs IsNot Nothing AndAlso outputs.Count > 0
+
+            ' No observable output => not a reproducible result; do not participate in redundancy detection.
+            If Not hasResult AndAlso Not hasOutputs Then
+                Return System.String.Empty
+            End If
+
+            Dim builder As New System.Text.StringBuilder()
+            builder.Append("result=")
+            builder.Append(If(hasResult, resultToken.ToString(Newtonsoft.Json.Formatting.None), "null"))
+            builder.Append("|outputs=")
+            If hasOutputs Then
+                Dim entries As New System.Collections.Generic.List(Of System.String)()
+                For Each entry As Newtonsoft.Json.Linq.JToken In outputs
+                    Dim entryObj As Newtonsoft.Json.Linq.JObject = TryCast(entry, Newtonsoft.Json.Linq.JObject)
+                    If entryObj Is Nothing Then Continue For
+                    entries.Add(
+                        ReadString(entryObj("name")) & ":" &
+                        ReadLong(entryObj("bytes")).ToString(System.Globalization.CultureInfo.InvariantCulture) & ":" &
+                        ReadString(entryObj("sha256")))
+                Next
+                entries.Sort(System.StringComparer.Ordinal)
+                builder.Append(System.String.Join(",", entries))
+            End If
+
+            Return ComputeHash(builder.ToString())
+        End Function
+
+        ''' <summary>
+        ''' Adds an advisory (non-blocking) note to a SUCCESSFUL python_execute payload when the run reproduced
+        ''' the exact same observable result as the previous successful run. It keeps the outcome successful and
+        ''' non-terminal; it only discourages a further re-read/re-verify Python call after the requested output
+        ''' already exists and is validated. Never throws; on any problem it returns the payload unchanged.
+        ''' </summary>
+        Private Shared Function AnnotateRedundantSuccess(payload As Newtonsoft.Json.Linq.JObject) As System.String
+            Try
+                Dim advisor As New Newtonsoft.Json.Linq.JObject(
+                    New Newtonsoft.Json.Linq.JProperty("classification", "SUCCESS"),
+                    New Newtonsoft.Json.Linq.JProperty("redundant_repeat", True),
+                    New Newtonsoft.Json.Linq.JProperty("guidance",
+                        "This successful run reproduced the exact same observable result (identical published result and output files) as the previous successful run. The requested output already exists and is validated. Do not run python_execute again only to re-read or re-verify it; finalize and report completion. Run Python again only to produce a genuinely different or additional result."))
+                payload("advisor") = advisor
+                Return payload.ToString(Newtonsoft.Json.Formatting.None)
+            Catch ex As System.Exception
+                System.Diagnostics.Trace.WriteLine(ex.ToString())
+                Return payload.ToString(Newtonsoft.Json.Formatting.None)
+            End Try
+        End Function
 
         ' ─────────────────────────────────────────────────────────────────────
         ' Guidance / history payload
@@ -624,6 +836,7 @@ Namespace Agents
                 array.Add(New Newtonsoft.Json.Linq.JObject(
                     New Newtonsoft.Json.Linq.JProperty("code_expression", attempt.CodeExpression),
                     New Newtonsoft.Json.Linq.JProperty("modification", attempt.Modification),
+                    New Newtonsoft.Json.Linq.JProperty("args_changed", attempt.ArgsChanged),
                     New Newtonsoft.Json.Linq.JProperty("error_message", attempt.ErrorMessage),
                     New Newtonsoft.Json.Linq.JProperty("fingerprint", attempt.Fingerprint),
                     New Newtonsoft.Json.Linq.JProperty("fingerprint_changed", attempt.FingerprintChanged)))
@@ -738,6 +951,142 @@ Namespace Agents
 
             Return "The proposed change does not look like a minimal repair (" & System.String.Join("; ", warnings) &
                    "). Restore the removed functionality and outputs, then fix only the smallest region that caused the error."
+        End Function
+
+        ''' <summary>
+        ''' Capability-driven, tool-agnostic check: returns True when the currently executing tool is a fallback
+        ''' strategy (IsFallbackStrategy) and at least one OTHER selected non-fallback tool declares an overlapping
+        ''' CapabilityTags entry. Contains no host- or tool-name logic. Used by hosts to decide whether a failed
+        ''' fallback execution should be re-routed to a specialized alternative instead of repaired in place.
+        ''' </summary>
+        Public Shared Function HasCapableNonFallbackAlternative(
+            selectedTools As System.Collections.Generic.IEnumerable(Of ModelConfig),
+            currentToolName As System.String
+        ) As System.Boolean
+
+            If selectedTools Is Nothing OrElse System.String.IsNullOrWhiteSpace(currentToolName) Then Return False
+
+            Dim current As ModelConfig = Nothing
+            For Each tool As ModelConfig In selectedTools
+                If tool IsNot Nothing AndAlso
+                   System.String.Equals(tool.ToolName, currentToolName, System.StringComparison.OrdinalIgnoreCase) Then
+                    current = tool
+                    Exit For
+                End If
+            Next
+
+            If current Is Nothing OrElse Not current.IsFallbackStrategy Then Return False
+
+            Dim currentTags As System.Collections.Generic.HashSet(Of System.String) = ParseCapabilityTags(current.CapabilityTags)
+            If currentTags.Count = 0 Then Return False
+
+            For Each tool As ModelConfig In selectedTools
+                If tool Is Nothing Then Continue For
+                If tool.IsFallbackStrategy Then Continue For
+                If System.String.Equals(tool.ToolName, currentToolName, System.StringComparison.OrdinalIgnoreCase) Then Continue For
+                For Each tag As System.String In ParseCapabilityTags(tool.CapabilityTags)
+                    If currentTags.Contains(tag) Then Return True
+                Next
+            Next
+
+            Return False
+        End Function
+
+        Private Shared Function ParseCapabilityTags(tags As System.String) As System.Collections.Generic.HashSet(Of System.String)
+            Dim result As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            If System.String.IsNullOrWhiteSpace(tags) Then Return result
+            For Each part As System.String In tags.Split(New System.Char() {","c, ";"c, " "c}, System.StringSplitOptions.RemoveEmptyEntries)
+                Dim trimmed As System.String = part.Trim()
+                If trimmed.Length > 0 Then result.Add(trimmed)
+            Next
+            Return result
+        End Function
+
+        ''' <summary>
+        ''' First-failure reroute gate for a fallback tool. When <paramref name="alternativesAvailable"/> is True
+        ''' and this is the first (not yet offered) deterministic/unknown failure of the fallback in the current
+        ''' task, emits a synthetic non-repairable payload advising the model to re-evaluate routing and prefer the
+        ''' specialized alternative, and returns True. It deliberately does NOT enter the code-repair loop. It marks
+        ''' the session so any subsequent failure of the same fallback is treated as a genuine repair (the
+        ''' alternative could not perform the operation). Transient and fatal outcomes are never rerouted. Never
+        ''' throws; on any problem it returns False so normal repair handling proceeds. Fully tool-agnostic.
+        ''' </summary>
+        Public Shared Function TryBuildRerouteInsteadOfRepairPayload(
+            sessionKey As System.Object,
+            arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+            failedPayloadJson As System.String,
+            alternativesAvailable As System.Boolean,
+            ByRef reroutePayload As System.String,
+            ByRef rerouteReason As System.String
+        ) As System.Boolean
+
+            reroutePayload = System.String.Empty
+            rerouteReason = System.String.Empty
+
+            If Not alternativesAvailable Then Return False
+            If System.String.IsNullOrWhiteSpace(failedPayloadJson) Then Return False
+
+            Try
+                Dim payload As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(failedPayloadJson)
+
+                ' Only genuine execution failures are rerouted; never a success.
+                If System.String.Equals(ReadString(payload("status")), "success", System.StringComparison.Ordinal) Then
+                    Return False
+                End If
+
+                Dim errorObj As Newtonsoft.Json.Linq.JObject = TryCast(payload("error"), Newtonsoft.Json.Linq.JObject)
+                Dim code As System.String = If(errorObj Is Nothing, System.String.Empty, ReadString(errorObj("code")))
+
+                ' Fatal outcomes go to the abort path; transient outcomes are a genuine unchanged retry, not a
+                ' routing problem. Neither should be rerouted.
+                If IsFatalCode(code) OrElse IsTransientCode(code) Then Return False
+
+                Dim session As PythonExecuteRepairSession = GetOrCreateSession(sessionKey)
+
+                ' Only the FIRST failure reroutes. If a reroute was already offered, the alternative was evidently
+                ' unable to perform the operation, so let the normal repair loop take over.
+                If session.RerouteToAlternativeOffered Then Return False
+                If session.Attempts.Count > 0 Then Return False
+
+                session.RerouteToAlternativeOffered = True
+
+                rerouteReason =
+                    "The previous python_execute call was a fallback execution and it failed on its first attempt, while a specialized tool that can perform this operation directly is available in this session. Do not enter a code-repair loop for the fallback. Re-evaluate routing and prefer the specialized tool. Use python_execute again only if the specialized tool genuinely cannot perform the required operation."
+
+                Dim advisorObj As New Newtonsoft.Json.Linq.JObject(
+                    New Newtonsoft.Json.Linq.JProperty("classification", "REROUTE_TO_ALTERNATIVE"),
+                    New Newtonsoft.Json.Linq.JProperty("reroute_to_alternative", True),
+                    New Newtonsoft.Json.Linq.JProperty("worker_invoked", True),
+                    New Newtonsoft.Json.Linq.JProperty("guidance", rerouteReason))
+
+                Dim newErrorObj As New Newtonsoft.Json.Linq.JObject(
+                    New Newtonsoft.Json.Linq.JProperty("code", "REROUTE_TO_ALTERNATIVE"),
+                    New Newtonsoft.Json.Linq.JProperty("phase", "routing"),
+                    New Newtonsoft.Json.Linq.JProperty("retryable", False),
+                    New Newtonsoft.Json.Linq.JProperty("repairable", False),
+                    New Newtonsoft.Json.Linq.JProperty("source", Newtonsoft.Json.Linq.JValue.CreateNull()),
+                    New Newtonsoft.Json.Linq.JProperty("message", "python_execute is a fallback here and failed on its first attempt; a specialized tool for this operation is available. Not entering the Python repair loop."),
+                    New Newtonsoft.Json.Linq.JProperty("advisor", advisorObj))
+
+                Dim reroute As New Newtonsoft.Json.Linq.JObject(
+                    New Newtonsoft.Json.Linq.JProperty("status", "failed"),
+                    New Newtonsoft.Json.Linq.JProperty("exit_code", 1),
+                    New Newtonsoft.Json.Linq.JProperty("duration_ms", 0),
+                    New Newtonsoft.Json.Linq.JProperty("diagnostic_id", System.Guid.NewGuid().ToString("D")),
+                    New Newtonsoft.Json.Linq.JProperty("human_log_available", False),
+                    New Newtonsoft.Json.Linq.JProperty("result", Newtonsoft.Json.Linq.JValue.CreateNull()),
+                    New Newtonsoft.Json.Linq.JProperty("output_files", New Newtonsoft.Json.Linq.JArray()),
+                    New Newtonsoft.Json.Linq.JProperty("error", newErrorObj))
+
+                reroutePayload = reroute.ToString(Newtonsoft.Json.Formatting.None)
+                Return True
+
+            Catch ex As System.Exception
+                System.Diagnostics.Trace.WriteLine(ex.ToString())
+                reroutePayload = System.String.Empty
+                rerouteReason = System.String.Empty
+                Return False
+            End Try
         End Function
 
         ''' <summary>
