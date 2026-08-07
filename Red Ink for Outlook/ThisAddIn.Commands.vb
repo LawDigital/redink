@@ -1639,6 +1639,8 @@ Partial Public Class ThisAddIn
                 DefaultPrefixText = $" (default prefix: '{DefaultPrefix}')"
             End If
 
+            GoTo SkipPromptWin
+
             ' Prompt for the text to process
 
             Dim InsertButtons As System.Tuple(Of String, String, String)() = {
@@ -1660,6 +1662,307 @@ Partial Public Class ThisAddIn
 
                 OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute ({ClipboardInstruct}){PromptLibInstruct}{AddOnInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons, Context:=_context)
             End If
+
+SkipPromptWin:
+
+            ' =============================================================
+            ' FREESTYLE PROMPT UI
+            ' =============================================================
+
+            Dim promptOptions As New SLib.FreestylePromptOptions() With {
+                .Title = $"{AN} Freestyle",
+                .Heading = "What would you like Red Ink to do?",
+                .ModeCaption = "Output",
+                .ModelText = INI_Model,
+                .ContextStatusText = If(NoText, "No text selected", "The current mail selection will be used as context"),
+                .LastPrompt = My.Settings.LastPrompt,
+                .PromptLibraryEnabled = INI_PromptLib,
+                .Context = _context
+            }
+
+            ' =============================================================
+            ' OUTPUT PREFIXES
+            '
+            ' Covers:
+            ' ClipboardPrefix
+            ' ClipboardPrefix2
+            ' NewDocPrefix
+            ' MarkupPrefix
+            ' MarkupPrefixApprove
+            ' MarkupPrefixWord
+            ' MarkupPrefixDiffW
+            ' MarkupPrefixDiff
+            ' InPlacePrefix
+            ' =============================================================
+
+            Dim modeDefault As New SLib.FreestylePromptMode() With {
+                .Id = "default",
+                .Text = "Configured default",
+                .Prefix = System.String.Empty,
+                .ManualSyntax = DefaultPrefix,
+                .IsDefault = True
+            }
+
+            promptOptions.Modes.Add(modeDefault)
+
+
+            Dim modeWindow As New SLib.FreestylePromptMode() With {
+                .Id = "window",
+                .Text = "Separate window / clipboard",
+                .Prefix = ClipboardPrefix,
+                .ManualSyntax = ClipboardPrefix & " / " & ClipboardPrefix2
+            }
+
+            modeWindow.Prefixes.Add(ClipboardPrefix)
+            modeWindow.Prefixes.Add(ClipboardPrefix2)
+
+            promptOptions.Modes.Add(modeWindow)
+
+
+            Dim modeNewDocument As New SLib.FreestylePromptMode() With {
+                .Id = "new-document",
+                .Text = "New Word document",
+                .Prefix = NewDocPrefix,
+                .ManualSyntax = NewDocPrefix
+            }
+
+            modeNewDocument.Prefixes.Add(NewDocPrefix)
+
+            promptOptions.Modes.Add(modeNewDocument)
+
+
+            Dim modeReplace As New SLib.FreestylePromptMode() With {
+                .Id = "replace",
+                .Text = "Replace selection",
+                .Prefix = InPlacePrefix,
+                .ManualSyntax = InPlacePrefix,
+                .IsAvailable = Not NoText,
+                .UnavailableReason = "Replacing text requires a selection in the e-mail."
+            }
+
+            modeReplace.Prefixes.Add(InPlacePrefix)
+
+            promptOptions.Modes.Add(modeReplace)
+
+
+            Dim modeMarkup As New SLib.FreestylePromptMode() With {
+                .Id = "markup",
+                .Text = "Track changes - configured method",
+                .Prefix = MarkupPrefix,
+                .ManualSyntax = MarkupPrefix,
+                .IsAvailable = Not NoText,
+                .UnavailableReason = "Markup requires a text selection in the e-mail."
+            }
+
+            modeMarkup.Prefixes.Add(MarkupPrefix)
+
+            promptOptions.Modes.Add(modeMarkup)
+
+
+            Dim modeMarkupReview As New SLib.FreestylePromptMode() With {
+                .Id = "markup-review",
+                .Text = "Review changes",
+                .Prefix = MarkupPrefixApprove,
+                .ManualSyntax = MarkupPrefixApprove,
+                .IsAvailable = Not NoText,
+                .UnavailableReason = "Review changes requires a text selection in the e-mail."
+            }
+
+            modeMarkupReview.Prefixes.Add(MarkupPrefixApprove)
+
+            promptOptions.Modes.Add(modeMarkupReview)
+
+
+            Dim modeMarkupWord As New SLib.FreestylePromptMode() With {
+                .Id = "markup-word",
+                .Text = "Track changes - Word compare",
+                .Prefix = MarkupPrefixWord,
+                .ManualSyntax = MarkupPrefixWord,
+                .IsAvailable = Not NoText,
+                .UnavailableReason = "Word comparison requires a text selection in the e-mail."
+            }
+
+            modeMarkupWord.Prefixes.Add(MarkupPrefixWord)
+
+            promptOptions.Modes.Add(modeMarkupWord)
+
+
+            Dim modeMarkupDiffWindow As New SLib.FreestylePromptMode() With {
+                .Id = "markup-diff-window",
+                .Text = "Track changes - diff window",
+                .Prefix = MarkupPrefixDiffW,
+                .ManualSyntax = MarkupPrefixDiffW,
+                .IsAvailable = Not NoText,
+                .UnavailableReason = "Diff comparison requires a text selection in the e-mail."
+            }
+
+            modeMarkupDiffWindow.Prefixes.Add(MarkupPrefixDiffW)
+
+            promptOptions.Modes.Add(modeMarkupDiffWindow)
+
+
+            Dim modeMarkupDiff As New SLib.FreestylePromptMode() With {
+                .Id = "markup-diff",
+                .Text = "Track changes - inline diff",
+                .Prefix = MarkupPrefixDiff,
+                .ManualSyntax = MarkupPrefixDiff,
+                .IsAvailable = Not NoText,
+                .UnavailableReason = "Diff markup requires a text selection in the e-mail."
+            }
+
+            modeMarkupDiff.Prefixes.Add(MarkupPrefixDiff)
+
+            promptOptions.Modes.Add(modeMarkupDiff)
+
+            ' =============================================================
+            ' ADD CONTEXT
+            '
+            ' Covers:
+            ' AddmailTrigger
+            ' ObjectTrigger2
+            ' =============================================================
+
+            promptOptions.InsertOptions.Add(
+                New SLib.FreestylePromptInsertOption() With {
+                    .Id = "mail-chain",
+                    .Text = "Full mail chain",
+                    .Description = "Include the full surrounding e-mail chain as additional context (" & AddmailTrigger & ").",
+                    .InsertText = AddmailTrigger
+                })
+
+            If DoFileObject Then
+
+                promptOptions.InsertOptions.Add(
+                    New SLib.FreestylePromptInsertOption() With {
+                        .Id = "clipboard-object",
+                        .Text = "Clipboard object",
+                        .Description = "Include clipboard content as an LLM object (" & ObjectTrigger2 & ").",
+                        .InsertText = ObjectTrigger2
+                    })
+
+            End If
+
+            ' =============================================================
+            ' FORMATTING
+            '
+            ' Covers:
+            ' NoFormatTrigger
+            ' NoFormatTrigger2
+            ' KFTrigger
+            ' KFTrigger2
+            ' KPFTrigger
+            ' KPFTrigger2
+            ' =============================================================
+
+            Dim formattingSection As New SLib.FreestylePromptSection() With {
+                .Id = "formatting",
+                .Caption = "Formatting"
+            }
+
+            formattingSection.Options.Add(
+                New SLib.FreestylePromptToggleOption() With {
+                    .Id = "no-format",
+                    .Text = "Do not preserve formatting",
+                    .Trigger = NoFormatTrigger2,
+                    .ManualSyntax = NoFormatTrigger & " / " & NoFormatTrigger2,
+                    .Description = "Override the formatting default and do not preserve the selected text's formatting."
+                })
+
+            formattingSection.Options.Add(
+                New SLib.FreestylePromptToggleOption() With {
+                    .Id = "keep-format",
+                    .Text = "Keep character formatting",
+                    .Trigger = KFTrigger2,
+                    .ManualSyntax = KFTrigger & " / " & KFTrigger2,
+                    .Description = "Preserve character-level formatting where supported."
+                })
+
+            formattingSection.Options.Add(
+                New SLib.FreestylePromptToggleOption() With {
+                    .Id = "keep-paragraph-format",
+                    .Text = "Keep paragraph formatting",
+                    .Trigger = KPFTrigger2,
+                    .ManualSyntax = KPFTrigger & " / " & KPFTrigger2,
+                    .Description = "Preserve paragraph-level formatting where supported."
+                })
+
+            promptOptions.Sections.Add(formattingSection)
+
+            ' =============================================================
+            ' PROCESSING
+            '
+            ' Covers:
+            ' MyStyleTrigger
+            ' =============================================================
+
+            Dim processingSection As New SLib.FreestylePromptSection() With {
+                .Id = "processing",
+                .Caption = "Processing"
+            }
+
+            If Not System.String.IsNullOrWhiteSpace(INI_MyStylePath) Then
+
+                processingSection.Options.Add(
+                    New SLib.FreestylePromptToggleOption() With {
+                        .Id = "mystyle",
+                        .Text = "Apply MyStyle",
+                        .Trigger = MyStyleTrigger,
+                        .ManualSyntax = MyStyleTrigger,
+                        .Description = "Apply one of your Outlook MyStyle prompts."
+                    })
+
+            End If
+
+            If processingSection.Options.Count > 0 Then
+                promptOptions.Sections.Add(processingSection)
+            End If
+
+            ' =============================================================
+            ' MODELS
+            '
+            ' Covers:
+            ' SecondAPICode
+            ' =============================================================
+
+            If INI_SecondAPI Then
+
+                Dim modelSection As New SLib.FreestylePromptSection() With {
+                    .Id = "models",
+                    .Caption = "Models"
+                }
+
+                Dim secondModelText As System.String
+
+                If System.String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
+                    secondModelText = "Use secondary model"
+                Else
+                    secondModelText = "Choose alternate model"
+                End If
+
+                modelSection.Options.Add(
+                    New SLib.FreestylePromptToggleOption() With {
+                        .Id = "second-api",
+                        .Text = secondModelText,
+                        .Trigger = SecondAPICode,
+                        .ManualSyntax = SecondAPICode,
+                        .Description = If(System.String.IsNullOrWhiteSpace(INI_AlternateModelPath), "Use the configured secondary model (" & INI_Model_2 & ").", "Open the configured alternate-model selector before running.")
+                    })
+
+                promptOptions.Sections.Add(modelSection)
+
+            End If
+
+            ' =============================================================
+            ' SHOW
+            ' =============================================================
+
+            Dim promptResult As SLib.FreestylePromptResult = SLib.ShowFreestylePromptForm(promptOptions)
+
+            If promptResult Is Nothing OrElse Not promptResult.Accepted Then
+                Exit Sub
+            End If
+
+            OtherPrompt = SLib.ComposeFreestylePrompt(promptResult).Trim()
 
             If String.IsNullOrEmpty(OtherPrompt) AndAlso OtherPrompt <> "ESC" AndAlso INI_PromptLib Then
 

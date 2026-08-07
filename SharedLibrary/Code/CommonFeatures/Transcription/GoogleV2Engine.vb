@@ -270,8 +270,8 @@ Namespace Transcription
             Return normalized
         End Function
 
-        Private Sub RaiseStatusMessage(message As String)
-            RaiseEvent Status(Me, New TranscriptionStatusEventArgs(message))
+        Private Sub RaiseStatusMessage(message As String, Optional progressPercent As System.Nullable(Of Integer) = Nothing)
+            RaiseEvent Status(Me, New TranscriptionStatusEventArgs(message, progressPercent))
         End Sub
 
         Private Function GetRecognizerName() As String
@@ -602,24 +602,46 @@ Namespace Transcription
         End Function
 
         Public Async Function TranscribeFileAsync(filePath As String, opts As TranscriptionOptions, ct As CancellationToken) As Task Implements ITranscriptionEngine.TranscribeFileAsync
-            RaiseStatusMessage("Streaming file to Google V2…")
+            RaiseStatusMessage("Preparing file for Google V2…", 0)
             Await StartLiveAsync(opts, ct)
 
             Dim pcm As Byte() = VoskEngine.LoadAudioToPcm16Mono16k(filePath)
             Const chunkSize As Integer = 4096
             Dim bytesPerSec As Integer = 16000 * 2
             Dim pos As Integer = 0
+            Dim lastProgressPercent As Integer = -1
+
+            RaiseStatusMessage("Streaming file to Google V2…", 0)
 
             While pos < pcm.Length AndAlso Not ct.IsCancellationRequested
                 Dim n As Integer = Math.Min(chunkSize, pcm.Length - pos)
                 Dim slice(n - 1) As Byte
                 Buffer.BlockCopy(pcm, pos, slice, 0, n)
                 Await PushAudioAsync(slice, n, ct)
-                Await Task.Delay(CInt(1000.0 * n / bytesPerSec), ct)
                 pos += n
+
+                Dim progressPercent As Integer =
+                    CInt(Math.Truncate((CDbl(pos) / Math.Max(1.0R, CDbl(pcm.Length))) * 100.0R))
+
+                If progressPercent <> lastProgressPercent Then
+                    lastProgressPercent = progressPercent
+                    RaiseStatusMessage("Streaming file to Google V2…", progressPercent)
+                End If
+
+                Await Task.Delay(CInt(1000.0 * n / bytesPerSec), ct)
             End While
 
+            If ct.IsCancellationRequested Then
+                RaiseStatusMessage("Google V2 file transcription canceled.")
+            Else
+                RaiseStatusMessage("Finalizing Google V2 file transcription…", 100)
+            End If
+
             Await StopLiveAsync()
+
+            If Not ct.IsCancellationRequested Then
+                RaiseStatusMessage("Google V2 file transcription completed.", 100)
+            End If
         End Function
 
         Private Function StartWriter(queue As BlockingCollection(Of ByteString),

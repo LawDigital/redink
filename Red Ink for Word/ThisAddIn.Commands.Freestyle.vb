@@ -1551,6 +1551,9 @@ Partial Public Class ThisAddIn
                         }
 
             ' Prompt user for input if not provided via LastPrompt parameter
+
+            GoTo SkipPromptInput
+
             If LastPrompt.Trim() = "" Then
                 If Not NoText Then
                     ' Offer optional buttons for common prefix shortcuts when text is selected
@@ -1574,6 +1577,584 @@ Partial Public Class ThisAddIn
             Else
                 OtherPrompt = LastPrompt
             End If
+
+SkipPromptInput:
+
+            If LastPrompt.Trim() = "" Then
+
+                Dim promptOptions As New SLib.FreestylePromptOptions() With {
+                    .Title = $"{AN} Freestyle",
+                    .Heading = "What would you like Red Ink to do?",
+                    .ModeCaption = "Output",
+                    .ModelText = If(UseSecondAPI, INI_Model_2, INI_Model),
+                    .ContextStatusText = If(NoText, "No text selected", "The current selection will be used as context"),
+                    .LastPrompt = My.Settings.LastPrompt,
+                    .PromptLibraryEnabled = INI_PromptLib,
+                    .ShowShortCommandsHint = True,
+                    .Context = _context
+                }
+
+                ' =============================================================
+                ' OUTPUT MODES
+                ' =============================================================
+
+                Dim modeDefault As New SLib.FreestylePromptMode() With {
+                    .Id = "default",
+                    .Text = "Configured default",
+                    .Prefix = System.String.Empty,
+                    .ManualSyntax = DefaultPrefix,
+                    .IsDefault = True
+                }
+
+                promptOptions.Modes.Add(modeDefault)
+
+
+                Dim modeWindow As New SLib.FreestylePromptMode() With {
+                    .Id = "window",
+                    .Text = "Separate window / clipboard",
+                    .Prefix = ClipboardPrefix,
+                    .ManualSyntax = ClipboardPrefix & " / " & ClipboardPrefix2
+                }
+
+                modeWindow.Prefixes.Add(ClipboardPrefix)
+                modeWindow.Prefixes.Add(ClipboardPrefix2)
+                promptOptions.Modes.Add(modeWindow)
+
+
+                Dim modeNewDoc As New SLib.FreestylePromptMode() With {
+                    .Id = "newdoc",
+                    .Text = "New Word document",
+                    .Prefix = NewdocPrefix,
+                    .ManualSyntax = NewdocPrefix
+                }
+
+                modeNewDoc.Prefixes.Add(NewdocPrefix)
+                promptOptions.Modes.Add(modeNewDoc)
+
+
+                Dim modeComments As New SLib.FreestylePromptMode() With {
+                    .Id = "comments",
+                    .Text = "Insert comments",
+                    .Prefix = BubblesPrefix,
+                    .ManualSyntax = BubblesPrefix
+                }
+
+                modeComments.Prefixes.Add(BubblesPrefix)
+                promptOptions.Modes.Add(modeComments)
+
+
+                Dim modeSlides As New SLib.FreestylePromptMode() With {
+                    .Id = "slides",
+                    .Text = "Add to PowerPoint",
+                    .Prefix = SlidesPrefix,
+                    .ManualSyntax = SlidesPrefix
+                }
+
+                modeSlides.Prefixes.Add(SlidesPrefix)
+                promptOptions.Modes.Add(modeSlides)
+
+
+                Dim modeChart As New SLib.FreestylePromptMode() With {
+                    .Id = "chart",
+                    .Text = "Create chart",
+                    .Prefix = ChartPrefix,
+                    .ManualSyntax = ChartPrefix
+                }
+
+                modeChart.Prefixes.Add(ChartPrefix)
+                promptOptions.Modes.Add(modeChart)
+
+
+                Dim modeChartApp As New SLib.FreestylePromptMode() With {
+                    .Id = "chart-app",
+                    .Text = "Create chart for web app",
+                    .Prefix = ChartPrefixApp,
+                    .ManualSyntax = ChartPrefixApp
+                }
+
+                modeChartApp.Prefixes.Add(ChartPrefixApp)
+                promptOptions.Modes.Add(modeChartApp)
+
+
+                Dim modeReplace As New SLib.FreestylePromptMode() With {
+                    .Id = "replace",
+                    .Text = "Replace selection",
+                    .Prefix = InPlacePrefix,
+                    .ManualSyntax = InPlacePrefix,
+                    .IsAvailable = Not NoText,
+                    .UnavailableReason = "The '" & InPlacePrefix & "' prefix requires selected text."
+                }
+
+                modeReplace.Prefixes.Add(InPlacePrefix)
+                promptOptions.Modes.Add(modeReplace)
+
+
+                Dim modeAdd As New SLib.FreestylePromptMode() With {
+                    .Id = "add",
+                    .Text = "Add after selection",
+                    .Prefix = AddPrefix,
+                    .ManualSyntax = AddPrefix & " / " & AddPrefix2,
+                    .IsAvailable = Not NoText,
+                    .UnavailableReason = "The '" & AddPrefix & "' prefix requires selected text."
+                }
+
+                modeAdd.Prefixes.Add(AddPrefix)
+                modeAdd.Prefixes.Add(AddPrefix2)
+                promptOptions.Modes.Add(modeAdd)
+
+
+                Dim modeMarkup As New SLib.FreestylePromptMode() With {
+                    .Id = "markup",
+                    .Text = "Track changes – configured method",
+                    .Prefix = MarkupPrefix,
+                    .ManualSyntax = MarkupPrefix,
+                    .IsAvailable = Not NoText,
+                    .UnavailableReason = "Markup requires selected text."
+                }
+
+                modeMarkup.Prefixes.Add(MarkupPrefix)
+                promptOptions.Modes.Add(modeMarkup)
+
+
+                Dim modeMarkupRegex As New SLib.FreestylePromptMode() With {
+                    .Id = "markup-regex",
+                    .Text = "Track changes – regex",
+                    .Prefix = MarkupPrefixRegex,
+                    .ManualSyntax = MarkupPrefixRegex,
+                    .IsAvailable = Not NoText,
+                    .UnavailableReason = "Markup requires selected text."
+                }
+
+                modeMarkupRegex.Prefixes.Add(MarkupPrefixRegex)
+                promptOptions.Modes.Add(modeMarkupRegex)
+
+
+                Dim modeMarkupWord As New SLib.FreestylePromptMode() With {
+                    .Id = "markup-word",
+                    .Text = "Track changes – Word compare",
+                    .Prefix = MarkupPrefixWord,
+                    .ManualSyntax = MarkupPrefixWord,
+                    .IsAvailable = Not NoText,
+                    .UnavailableReason = "Markup requires selected text."
+                }
+
+                modeMarkupWord.Prefixes.Add(MarkupPrefixWord)
+                promptOptions.Modes.Add(modeMarkupWord)
+
+
+                Dim modeMarkupDiffWindow As New SLib.FreestylePromptMode() With {
+                    .Id = "markup-diff-window",
+                    .Text = "Track changes – diff window",
+                    .Prefix = MarkupPrefixDiffW,
+                    .ManualSyntax = MarkupPrefixDiffW,
+                    .IsAvailable = Not NoText,
+                    .UnavailableReason = "Markup requires selected text."
+                }
+
+                modeMarkupDiffWindow.Prefixes.Add(MarkupPrefixDiffW)
+                promptOptions.Modes.Add(modeMarkupDiffWindow)
+
+
+                Dim modeMarkupDiff As New SLib.FreestylePromptMode() With {
+                    .Id = "markup-diff",
+                    .Text = "Track changes – inline diff",
+                    .Prefix = MarkupPrefixDiff,
+                    .ManualSyntax = MarkupPrefixDiff,
+                    .IsAvailable = Not NoText,
+                    .UnavailableReason = "Markup requires selected text."
+                }
+
+                modeMarkupDiff.Prefixes.Add(MarkupPrefixDiff)
+                promptOptions.Modes.Add(modeMarkupDiff)
+
+
+                Dim modePane As New SLib.FreestylePromptMode() With {
+                    .Id = "pane",
+                    .Text = "Side pane",
+                    .Prefix = PanePrefix,
+                    .ManualSyntax = PanePrefix
+                }
+
+                modePane.Prefixes.Add(PanePrefix)
+                promptOptions.Modes.Add(modePane)
+
+
+                Dim modePushback As New SLib.FreestylePromptMode() With {
+                    .Id = "pushback",
+                    .Text = "Reply to comments",
+                    .Prefix = PushbackPrefix,
+                    .ManualSyntax = PushbackPrefix & " / " & PushbackPrefix2,
+                    .IsAvailable = Not NoText,
+                    .UnavailableReason = "Replying to comments requires selected text."
+                }
+
+                modePushback.Prefixes.Add(PushbackPrefix)
+                modePushback.Prefixes.Add(PushbackPrefix2)
+                promptOptions.Modes.Add(modePushback)
+
+
+                Dim modeFiles As New SLib.FreestylePromptMode() With {
+                    .Id = "files",
+                    .Text = "Modify file(s)",
+                    .Prefix = FilePrefix,
+                    .ManualSyntax = FilePrefix & " / " & FilePrefix2
+                }
+
+                modeFiles.Prefixes.Add(FilePrefix)
+                modeFiles.Prefixes.Add(FilePrefix2)
+                promptOptions.Modes.Add(modeFiles)
+
+
+                Dim modeAssemble As New SLib.FreestylePromptMode() With {
+                    .Id = "assemble",
+                    .Text = "Assemble document from templates",
+                    .Prefix = AssemblePrefix,
+                    .ManualSyntax = AssemblePrefix
+                }
+
+                modeAssemble.Prefixes.Add(AssemblePrefix)
+                promptOptions.Modes.Add(modeAssemble)
+
+
+                Dim modeForm As New SLib.FreestylePromptMode() With {
+                    .Id = "form",
+                    .Text = "Complete Word form / table",
+                    .Prefix = FormPrefix,
+                    .ManualSyntax = FormPrefix,
+                    .IsAvailable = NoText,
+                    .UnavailableReason = "The '" & FormPrefix & "' prefix is available only when no text is selected."
+                }
+
+                modeForm.Prefixes.Add(FormPrefix)
+                promptOptions.Modes.Add(modeForm)
+
+
+                Dim modePure As New SLib.FreestylePromptMode() With {
+                    .Id = "pure",
+                    .Text = "Direct prompt",
+                    .Prefix = PurePrefix,
+                    .ManualSyntax = PurePrefix
+                }
+
+                modePure.Prefixes.Add(PurePrefix)
+                promptOptions.Modes.Add(modePure)
+
+                ' =============================================================
+                ' CONTEXT
+                ' =============================================================
+
+                promptOptions.InsertOptions.Add(
+                    New SLib.FreestylePromptInsertOption() With {
+                        .Id = "file",
+                        .Text = "File",
+                        .Description = "Select and include a document or file (" & ExtTrigger & ").",
+                        .InsertText = ExtTrigger
+                    })
+
+                promptOptions.InsertOptions.Add(
+                    New SLib.FreestylePromptInsertOption() With {
+                        .Id = "file-path",
+                        .Text = "File path",
+                        .Description = "Enter a specific file path and insert it directly into the prompt.",
+                        .RequiresValue = True,
+                        .ValuePrompt = "Enter the full path of the file to include:",
+                        .ValueTitle = $"{AN} Freestyle - File path",
+                        .ValueTemplate = ExtTriggerFixed,
+                        .ValuePlaceholder = "[path]"
+                    })
+
+                promptOptions.InsertOptions.Add(
+                    New SLib.FreestylePromptInsertOption() With {
+                        .Id = "folder",
+                        .Text = "Folder",
+                        .Description = "Include files from a directory (" & ExtDirTrigger & ").",
+                        .InsertText = ExtDirTrigger
+                    })
+
+                promptOptions.InsertOptions.Add(
+                    New SLib.FreestylePromptInsertOption() With {
+                        .Id = "url",
+                        .Text = "URL",
+                        .Description = "Include content from a URL (" & ExtUrlTrigger & ").",
+                        .InsertText = ExtUrlTrigger
+                    })
+
+                promptOptions.InsertOptions.Add(
+                    New SLib.FreestylePromptInsertOption() With {
+                        .Id = "other-word-documents",
+                        .Text = "Other open Word docs",
+                        .Description = "Include one or more other open Word documents (" & AddDocTrigger & ").",
+                        .InsertText = AddDocTrigger
+                    })
+
+                If DoFileObject Then
+
+                    promptOptions.InsertOptions.Add(
+                        New SLib.FreestylePromptInsertOption() With {
+                            .Id = "file-object",
+                            .Text = "File object",
+                            .Description = "Attach a file as an LLM object (" & ObjectTrigger & ").",
+                            .InsertText = ObjectTrigger
+                        })
+
+                    promptOptions.InsertOptions.Add(
+                        New SLib.FreestylePromptInsertOption() With {
+                            .Id = "clipboard-object",
+                            .Text = "Clipboard object",
+                            .Description = "Use clipboard content as an LLM object (" & ObjectTrigger2 & ").",
+                            .InsertText = ObjectTrigger2
+                        })
+
+                End If
+
+                ' =============================================================
+                ' SOURCES
+                ' =============================================================
+
+                Dim sourcesSection As New SLib.FreestylePromptSection() With {
+                    .Id = "sources",
+                    .Caption = "Sources"
+                }
+
+                If INI_Lib Then
+
+                    sourcesSection.Options.Add(
+                        New SLib.FreestylePromptToggleOption() With {
+                            .Id = "library",
+                            .Text = "Library search",
+                            .Trigger = LibTrigger,
+                            .ManualSyntax = LibTrigger,
+                            .Description = "Search the configured Red Ink library."
+                        })
+
+                End If
+
+                If INI_ISearch Then
+
+                    sourcesSection.Options.Add(
+                        New SLib.FreestylePromptToggleOption() With {
+                            .Id = "internet",
+                            .Text = "Internet search",
+                            .Trigger = NetTrigger,
+                            .ManualSyntax = NetTrigger,
+                            .Description = "Use internet search."
+                        })
+
+                End If
+
+                If Not System.String.IsNullOrWhiteSpace(INI_KnowledgeStorePath) OrElse Not System.String.IsNullOrWhiteSpace(INI_KnowledgeStorePathLocal) Then
+
+                    sourcesSection.Options.Add(
+                        New SLib.FreestylePromptToggleOption() With {
+                            .Id = "knowledge",
+                            .Text = "Knowledge Store",
+                            .Trigger = KnowledgeTriggerHelper.KbTrigger,
+                            .ManualSyntax = KnowledgeTriggerHelper.KbTrigger & " / " & KnowledgeTriggerHelper.KbTriggerPrefix & "…)",
+                            .Description = "Leave blank for all stores, or enter a query, store:StoreName query, or tag:TagName query.",
+                            .ArgumentPrefix = KnowledgeTriggerHelper.KbTriggerPrefix,
+                            .ArgumentSuffix = ")",
+                            .ArgumentHint = "Optional: query, store:StoreName query, or tag:TagName query",
+                            .ArgumentRequired = False
+                        })
+
+                End If
+
+                If sourcesSection.Options.Count > 0 Then
+                    promptOptions.Sections.Add(sourcesSection)
+                End If
+
+                ' =============================================================
+                ' PROCESSING
+                ' =============================================================
+
+                Dim processingSection As New SLib.FreestylePromptSection() With {
+                    .Id = "processing",
+                    .Caption = "Processing"
+                }
+
+                processingSection.Options.Add(
+                    New SLib.FreestylePromptToggleOption() With {
+                        .Id = "all",
+                        .Text = "Use entire document",
+                        .Trigger = AllTrigger,
+                        .ManualSyntax = AllTrigger,
+                        .Description = "Use the complete active document."
+                    })
+
+                If Not NoText Then
+
+                    processingSection.Options.Add(
+                        New SLib.FreestylePromptToggleOption() With {
+                            .Id = "chunks",
+                            .Text = "Process in chunks",
+                            .Trigger = ChunkTrigger,
+                            .ManualSyntax = ChunkTrigger,
+                            .Description = "Iterate through the selected text in paragraph chunks."
+                        })
+
+                    processingSection.Options.Add(
+                        New SLib.FreestylePromptToggleOption() With {
+                            .Id = "existing-comments",
+                            .Text = "Include existing comments",
+                            .Trigger = BubblesExtractTrigger,
+                            .ManualSyntax = BubblesExtractTrigger,
+                            .Description = "Include existing Word comments in the LLM context."
+                        })
+
+                    processingSection.Options.Add(
+                        New SLib.FreestylePromptToggleOption() With {
+                            .Id = "tracked-revisions",
+                            .Text = "Include tracked revisions",
+                            .Trigger = TPMarkupTrigger,
+                            .ManualSyntax = TPMarkupTrigger & " / " & TPMarkupTriggerL & "author" & TPMarkupTriggerR,
+                            .Description = "Optionally restrict revisions to a specific author.",
+                            .ArgumentPrefix = TPMarkupTriggerL,
+                            .ArgumentSuffix = TPMarkupTriggerR,
+                            .ArgumentHint = "Optional revision author",
+                            .ArgumentRequired = False
+                        })
+
+                End If
+
+                If Not System.String.IsNullOrWhiteSpace(INI_MyStylePath) Then
+
+                    processingSection.Options.Add(
+                        New SLib.FreestylePromptToggleOption() With {
+                            .Id = "mystyle",
+                            .Text = "Apply MyStyle",
+                            .Trigger = MyStyleTrigger,
+                            .ManualSyntax = MyStyleTrigger
+                        })
+
+                End If
+
+                promptOptions.Sections.Add(processingSection)
+
+                ' =============================================================
+                ' FORMATTING
+                ' =============================================================
+
+                If Not NoText Then
+
+                    Dim formattingSection As New SLib.FreestylePromptSection() With {
+                        .Id = "formatting",
+                        .Caption = "Formatting"
+                    }
+
+                    formattingSection.Options.Add(
+                        New SLib.FreestylePromptToggleOption() With {
+                            .Id = "no-format",
+                            .Text = "Do not preserve formatting",
+                            .Trigger = NoFormatTrigger2,
+                            .ManualSyntax = NoFormatTrigger & " / " & NoFormatTrigger2
+                        })
+
+                    formattingSection.Options.Add(
+                        New SLib.FreestylePromptToggleOption() With {
+                            .Id = "keep-format",
+                            .Text = "Keep character formatting",
+                            .Trigger = KFTrigger2,
+                            .ManualSyntax = KFTrigger & " / " & KFTrigger2
+                        })
+
+                    formattingSection.Options.Add(
+                        New SLib.FreestylePromptToggleOption() With {
+                            .Id = "keep-paragraph-format",
+                            .Text = "Keep paragraph formatting",
+                            .Trigger = KPFTrigger2,
+                            .ManualSyntax = KPFTrigger & " / " & KPFTrigger2
+                        })
+
+                    formattingSection.Options.Add(
+                        New SLib.FreestylePromptToggleOption() With {
+                            .Id = "same-as-replace",
+                            .Text = "Add: format like Replace",
+                            .Trigger = SameAsReplaceTrigger,
+                            .ManualSyntax = SameAsReplaceTrigger
+                        })
+
+                    promptOptions.Sections.Add(formattingSection)
+
+                End If
+
+                ' =============================================================
+                ' MODELS / TOOLS
+                ' =============================================================
+
+                Dim modelSection As New SLib.FreestylePromptSection() With {
+                    .Id = "models",
+                    .Caption = "Models / tools"
+                }
+
+                If UseSecondAPI AndAlso Not System.String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
+
+                    modelSection.Options.Add(
+                        New SLib.FreestylePromptToggleOption() With {
+                            .Id = "multimodel",
+                            .Text = "Use multiple models",
+                            .Trigger = MultiModelTrigger,
+                            .ManualSyntax = MultiModelTrigger
+                        })
+
+                End If
+
+                modelSection.Options.Add(
+                    New SLib.FreestylePromptToggleOption() With {
+                        .Id = "show-model",
+                        .Text = "Include model name in output",
+                        .Trigger = ShowModel,
+                        .ManualSyntax = ShowModel
+                    })
+
+                If ToolTriggerAvailable Then
+
+                    modelSection.Options.Add(
+                        New SLib.FreestylePromptToggleOption() With {
+                            .Id = "agentic-model",
+                            .Text = "Use agentic model",
+                            .Trigger = ToolTrigger,
+                            .ManualSyntax = ToolTrigger
+                        })
+
+                End If
+
+                Dim toolSelectionAvailable As System.Boolean = (UseSecondAPI OrElse ToolTriggerAvailable) AndAlso ((Not System.String.IsNullOrWhiteSpace(INI_AlternateModelPath) AndAlso modelSupportsTool) OrElse ToolTriggerAvailable)
+
+                If toolSelectionAvailable Then
+
+                    modelSection.Options.Add(
+                        New SLib.FreestylePromptToggleOption() With {
+                            .Id = "tool-selection",
+                            .Text = "Allow tool selection",
+                            .Trigger = ToolSelectionTrigger,
+                            .ManualSyntax = ToolSelectionTrigger,
+                            .Description = "Permit selection of the available " & ToolFriendlyName.ToLower() & "."
+                        })
+
+                End If
+
+                If modelSection.Options.Count > 0 Then
+                    promptOptions.Sections.Add(modelSection)
+                End If
+
+                ' =============================================================
+                ' SHOW
+                ' =============================================================
+
+                Dim promptResult As SLib.FreestylePromptResult = SLib.ShowFreestylePromptForm(promptOptions)
+
+                If promptResult Is Nothing OrElse Not promptResult.Accepted Then
+                    Return
+                End If
+
+                OtherPrompt = SLib.ComposeFreestylePrompt(promptResult).Trim()
+
+            Else
+
+                OtherPrompt = LastPrompt
+
+            End If
+
 
             'Debug.WriteLine($"OtherPrompt: '{OtherPrompt}'")
 

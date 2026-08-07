@@ -111,6 +111,10 @@ Namespace Transcription
             _modelFile = modelFileName
         End Sub
 
+        Private Sub RaiseStatusMessage(message As String, Optional progressPercent As System.Nullable(Of Integer) = Nothing)
+            RaiseEvent Status(Me, New TranscriptionStatusEventArgs(message, progressPercent))
+        End Sub
+
         Private Sub Init(opts As TranscriptionOptions)
             EnsureRuntimeConfigured()
 
@@ -239,8 +243,16 @@ Namespace Transcription
 
         Public Async Function TranscribeFileAsync(filePath As String, opts As TranscriptionOptions, ct As CancellationToken) As Task Implements ITranscriptionEngine.TranscribeFileAsync
             Init(opts)
+            RaiseStatusMessage("Preparing file…")
             Dim samples As Single() = LoadAudioToFloat16k(filePath)
+            RaiseStatusMessage("Transcribing file…")
             Await ProcessSegmentsAsync(samples, ct)
+
+            If ct.IsCancellationRequested OrElse _cancelled Then
+                RaiseStatusMessage("File transcription canceled.")
+            Else
+                RaiseStatusMessage("File transcription completed.", 100)
+            End If
         End Function
 
         Private Async Function ProcessSegmentsAsync(samples As Single(), ct As CancellationToken) As Task

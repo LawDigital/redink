@@ -88,6 +88,10 @@ Namespace Transcription
             _modelName = modelDirName
         End Sub
 
+        Private Sub RaiseStatusMessage(message As String, Optional progressPercent As System.Nullable(Of Integer) = Nothing)
+            RaiseEvent Status(Me, New TranscriptionStatusEventArgs(message, progressPercent))
+        End Sub
+
         Private Sub Init(opts As TranscriptionOptions)
             Dim modelPath As String = Path.Combine(_modelRoot, _modelName)
 
@@ -156,9 +160,14 @@ Namespace Transcription
         Public Async Function TranscribeFileAsync(filePath As String, opts As TranscriptionOptions, ct As CancellationToken) As Task Implements ITranscriptionEngine.TranscribeFileAsync
             Init(opts)
 
+            RaiseStatusMessage("Preparing file…", 0)
+
             Dim pcm As Byte() = LoadAudioToPcm16Mono16k(filePath)
             Dim offset As Integer = 0
+            Dim lastProgressPercent As Integer = -1
             Const chunkSize As Integer = 4096
+
+            RaiseStatusMessage("Transcribing file…", 0)
 
             While offset < pcm.Length AndAlso Not ct.IsCancellationRequested
                 Dim len As Integer = Math.Min(chunkSize, pcm.Length - offset)
@@ -166,12 +175,29 @@ Namespace Transcription
                 Buffer.BlockCopy(pcm, offset, slice, 0, len)
                 Await PushAudioAsync(slice, len, ct)
                 offset += len
+
+                Dim progressPercent As Integer =
+                    CInt(Math.Truncate((CDbl(offset) / Math.Max(1.0R, CDbl(pcm.Length))) * 100.0R))
+
+                If progressPercent <> lastProgressPercent Then
+                    lastProgressPercent = progressPercent
+                    RaiseStatusMessage("Transcribing file…", progressPercent)
+                End If
             End While
+
+            If ct.IsCancellationRequested Then
+                RaiseStatusMessage("File transcription canceled.")
+                Return
+            End If
+
+            RaiseStatusMessage("Finalizing file transcription…", 100)
 
             Try
                 ProcessJson(_rec.FinalResult(), True)
             Catch
             End Try
+
+            RaiseStatusMessage("File transcription completed.", 100)
         End Function
 
         Private Sub ProcessJson(json As String, isFinal As Boolean)
