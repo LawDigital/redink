@@ -113,6 +113,65 @@ Partial Public Class ThisAddIn
 
 #Region "Execute Tooling"
 
+
+    ''' <summary>
+    ''' Builds the user-facing progress-note instruction (B1). The note is authored in the
+    ''' dialogue language when known (same contract as the final response). It is only requested
+    ''' for normal text turns; it must NOT be emitted on turns that call a tool, because native
+    ''' function-calling models would otherwise serialize the tool call as text and break tool
+    ''' detection. Deterministic host-side progress (A) already covers tool-calling turns.
+    ''' </summary>
+    Private Shared Function BuildToolingProgressStatusInstruction(userLanguage As String) As String
+        Dim lang As String = If(userLanguage, "").Trim()
+        Dim languageClause As String =
+            If(lang = "",
+               "in the same language as the user's latest message",
+               "in " & lang)
+        Return "When you respond with normal text (reasoning, questions, or your final answer) and you are NOT issuing a tool/function call in that same turn, begin that response with exactly one short, user-facing progress note " & languageClause &
+               " on its own line using the marker format [[STATUS: your note]] (for example [[STATUS: Reviewing the Word document...]] or [[STATUS: Searching the web...]]). Never place this marker in a turn where you issue a tool or function call, and never serialize a tool call as plain text or JSON just to add the note; always use the normal tool-calling mechanism for tool calls. Keep the note under eight words, describe in plain language what you are about to do, do not reveal tool names, arguments, or internal reasoning, and never mention the marker itself to the user."
+    End Function
+
+    Private Shared ReadOnly TurnStatusMarkerRegex As New System.Text.RegularExpressions.Regex(
+        "\[\[\s*STATUS\s*:\s*(?<t>.*?)\]\]",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.Singleline)
+
+    ''' <summary>Returns the text of the first [[STATUS: ...]] marker in the response, or "".</summary>
+    Private Function ExtractTurnStatusMarker(text As String) As String
+        If String.IsNullOrEmpty(text) Then Return ""
+        Dim m = TurnStatusMarkerRegex.Match(text)
+        If Not m.Success Then Return ""
+        Return If(m.Groups("t").Value, "").Trim()
+    End Function
+
+    ''' <summary>Removes all [[STATUS: ...]] markers so they never reach the user.</summary>
+    Private Function StripTurnStatusMarker(text As String) As String
+        If String.IsNullOrEmpty(text) Then Return text
+        Return TurnStatusMarkerRegex.Replace(text, "").Trim()
+    End Function
+
+    ''' <summary>
+    ''' Derives a tool-agnostic, user-facing progress line for an upcoming tool call,
+    ''' preferring the tool's configured ModelDescription over its raw name.
+    ''' </summary>
+    Private Function BuildFriendlyProgressText(tc As ToolCall, context As ToolExecutionContext) As String
+        Dim toolName As String = If(tc?.ToolName, "").Trim()
+        If toolName = "" Then Return "Working..."
+
+        Dim friendly As String = toolName
+        Try
+            Dim cfg = If(context?.SelectedTools, New List(Of ModelConfig)()).
+                FirstOrDefault(Function(t) t IsNot Nothing AndAlso
+                                         String.Equals(t.ToolName, toolName, StringComparison.OrdinalIgnoreCase))
+            If cfg IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(cfg.ModelDescription) Then
+                friendly = cfg.ModelDescription.Trim()
+            End If
+        Catch
+        End Try
+
+        Return $"Working on: {friendly}..."
+    End Function
+
+
     ''' <summary>
     ''' Executes an iterative tool-enabled LLM loop until either no tool calls are detected, the maximum iteration count is reached,
     ''' or the user cancels. Tool call detection/extraction and response injection are controlled by the active tooling model config.
@@ -174,7 +233,8 @@ Partial Public Class ThisAddIn
         Optional workflowId As String = "",
         Optional memoryGroundingMode As SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode = SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None,
         Optional memoryGroundingModeIsExplicit As Boolean = False,
-        Optional finalResponseContract As SharedLibrary.Agents.ToolingFinalResponseContract = SharedLibrary.Agents.ToolingFinalResponseContract.UserFacingTaskStatus) As Task(Of String)
+        Optional finalResponseContract As SharedLibrary.Agents.ToolingFinalResponseContract = SharedLibrary.Agents.ToolingFinalResponseContract.UserFacingTaskStatus,
+        Optional progressSink As Action(Of String) = Nothing) As Task(Of String)
 
 
         ToolingFileLogger.StartSession()
@@ -575,6 +635,9 @@ Partial Public Class ThisAddIn
 
         _activeToolingContext = context
 
+        context.ProgressSink = progressSink
+        context.ReportProgress("Getting started...")
+
         context.Log("Starting tooling session...")
         If selectedTools IsNot Nothing Then
             context.Log($"Selected tools: {String.Join(", ", selectedTools.Select(Function(t) t.ToolName))}")
@@ -610,6 +673,12 @@ Partial Public Class ThisAddIn
             ' Build System Prompt (matching direct LLM() call plus Tooling Instructions)
             ' Base system command
             Dim baseSysPrompt As String = sysCommand
+
+            ' B1 progress (major steps only): the model announces significant new phases via the
+            ' report_progress tool (a real tool call authored in the dialogue language). Deterministic
+            ' host-side progress (A) still surfaces for every tool call, so A always appears even if
+            ' the model never calls report_progress.
+            baseSysPrompt &= " " & BuildMajorStepProgressToolInstruction()
 
             ' Add bubbles extract instruction if bubbles text is present
             If Not String.IsNullOrWhiteSpace(bubblesText) Then
@@ -1040,6 +1109,12 @@ Partial Public Class ThisAddIn
 
                 context.Log($"Response received ({currentResponse.Length} chars)")
 
+                Dim turnStatus As String = ExtractTurnStatusMarker(currentResponse)
+                If Not String.IsNullOrWhiteSpace(turnStatus) Then
+                    context.ReportProgress(turnStatus)
+                    currentResponse = StripTurnStatusMarker(currentResponse)
+                End If
+
                 Dim detectionPattern = context.ToolingModel.ToolCallDetectionPattern
 
                 If ContainsToolCalls(currentResponse, detectionPattern) Then
@@ -1068,6 +1143,34 @@ Partial Public Class ThisAddIn
 
                     For Each tc In toolCalls
                         If context.IsCancelled Then Exit For
+
+                        ' B1 major-step announcement: surface the model-authored heading and
+                        ' acknowledge the call as a successful no-op. Kept out of sequencing,
+                        ' exposure, and duplicate-detection so it never counts as real work.
+                        If IsReportProgressToolName(tc.ToolName) Then
+                            Dim progressNote As String = ""
+                            If tc.Arguments IsNot Nothing AndAlso
+                               tc.Arguments.ContainsKey("note") AndAlso
+                               tc.Arguments("note") IsNot Nothing Then
+                                progressNote = tc.Arguments("note").ToString()
+                            End If
+
+                            context.ReportMajorProgress(progressNote)
+
+                            Dim progressResponse As New ToolResponse() With {
+                                .CallId = tc.CallId,
+                                .ToolName = tc.ToolName,
+                                .Success = True,
+                                .Response = "{""ok"":true}",
+                                .OriginalCallJson = tc.RawJson
+                            }
+                            context.AllToolResponses.Add(progressResponse)
+
+                            context.Log("Progress update reported to the user.", "diag")
+                            Continue For
+                        End If
+
+                        context.ReportProgress(BuildFriendlyProgressText(tc, context))
 
                         If Not subAgentMode AndAlso
                                context.SequencingState IsNot Nothing AndAlso

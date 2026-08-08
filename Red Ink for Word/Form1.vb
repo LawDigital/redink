@@ -1434,7 +1434,13 @@ Public Class frmAIChat
                         If(toolTriggerDetected, True, _useSecondApi),
                         fullPromptOverride:=fullPrompt.ToString(),
                         hideSplash:=True,
-                        hideLogWindow:=Not chkShowToolingLog.Checked)
+                        hideLogWindow:=Not chkShowToolingLog.Checked,
+                        progressSink:=Sub(status)
+                                          Try
+                                              Me.BeginInvoke(New MethodInvoker(Sub() UpdateAssistantThinking(status)))
+                                          Catch
+                                          End Try
+                                      End Sub)
                 Finally
                     If appliedOverride AndAlso backupConfig IsNot Nothing Then
                         SharedMethods.RestoreDefaults(_context, backupConfig)

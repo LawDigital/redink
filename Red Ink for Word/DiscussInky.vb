@@ -2082,7 +2082,8 @@ Public Class DiscussInky
                     useSecondApi,
                     fullPromptOverride:=userPrompt,
                     hideSplash:=True,
-                    hideLogWindow:=hideLog).ConfigureAwait(False)
+                    hideLogWindow:=hideLog,
+                    progressSink:=Sub(status) UpdateAssistantThinking(status)).ConfigureAwait(False)
             Else
                 ' Standard LLM call
                 Return Await LLM(_context,

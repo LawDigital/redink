@@ -136,6 +136,9 @@ Partial Public Class ThisAddIn
         Public Property ChatId As Integer = 1
         Public Property ScheduledTaskId As String = ""
 
+        ''' <summary>Latest user-facing progress note for the running job (local chat only).</summary>
+        Public Property StatusMessage As String = ""
+
         Public Sub Dispose() Implements IDisposable.Dispose
             Try
                 Cts?.Cancel()
@@ -2029,6 +2032,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("function startElapsedTimer(){stopElapsedTimer();__jobStartTs=Date.now();__elapsedTimer=setInterval(updateElapsed,1000);}")
         html.AppendLine("function stopElapsedTimer(){if(__elapsedTimer){clearInterval(__elapsedTimer);__elapsedTimer=null;}const el=document.getElementById('typingElapsed');if(el)el.style.display='none';}")
         html.AppendLine("function removeTypingBubble(){if(__typingBubbleId){removeTempBubble(__typingBubbleId);__typingBubbleId=null;}stopElapsedTimer();}")
+        html.AppendLine("function setTypingStatus(text){if(!__typingBubbleId)return;const row=document.getElementById(__typingBubbleId);if(!row)return;let el=row.querySelector('.typing-status');const c=row.querySelector('.tmpContent');if(!c)return;if(!el){el=document.createElement('div');el.className='typing-status';el.style.opacity='.75';el.style.fontStyle='italic';el.style.marginTop='4px';c.appendChild(el);}el.textContent=String(text||'');}")
 
         ' Boot        
         html.AppendLine("async function claimScheduledTask(){const r=await api('inky_claimscheduledtask');if(!r||!r.ok)return null;return r.task||null;}")
@@ -2037,7 +2041,7 @@ Partial Public Class ThisAddIn
         ' Poll job
         html.AppendLine("function buildAssistantTurnFromJobResult(r){const md=String((r&&r.result)||'').trim();if(!md)return null;const html=String((r&&r.resultHtml)||'').trim()||md.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>');return {role:'assistant',markdown:md,html:html,utc:new Date().toISOString()};}")
         html.AppendLine("function ensureJobResultVisible(st,r){const hist=(st&&Array.isArray(st.history))?st.history.slice():[];const turn=buildAssistantTurnFromJobResult(r);if(!turn)return hist;const activeChat=Number((st&&st.activeChat)||1);const resultChat=Number((r&&r.chat)||activeChat);if(activeChat!==resultChat)return hist;const last=hist.length?hist[hist.length-1]:null;const lastMd=String((last&&last.markdown)||'').trim();if(last&&last.role==='assistant'&&lastMd===turn.markdown)return hist;hist.push(turn);return hist;}")
-        html.AppendLine("async function pollJob(jobId){if(!jobId)return;__currentJobId=jobId;__jobCanceled=false;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);try{for(;;){await new Promise(r=>setTimeout(r,2000));if(__jobCanceled)break;const s=await api('inky_jobstatus',{Job:jobId});if(!s.ok){console.warn('job status error',s.error);break;}if(s.status==='running'){continue;}if(s.status==='done'){if(Array.isArray(s.history)){render(s.history);}else{const st=await api('inky_getstate');if(st.ok){const hist=ensureJobResultVisible(st,s);render(hist);}else{render(ensureJobResultVisible({history:[]},s));console.warn('state sync error',st&&st.error);}}const stSync=await api('inky_getstate');if(stSync&&stSync.ok){if(stSync.agentFiles)updateAgentFilesDisplay(stSync.agentFiles);syncAdvancedToolsUi({advancedToolsEnabled:stSync.advancedToolsEnabled===true,agentWorkspace:stSync.agentWorkspace,agentFiles:stSync.agentFiles||[],agentModelAvailable:stSync.agentModelAvailable===true,agentModelActive:stSync.agentModelActive===true});}break;}if(s.status==='canceled'){const st=await api('inky_getstate');if(st.ok){render(st.history||[]);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);}break;}if(s.status==='error'){console.warn('job failed',s.error);break;}const st=await api('inky_getstate');if(st.ok){const hist=ensureJobResultVisible(st,s);render(hist);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);}break;}}finally{cancelBtn.style.display='none';removeTypingBubble();sendBtn.disabled=false;pureBtn.disabled=false;disableChatSwitch(false);__currentJobId=null;adjustModelSel();}}")
+        html.AppendLine("async function pollJob(jobId){if(!jobId)return;__currentJobId=jobId;__jobCanceled=false;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);try{for(;;){await new Promise(r=>setTimeout(r,2000));if(__jobCanceled)break;const s=await api('inky_jobstatus',{Job:jobId});if(!s.ok){console.warn('job status error',s.error);break;}if(s.status==='running'){if(s.statusText)setTypingStatus(s.statusText);continue;}if(s.status==='done'){if(Array.isArray(s.history)){render(s.history);}else{const st=await api('inky_getstate');if(st.ok){const hist=ensureJobResultVisible(st,s);render(hist);}else{render(ensureJobResultVisible({history:[]},s));console.warn('state sync error',st&&st.error);}}const stSync=await api('inky_getstate');if(stSync&&stSync.ok){if(stSync.agentFiles)updateAgentFilesDisplay(stSync.agentFiles);syncAdvancedToolsUi({advancedToolsEnabled:stSync.advancedToolsEnabled===true,agentWorkspace:stSync.agentWorkspace,agentFiles:stSync.agentFiles||[],agentModelAvailable:stSync.agentModelAvailable===true,agentModelActive:stSync.agentModelActive===true});}break;}if(s.status==='canceled'){const st=await api('inky_getstate');if(st.ok){render(st.history||[]);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);}break;}if(s.status==='error'){console.warn('job failed',s.error);break;}const st=await api('inky_getstate');if(st.ok){const hist=ensureJobResultVisible(st,s);render(hist);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);}break;}}finally{cancelBtn.style.display='none';removeTypingBubble();sendBtn.disabled=false;pureBtn.disabled=false;disableChatSwitch(false);__currentJobId=null;adjustModelSel();}}")
 
         ' Send (normal)
         html.AppendLine("async function send(){if(__currentJobId){return;}const t=msgEl.value.trim();if(!t)return;const scheduledTaskId=__pendingScheduledTaskId||'';__pendingScheduledTaskId='';__lastPrompt=t;msgEl.value='';sendBtn.disabled=true;pureBtn.disabled=true;chatEl.insertAdjacentHTML('beforeend',`<div class=""row user""><div class=""bubble""><div class=""role"">You</div><div>${t.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>')}</div></div></div>`);let typingId=addTempAssistantBubble('<span class=""typing-dots""><span></span><span></span><span></span></span>');const payload={Text:t};if(scheduledTaskId)payload.ScheduledTaskId=scheduledTaskId;if(__pendingFilePath)payload.FileObject=__pendingFilePath;let r;try{r=await api('inky_send',payload);}catch(e){r={ok:false,error:e.message||'Network error'};}if(!r||!r.ok){removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;alert(r&&r.error||'Error');__pendingFilePath='';adjustModelSel();return;}__pendingFilePath='';if(r.job){if(r.history){render(r.history||[]);}removeTempBubble(typingId);__typingBubbleId=null;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);pollJob(r.job);}else{removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;if(r.history){render(r.history||[]);}adjustModelSel();}}")
@@ -3406,7 +3410,7 @@ Partial Public Class ThisAddIn
 
                                     Try
                                         If useToolTrigger AndAlso selectedToolsForJob IsNot Nothing AndAlso selectedToolsForJob.Count > 0 Then
-                                            ' (t) trigger path: use ToolDefaultModel with selected sources
+                                            ' (ag) trigger path: use ToolDefaultModel with selected sources
                                             ' Respects INI_ToolingLogWindow (same as Form1.vb chkShowToolingLog)
                                             localOutput = ExecuteToolingLoop(
                                                     sysPromptBase,
@@ -3422,7 +3426,8 @@ Partial Public Class ThisAddIn
                                                     True,
                                                     Not INI_ToolingLogWindow,
                                                     False,
-                                                    jobCts.Token
+                                                    jobCts.Token,
+                                                    progressSink:=Sub(s) job.StatusMessage = s
                                                 ).GetAwaiter().GetResult()
 
                                             ' Restore config AFTER tooling completes
@@ -3452,7 +3457,8 @@ Partial Public Class ThisAddIn
                                                     Not INI_ToolingLogWindow,
                                                     False,
                                                     jobCts.Token,
-                                                    _chatAgentTempDir
+                                                    _chatAgentTempDir,
+                                                    progressSink:=Sub(s) job.StatusMessage = s
                                                 ).GetAwaiter().GetResult()
                                             Finally
                                                 INI_ToolingMaximumIterations = previousMaxIterations
@@ -3520,7 +3526,8 @@ Partial Public Class ThisAddIn
                                                     True,
                                                     Not INI_ToolingLogWindow,
                                                     False,
-                                                    jobCts.Token
+                                                    jobCts.Token,
+                                                    progressSink:=Sub(s) job.StatusMessage = s
                                                 ).GetAwaiter().GetResult()
 
                                             ' Restore config AFTER tooling completes
@@ -3794,7 +3801,7 @@ Partial Public Class ThisAddIn
                         End If
                         Dim t = job.Tcs.Task
                         If Not t.IsCompleted Then
-                            Return JsonOk(New With {.ok = True, .job = jobId, .status = "running"})
+                            Return JsonOk(New With {.ok = True, .job = jobId, .status = "running", .statusText = If(job.StatusMessage, "")})
                         End If
                         If t.IsCanceled Then
                             Return JsonOk(New With {.ok = True, .job = jobId, .status = "canceled"})

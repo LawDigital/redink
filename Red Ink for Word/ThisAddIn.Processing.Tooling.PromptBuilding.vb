@@ -458,9 +458,17 @@ Partial Public Class ThisAddIn
             Return result
         End If
 
+        ' Always expose the internal report_progress tool so the model can announce major
+        ' steps (B1) via a real tool call. Host-derived progress (A) is independent of this.
+        Dim progressReportTool As ModelConfig = GetInternalProgressReportTool()
+        If progressReportTool IsNot Nothing Then
+            result.Add(progressReportTool)
+        End If
+
         Dim deduplicatedTools As List(Of ModelConfig) =
             allowedTools.
                 Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
+                Where(Function(t) Not IsReportProgressToolName(t.ToolName)).
                 GroupBy(Function(t) t.ToolName, StringComparer.OrdinalIgnoreCase).
                 Select(Function(g) g.First()).
                 ToList()

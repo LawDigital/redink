@@ -1829,6 +1829,66 @@ Partial Public Class ThisAddIn
         }
     End Function
 
+    ''' <summary>Internal tool name used by the model to announce a major step (B1).</summary>
+    Public Const InternalProgressReportToolName As String = "report_progress"
+
+    ''' <summary>Returns True when the tool name is the internal report_progress tool.</summary>
+    Public Function IsReportProgressToolName(toolName As String) As Boolean
+        Return Not String.IsNullOrWhiteSpace(toolName) AndAlso
+               toolName.Trim().Equals(InternalProgressReportToolName, StringComparison.OrdinalIgnoreCase)
+    End Function
+
+    ''' <summary>
+    ''' Model-facing instruction describing when to call report_progress. Major steps only;
+    ''' the note is authored in the dialogue language; it may be batched with real tool calls.
+    ''' </summary>
+    Public Function BuildMajorStepProgressToolInstruction() As String
+        Return "When you begin a significant new phase of work, you may call the report_progress tool with one short, user-facing note in the dialogue language describing what you are about to do (for example, just before a group of related tool calls). Call it only for major steps, not on every turn and not for minor steps. You may include it in the same turn as your real tool calls. Never write progress as plain text and never serialize any tool call as text; always use native tool calls."
+    End Function
+
+    ''' <summary>Canonical JSON definition for the internal report_progress tool.</summary>
+    Private Function BuildInternalProgressReportToolDefinition() As String
+        Dim definition As New JObject(
+            New JProperty("name", InternalProgressReportToolName),
+            New JProperty("description",
+                "Announces a single major step to the user in the dialogue language. " &
+                "Use only at the start of a significant new phase of work, not on every turn. " &
+                "Performs no other work and returns immediately."),
+            New JProperty("parameters",
+                New JObject(
+                    New JProperty("type", "object"),
+                    New JProperty("properties",
+                        New JObject(
+                            New JProperty("note",
+                                New JObject(
+                                    New JProperty("type", "string"),
+                                    New JProperty("description", "One short, user-facing sentence in the dialogue language describing the major step you are about to start. Do not reveal tool names, arguments, or internal reasoning.")
+                                )
+                            )
+                        )
+                    ),
+                    New JProperty("required", New JArray("note")),
+                    New JProperty("additionalProperties", False)
+                )
+            )
+        )
+
+        Return definition.ToString(Formatting.None)
+    End Function
+
+    ''' <summary>Creates the built-in report_progress tool configuration (B1 major-step channel).</summary>
+    Public Function GetInternalProgressReportTool() As ModelConfig
+        Return New ModelConfig() With {
+            .ToolName = InternalProgressReportToolName,
+            .ToolInstructionsPrompt = BuildMajorStepProgressToolInstruction(),
+            .ToolDefinition = BuildInternalProgressReportToolDefinition(),
+            .ModelDescription = "Progress Update" & InternalToolSuffix,
+            .Tool = True,
+            .ToolPriority = 995,
+            .ToolErrorHandling = "skip"
+        }
+    End Function
+
     Private Function GetSafeDownloadRoot() As String
         Try
             If _chatAgentActive AndAlso Not _apActive Then
