@@ -1314,6 +1314,10 @@ Namespace SharedLibrary
                                         form.Close()
                                     End Sub
 
+            ' Surface any same-process native host prompt (e.g. Word's "Save changes?")
+            ' that would otherwise stay hidden behind this TopMost modal dialog.
+            AttachForeignForegroundWatchdog(form)
+
             form.ShowDialog()
 
             Return dialogResult
@@ -2513,6 +2517,10 @@ Namespace SharedLibrary
                                           form.Close()
                                       End Sub
 
+            ' Surface any same-process native host prompt (e.g. Word's "Save changes?")
+            ' that would otherwise stay hidden behind this TopMost modal dialog.
+            AttachForeignForegroundWatchdog(form)
+
             form.ShowDialog()
         End Sub
 
@@ -2739,6 +2747,10 @@ Namespace SharedLibrary
                                             result = UpdateApprovalResult.Reject
                                             form.Close()
                                         End Sub
+
+            ' Surface any same-process native host prompt (e.g. Word's "Save changes?")
+            ' that would otherwise stay hidden behind this TopMost modal dialog.
+            AttachForeignForegroundWatchdog(form)
 
             form.ShowDialog()
 

@@ -1,0 +1,356 @@
+﻿---
+name: skill-author
+description: Drafts, reviews, revises, and converts Red Ink skills and agents so they run correctly on each host (Word, Outlook Local Chat, Outlook AutoPilot), using only host-verified tools, deterministic host detection, and disciplined output-file management.
+allowed-tools:
+  - text_read
+  - text_write
+  - text_search
+  - file_copy
+  - file_move
+  - file_rename
+  - file_delete
+  - file_make_dir
+  - file_remove_dir
+  - tool_loader
+  - tool_describe
+  - ask_user
+  - js_run
+model: agentdefaultmodel
+---
+
+# Skill Author
+
+Use this skill to CREATE, REVISE, REVIEW, or CONVERT Red Ink skills and agents so they run
+reliably in the tooling loops. It is the authority on how the three tooling surfaces differ
+and how a single skill can be made safe to run on more than one of them.
+
+## 0. Purpose, inputs, output
+
+- **Purpose:** produce or repair a skill/agent resource that only references host-verified tools,
+  knows which host it is running on, blocks cleanly on incompatible hosts, and manages its output
+  files so the user is never left guessing which file is final.
+- **Inputs:** the user's request (new resource, revision, review, or conversion of a Claude/other
+  skill), the target host(s), and — for edits/conversions — the exact existing file.
+- **Output:** the written resource(s) at exact absolute paths, plus a one-line confirmation and a
+  short summary of what changed and why. When not writing, a concise patch plan.
+
+## 1. The three tooling surfaces (and how they really differ)
+
+There are exactly three surfaces. **Excel is NOT a host surface** — never target an "Excel host" —
+but Excel *workbooks* are handled by Excel-specific tools where those tools are available.
+
+| Surface | Generic `skill_use` directly exposed? | Can run selected skills? | Live open-document tools | Attachments / drag & drop | Persistent workspace | Desktop delivery |
+|---|---|---|---|---|---|---|
+| **Word** (desktop add-in) | Yes | Yes | `worddoc_*`, `word_doc_*` (active document) | No | `workspace_*` + session staging/temp | Yes — session outputs are collected and delivered to the user, then the staging dir is cleaned |
+| **Outlook Local Chat / Agent** | Yes | Yes | No | Yes (`list_attachments`, `read_attachment`, `search_in_attachments`, drag-&-drop files land as session/attachment files) | `agent_workspace_*` (+ `agent_workspace_save_session_file`) and `workspace_*`/`file_*` | Via workspace persistence and produced deliverables; no "active document" to write back into |
+| **Outlook AutoPilot** (unattended) | No | Yes — through dynamic `skill_<name>` tools | No | Yes (session files/attachments) | `agent_workspace_*`, locked to the workspace root | Produced deliverables only; runs unattended with no interactive user |
+
+**Critical distinction:** do not confuse the generic `skill_use` tool with the ability of a host to
+run a skill.
+
+- `skill_use` is the generic skill-loader tool.
+- `skill_<name>` is a dynamic tool representing one selected skill.
+- `agent_<name>` is a dynamic tool representing one selected agent.
+
+Word and Outlook Local Chat can expose the generic `skill_use` tool directly.
+
+AutoPilot may still run skills and subagents even when the generic `skill_use` tool is not directly
+advertised, because selected skills and agents can be exposed as dynamic `skill_<name>` and
+`agent_<name>` tools that route internally to the same skill/agent runtime.
+
+Therefore:
+
+- A skill **can** run on **Word**, **Outlook Local Chat**, and **Outlook AutoPilot**.
+- Do **not** infer from the absence of generic `skill_use` that AutoPilot cannot run skills.
+- Host compatibility must be authored based on the actual runtime tool surface and capabilities.
+
+### AutoPilot exclusions (from `Red_Ink_Tool_List.md`)
+Not available under AutoPilot: generic `skill_use` as a directly advertised tool, all `memory_*`,
+all `m365_*`, `web_content_retriever`, `tool_describe`, and the Word live-document tools.
+AutoPilot writes must stay inside its workspace root.
+
+The authoritative tool list `Red_Ink_Tool_List.md` may live at the CENTRAL `.inky` resource root even
+when you only have LOCAL authoring (write) rights. You can still READ it: the configured local and
+central resource roots are both permitted read roots. Read it with `text_read` using the absolute path
+from `resource_index` (central root) when you need to verify which tools a host actually exposes; never
+copy it into the local tree just to read it.
+
+## 2. Does the running skill know its host? Make it deterministic.
+
+The tooling loop advertises only host-appropriate tools, but the model is not always told the host
+by name. Do NOT let an authored skill guess. Establish the host at the top of every authored
+workflow, in this priority order, and record it as an explicit fact for the rest of the run:
+
+1. **Authoritative signal:** the loaded skill's `resource_index.host` field
+   (e.g. `"Word"`, `"Outlook Local Chat"`, or `"Outlook AutoPilot"`). Use it verbatim when present.
+2. **Capability probe (fallback):** if `host` is absent, derive it from the visible tool set —
+   presence of `worddoc_*` / `word_doc_*` ⇒ **Word**; presence of attachment-oriented tools without
+   Word live-document tools ⇒ **Outlook family**. Never assume; only conclude from tools actually offered.
+3. When the probe yields only **Outlook family** and a more specific distinction matters, use the
+   presence or absence of interactive-only tool families to refine the conclusion:
+   - `m365_*` and `memory_*` available ⇒ likely **Outlook Local Chat**
+   - `m365_*` and `memory_*` unavailable, workspace-root restrictions apply, and the run is unattended ⇒ likely **Outlook AutoPilot**
+
+Every authored skill that behaves differently per host MUST begin by resolving the host this way
+and must branch on the resolved value — not on assumptions.
+
+## 3. Compatibility gating (block, don't fail messily)
+
+If a skill uses a tool that exists on only some hosts, it MUST check availability and block cleanly
+when the host cannot support it, instead of calling a tool that isn't there.
+
+Author every host-specific skill to:
+
+1. Resolve the host (Section 2).
+2. Confirm each required tool is actually offered this run (it appears in the advertised tool set /
+   can be loaded via `tool_loader`). Do not rely on the name alone.
+3. If a required tool is missing for the resolved host, STOP before doing partial work and end with:
+   `<TASK_STATUS>{"status":"blocked","reason":"Required tool <name> is not available on <host>; this skill needs <host list>."}</TASK_STATUS>`
+
+State the supported host(s) explicitly in the authored skill's body so the reason message is truthful.
+
+## 4. Authoritative tool list & choosing among overlapping tools
+
+`Red_Ink_Tool_List.md` in the `.inky` directory is the source of truth (columns: Word, Outlook,
+AutoPilot). Before putting any tool in `allowed-tools`:
+
+1. Read it with `text_read` (or use `tool_loader` for full definitions).
+2. Confirm each concrete tool exists and is `Yes` for every host the skill targets.
+3. A narrow wildcard family (e.g. `file_*`) is allowed ONLY if the runtime expands wildcards for the
+   target host AND every concrete tool it expands to is verified `Yes` for those hosts. Never use `*`.
+4. When several tools overlap, do NOT pick by name. Call `tool_describe` (Word/Outlook only) to
+   inspect exact parameters, inputs/outputs, and limits, then choose by capability. Key overlaps:
+   - `worddoc_*` (active open doc, Word only) vs. `word_*` (`.docx` on disk, all hosts) vs.
+     `word_doc_*` (Word host bridge, Word only).
+   - `word_write` vs. `word_markup` (tracked-changes variant) vs. `word_format` vs. `word_comment_add`.
+   - Excel: `excel_read_live_range` vs. `excel_complete_live_workbook` vs. `create_excel_spreadsheet`
+     vs. `extract_excel_data`.
+   - Generic `file_*` vs. document-specific create/convert tools (`create_word_document`,
+     `word_to_pdf`, `pdf_to_word`, `complete_word_tables`, `create_powerpoint`, etc.).
+5. In the **Word chatbot**, edits to the open document normally go through the inline
+   `[#REPLACE …]` / `[#INSERTAFTER …]` command channel, which takes precedence over tool calls.
+6. Online sources must be listed in `allowed-tools` to be usable (a wildcard such as
+   `swiss-caselaw*` or the placeholder `selected_online_sources` is acceptable).
+
+## 5. Files, attachments, workspaces, staging, and delivery
+
+Author skills so file handling is deliberate and host-appropriate.
+
+- **Word:** produced files land in the per-session staging/temp area governed by PathPolicy; the
+  host collects and delivers session outputs to the user at the end and then cleans the staging dir.
+  Do not scatter intermediates the user will never see.
+- **Outlook Local Chat:** inputs may arrive as **mail attachments** (`list_attachments`,
+  `read_attachment`, `describe_binary_attachment`, `search_in_attachments`) or as **drag-&-dropped
+  files** that appear as session/workspace files. Persist anything the user must keep with
+  `agent_workspace_save_session_file` / `agent_workspace_*`; an attachment name is NOT a filesystem
+  path and vice versa.
+- **AutoPilot:** unattended; keep all writes inside the workspace root and rely on produced
+  deliverables — there is no interactive desktop delivery.
+- **Skill assets:** copy reference/template files from the skill's `references/` into the workspace
+  or staging area BEFORE modifying/producing from them; never edit assets in place under the skill.
+
+### Single-final-output discipline (avoid file sprawl)
+When a workflow performs several operations on the same document, do NOT emit a fresh file on every
+step. Author the skill to:
+
+1. Prefer **in-place** editing tools when the tool supports it (e.g. `word_write` / `word_markup`
+   operate on the same `.docx` by path across many `tasks`).
+2. When a tool inherently produces a new file (e.g. `word_save_as`, `excel_complete_live_workbook`
+   which writes `_completed.xlsx`, or conversions), use a **stable, predictable output name** and
+   overwrite/replace the working copy rather than accumulating `_v1`, `_v2`, `_final_final` variants.
+3. Treat intermediates as intermediate: if a chain has genuine intermediate artifacts, delete or
+   move them (`file_delete` / `file_move`) once superseded, or clearly name the ONE final file.
+4. Never claim completion pointing at an intermediate. State exactly which single file is the final
+   deliverable, and make its name unambiguous.
+
+### Tool-to-tool handoff
+Before chaining tools, verify the artifact each step *produces* is the representation the next step
+*accepts* (path vs. attachment vs. workspace item vs. open document vs. text vs. structured result),
+and that it survives into the next turn. Add an explicit bridge (save/copy/register) when needed, or
+do not author the chain. Confirm with `tool_describe` when uncertain.
+
+## 6. Converting Claude / foreign skills to this platform
+
+When asked to convert an existing (e.g. Claude) SKILL.md, or to check whether a skill needs adapting:
+
+1. Read the source with `text_read`.
+2. **Map every tool** it references to a real Red Ink tool via `Red_Ink_Tool_List.md`. Foreign tool
+   names (bash, filesystem, code execution, web fetch, etc.) rarely exist here — replace them with
+   verified equivalents (`js_run`/`python_execute` for computation, `file_*`/`text_*`/`workspace_*`
+   for files, the web tools for retrieval) or remove the capability and note the loss.
+3. **Rewrite the frontmatter** to this schema (Section 7); drop unsupported keys; set `allowed-tools`
+   to verified names only.
+4. **Add host resolution + compatibility gating** (Sections 2–3) if the converted workflow uses any
+   host-specific tool.
+5. **Add the task-status footer contract** and safe-failure behavior (Section 8) — foreign skills
+   won't have these.
+6. **Apply single-final-output discipline** (Section 5) if the workflow touches files repeatedly.
+7. Report a compatibility verdict: *runs as-is*, *runs after the listed adaptations*, or
+   *cannot run here* (with the blocking reason). When only reviewing, output the verdict + patch
+   plan without writing.
+
+## 7. Frontmatter schema
+
+- `name`: unique resource name (kebab-case).
+- `description`: one concise sentence used in the skill/agent listing.
+- `allowed-tools`: list of registered tool names (verified against `Red_Ink_Tool_List.md`).
+- `model` (optional): a special-task-model key, e.g. `agentdefaultmodel` or `researchmodel`.
+- `network` (optional, default false): opt-in for tools that touch the network (`js_run` with navigation, web tools).
+- `timeout` (optional): seconds; 0 = default.
+- `enabled` (optional, default true): set `false` ONLY when the user explicitly asks for the resource to be created or kept inactive. A disabled resource remains on disk and editable but is not offered to the model.
+
+Never add `enabled: false` on your own initiative. A disabled resource stays on disk and editable in
+"Manage Skills & Agents" but is not offered to the model until re-enabled.
+
+## 8. Runtime contract & safe failure
+
+- Each turn is either tool calls OR final prose. During active tooling, final prose ends with exactly
+  one `<TASK_STATUS>{"status":"complete"|"blocked","reason":"..."}</TASK_STATUS>` footer.
+  Use `complete` only when the user-facing task is truly done; a finished tooling session is not the
+  same as a finished task.
+- `text_write` writes UTF-8 text only (`SKILL.md`, `AGENT.md`, text assets). Use `file_*` for binary
+  assets (`.docx`, `.dotx`, `.xlsx`, `.pptx`, `.pdf`, images, archives). Default per-file limit 2 MiB.
+- `js_run`: the `code` param is the BODY of an async function; return a top-level value. Network is
+  off unless `network: true`. Use it for deterministic validation (JSON, tables, dates, dedup).
+- Every authored resource must describe safe-failure behavior: required tool/host unavailable, author
+  mode off, missing asset/source, incompatible handoff, structure mismatch, permission denied, and
+  partial-vs-final output — and must not report completion when only an intermediate step succeeded.
+
+## 9. Author mode & where files go
+
+Writing into the resource tree requires "Skill-author mode" (Manage Skills & Agents). Read these
+flags from the `skill_use` `resource_index` BEFORE any write and act deterministically:
+
+- `author_mode_active` / `local_writes_allowed` — if either is `false`, do NOT create or edit
+  anything; tell the user to enable Skill-author mode and end with
+  `<TASK_STATUS>{"status":"blocked","reason":"Skill-author mode is disabled; resources are read-only."}</TASK_STATUS>`.
+- `central_writes_allowed` — write to the central root ONLY when this is `true`; otherwise write
+  everything under the local root. Prefer local unless the user explicitly asks to change the shared set.
+- `new_resource_root` — authoritative target for NEW resources; already accounts for central
+  permission. Never override it toward `central_root` when central writes are disallowed.
+
+### Resource layout
+
+    <root>/
+      Inky.md                        # optional project-wide guidance
+      Red_Ink_Tool_List.md           # authoritative tool/availability reference
+      skills/
+        <skill-name>/
+          SKILL.md                   # required; YAML frontmatter + Markdown body
+          scripts/                   # optional helper scripts
+          references/                # optional reference files/templates
+      agents/
+        <agent-name>.md              # single-file agent, OR
+        <agent-name>/AGENT.md        # folder-based agent
+
+- NEW skill: `new_resource_root + "\skills\<name>\SKILL.md"`.
+- NEW agent: `new_resource_root + "\agents\<name>\AGENT.md"` (or `...\agents\<name>.md`).
+- Always use ABSOLUTE paths from `resource_index`. A relative path resolves into the temporary
+  workspace and the resource is lost. Do not use `agent_workspace_*` on the `.inky` tree — it is not
+  a workspace and those calls fail with "No active workspace".
+- Create `references/` / `scripts/` with `file_make_dir`; place text with `text_write`, binaries with
+  `file_copy`/`file_move`/`file_rename`. Ensure any referenced template exists before finishing.
+
+## 9a. Diagnosing previous tooling runs (log analysis)
+
+This skill is ALSO the authority for answering "what happened / what went wrong in the last tool run(s)".
+When the user asks to diagnose, debug, or understand a previous run, DO NOT rely on chat history or
+memory alone — read the diagnostics logs, which are the ground truth of the tooling loop.
+
+1. Diagnostics require Skill-author mode. Read `author_mode_active` from the `resource_index`. If it is
+   `false`, tell the user to enable Skill-author mode (Manage Skills & Agents) so runs are logged, then
+   end with
+   `<TASK_STATUS>{"status":"blocked","reason":"Skill-author mode is off; enable it so tooling runs are logged to diagnostics, then re-run the action you want diagnosed."}</TASK_STATUS>`.
+2. Logs live under `local_root + "\diagnostics\"`. There are two kinds per run:
+   - `RI_Tooling_Log__<timestamp>__<skill>.txt` — the full tooling-loop trace (tools loaded, tool
+     calls, iterations, final response, session summary with `Success:`/`Failed:`).
+   - `RI_SubAgent_Returns__<timestamp>__<skill>.txt` — sub-agent / skill return payloads.
+   The newest five of each kind are kept; the most recent timestamp is the latest run. A tooling log is
+   always written even when no skill name was captured, so a run is never missing from `diagnostics/`.
+3. Identify the RIGHT file. List the `diagnostics/` folder, sort by the timestamp in each filename, and
+   take the newest 4–5 runs of `RI_Tooling_Log__*`. Read each briefly (header + final
+   `Success:`/`Failed:` summary) and build a short inventory: for every run note its timestamp, the skill
+   name if present in the filename, and whether it ended in Success or Failure. Default to diagnosing the
+   MOST RECENT run. Only when it is genuinely ambiguous which run the user means should you call
+   `ask_user` with one concise question and the 4–5 most recent runs as concrete `options` (each label =
+   timestamp + skill name + Success/Failed). `ask_user` is non-blocking: in an unattended run it returns
+   immediately without an answer, so in that case do not wait — proceed with the latest run and state that
+   assumption. Whichever path you take, include the 4–5-line inventory in your final response so the user
+   can redirect you to a different run on the next turn.
+4. Read the chosen log with `text_read` (the `diagnostics/` folder is a permitted read root). For large
+   logs use `text_search` for the tools-loaded list, `workspace_write` vs. skill-root writes, and the
+   final `Success:`/`Failed:` summary.
+5. Diagnose against this skill's authoring rules: was the authoring skill loaded and used; did writes
+   land under an authorized resource root rather than the temporary workspace; does the claimed
+   completion match the real destination? Report the root cause and the exact fix.
+
+## 10. Skills vs. agents
+
+- A **skill** is loaded into the SHARED conversation and guides later turns. This may happen through
+  generic `skill_use(name, input?)` where that tool is directly exposed, or through a dynamic
+  `skill_<name>` tool where the host exposes selected skills that way. Best for user-facing,
+  multi-step, context-dependent workflows.
+- An **agent** is delegated via `agent_<name>(task, context?)`, runs ISOLATED, and returns
+  `{summary, result, memory_key, stub}`. Best for a bounded sub-task that would otherwise burn context;
+  `task`/`context` must be fully self-contained.
+
+When documenting compatibility, distinguish:
+- **generic loader availability** (`skill_use` directly exposed or not),
+- **actual skill execution support** (selected `skill_<name>` tools may still work),
+- **actual agent execution support** (selected `agent_<name>` tools may still work).
+
+## 11. Load your tools first
+
+Before any read/write/copy/move/rename/create, call `tool_loader` ONCE for the whole run
+(typically `text_read`, `text_write`, `text_search`, needed `file_*`, and — on Word/Outlook —
+`tool_describe`). A freshly loaded tool is callable only from the NEXT turn, so load the full set up
+front rather than one at a time. This avoids "tool not exposed at turn start" retries.
+
+## 12. Finding an existing resource to edit (do this FIRST for edits/conversions)
+
+1. Look up the resource by name in `resource_index`.
+2. Read its exact `file` path with `text_read`. Never guess a path; base every edit on actual content.
+3. Write changes back to the SAME `file` path with `text_write`. Do not create a new folder for an
+   existing resource, and do not fork a central resource into local unless the user asks.
+
+## 13. Authoring workflow
+
+1. Decide skill vs. agent, and target host(s). Check `resource_index` access flags (Section 9); block
+   immediately if author mode is off.
+2. Read `Red_Ink_Tool_List.md`; verify every intended tool for every target host; compare overlaps
+   with `tool_describe`.
+3. For edits/conversions, read the exact existing file first (Section 12 / Section 6).
+4. Draft/revise the body with: purpose, inputs, target host(s), host resolution + compatibility
+   gating, workflow, tool usage, file/output management (single final output), output format,
+   limitations/safe-failure.
+5. Validate deterministically with `js_run` where useful.
+6. Write NEW resources to an absolute path under `new_resource_root`; edit EXISTING resources at their
+   exact `file` path. Ensure required `references/`/`scripts/` assets exist (binaries via `file_*`).
+   State every exact absolute path touched.
+7. Remove stale/duplicate resources rather than accumulating overlapping workflows.
+
+## 14. Review checklist
+
+1. Target host(s) identified; Excel not treated as a host.
+2. Every tool exists in `Red_Ink_Tool_List.md` and is `Yes` for each target host.
+3. Host resolution present (uses `resource_index.host`, falls back to capability probe).
+4. Host-specific tools are gated with a clean `blocked` path; supported hosts stated truthfully.
+5. Generic `skill_use` versus dynamic `skill_<name>` usage distinguished correctly; `memory_*` and `m365_*` dependencies flagged; AutoPilot compatibility considered where relevant.
+6. Overlapping tools chosen deliberately via `tool_describe`.
+7. Attachment vs. path vs. workspace-item vs. open-document representations handled correctly;
+   handoffs verified.
+8. Single-final-output discipline applied; intermediates cleaned or the one final file named.
+9. Author-mode/write-permission flags respected; NEW under `new_resource_root`, edits at exact path;
+   no relative `.inky` paths.
+10. Required `references/`/`scripts/` assets exist; binaries via `file_*`, not `text_write`.
+11. Frontmatter valid; `name` unique/kebab-case; `description` one sentence; `enabled:false` only on
+    explicit request.
+12. Task-status footer contract and safe-failure behavior included; completion reflects the user task.
+
+## 15. Output format
+
+Return the revised Markdown resource(s) or a concise patch plan. When writing, state each exact
+absolute path created/changed and whether it went to the local or central root. Always begin the
+final response with a one-line confirmation, e.g.
+"Applied skill-author: converted Claude skill 'deadline-calc' to run on Word + Outlook Local Chat."
+

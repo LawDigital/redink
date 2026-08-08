@@ -1259,23 +1259,58 @@ Partial Public Class ThisAddIn
 
                 ' If tools are selected and the model supports tooling, enter the tool execution loop
                 If SelectedTools IsNot Nothing AndAlso SelectedTools.Count > 0 AndAlso UseSecondAPI Then
-                    LLMResult = Await ExecuteToolingLoop(
-                        SysCommand,
-                        SelectedText,
-                        SelectedTools,
-                        UseSecondAPI,
-                        FileObject,
-                        DoTPMarkup,
-                        BubblesText,
-                        NoFormatting,
-                        KeepFormat,
-                        SlideDeck,
-                        DoMyStyle,
-                        MyStyleInsert,
-                        AddDocs,
-                        InsertDocs,
-                        SlideInsert,
-                        OtherPromptUnfilled, DoChart:=DoChart)
+
+                    ' Provide ongoing agentic feedback via the InfoBox popup (multi-line, wraps),
+                    ' mirroring the chatbot (Form1) live-progress channel: run the loop with its own
+                    ' splash suppressed and refresh the InfoBox for each per-step progress note.
+                    Dim infoBoxShown As Boolean = False
+                    Try
+                        SLib.InfoBox.ShowInfoBox($"{Globals.ThisAddIn.ToolFriendlyName}: Thinking...")
+                        infoBoxShown = True
+
+                        LLMResult = Await ExecuteToolingLoop(
+                            SysCommand,
+                            SelectedText,
+                            SelectedTools,
+                            UseSecondAPI,
+                            FileObject,
+                            DoTPMarkup,
+                            BubblesText,
+                            NoFormatting,
+                            KeepFormat,
+                            SlideDeck,
+                            DoMyStyle,
+                            MyStyleInsert,
+                            AddDocs,
+                            InsertDocs,
+                            SlideInsert,
+                            OtherPromptUnfilled,
+                            DoChart:=DoChart,
+                            hideSplash:=True,
+                            hideLogWindow:=Not GetEffectiveToolingLogWindowSetting(),
+                            progressSink:=Sub(status As String)
+                                              Try
+                                                  If String.IsNullOrWhiteSpace(status) Then Return
+                                                  If mainThreadControl IsNot Nothing AndAlso mainThreadControl.InvokeRequired Then
+                                                      mainThreadControl.BeginInvoke(New System.Windows.Forms.MethodInvoker(Sub() SLib.InfoBox.ShowInfoBox(status)))
+                                                  Else
+                                                      SLib.InfoBox.ShowInfoBox(status)
+                                                  End If
+                                              Catch
+                                              End Try
+                                          End Sub)
+                    Finally
+                        If infoBoxShown Then
+                            Try
+                                If mainThreadControl IsNot Nothing AndAlso mainThreadControl.InvokeRequired Then
+                                    mainThreadControl.Invoke(New System.Windows.Forms.MethodInvoker(Sub() SLib.InfoBox.ShowInfoBox("", 1)))
+                                Else
+                                    SLib.InfoBox.ShowInfoBox("", 1)
+                                End If
+                            Catch
+                            End Try
+                        End If
+                    End Try
                 Else
 
                     ' Other LLM calls w/o Tooling

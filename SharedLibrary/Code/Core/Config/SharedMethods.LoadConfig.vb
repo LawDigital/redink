@@ -416,6 +416,10 @@ Namespace SharedLibrary
                 context.INI_AgentResourcesPathLocal = If(configDict.ContainsKey("AgentResourcesPathLocal"), configDict("AgentResourcesPathLocal"), "")
                 Agents.AgentResources.SetPaths(context.INI_AgentResourcesPath, context.INI_AgentResourcesPathLocal)
 
+                ' Restore persisted Skill-author mode (My.Settings) now that resource paths are known,
+                ' so the local .inky tree can be ensured. Runs for both Word and Outlook via shared config load.
+                Try : Agents.SkillAuthorMode.RestorePersistedState() : Catch : End Try
+
                 context.INI_ChunkOCR = If(configDict.ContainsKey("ChunkOCR"), CInt(configDict("ChunkOCR")), DEFAULT_CHUNK_OCR_PAGES)
 
                 ' Logo paths

@@ -3339,6 +3339,11 @@ Partial Public Class ThisAddIn
                         End Try
                         llmOperationCts = jobCts
 
+                        ' Ensure the tooling-log-window setting reflects any user override
+                        ' (e.g. the "tooling log" toggle) before the background job reads
+                        ' INI_ToolingLogWindow to decide whether to show the log window.
+                        ApplyEffectiveToolingLogWindowSettingToContext()
+
                         If Not String.IsNullOrWhiteSpace(scheduledTaskId) Then
                             SchedulerMarkLocalTaskRunning(scheduledTaskId)
                         End If

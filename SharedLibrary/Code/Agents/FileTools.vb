@@ -269,7 +269,7 @@ Namespace Agents
             Dim def =
                 "{""name"":""" & ToolCopy & """," &
                 """description"":""Copy a file or directory (binary-safe). " & RootsDescription &
-                " Typical use: copy a template from a skill's references into the workspace or staging area, or copy a produced file into a skill's references (author mode)."",""parameters"":{""type"":""object""," &
+                " Use this (with file_make_dir and text_write) for PERSISTENT local Skill/Agent installation into the resource root - not workspace_write, which is temporary. Typical use: copy a template from a skill's references into the workspace or staging area, or copy a produced file into a skill's references (author mode)."",""parameters"":{""type"":""object""," &
                 """properties"":{" &
                 """source"":{""type"":""string"",""description"":""Source file or directory path.""}," &
                 """destination"":{""type"":""string"",""description"":""Destination path.""}," &
@@ -330,7 +330,8 @@ Namespace Agents
         Private Shared Function BuildMakeDir() As ModelConfig
             Dim def =
                 "{""name"":""" & ToolMakeDir & """," &
-                """description"":""Create a directory (including intermediate directories). " & RootsDescription & """,""parameters"":{""type"":""object""," &
+                """description"":""Create a directory (including intermediate directories). " & RootsDescription &
+                " Use this for PERSISTENT local Skill/Agent installation: create the skill/agent folder under the resource root, then write files with text_write/file_copy. Do not represent a Skill as a folder in the temporary workspace."",""parameters"":{""type"":""object""," &
                 """properties"":{" &
                 """path"":{""type"":""string"",""description"":""Directory path to create.""}}," &
                 """required"":[""path""]}}"

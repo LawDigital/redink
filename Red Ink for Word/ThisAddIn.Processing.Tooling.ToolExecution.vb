@@ -365,6 +365,16 @@ Partial Public Class ThisAddIn
                     response.Response = "{""summary"":""Sub-agent returned no usable result."",""result"":null,""resultKind"":""error"",""error"":{""code"":""agent_empty_result"",""phase"":""final_output_parse"",""message"":""Sub-agent returned no usable final result.""}}"
                 End If
 
+                If String.Equals(toolCall.ToolName, SharedLibrary.Agents.SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) AndAlso response.Success Then
+                    Dim __skillName As String = Nothing
+                    If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("name") Then
+                        __skillName = System.Convert.ToString(toolCall.Arguments("name"))
+                    End If
+                    If Not String.IsNullOrWhiteSpace(__skillName) Then
+                        ToolingFileLogger.SetTopLevelSkillName(__skillName)
+                    End If
+                End If
+
                 ToolingFileLogger.LogSubAgentReturn($"Agent-layer tool ({toolCall.ToolName})", response.Response)
                 GoTo __AfterDispatch
             ElseIf toolCall.ToolName.StartsWith("skill_", StringComparison.OrdinalIgnoreCase) Then

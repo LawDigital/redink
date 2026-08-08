@@ -1797,20 +1797,37 @@ Partial Public Class ThisAddIn
                         If toolResponse.Success AndAlso
                            tc.ToolName.Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase) Then
 
-                            restartAfterToolLoader = True
+                            If LoaderResponseExposedNewTools(toolResponse.Response) Then
+                                restartAfterToolLoader = True
+                                context.PendingContinuationGuardPrompt = BuildToolLoaderBarrierGuardPrompt()
+                                context.PendingGuardTitle = "HOST TOOL LOADER BARRIER"
+                                context.PendingRejectedTurnExplanation =
+                                    "The previous turn successfully loaded tools. Newly loaded tool schemas are available only from the next turn onward."
+                                context.PendingRejectedAssistantTurn = If(currentResponse, "")
+                                context.PrematureTextRetryCount = 0
+                                stopCurrentBatchAfterTool = True
+
+                                context.LogWarn(
+                                    "Stopping current tool-call batch after successful tool_loader call.",
+                                    details:=$"host={context.HostKind}; tool={tc.ToolName}", visibleToUser:=False)
+
+                                Exit For
+                            End If
+
+                            ' No new tool schemas were exposed (all requested tools were already
+                            ' loaded). Do not consume an extra iteration or stop the batch; instead
+                            ' steer the model back toward an already-exposed tool. Capability-driven:
+                            ' relies solely on the loader's own "loaded" array, no tool-name heuristics.
                             context.PendingContinuationGuardPrompt = BuildToolLoaderBarrierGuardPrompt()
-                            context.PendingGuardTitle = "HOST TOOL LOADER BARRIER"
+                            context.PendingGuardTitle = "HOST TOOL LOADER NO-OP"
                             context.PendingRejectedTurnExplanation =
-                                "The previous turn successfully loaded tools. Newly loaded tool schemas are available only from the next turn onward."
-                            context.PendingRejectedAssistantTurn = If(currentResponse, "")
+                                "The requested tools were already loaded. Their schemas are already available; call one of the exposed tools instead of loading again."
+                            context.PendingRejectedAssistantTurn = ""
                             context.PrematureTextRetryCount = 0
-                            stopCurrentBatchAfterTool = True
 
                             context.LogWarn(
-                                "Stopping current tool-call batch after successful tool_loader call.",
+                                "Ignoring no-op tool_loader call; all requested tools were already loaded.",
                                 details:=$"host={context.HostKind}; tool={tc.ToolName}", visibleToUser:=False)
-
-                            Exit For
                         End If
 
                         If RegisterToolFailureLoopState(tc, toolResponse, context) Then
@@ -2144,6 +2161,23 @@ Partial Public Class ThisAddIn
                             SharedLibrary.Agents.ToolCallSequencing.ClearNonBlockingUnresolvedToolFailure(
                                 context.SequencingState,
                                 "host_exposure_recovery")
+
+                            ' Skill/Agent authoring postcondition: a 'create/modify a skill' task must have
+                            ' written under an authorized skill/resource root. A successful workspace_write
+                            ' does NOT satisfy this - workspace outputs are temporary and do not install a skill.
+                            If SharedLibrary.Agents.SkillAuthoringPostcondition.RequiresSkillRootMutation(context) AndAlso
+                               Not SharedLibrary.Agents.SkillAuthoringPostcondition.HasSkillRootMutation(context) Then
+                                If System.Convert.ToInt32(context.PrematureTextRetryCount) < ToolExecutionContext.MaxContinuationRetries Then
+                                    context.PendingContinuationGuardPrompt = SharedLibrary.Agents.SkillAuthoringPostcondition.GuardPrompt
+                                    context.PendingGuardTitle = "Skill not actually created"
+                                    context.PendingRejectedTurnExplanation = "Skill authoring task completed without any write under an authorized skill root."
+                                    context.PendingRejectedAssistantTurn = currentResponse
+                                    context.PrematureTextRetryCount = System.Convert.ToInt32(context.PrematureTextRetryCount) + 1
+                                    context.Log("Final-turn rejected at 'complete' branch: skill task wrote only to the workspace.", "warn")
+                                    Continue While
+                                End If
+                                context.LogWarn("Skill-authoring postcondition unmet; repair budget exhausted, accepting candidate.")
+                            End If
 
                             currentResponse = StripTaskStatus(currentResponse)
                             acceptedFinalStatus = "complete"
@@ -2757,7 +2791,10 @@ Partial Public Class ThisAddIn
             ToolingFileLogger.LogStep(
     $"Host final response prepared: len={finalResponseLength}; origin={finalResponseOrigin}; blocked={If(context.FinalizationBlocked, "true", "false")}; empty={If(context.EmptyMainModelResponse, "true", "false")}; abortedDueToToolError={If(abortDueToToolError, "true", "false")}")
 
-            Dim sessionSucceeded As Boolean = (Not abortDueToToolError) AndAlso (Not context.EmptyMainModelResponse) AndAlso (Not context.FinalizationBlocked)
+            ' A final turn accepted with status "blocked" is an unfinished/blocked outcome
+            ' and must not be reported as a successful session, even when it carries
+            ' substantive prose (which leaves context.FinalizationBlocked unset).
+            Dim sessionSucceeded As Boolean = (Not abortDueToToolError) AndAlso (Not context.EmptyMainModelResponse) AndAlso (Not context.FinalizationBlocked) AndAlso Not String.Equals(acceptedFinalStatus, "blocked", StringComparison.OrdinalIgnoreCase)
             Dim sessionSummary As String =
     $"Iterations: {iteration}, Tool calls: {context.AllToolResponses.Count}, Success: {successCount}, Failed: {failedCount}" &
     If(deferredCount > 0, $", Deferred: {deferredCount}", "")
@@ -2794,6 +2831,7 @@ Partial Public Class ThisAddIn
             If Not subAgentMode Then
                 Try
                     SharedLibrary.Agents.ToolResultStore.ClearWorkflow(context.WorkflowId)
+                    SharedLibrary.Agents.SkillAuthoringPostcondition.Clear(context.WorkflowId)
                     ToolingFileLogger.LogStep($"ClearWorkflow: tool result store cleared for workflow '{context.WorkflowId}'.")
                 Catch ex As Exception
                     ToolingFileLogger.LogWarn("Failed to clear tool result store.", ex:=ex)
@@ -3767,6 +3805,30 @@ Partial Public Class ThisAddIn
         Return response
     End Function
 
+    ''' <summary>
+    ''' Returns True when a tool_loader response actually exposed at least one new tool
+    ''' (its "loaded" array is non-empty). Used to avoid consuming an extra orchestration
+    ''' iteration on no-op loader calls where every requested tool was already loaded.
+    ''' Capability-driven: inspects only the loader's own structured output.
+    ''' </summary>
+    Private Function LoaderResponseExposedNewTools(loaderResponse As String) As Boolean
+        If String.IsNullOrWhiteSpace(loaderResponse) Then
+            Return False
+        End If
+
+        Try
+            Dim obj As JObject = JObject.Parse(loaderResponse)
+            Dim loadedToken As JToken = obj("loaded")
+            Return loadedToken IsNot Nothing AndAlso
+                   loadedToken.Type = JTokenType.Array AndAlso
+                   DirectCast(loadedToken, JArray).Count > 0
+        Catch
+            ' On parse failure, fall back to the conservative (barrier) behavior by
+            ' treating it as a real load so the caller preserves existing semantics.
+            Return True
+        End Try
+    End Function
+
 #End Region
 
 
@@ -4733,6 +4795,16 @@ Partial Public Class ThisAddIn
                     response.ErrorCode = "agent_empty_result"
                     response.ErrorMessage = "js_run returned no usable result. Ensure the script explicitly returns the computed value."
                     response.Response = "{""summary"":""Sub-agent returned no usable result."",""result"":null,""resultKind"":""error"",""error"":{""code"":""agent_empty_result"",""phase"":""final_output_parse"",""message"":""Sub-agent returned no usable final result.""}}"
+                End If
+
+                If String.Equals(toolCall.ToolName, SharedLibrary.Agents.SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) AndAlso response.Success Then
+                    Dim __skillName As String = Nothing
+                    If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("name") Then
+                        __skillName = System.Convert.ToString(toolCall.Arguments("name"))
+                    End If
+                    If Not String.IsNullOrWhiteSpace(__skillName) Then
+                        ToolingFileLogger.SetTopLevelSkillName(__skillName)
+                    End If
                 End If
 
                 ToolingFileLogger.LogSubAgentReturn($"Agent-layer tool ({toolCall.ToolName})", response.Response)

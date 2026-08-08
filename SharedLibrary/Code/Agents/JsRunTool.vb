@@ -20,6 +20,7 @@ Option Explicit On
 
 Imports System.Threading
 Imports System.Threading.Tasks
+Imports System.Text.RegularExpressions
 Imports Newtonsoft.Json
 Imports SharedLibrary.SharedLibrary
 
@@ -71,6 +72,19 @@ Namespace Agents
         Public Shared Async Function ExecuteAsync(arguments As IDictionary(Of String, Object),
                                                   Optional cancellationToken As CancellationToken = Nothing) As Task(Of String)
             Try
+                ' Pre-execution guard: the WebView2 sandbox is a browser context with no Node.js
+                ' runtime, so require()/module/process/__dirname and Node's fs are guaranteed to
+                ' throw "X is not defined". Rejecting such code before execution turns a certain
+                ' failure into a structured, actionable hint (no behavioural regression: this code
+                ' could never have succeeded in the sandbox).
+                Dim nodeHint As String = DetectNodeApiUsage(GetStr(arguments, "code"))
+                If nodeHint <> "" Then
+                    Return JsonConvert.SerializeObject(New With {
+                        Key .ok = False,
+                        Key .error = "node_api_unavailable",
+                        Key .message = nodeHint})
+                End If
+
                 Return Await WebView2JsSandbox.RunAsync(
                     code:=GetStr(arguments, "code"),
                     timeoutMs:=GetInt(arguments, "timeout_ms", 15000),
@@ -82,6 +96,36 @@ Namespace Agents
             Catch ex As Exception
                 Return JsonConvert.SerializeObject(New With {Key .error = "js_run_failed", Key .message = ex.Message})
             End Try
+        End Function
+
+        ''' <summary>
+        ''' Detects Node.js-only constructs that cannot exist in the WebView2 browser sandbox.
+        ''' Returns a short, model-facing hint when found, or "" when the code is safe to run.
+        ''' Only patterns that are guaranteed to fail in the sandbox are matched, so a positive
+        ''' detection never blocks code that could otherwise have succeeded.
+        ''' </summary>
+        Friend Shared Function DetectNodeApiUsage(code As String) As String
+            If String.IsNullOrWhiteSpace(code) Then Return ""
+
+            ' Node module loading (the exact failure seen in production: "require is not defined").
+            If Regex.IsMatch(code, "(^|[^.\w])require\s*\(") Then
+                Return "Node.js module loading (require(...)) is unavailable in this sandbox. " &
+                       "To read local files use the designated file tools (for example text_read, text_search, " &
+                       "or the workspace_* tools) instead of Node's fs module. Use js_run only for in-memory, " &
+                       "rule-based computation on data you already have."
+            End If
+
+            ' Other Node-only globals that are guaranteed to be undefined in a browser context.
+            If Regex.IsMatch(code, "(^|[^.\w])module\s*\.\s*exports\b") OrElse
+               Regex.IsMatch(code, "(^|[^.\w])__dirname\b") OrElse
+               Regex.IsMatch(code, "(^|[^.\w])__filename\b") OrElse
+               Regex.IsMatch(code, "(^|[^.\w])process\s*\.\s*(env|argv|cwd|platform)\b") Then
+                Return "This code relies on Node.js runtime globals (module.exports/__dirname/__filename/process) " &
+                       "that do not exist in the sandboxed browser environment. Use js_run only for in-memory, " &
+                       "rule-based computation, and use the file tools (text_read, text_search, workspace_*) for filesystem access."
+            End If
+
+            Return ""
         End Function
 
         Private Shared Function GetStr(args As IDictionary(Of String, Object), name As String) As String

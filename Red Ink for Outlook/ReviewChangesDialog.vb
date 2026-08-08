@@ -68,6 +68,11 @@ Public Class ReviewChangesDialog
         RenderDiffFast()
         SchedulePreview(immediate:=True)
         UpdateStatus()
+
+        ' Surface any same-process native host prompt (e.g. Word's "Save changes?")
+        ' that would otherwise stay hidden behind this TopMost modal dialog.
+        SharedMethods.AttachForeignForegroundWatchdog(Me)
+        AddHandler Me.Shown, Sub(sender, e) SharedMethods.ForceDialogToForeground(Me)
     End Sub
 
     ' --------------------------------------------------------------- UI build
