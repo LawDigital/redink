@@ -1840,6 +1840,42 @@ Namespace My
                 Me("ToolingLogMinimized") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property ToolingLogWindowOverrideEnabled() As Boolean
+            Get
+                Return CType(Me("ToolingLogWindowOverrideEnabled"),Boolean)
+            End Get
+            Set
+                Me("ToolingLogWindowOverrideEnabled") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property ToolingLogWindowOverrideValue() As Boolean
+            Get
+                Return CType(Me("ToolingLogWindowOverrideValue"),Boolean)
+            End Get
+            Set
+                Me("ToolingLogWindowOverrideValue") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property ToolingLogMaximized() As Boolean
+            Get
+                Return CType(Me("ToolingLogMaximized"),Boolean)
+            End Get
+            Set
+                Me("ToolingLogMaximized") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

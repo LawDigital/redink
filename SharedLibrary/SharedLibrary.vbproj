@@ -448,6 +448,7 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Code\Agents\AgentToolRouter.vb" />
+    <Compile Include="Code\Agents\AskUserTool.vb" />
     <Compile Include="Code\Agents\ContextCompactTool.vb" />
     <Compile Include="Code\Agents\ContextExpandTool.vb" />
     <Compile Include="Code\Agents\FileTools.vb" />
@@ -472,6 +473,7 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Code\Agents\SessionMemory.vb" />
+    <Compile Include="Code\Agents\ShowMethods.AskUser.vb" />
     <Compile Include="Code\Agents\SkillAuthorMode.vb" />
     <Compile Include="Code\Agents\SkillInvokeTool.vb" />
     <Compile Include="Code\Agents\SubAgentRunner.vb" />

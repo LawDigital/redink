@@ -2804,7 +2804,15 @@ SkipPromptWin:
                         {"KnowledgeStoreBackgroundIndexingWindow", "Optional local-time processing window for background indexing. Leave empty to allow any time. Examples: '22:00-06:00' (only at night), 'allow:22:00-06:00;12:00-13:00', 'deny:08:00-18:00'."}
                 }
 
+        Dim hadToolingLogOverrideBefore As Boolean = HasToolingLogWindowOverride()
+        Dim toolingLogSettingBefore As Boolean = GetEffectiveToolingLogWindowSetting()
+
+        ApplyEffectiveToolingLogWindowSettingToContext()
         ShowSettingsWindow(Settings, SettingsTips)
+
+        If hadToolingLogOverrideBefore OrElse _context.INI_ToolingLogWindow <> toolingLogSettingBefore Then
+            SetToolingLogWindowOverride(_context.INI_ToolingLogWindow)
+        End If
 
         Globals.Ribbons.Ribbon1.UpdateRibbon()
         Globals.Ribbons.Ribbon1.ApplyRibbonVisibilityConfiguration()

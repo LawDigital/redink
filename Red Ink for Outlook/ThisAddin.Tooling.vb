@@ -4695,6 +4695,13 @@ Partial Public Class ThisAddIn
                 GoTo __AfterDispatch
             End If
 
+            If SharedLibrary.Agents.AskUserTool.IsAskUserTool(toolCall.ToolName) Then
+                response.Response = SharedLibrary.Agents.AskUserTool.Execute(toolCall.Arguments)
+                response.Success = Not String.IsNullOrWhiteSpace(response.Response)
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+                GoTo __AfterDispatch
+            End If
+
             If SharedLibrary.Agents.ContextCompactTool.IsContextCompactTool(toolCall.ToolName) Then
                 response.Response = SharedLibrary.Agents.ContextCompactTool.Execute(
                     toolCall.Arguments,
@@ -5041,6 +5048,7 @@ __AfterDispatch:
             tools.Add(SharedLibrary.Agents.ToolDescribeTool.Build())
             tools.Add(SharedLibrary.Agents.ContextExpandTool.Build())
             tools.Add(SharedLibrary.Agents.ContextCompactTool.Build())
+            If Not _apActive Then tools.Add(SharedLibrary.Agents.AskUserTool.Build())
 
             Dim __agentReg As New SharedLibrary.Agents.ToolRegistry()
             SharedLibrary.Agents.ToolRegistryBuilder.AddSkills(__agentReg, SharedLibrary.Agents.AgentResources.Skills)

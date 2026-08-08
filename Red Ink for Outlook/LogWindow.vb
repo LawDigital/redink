@@ -298,10 +298,13 @@ Public Class LogWindow
                 PositionWindowDefault()
             End If
 
-            Me.WindowState =
-                If(My.Settings.ToolingLogMinimized,
-                   FormWindowState.Minimized,
-                   FormWindowState.Normal)
+            If My.Settings.ToolingLogMaximized Then
+                Me.WindowState = FormWindowState.Maximized
+            ElseIf My.Settings.ToolingLogMinimized Then
+                Me.WindowState = FormWindowState.Minimized
+            Else
+                Me.WindowState = FormWindowState.Normal
+            End If
         Catch
             PositionWindowDefault()
             Me.WindowState = FormWindowState.Normal
@@ -365,6 +368,7 @@ Public Class LogWindow
             End If
 
             My.Settings.ToolingLogMinimized = (Me.WindowState = FormWindowState.Minimized)
+            My.Settings.ToolingLogMaximized = (Me.WindowState = FormWindowState.Maximized)
             My.Settings.Save()
         Catch
         End Try

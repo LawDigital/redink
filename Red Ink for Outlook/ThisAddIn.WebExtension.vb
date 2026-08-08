@@ -2629,8 +2629,8 @@ Partial Public Class ThisAddIn
                     Case "inky_settoolinglog"
                         Try
                             Dim enabled As Boolean = CBool(j("Enabled"))
-                            INI_ToolingLogWindow = enabled
-                            Return JsonOk(New With {.ok = True, .enabled = enabled})
+                            SetToolingLogWindowOverride(enabled)
+                            Return JsonOk(New With {.ok = True, .enabled = GetEffectiveToolingLogWindowSetting()})
                         Catch ex As Exception
                             Return JsonErr("Failed to toggle tooling log: " & ex.Message)
                         End Try
@@ -2843,7 +2843,7 @@ Partial Public Class ThisAddIn
                                     .activeChat = activeChatId,
                                     .toolingEnabled = toolingEnabled,
                                     .supportsTooling = supportsTooling,
-                                    .toolingLogEnabled = INI_ToolingLogWindow,
+                                    .toolingLogEnabled = GetEffectiveToolingLogWindowSetting(),
                                     .tools = GetToolListForBrowser(includeInteractiveM365Tools:=True),
                                     .advancedToolsEnabled = st.AgentModeEnabled,
                                     .agentFiles = GetAgentFileListForBrowser(),

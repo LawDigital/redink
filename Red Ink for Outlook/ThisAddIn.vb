@@ -153,6 +153,21 @@ Partial Public Class ThisAddIn
     Public StartupInitialized As Boolean = False
 
     ''' <summary>
+    ''' Arms the ask_user interactivity guard for Outlook. A live user is only present in
+    ''' Local Chat / Web Agent runs. Unattended e-mail Scheduler and AutoPilot runs
+    ''' (indicated by _apActive) must never block on ask_user. Idempotent; safe to call
+    ''' more than once.
+    ''' </summary>
+    Private Sub ArmAskUserInteractivityGuard()
+        SharedLibrary.Agents.AskUserTool.InteractivityProvider =
+            Function() As Boolean
+                ' Interactive only when a chat agent session is active and this is not an
+                ' unattended AutoPilot / e-mail Scheduler execution.
+                Return _chatAgentActive AndAlso Not _apActive
+            End Function
+    End Sub
+
+    ''' <summary>
     ''' Hidden control created to obtain a Windows Forms handle for marshaling to the Outlook UI thread.
     ''' </summary>
     Private mainThreadControl As New System.Windows.Forms.Control()
@@ -246,6 +261,10 @@ Partial Public Class ThisAddIn
 
         UiSyncContext = _uiContext
         UiThreadId = System.Threading.Thread.CurrentThread.ManagedThreadId
+
+        ' Arm the ask_user interactivity guard so unattended e-mail Scheduler / AutoPilot
+        ' runs never block on a modal (interactive only in Local Chat / Web Agent).
+        ArmAskUserInteractivityGuard()
 
         _uiScheduler = TaskScheduler.FromCurrentSynchronizationContext()
 
