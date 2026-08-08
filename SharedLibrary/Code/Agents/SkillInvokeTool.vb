@@ -217,6 +217,16 @@ Namespace Agents
                 "To modify an EXISTING resource, edit the exact 'file' path shown for it (each entry carries its 'origin' = local or central). " &
                 "Do not invent new paths for existing resources, and do not copy a central resource into local_root unless the user asks to fork it."
 
+            If authorActive Then
+                Dim diagPrefix As String = SharedLibrary.SharedMethods.AN5
+                idx("diagnostics_hint") =
+                    "Diagnostics: the previous tooling run of each skill is logged under local_root + '\diagnostics\'. " &
+                    "Files are named '" & diagPrefix & "_Tooling_Log__<skill>.txt' (full tooling-loop trace) and '" &
+                    diagPrefix & "_SubAgent_Returns__<skill>.txt' (sub-agent/skill return payloads), where <skill> is the " &
+                    "sanitized skill name. To diagnose a failing skill, read the file named after that skill. Only the last " &
+                    "run per skill is kept (overwritten on the next run of the same skill)."
+            End If
+
             Return idx
         End Function
 

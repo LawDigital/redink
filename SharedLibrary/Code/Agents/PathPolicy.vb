@@ -366,6 +366,17 @@ Namespace Agents
             readRoots.AddRange(skillFullRoots)
             readRoots.AddRange(agentFullRoots)
             readRoots.AddRange(authorBaseRoots)
+
+            ' Local diagnostics folder (previous tooling-run logs) is always readable so the
+            ' skill-author skill can inspect the last run to diagnose the tooling loop.
+            Try
+                Dim diagLocalRoot As String = AgentResources.ConfiguredLocalPath
+                If Not String.IsNullOrWhiteSpace(diagLocalRoot) Then
+                    Dim diagDir As String = Path.GetFullPath(Path.Combine(diagLocalRoot, "diagnostics"))
+                    If Directory.Exists(diagDir) Then readRoots.Add(diagDir)
+                End If
+            Catch
+            End Try
             If _chatAuthor.Value OrElse SkillAuthorMode.IsActive Then
                 writeRoots.AddRange(skillFullRoots)
                 writeRoots.AddRange(agentFullRoots)

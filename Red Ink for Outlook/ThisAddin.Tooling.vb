@@ -4765,6 +4765,7 @@ Partial Public Class ThisAddIn
                     response.ErrorMessage = "Skill invocation returned no usable result."
                 End If
 
+                ToolingFileLogger.SetTopLevelSkillName(toolCall.ToolName.Substring("skill_".Length))
                 ToolingFileLogger.LogSubAgentReturn($"Agent-layer skill ({toolCall.ToolName})", response.Response)
                 GoTo __AfterDispatch
             End If

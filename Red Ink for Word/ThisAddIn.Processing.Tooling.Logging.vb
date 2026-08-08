@@ -75,6 +75,12 @@ Partial Public Class ThisAddIn
         ''' <summary>Stable log filename used for the tooling session log (overwritten each run).</summary>
         Private Shared ReadOnly StableLogFileName As String = $"{AN5}_Tooling_Log.txt"
 
+        ''' <summary>Whether the current session writes into the local diagnostics folder (per-skill, keep-last-run).</summary>
+        Private Shared _isDiagnosticsMode As Boolean = False
+
+        ''' <summary>Sanitized name of the top-level skill invoked in this run (used for per-skill log filenames).</summary>
+        Private Shared _topLevelSkillSlug As String = Nothing
+
         Private Shared _sessionDepth As Integer = 0
 
         ''' <summary>
@@ -85,7 +91,8 @@ Partial Public Class ThisAddIn
 
         Public Shared Sub StartSession()
             SyncLock _lock
-                Dim shouldEnable As Boolean = INI_APIDebug
+                Dim authorActive As Boolean = SharedLibrary.Agents.SkillAuthorMode.IsActive
+                Dim shouldEnable As Boolean = INI_APIDebug OrElse authorActive
                 If Not shouldEnable Then Return
 
                 _isEnabled = True
@@ -96,8 +103,39 @@ Partial Public Class ThisAddIn
                     Return
                 End If
 
-                Dim desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
-                _logPath = Path.Combine(desktopPath, StableLogFileName)
+                ' Choose the base directory. In skill-author mode with a configured local
+                ' resource root, write into <local>\diagnostics\ so the skill-author skill
+                ' can read the last run's log. Otherwise fall back to the Desktop, but only
+                ' when APIDebug is on (avoid cluttering the Desktop when it is off).
+                Dim baseDir As String = Nothing
+                _isDiagnosticsMode = False
+
+                If authorActive Then
+                    Dim localRoot As String = SharedLibrary.Agents.AgentResources.ConfiguredLocalPath
+                    If Not String.IsNullOrWhiteSpace(localRoot) Then
+                        Try
+                            Dim diagDir As String = Path.Combine(localRoot, "diagnostics")
+                            If Not Directory.Exists(diagDir) Then Directory.CreateDirectory(diagDir)
+                            baseDir = diagDir
+                            _isDiagnosticsMode = True
+                        Catch
+                            baseDir = Nothing
+                        End Try
+                    End If
+                End If
+
+                If baseDir Is Nothing Then
+                    If Not INI_APIDebug Then
+                        ' Author mode without a usable local root: skip logging entirely.
+                        _isEnabled = False
+                        _sessionDepth = 0
+                        Return
+                    End If
+                    baseDir = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
+                End If
+
+                _topLevelSkillSlug = Nothing
+                _logPath = Path.Combine(baseDir, StableLogFileName)
 
                 Try
                     WriteHeader()
@@ -107,6 +145,7 @@ Partial Public Class ThisAddIn
                     _started = False
                     _logPath = Nothing
                     _sessionDepth = 0
+                    _isDiagnosticsMode = False
                 End Try
             End SyncLock
         End Sub
@@ -368,9 +407,14 @@ Partial Public Class ThisAddIn
                 End If
                 WriteLine("END", $"Ended: {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}")
 
+                FinalizeDiagnosticsFiles()
+
                 _isEnabled = False
                 _started = False
                 _logPath = Nothing
+                _subAgentLogPath = Nothing
+                _topLevelSkillSlug = Nothing
+                _isDiagnosticsMode = False
                 _sessionDepth = 0
             End SyncLock
         End Sub
@@ -483,6 +527,68 @@ Partial Public Class ThisAddIn
                 _subAgentLogPath = IO.Path.Combine(dir, $"{AN5}_SubAgent_Returns.txt")
             Catch
                 ' If the path cannot be resolved, sub-agent returns silently skip.
+            End Try
+        End Sub
+
+        ''' <summary>
+        ''' Records the top-level skill invoked in this run so diagnostics logs can be
+        ''' finalized under per-skill filenames. Only the first (top-level) skill is kept.
+        ''' </summary>
+        Public Shared Sub SetTopLevelSkillName(skillName As String)
+            SyncLock _lock
+                If Not _isEnabled Then Return
+                If Not String.IsNullOrWhiteSpace(_topLevelSkillSlug) Then Return
+                _topLevelSkillSlug = SanitizeSlug(skillName)
+            End SyncLock
+        End Sub
+
+        ''' <summary>Converts a skill name into a filename-safe slug (letters/digits/-/_).</summary>
+        Private Shared Function SanitizeSlug(name As String) As String
+            If String.IsNullOrWhiteSpace(name) Then Return Nothing
+            Dim sb As New StringBuilder()
+            For Each ch In name.Trim()
+                If Char.IsLetterOrDigit(ch) OrElse ch = "-"c OrElse ch = "_"c Then
+                    sb.Append(ch)
+                ElseIf ch = " "c Then
+                    sb.Append("-"c)
+                End If
+            Next
+            Dim slug As String = sb.ToString().Trim("-"c, "_"c)
+            If slug.Length > 60 Then slug = slug.Substring(0, 60)
+            Return If(slug.Length = 0, Nothing, slug)
+        End Function
+
+        ''' <summary>
+        ''' In diagnostics mode, renames the working tooling and sub-agent log files to
+        ''' per-skill names (keep-last-run, overwritten). No-op outside diagnostics mode or
+        ''' when no top-level skill was recorded.
+        ''' </summary>
+        Private Shared Sub FinalizeDiagnosticsFiles()
+            If Not _isDiagnosticsMode Then Return
+            If String.IsNullOrWhiteSpace(_topLevelSkillSlug) Then Return
+            Try
+                Dim dir As String = Path.GetDirectoryName(_logPath)
+
+                Dim finalLog As String = Path.Combine(dir, $"{AN5}_Tooling_Log__{_topLevelSkillSlug}.txt")
+                MoveOverwrite(_logPath, finalLog)
+
+                If Not String.IsNullOrEmpty(_subAgentLogPath) AndAlso File.Exists(_subAgentLogPath) Then
+                    Dim finalSub As String = Path.Combine(dir, $"{AN5}_SubAgent_Returns__{_topLevelSkillSlug}.txt")
+                    MoveOverwrite(_subAgentLogPath, finalSub)
+                End If
+            Catch
+                ' Never throw from logger.
+            End Try
+        End Sub
+
+        ''' <summary>Moves <paramref name="src"/> to <paramref name="dest"/>, overwriting any existing file.</summary>
+        Private Shared Sub MoveOverwrite(src As String, dest As String)
+            Try
+                If String.IsNullOrEmpty(src) OrElse Not File.Exists(src) Then Return
+                If File.Exists(dest) Then File.Delete(dest)
+                File.Move(src, dest)
+            Catch
+                ' Never throw from logger.
             End Try
         End Sub
 
