@@ -204,15 +204,15 @@ Partial Public Class ThisAddIn
 
         ''' <summary>
         ''' Composes and forwards the combined progress line, skipping empty text and consecutive
-        ''' duplicates. When a B1 heading exists it becomes the lead statement with the English A note
-        ''' shown in brackets; otherwise the A note is emitted standalone. Never throws.
+        ''' duplicates. When a B1 heading exists it becomes the lead statement and the English A note
+        ''' is shown on the next indented line; otherwise the A note is emitted standalone. Never throws.
         ''' </summary>
         Private Sub EmitProgress()
             If ProgressSink Is Nothing Then Return
 
             Dim msg As String
             If _lastProgressHeading <> "" AndAlso _lastProgressText <> "" Then
-                msg = _lastProgressHeading & " (" & _lastProgressText & ")"
+                msg = _lastProgressHeading & " [" & _lastProgressText & "]"
             ElseIf _lastProgressHeading <> "" Then
                 msg = _lastProgressHeading
             Else

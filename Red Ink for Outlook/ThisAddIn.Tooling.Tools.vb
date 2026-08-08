@@ -1843,7 +1843,7 @@ Partial Public Class ThisAddIn
     ''' the note is authored in the dialogue language; it may be batched with real tool calls.
     ''' </summary>
     Public Function BuildMajorStepProgressToolInstruction() As String
-        Return "When you begin a significant new phase of work, you may call the report_progress tool with one short, user-facing note in the dialogue language describing what you are about to do (for example, just before a group of related tool calls). Call it only for major steps, not on every turn and not for minor steps. You may include it in the same turn as your real tool calls. Never write progress as plain text and never serialize any tool call as text; always use native tool calls."
+        Return "PROGRESS REPORTING RULE: You MUST call the report_progress tool before the first substantive tool action of every tooling run and again whenever you begin a materially different major phase of work. Do this whether or not the user explicitly asked for progress updates. Use exactly one short, user-facing sentence in the dialogue language. Call it only for major steps, not for every minor step. You may include report_progress in the same turn as the real tool calls that follow it. Do NOT write progress as plain text. Do NOT serialize tool calls as text or JSON text. Use only native tool calls. A major work phase must not begin silently without a preceding report_progress call."
     End Function
 
     ''' <summary>Canonical JSON definition for the internal report_progress tool.</summary>

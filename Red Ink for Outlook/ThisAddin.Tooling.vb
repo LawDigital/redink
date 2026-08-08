@@ -399,40 +399,6 @@ Partial Public Class ThisAddIn
 
 #Region "Execute Tooling"
 
-    ''' <summary>
-    ''' Builds the user-facing progress-note instruction (B1). The note is authored in the
-    ''' dialogue language when known (same contract as the final response). It is only requested
-    ''' for normal text turns; it must NOT be emitted on turns that call a tool, because native
-    ''' function-calling models would otherwise serialize the tool call as text and break tool
-    ''' detection. Deterministic host-side progress (A) already covers tool-calling turns.
-    ''' </summary>
-    Private Shared Function BuildToolingProgressStatusInstruction(userLanguage As String) As String
-        Dim lang As String = If(userLanguage, "").Trim()
-        Dim languageClause As String =
-            If(lang = "",
-               "in the same language as the user's latest message",
-               "in " & lang)
-        Return "When you respond with normal text (reasoning, questions, or your final answer) and you are NOT issuing a tool/function call in that same turn, begin that response with exactly one short, user-facing progress note " & languageClause &
-               " on its own line using the marker format [[STATUS: your note]] (for example [[STATUS: Reviewing the e-mail...]] or [[STATUS: Searching the web...]]). Never place this marker in a turn where you issue a tool or function call, and never serialize a tool call as plain text or JSON just to add the note; always use the normal tool-calling mechanism for tool calls. Keep the note under eight words, describe in plain language what you are about to do, do not reveal tool names, arguments, or internal reasoning, and never mention the marker itself to the user."
-    End Function
-
-    Private Shared ReadOnly TurnStatusMarkerRegex As New System.Text.RegularExpressions.Regex(
-        "\[\[\s*STATUS\s*:\s*(?<t>.*?)\]\]",
-        System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.Singleline)
-
-    ''' <summary>Returns the text of the first [[STATUS: ...]] marker in the response, or "".</summary>
-    Private Function ExtractTurnStatusMarker(text As String) As String
-        If String.IsNullOrEmpty(text) Then Return ""
-        Dim m = TurnStatusMarkerRegex.Match(text)
-        If Not m.Success Then Return ""
-        Return If(m.Groups("t").Value, "").Trim()
-    End Function
-
-    ''' <summary>Removes all [[STATUS: ...]] markers so they never reach the user.</summary>
-    Private Function StripTurnStatusMarker(text As String) As String
-        If String.IsNullOrEmpty(text) Then Return text
-        Return TurnStatusMarkerRegex.Replace(text, "").Trim()
-    End Function
 
     ''' <summary>
     ''' Derives a tool-agnostic, user-facing progress line for an upcoming tool call,
@@ -1431,12 +1397,6 @@ Partial Public Class ThisAddIn
                 End If
 
                 context.Log($"Response received ({currentResponse.Length} chars)")
-
-                Dim turnStatus As String = ExtractTurnStatusMarker(currentResponse)
-                If Not String.IsNullOrWhiteSpace(turnStatus) Then
-                    context.ReportProgress(turnStatus)
-                    currentResponse = StripTurnStatusMarker(currentResponse)
-                End If
 
                 Dim detectionPattern = context.ToolingModel.ToolCallDetectionPattern
 

@@ -1780,6 +1780,66 @@ Namespace My
                 Me("CrashLog") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property ToolingLogX() As Integer
+            Get
+                Return CType(Me("ToolingLogX"),Integer)
+            End Get
+            Set
+                Me("ToolingLogX") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property ToolingLogY() As Integer
+            Get
+                Return CType(Me("ToolingLogY"),Integer)
+            End Get
+            Set
+                Me("ToolingLogY") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property ToolingLogWidth() As Integer
+            Get
+                Return CType(Me("ToolingLogWidth"),Integer)
+            End Get
+            Set
+                Me("ToolingLogWidth") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property ToolingLogHeight() As Integer
+            Get
+                Return CType(Me("ToolingLogHeight"),Integer)
+            End Get
+            Set
+                Me("ToolingLogHeight") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property ToolingLogMinimized() As Boolean
+            Get
+                Return CType(Me("ToolingLogMinimized"),Boolean)
+            End Get
+            Set
+                Me("ToolingLogMinimized") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

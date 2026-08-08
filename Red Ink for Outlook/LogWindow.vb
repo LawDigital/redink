@@ -76,6 +76,7 @@ Public Class LogWindow
     ''' Base text used for the primary button. Starts as "Close" but the actual button may show a countdown suffix.
     ''' </summary>
     Private _closeButtonBaseText As String = "Close"
+    Private _restoringPlacement As Boolean = False
 
     ''' <summary>
     ''' Raised when the user requests cancellation of the current tooling run.
@@ -180,8 +181,8 @@ Public Class LogWindow
         Me.MinimumSize = New Size(450, 300)
         Me.TopMost = False
         Me.MaximizeBox = False
-        Me.MinimizeBox = False
-        Me.ShowInTaskbar = False
+        Me.MinimizeBox = True
+        Me.ShowInTaskbar = True
         Me.AutoScaleMode = AutoScaleMode.Font
 
         ' Double buffering prevents rendering artifacts on buttons/text
@@ -248,12 +249,125 @@ Public Class LogWindow
     Protected Overrides Sub OnShown(e As EventArgs)
         MyBase.OnShown(e)
         If Not _initialPositionSet Then
-            Dim wa = Screen.PrimaryScreen.WorkingArea
-            Me.Location = New Point(wa.Right - Me.Width - 40, wa.Bottom - Me.Height - 40)
-            _initialPositionSet = True
+            RestoreWindowPlacement()
         End If
         Me.BringToFront()
         Me.Refresh() ' Ensure initial paint
+    End Sub
+
+    Protected Overrides Sub OnMove(e As EventArgs)
+        MyBase.OnMove(e)
+
+        If Me.WindowState = FormWindowState.Normal Then
+            SaveWindowPlacement()
+        End If
+    End Sub
+
+    Protected Overrides Sub OnResize(e As EventArgs)
+        MyBase.OnResize(e)
+        SaveWindowPlacement()
+    End Sub
+
+    Protected Overrides Sub OnFormClosing(e As FormClosingEventArgs)
+        SaveWindowPlacement()
+        MyBase.OnFormClosing(e)
+    End Sub
+
+    Private Sub RestoreWindowPlacement()
+        _restoringPlacement = True
+
+        Try
+            Dim savedWidth As Integer = My.Settings.ToolingLogWidth
+            Dim savedHeight As Integer = My.Settings.ToolingLogHeight
+            Dim hasSavedBounds As Boolean = savedWidth > 0 AndAlso savedHeight > 0
+
+            If hasSavedBounds Then
+                Dim restoredBounds As Rectangle =
+                    GetSafePlacementBounds(
+                        My.Settings.ToolingLogX,
+                        My.Settings.ToolingLogY,
+                        savedWidth,
+                        savedHeight)
+
+                Me.SetBounds(
+                    restoredBounds.X,
+                    restoredBounds.Y,
+                    restoredBounds.Width,
+                    restoredBounds.Height)
+            Else
+                PositionWindowDefault()
+            End If
+
+            Me.WindowState =
+                If(My.Settings.ToolingLogMinimized,
+                   FormWindowState.Minimized,
+                   FormWindowState.Normal)
+        Catch
+            PositionWindowDefault()
+            Me.WindowState = FormWindowState.Normal
+        Finally
+            _initialPositionSet = True
+            _restoringPlacement = False
+        End Try
+    End Sub
+
+    Private Sub PositionWindowDefault()
+        Dim wa As Rectangle = Screen.PrimaryScreen.WorkingArea
+        Dim width As Integer = Math.Min(Me.Width, wa.Width)
+        Dim height As Integer = Math.Min(Me.Height, wa.Height)
+
+        Me.SetBounds(
+            Math.Max(wa.Left, wa.Right - width - 40),
+            Math.Max(wa.Top, wa.Bottom - height - 40),
+            width,
+            height)
+    End Sub
+
+    Private Function GetSafePlacementBounds(savedX As Integer,
+                                            savedY As Integer,
+                                            savedWidth As Integer,
+                                            savedHeight As Integer) As Rectangle
+
+        Dim width As Integer = If(savedWidth > 0, savedWidth, Me.Width)
+        Dim height As Integer = If(savedHeight > 0, savedHeight, Me.Height)
+
+        Dim probe As New Rectangle(savedX, savedY, Math.Max(1, width), Math.Max(1, height))
+        Dim area As Rectangle = Screen.FromRectangle(probe).WorkingArea
+
+        Dim minWidth As Integer = Math.Min(Me.MinimumSize.Width, area.Width)
+        Dim minHeight As Integer = Math.Min(Me.MinimumSize.Height, area.Height)
+
+        width = Math.Max(minWidth, Math.Min(width, area.Width))
+        height = Math.Max(minHeight, Math.Min(height, area.Height))
+
+        Dim x As Integer = Math.Max(area.Left, Math.Min(savedX, area.Right - width))
+        Dim y As Integer = Math.Max(area.Top, Math.Min(savedY, area.Bottom - height))
+
+        Return New Rectangle(x, y, width, height)
+    End Function
+
+    Private Sub SaveWindowPlacement()
+        If _restoringPlacement OrElse Me.IsDisposed OrElse Not Me.IsHandleCreated Then
+            Return
+        End If
+
+        Try
+            Dim boundsToSave As Rectangle =
+                If(Me.WindowState = FormWindowState.Normal,
+                   Me.Bounds,
+                   Me.RestoreBounds)
+
+            If boundsToSave.Width > 0 AndAlso boundsToSave.Height > 0 Then
+                My.Settings.ToolingLogX = boundsToSave.X
+                My.Settings.ToolingLogY = boundsToSave.Y
+                My.Settings.ToolingLogWidth = boundsToSave.Width
+                My.Settings.ToolingLogHeight = boundsToSave.Height
+            End If
+
+            My.Settings.ToolingLogMinimized = (Me.WindowState = FormWindowState.Minimized)
+            My.Settings.Save()
+        Catch
+        End Try
     End Sub
 
     ''' <summary>

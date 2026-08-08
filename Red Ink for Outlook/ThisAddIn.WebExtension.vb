@@ -2032,7 +2032,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("function startElapsedTimer(){stopElapsedTimer();__jobStartTs=Date.now();__elapsedTimer=setInterval(updateElapsed,1000);}")
         html.AppendLine("function stopElapsedTimer(){if(__elapsedTimer){clearInterval(__elapsedTimer);__elapsedTimer=null;}const el=document.getElementById('typingElapsed');if(el)el.style.display='none';}")
         html.AppendLine("function removeTypingBubble(){if(__typingBubbleId){removeTempBubble(__typingBubbleId);__typingBubbleId=null;}stopElapsedTimer();}")
-        html.AppendLine("function setTypingStatus(text){if(!__typingBubbleId)return;const row=document.getElementById(__typingBubbleId);if(!row)return;let el=row.querySelector('.typing-status');const c=row.querySelector('.tmpContent');if(!c)return;if(!el){el=document.createElement('div');el.className='typing-status';el.style.opacity='.75';el.style.fontStyle='italic';el.style.marginTop='4px';c.appendChild(el);}el.textContent=String(text||'');}")
+        html.AppendLine("function setTypingStatus(text){if(!__typingBubbleId)return;const row=document.getElementById(__typingBubbleId);if(!row)return;let el=row.querySelector('.typing-status');const c=row.querySelector('.tmpContent');if(!c)return;if(!el){el=document.createElement('div');el.className='typing-status';el.style.opacity='.75';el.style.fontStyle='italic';el.style.marginTop='4px';el.style.whiteSpace='pre-wrap';c.appendChild(el);}el.textContent=String(text||'');}")
 
         ' Boot        
         html.AppendLine("async function claimScheduledTask(){const r=await api('inky_claimscheduledtask');if(!r||!r.ok)return null;return r.task||null;}")
