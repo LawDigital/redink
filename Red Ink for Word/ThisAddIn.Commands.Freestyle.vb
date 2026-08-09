@@ -2243,8 +2243,10 @@ SkipPromptInput:
                 AddItem("kbhealth", "Run an AI health check/lint on the active Wiki (finds orphans/duplicates).")
                 AddItem("kbrepair", "Run an AI repair operation on the active Wiki (fixes issues found during health check).")
                 AddItem("cliptowiki", "Store the clipboard text in the knowledgebase wiki.")
+
                 ' TOOLS / SOURCES
                 AddItem("setagents", "Select sources/tools available For agentic models (session scope).")
+                AddItem("updateagents", "Update the sample agent files (skills, agents) from redink.ai server.")
                 AddItem("loadurl", "Retrieve the text Of a particular URL given.")
                 AddItem("translator", "Open a widget that provides you With an On-the-fly translation.")
                 AddItem("drawio", "Open a draw.io For editing chart files, optionally With Internet blocking.")
@@ -2948,6 +2950,11 @@ SkipPromptInput:
                 Return
             End If
 
+            ' Update agent sample files
+            If String.Equals(OtherPrompt.Trim(), "updateagents", StringComparison.OrdinalIgnoreCase) OrElse String.Equals(OtherPrompt.Trim(), "updateskills", StringComparison.OrdinalIgnoreCase) Then
+                SharedMethods.CheckForAgentResourceUpdates(_context)
+                Return
+            End If
 
             ' Signature Management for Update INI Key Functionality
             If String.Equals(OtherPrompt.Trim(), "iniupdatekeys", StringComparison.OrdinalIgnoreCase) OrElse String.Equals(OtherPrompt.Trim(), "signtool", StringComparison.OrdinalIgnoreCase) Then

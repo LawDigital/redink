@@ -457,6 +457,8 @@ Namespace SharedLibrary
         Public Const ToolCallMatchingMiddle As String = ":"
         Public Const ToolCallMatchingEnd As String = ")"
 
+        Public Const DotInkyZip As String = ".inky.zip"
+
         ''' <summary>
         ''' Controls whether the sandboxed DOCX reader includes headers, footers, footnotes and endnotes
         ''' in addition to the main body text.

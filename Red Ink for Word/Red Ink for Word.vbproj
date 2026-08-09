@@ -261,19 +261,19 @@
       <HintPath>..\packages\Google.Protobuf.3.35.1\lib\net45\Google.Protobuf.dll</HintPath>
     </Reference>
     <Reference Include="Grpc.Auth, Version=2.0.0.0, Culture=neutral, PublicKeyToken=d754f35622e28bad, processorArchitecture=MSIL">
-      <HintPath>..\packages\Grpc.Auth.2.80.0\lib\net462\Grpc.Auth.dll</HintPath>
+      <HintPath>..\packages\Grpc.Auth.2.83.0\lib\net462\Grpc.Auth.dll</HintPath>
     </Reference>
     <Reference Include="Grpc.Core, Version=2.0.0.0, Culture=neutral, PublicKeyToken=d754f35622e28bad, processorArchitecture=MSIL">
       <HintPath>..\packages\Grpc.Core.2.46.6\lib\net45\Grpc.Core.dll</HintPath>
     </Reference>
     <Reference Include="Grpc.Core.Api, Version=2.0.0.0, Culture=neutral, PublicKeyToken=d754f35622e28bad, processorArchitecture=MSIL">
-      <HintPath>..\packages\Grpc.Core.Api.2.80.0\lib\net462\Grpc.Core.Api.dll</HintPath>
+      <HintPath>..\packages\Grpc.Core.Api.2.83.0\lib\net462\Grpc.Core.Api.dll</HintPath>
     </Reference>
     <Reference Include="Grpc.Net.Client, Version=2.0.0.0, Culture=neutral, PublicKeyToken=d754f35622e28bad, processorArchitecture=MSIL">
-      <HintPath>..\packages\Grpc.Net.Client.2.80.0\lib\net462\Grpc.Net.Client.dll</HintPath>
+      <HintPath>..\packages\Grpc.Net.Client.2.83.0\lib\net462\Grpc.Net.Client.dll</HintPath>
     </Reference>
     <Reference Include="Grpc.Net.Common, Version=2.0.0.0, Culture=neutral, PublicKeyToken=d754f35622e28bad, processorArchitecture=MSIL">
-      <HintPath>..\packages\Grpc.Net.Common.2.80.0\lib\netstandard2.0\Grpc.Net.Common.dll</HintPath>
+      <HintPath>..\packages\Grpc.Net.Common.2.83.0\lib\netstandard2.0\Grpc.Net.Common.dll</HintPath>
     </Reference>
     <Reference Include="HtmlAgilityPack, Version=1.12.4.0, Culture=neutral, PublicKeyToken=bd319b19eaf3b43a, processorArchitecture=MSIL">
       <HintPath>..\packages\HtmlAgilityPack.1.12.4\lib\Net45\HtmlAgilityPack.dll</HintPath>
@@ -295,7 +295,7 @@
     </Reference>
     <Reference Include="Microsoft.CSharp" />
     <Reference Include="Microsoft.Extensions.AI.Abstractions, Version=10.8.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Extensions.AI.Abstractions.10.8.1\lib\net462\Microsoft.Extensions.AI.Abstractions.dll</HintPath>
+      <HintPath>..\packages\Microsoft.Extensions.AI.Abstractions.10.8.3\lib\net462\Microsoft.Extensions.AI.Abstractions.dll</HintPath>
     </Reference>
     <Reference Include="Microsoft.Extensions.DependencyInjection, Version=10.0.0.10, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
       <HintPath>..\packages\Microsoft.Extensions.DependencyInjection.10.0.10\lib\net462\Microsoft.Extensions.DependencyInjection.dll</HintPath>
@@ -327,14 +327,14 @@
       <HintPath>..\packages\Microsoft.Office.Interop.PowerPoint.15.0.4420.1018\lib\net20\Microsoft.Office.Interop.PowerPoint.dll</HintPath>
       <EmbedInteropTypes>True</EmbedInteropTypes>
     </Reference>
-    <Reference Include="Microsoft.Web.WebView2.Core, Version=1.0.4078.44, Culture=neutral, PublicKeyToken=2a8ab48044d2601e, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Web.WebView2.1.0.4078.44\lib\net462\Microsoft.Web.WebView2.Core.dll</HintPath>
+    <Reference Include="Microsoft.Web.WebView2.Core, Version=1.0.4129.50, Culture=neutral, PublicKeyToken=2a8ab48044d2601e, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Web.WebView2.1.0.4129.50\lib\net462\Microsoft.Web.WebView2.Core.dll</HintPath>
     </Reference>
-    <Reference Include="Microsoft.Web.WebView2.WinForms, Version=1.0.4078.44, Culture=neutral, PublicKeyToken=2a8ab48044d2601e, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Web.WebView2.1.0.4078.44\lib\net462\Microsoft.Web.WebView2.WinForms.dll</HintPath>
+    <Reference Include="Microsoft.Web.WebView2.WinForms, Version=1.0.4129.50, Culture=neutral, PublicKeyToken=2a8ab48044d2601e, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Web.WebView2.1.0.4129.50\lib\net462\Microsoft.Web.WebView2.WinForms.dll</HintPath>
     </Reference>
-    <Reference Include="Microsoft.Web.WebView2.Wpf, Version=1.0.4078.44, Culture=neutral, PublicKeyToken=2a8ab48044d2601e, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Web.WebView2.1.0.4078.44\lib\net462\Microsoft.Web.WebView2.Wpf.dll</HintPath>
+    <Reference Include="Microsoft.Web.WebView2.Wpf, Version=1.0.4129.50, Culture=neutral, PublicKeyToken=2a8ab48044d2601e, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Web.WebView2.1.0.4129.50\lib\net462\Microsoft.Web.WebView2.Wpf.dll</HintPath>
     </Reference>
     <Reference Include="Microsoft.Win32.Registry, Version=5.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
       <HintPath>..\packages\Microsoft.Win32.Registry.5.0.0\lib\net461\Microsoft.Win32.Registry.dll</HintPath>
@@ -933,11 +933,11 @@
     <Error Condition="!Exists('..\packages\PdfiumViewer.Native.x86_64.v8-xfa.2018.4.8.256\build\PdfiumViewer.Native.x86_64.v8-xfa.props')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\PdfiumViewer.Native.x86_64.v8-xfa.2018.4.8.256\build\PdfiumViewer.Native.x86_64.v8-xfa.props'))" />
     <Error Condition="!Exists('..\packages\PdfiumViewer.Native.x86.v8-xfa.2018.4.8.256\build\PdfiumViewer.Native.x86.v8-xfa.props')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\PdfiumViewer.Native.x86.v8-xfa.2018.4.8.256\build\PdfiumViewer.Native.x86.v8-xfa.props'))" />
     <Error Condition="!Exists('..\packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets'))" />
-    <Error Condition="!Exists('..\packages\Microsoft.Web.WebView2.1.0.4078.44\build\Microsoft.Web.WebView2.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Microsoft.Web.WebView2.1.0.4078.44\build\Microsoft.Web.WebView2.targets'))" />
+    <Error Condition="!Exists('..\packages\Microsoft.Web.WebView2.1.0.4129.50\build\Microsoft.Web.WebView2.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Microsoft.Web.WebView2.1.0.4129.50\build\Microsoft.Web.WebView2.targets'))" />
   </Target>
   <Import Project="..\packages\Grpc.Core.2.46.6\build\net45\Grpc.Core.targets" Condition="Exists('..\packages\Grpc.Core.2.46.6\build\net45\Grpc.Core.targets')" />
   <Import Project="..\packages\Google.Api.CommonProtos.2.17.0\build\Google.Api.CommonProtos.targets" Condition="Exists('..\packages\Google.Api.CommonProtos.2.17.0\build\Google.Api.CommonProtos.targets')" />
   <Import Project="..\packages\NAudio.Lame.2.1.0\build\NAudio.Lame.targets" Condition="Exists('..\packages\NAudio.Lame.2.1.0\build\NAudio.Lame.targets')" />
   <Import Project="..\packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets" Condition="Exists('..\packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets')" />
-  <Import Project="..\packages\Microsoft.Web.WebView2.1.0.4078.44\build\Microsoft.Web.WebView2.targets" Condition="Exists('..\packages\Microsoft.Web.WebView2.1.0.4078.44\build\Microsoft.Web.WebView2.targets')" />
+  <Import Project="..\packages\Microsoft.Web.WebView2.1.0.4129.50\build\Microsoft.Web.WebView2.targets" Condition="Exists('..\packages\Microsoft.Web.WebView2.1.0.4129.50\build\Microsoft.Web.WebView2.targets')" />
 </Project>
