@@ -19,7 +19,11 @@ Notes:
 | `web_grounding` | Uses a web-enabled model to perform cited live-web research. | Yes | Yes | Yes |
 | `knowledge_search` | Searches the user's local knowledge store for relevant internal content. | Yes | Yes | Yes |
 | `tool_loader` | Lazily loads full tool definitions only when a specific tool is needed. | Yes | Yes | Yes |
+| `report_progress` | Announces a short user-facing major-step progress update. Use it before the first substantive tool action and again whenever a new major phase begins. | Yes | Yes | No |
 | `tool_describe` | Returns the full parameter schema and usage instructions for one or more tools (by name or name prefix) without making them callable, so overlapping tools can be compared before loading. | Yes | Yes | No |
+| `context_expand` | Retrieves a character window from a large tool result that was stored by reference. Large results are replaced in context by a short `result_ref` plus a preview; this tool reads more of that stored content on demand. | Yes | Yes | No |
+| `context_compact` | Voluntarily compacts older tool results out of the active context to free space when they are no longer needed in full. The full text stays retrievable via `context_expand`; an optional `keep_recent` controls how many recent results stay fully visible. | Yes | Yes | No |
+| `ask_user` | Asks the user one concise clarifying question (with optional concrete choices, single- or multi-select, or a requested text/number value) when required information is missing, several materially different interpretations exist, or a skill/workflow needs an explicit decision. The user may always answer freely. Interactive contexts only (Word chat and Outlook Local Chat); non-blocking no-op in unattended e-mail Scheduler / AutoPilot runs. | Yes | Yes | No |
 | `memory_put` | Stores a key/value memory entry with summary, tags, and metadata. | Yes | Yes | No |
 | `memory_get` | Retrieves a stored memory entry by key. | Yes | Yes | No |
 | `memory_list` | Lists stored memory entries and their summaries. | Yes | Yes | No |
@@ -68,6 +72,7 @@ These binary-safe tools operate across the PathPolicy-governed roots (the agent 
 | Tool | Description | Word | Outlook | AutoPilot |
 |---|---|---:|---:|---:|
 | `file_copy` | Copies a file or directory (binary-safe) between the workspace, staging area, and skill references/scripts. | Yes | Yes | Yes |
+| `file_list` | Lists files and/or directories under an allowed root, with optional glob filtering and recursion. | Yes | Yes | Yes |
 | `file_move` | Moves a file or directory (binary-safe) between the allowed roots. | Yes | Yes | Yes |
 | `file_rename` | Renames a file or directory in place. | Yes | Yes | Yes |
 | `file_delete` | Deletes a single file (Recycle Bin by default). | Yes | Yes | Yes |

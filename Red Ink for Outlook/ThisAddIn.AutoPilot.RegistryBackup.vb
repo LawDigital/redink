@@ -92,6 +92,22 @@ Partial Public Class ThisAddIn
         BackupAutoPilotSettingsToRegistry()
     End Sub
 
+    ''' <summary>
+    ''' Ensures the registry-backed AutoPilot settings are restored at most once per session.
+    ''' This avoids duplicate restore attempts when both auto-start and the manual dialog path
+    ''' touch the same recovery logic during the same Outlook session.
+    ''' </summary>
+    Private _autoPilotRegistrySettingsRestoredThisSession As Boolean = False
+
+    Private Sub EnsureAutoPilotSettingsRestoredFromRegistry()
+        If _autoPilotRegistrySettingsRestoredThisSession Then
+            Return
+        End If
+
+        TryRestoreAutoPilotSettingsFromRegistry()
+        _autoPilotRegistrySettingsRestoredThisSession = True
+    End Sub
+
 
 
     ''' <summary>
@@ -122,14 +138,6 @@ Partial Public Class ThisAddIn
             Dim filterRules As String = GetJsonString(json, "AP_FilterRules")
             Dim monitoredMailbox As String = GetJsonString(json, "AP_MonitoredMailbox")
             Dim whitelistedSenders As String = GetJsonString(json, "AP_WhitelistedSenders")
-
-            ' Match the existing "saved config" heuristic before restoring
-            If String.IsNullOrWhiteSpace(filterRules) AndAlso
-               String.IsNullOrWhiteSpace(monitoredMailbox) AndAlso
-               String.IsNullOrWhiteSpace(whitelistedSenders) Then
-                Debug.WriteLine("[AutoPilot] Registry backup found but contains no saved AutoPilot config.")
-                Return False
-            End If
 
             My.Settings.AP_FilterRules = filterRules
             My.Settings.AP_WhitelistedSenders = whitelistedSenders

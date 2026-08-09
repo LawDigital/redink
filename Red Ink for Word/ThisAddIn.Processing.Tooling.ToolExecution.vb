@@ -321,6 +321,29 @@ Partial Public Class ThisAddIn
                 GoTo __AfterDispatch
             End If
 
+            If SharedLibrary.Agents.ContextExpandTool.IsContextExpandTool(toolCall.ToolName) Then
+                response.Response = SharedLibrary.Agents.ContextExpandTool.Execute(toolCall.Arguments)
+                response.Success = Not String.IsNullOrWhiteSpace(response.Response)
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+                GoTo __AfterDispatch
+            End If
+
+            If SharedLibrary.Agents.AskUserTool.IsAskUserTool(toolCall.ToolName) Then
+                response.Response = SharedLibrary.Agents.AskUserTool.Execute(toolCall.Arguments)
+                response.Success = Not String.IsNullOrWhiteSpace(response.Response)
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+                GoTo __AfterDispatch
+            End If
+
+            If SharedLibrary.Agents.ContextCompactTool.IsContextCompactTool(toolCall.ToolName) Then
+                response.Response = SharedLibrary.Agents.ContextCompactTool.Execute(
+                    toolCall.Arguments,
+                    SharedLibrary.Agents.WorkflowContinuity.CurrentWorkflowId)
+                response.Success = Not String.IsNullOrWhiteSpace(response.Response)
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+                GoTo __AfterDispatch
+            End If
+
             ' Agent layer (memory_*, skill_use, agent_*) — single-line dispatcher.
             If SharedLibrary.Agents.AgentToolRouter.IsAgentLayerTool(toolCall.ToolName) Then
                 cancellationToken.ThrowIfCancellationRequested()
@@ -340,6 +363,16 @@ Partial Public Class ThisAddIn
                     response.ErrorCode = "agent_empty_result"
                     response.ErrorMessage = "js_run returned no usable result. Ensure the script explicitly returns the computed value."
                     response.Response = "{""summary"":""Sub-agent returned no usable result."",""result"":null,""resultKind"":""error"",""error"":{""code"":""agent_empty_result"",""phase"":""final_output_parse"",""message"":""Sub-agent returned no usable final result.""}}"
+                End If
+
+                If String.Equals(toolCall.ToolName, SharedLibrary.Agents.SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) AndAlso response.Success Then
+                    Dim __skillName As String = Nothing
+                    If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("name") Then
+                        __skillName = System.Convert.ToString(toolCall.Arguments("name"))
+                    End If
+                    If Not String.IsNullOrWhiteSpace(__skillName) Then
+                        ToolingFileLogger.SetTopLevelSkillName(__skillName)
+                    End If
                 End If
 
                 ToolingFileLogger.LogSubAgentReturn($"Agent-layer tool ({toolCall.ToolName})", response.Response)
@@ -372,6 +405,7 @@ Partial Public Class ThisAddIn
                     response.ErrorMessage = "Skill invocation returned no usable result."
                 End If
 
+                ToolingFileLogger.SetTopLevelSkillName(toolCall.ToolName.Substring("skill_".Length))
                 ToolingFileLogger.LogSubAgentReturn($"Agent-layer skill ({toolCall.ToolName})", response.Response)
                 GoTo __AfterDispatch
             End If

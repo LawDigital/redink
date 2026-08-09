@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 4.8.2026
+' 9.8.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -61,7 +61,7 @@ Partial Public Class ThisAddIn
     Public Const AN4 As String = "redink_"
     Public Const AN3 As String = "redink"
 
-    Public Shared Version As String = "V.040826" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.090826" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -153,6 +153,21 @@ Partial Public Class ThisAddIn
     Public StartupInitialized As Boolean = False
 
     ''' <summary>
+    ''' Arms the ask_user interactivity guard for Outlook. A live user is only present in
+    ''' Local Chat / Web Agent runs. Unattended e-mail Scheduler and AutoPilot runs
+    ''' (indicated by _apActive) must never block on ask_user. Idempotent; safe to call
+    ''' more than once.
+    ''' </summary>
+    Private Sub ArmAskUserInteractivityGuard()
+        SharedLibrary.Agents.AskUserTool.InteractivityProvider =
+            Function() As Boolean
+                ' Interactive only when a chat agent session is active and this is not an
+                ' unattended AutoPilot / e-mail Scheduler execution.
+                Return _chatAgentActive AndAlso Not _apActive
+            End Function
+    End Sub
+
+    ''' <summary>
     ''' Hidden control created to obtain a Windows Forms handle for marshaling to the Outlook UI thread.
     ''' </summary>
     Private mainThreadControl As New System.Windows.Forms.Control()
@@ -221,7 +236,8 @@ Partial Public Class ThisAddIn
                 "RedInk Outlook Add-in",
                 Me.GetType().Assembly,
                 My.Settings.CrashLog,
-                True)
+                True,
+                RDV)
         Catch
         End Try
 
@@ -245,6 +261,10 @@ Partial Public Class ThisAddIn
 
         UiSyncContext = _uiContext
         UiThreadId = System.Threading.Thread.CurrentThread.ManagedThreadId
+
+        ' Arm the ask_user interactivity guard so unattended e-mail Scheduler / AutoPilot
+        ' runs never block on a modal (interactive only in Local Chat / Web Agent).
+        ArmAskUserInteractivityGuard()
 
         _uiScheduler = TaskScheduler.FromCurrentSynchronizationContext()
 
@@ -283,34 +303,39 @@ Partial Public Class ThisAddIn
             activeChatId = 1
         End Try
 
-        '#If DEBUG Then
-        '        RunToolCallSequencingSelfTestsAtStartup()
-        '#End If
+#If DEBUG Then
+        RunPythonExecuteRepairAdvisorSelfTestsAtStartup()
+#End If
 
     End Sub
 
 
-    '#If DEBUG Then
-    '    Private Shared _toolCallSequencingSelfTestsRan As Boolean = False
+#If DEBUG Then
+    Private Shared _pythonExecuteRepairAdvisorSelfTestsRan As Boolean = False
 
-    'Private Sub RunToolCallSequencingSelfTestsAtStartup()
-    'If _toolCallSequencingSelfTestsRan Then Return
-    '    _toolCallSequencingSelfTestsRan = True
+    ''' <summary>
+    ''' DEBUG-only: runs the PythonExecuteRepairAdvisor self-tests once per process on a background
+    ''' thread and writes the outcome to the Visual Studio Output window (Debug pane). No UI is shown;
+    ''' this never runs in Release builds.
+    ''' </summary>
+    Private Sub RunPythonExecuteRepairAdvisorSelfTestsAtStartup()
+        If _pythonExecuteRepairAdvisorSelfTestsRan Then Return
+        _pythonExecuteRepairAdvisorSelfTestsRan = True
 
-    '    Debug.WriteLine("[Startup] Queueing ToolCallSequencing self-tests...")
+        Debug.WriteLine("[Startup] Queueing PythonExecuteRepairAdvisor self-tests...")
 
-    '   System.Threading.Tasks.Task.Run(
-    'Sub()
-    'Try
-    '               Debug.WriteLine("[Startup] Running ToolCallSequencing self-tests...")
-    'Dim status = SharedLibrary.Agents.ToolCallSequencingSelfTests.RunAllAndReturnStatus()
-    '               Debug.WriteLine("[Startup] " & status)
-    'Catch ex As System.Exception
-    '               Debug.WriteLine("[Startup] ToolCallSequencing self-tests failed: " & ex.ToString())
-    'End Try
-    'End Sub)
-    'End Sub
-    '#End If
+        System.Threading.Tasks.Task.Run(
+            Sub()
+                Try
+                    Debug.WriteLine("[Startup] Running PythonExecuteRepairAdvisor self-tests...")
+                    Dim status = SharedLibrary.AgentsXX.PythonExecuteRepairAdvisorSelfTests.RunAllAndReturnStatus()
+                    Debug.WriteLine("[Startup] " & status)
+                Catch ex As System.Exception
+                    Debug.WriteLine("[Startup] PythonExecuteRepairAdvisor self-tests failed: " & ex.ToString())
+                End Try
+            End Sub)
+    End Sub
+#End If
 
     ''' <summary>
     ''' Handles creation of a new Explorer window. Attaches Activate, marks initialized, runs delayed startup, and cleans handlers.

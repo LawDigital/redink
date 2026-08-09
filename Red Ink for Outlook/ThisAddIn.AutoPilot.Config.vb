@@ -165,6 +165,11 @@ Partial Public Class ThisAddIn
     Private Function ShowAutoPilotConfigDialog() As AutoPilotConfig
         Dim config As New AutoPilotConfig()
 
+        ' Restore the latest persisted AutoPilot configuration before reading defaults.
+        TryRestoreAutoPilotSettingsFromRegistry()
+
+        EnsureAutoPilotSettingsRestoredFromRegistry()
+
         ' Load persisted defaults so we can pre-populate the dialog fields
         Dim saved = LoadAutoPilotConfigDefaults()
         Dim previousMailbox As String = If(My.Settings.AP_MonitoredMailbox, "")
@@ -746,10 +751,7 @@ Partial Public Class ThisAddIn
             If Not IsAutoPilotPermitted() Then Return
             If _apActive Then Return
 
-            ' If My.Settings was deleted/reset, attempt silent recovery from the registry backup.
-            If Not HasSavedAutoPilotConfig() Then
-                TryRestoreAutoPilotSettingsFromRegistry()
-            End If
+            EnsureAutoPilotSettingsRestoredFromRegistry()
 
             If Not HasSavedAutoPilotConfig() Then Return
 

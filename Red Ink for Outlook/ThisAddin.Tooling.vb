@@ -168,6 +168,12 @@ Partial Public Class ThisAddIn
         Public Property NormalizedCallSignature As String
         Public Property WasDuplicateReplay As Boolean
 
+        ''' <summary>True when a repair-loop advisor determined the failure is terminal (budget exhausted or non-recoverable).</summary>
+        Public Property RepairLoopTerminal As Boolean
+
+        ''' <summary>Human-readable reason for <see cref="RepairLoopTerminal"/>, surfaced to abort/finalization handling.</summary>
+        Public Property RepairLoopTerminalReason As String
+
         ''' <summary>
         ''' Initializes a new tool response instance with default success state.
         ''' </summary>
@@ -290,6 +296,12 @@ Partial Public Class ThisAddIn
             sb.AppendLine("Continue with any remaining requested deliverables. Do not finalize until the full request is complete, or explain briefly why it cannot be completed.")
         End If
 
+        Dim consolidationGuidance As String =
+            SharedLibrary.Agents.ToolCallSequencing.BuildConsolidatableToolGuidance(context.SequencingState)
+        If Not String.IsNullOrWhiteSpace(consolidationGuidance) Then
+            sb.AppendLine(consolidationGuidance)
+        End If
+
         sb.AppendLine("[/HOST REQUEST CONTINUITY]")
         Return sb.ToString().TrimEnd()
     End Function
@@ -387,10 +399,30 @@ Partial Public Class ThisAddIn
 
 #Region "Execute Tooling"
 
+
     ''' <summary>
-    ''' Executes an iterative tool-enabled LLM loop until either no tool calls are detected, the maximum iteration count is reached,
-    ''' or the user cancels. Tool call detection/extraction and response injection are controlled by the active tooling model config.
+    ''' Derives a tool-agnostic, user-facing progress line for an upcoming tool call,
+    ''' preferring the tool's configured ModelDescription over its raw name.
     ''' </summary>
+    Private Function BuildFriendlyProgressText(tc As ToolCall, context As ToolExecutionContext) As String
+        Dim toolName As String = If(tc?.ToolName, "").Trim()
+        If toolName = "" Then Return "Working..."
+
+        Dim friendly As String = toolName
+        Try
+            Dim cfg = If(context?.SelectedTools, New List(Of ModelConfig)()).
+                FirstOrDefault(Function(t) t IsNot Nothing AndAlso
+                                         String.Equals(t.ToolName, toolName, StringComparison.OrdinalIgnoreCase))
+            If cfg IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(cfg.ModelDescription) Then
+                friendly = cfg.ModelDescription.Trim()
+            End If
+        Catch
+        End Try
+
+        Return $"Working on: {friendly}..."
+    End Function
+
+
     ''' <param name="sysCommand">Base system command prompt text.</param>
     ''' <param name="userText">User prompt text (used only if fullPromptOverride is empty).</param>
     ''' <param name="selectedTools">Tool configurations available to the model.</param>
@@ -453,7 +485,8 @@ Partial Public Class ThisAddIn
         Optional workflowId As String = "",
         Optional memoryGroundingMode As SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode = SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None,
         Optional memoryGroundingModeIsExplicit As Boolean = False,
-        Optional finalResponseContract As SharedLibrary.Agents.ToolingFinalResponseContract = SharedLibrary.Agents.ToolingFinalResponseContract.UserFacingTaskStatus) As Task(Of String)
+        Optional finalResponseContract As SharedLibrary.Agents.ToolingFinalResponseContract = SharedLibrary.Agents.ToolingFinalResponseContract.UserFacingTaskStatus,
+        Optional progressSink As Action(Of String) = Nothing) As Task(Of String)
 
         ' Check for power transition BEFORE starting (matches RunLlmAsync pattern)
         If System.Threading.Interlocked.CompareExchange(powerChanging, 0, 0) <> 0 Then
@@ -839,6 +872,9 @@ Partial Public Class ThisAddIn
 
         _activeToolingContext = context
 
+        context.ProgressSink = progressSink
+        context.ReportProgress("Getting started...")
+
         context.Log("Starting tooling session...")
         If selectedTools IsNot Nothing Then
             context.Log($"Selected tools: {String.Join(", ", selectedTools.Select(Function(t) t.ToolName))}")
@@ -882,6 +918,12 @@ Partial Public Class ThisAddIn
 
             ' Build System Prompt (matching direct LLM() call plus Tooling Instructions)
             Dim baseSysPrompt As String = sysCommand
+
+            ' B1 progress (major steps only): the model announces significant new phases via the
+            ' report_progress tool (a real tool call authored in the dialogue language). Deterministic
+            ' host-side progress (A) still surfaces for every tool call, so A always appears even if
+            ' the model never calls report_progress.
+            baseSysPrompt &= " " & BuildMajorStepProgressToolInstruction()
 
             If Not String.IsNullOrWhiteSpace(bubblesText) Then
                 baseSysPrompt &= " " & SP_Add_BubblesExtract
@@ -1004,6 +1046,11 @@ Partial Public Class ThisAddIn
 
             Dim abortDueToRepeatedToolLoop As Boolean = False
 
+            ' Tracks the currently exposed tool set so the (potentially large) tool
+            ' definitions block is only rebuilt when the exposed tools actually change
+            ' (e.g. after tool_loader / lazy-load). Null forces the first build.
+            Dim lastExposedToolSignature As String = Nothing
+
             Dim noSelectedText As Boolean = String.IsNullOrWhiteSpace(userText)
             While iteration < context.MaxIterations AndAlso Not context.IsCancelled
 
@@ -1067,7 +1114,31 @@ Partial Public Class ThisAddIn
                                         languageContractFragment
                 End If
 
-                INI_APICall_ToolInstructions_2 = BuildToolInstructionsForModel(context.SelectedTools, context.ToolingModel)
+                Dim currentExposedToolSignature As String =
+                    If(context.SelectedTools Is Nothing, "",
+                       String.Join("|", context.SelectedTools.
+                           Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
+                           Select(Function(t) t.ToolName.Trim())))
+
+                If Not String.Equals(currentExposedToolSignature, lastExposedToolSignature, StringComparison.Ordinal) Then
+                    INI_APICall_ToolInstructions_2 = BuildToolInstructionsForModel(context.SelectedTools, context.ToolingModel)
+                    lastExposedToolSignature = currentExposedToolSignature
+                End If
+
+                ' Payload-size diagnostic: measures per-iteration model input growth so the
+                ' large-result referencing and tool-definition rebuild gating can be verified.
+                ToolingFileLogger.LogStep(
+                    $"Payload sizes (chars): toolInstructions={If(INI_APICall_ToolInstructions_2, "").Length}; " &
+                    $"toolResponses={If(INI_APICall_ToolResponses_2, "").Length}; " &
+                    $"combined={If(INI_APICall_ToolInstructions_2, "").Length + If(INI_APICall_ToolResponses_2, "").Length}; " &
+                    $"iteration={iteration}")
+
+                Debug.WriteLine(
+                    $"[TOOLING-PAYLOAD] iteration={iteration}; " &
+                    $"toolInstructions={If(INI_APICall_ToolInstructions_2, "").Length}; " &
+                    $"toolResponses={If(INI_APICall_ToolResponses_2, "").Length}; " &
+                    $"combined={If(INI_APICall_ToolInstructions_2, "").Length + If(INI_APICall_ToolResponses_2, "").Length}")
+
 
                 Dim effectiveSysPrompt As String = enhancedSysPrompt
                 Dim effectiveUserPrompt As String = fullUserPrompt
@@ -1170,6 +1241,8 @@ Partial Public Class ThisAddIn
 
                     If Not subAgentMode AndAlso
                        lastSuccess IsNot Nothing AndAlso
+                       context.SequencingState IsNot Nothing AndAlso
+                       context.SequencingState.RequestRequiresCreatedDeliverable AndAlso
                        SharedLibrary.Agents.ToolCallSequencing.IsSuccessfulDeliverableResult(
                            If(lastSuccess.Response, "")) Then
 
@@ -1355,6 +1428,34 @@ Partial Public Class ThisAddIn
 
                     For Each tc In toolCalls
                         If context.IsCancelled OrElse cancellationToken.IsCancellationRequested Then Exit For
+
+                        ' B1 major-step announcement: surface the model-authored heading and
+                        ' acknowledge the call as a successful no-op. Kept out of sequencing,
+                        ' exposure, and duplicate-detection so it never counts as real work.
+                        If IsReportProgressToolName(tc.ToolName) Then
+                            Dim progressNote As String = ""
+                            If tc.Arguments IsNot Nothing AndAlso
+                               tc.Arguments.ContainsKey("note") AndAlso
+                               tc.Arguments("note") IsNot Nothing Then
+                                progressNote = tc.Arguments("note").ToString()
+                            End If
+
+                            context.ReportMajorProgress(progressNote)
+
+                            Dim progressResponse As New ToolResponse() With {
+                                .CallId = tc.CallId,
+                                .ToolName = tc.ToolName,
+                                .Success = True,
+                                .Response = "{""ok"":true}",
+                                .OriginalCallJson = tc.RawJson
+                            }
+                            context.AllToolResponses.Add(progressResponse)
+
+                            context.Log("Progress update reported to the user.", "diag")
+                            Continue For
+                        End If
+
+                        context.ReportProgress(BuildFriendlyProgressText(tc, context))
 
                         If Not subAgentMode AndAlso
                                context.SequencingState IsNot Nothing AndAlso
@@ -1605,6 +1706,26 @@ Partial Public Class ThisAddIn
                         toolResponse.NormalizedCallSignature = normalizedToolCallSignature
                         context.AllToolResponses.Add(toolResponse)
 
+                        ' A python_execute (or similar) repair-loop advisor may signal that the failure is
+                        ' terminal (repair budget exhausted or non-recoverable). Route into the existing
+                        ' tool-error abort path so the loop stops instead of guessing further variations.
+                        If toolResponse.RepairLoopTerminal Then
+                            Dim repairAbortReason As String =
+                                If(String.IsNullOrWhiteSpace(toolResponse.RepairLoopTerminalReason),
+                                   "The repair loop was stopped because no further automatic recovery is possible.",
+                                   toolResponse.RepairLoopTerminalReason)
+
+                            context.LogWarn($"Aborting after terminal repair-loop outcome for '{tc.ToolName}'.",
+                                            details:=repairAbortReason)
+
+                            abortDueToToolError = True
+                            abortToolName = tc.ToolName
+                            abortToolParamSummary = BuildCondensedParamSummary(tc.Arguments)
+                            abortToolRawCallJson = tc.RawJson
+                            abortToolErrorMessage = repairAbortReason
+                            Exit For
+                        End If
+
                         If Not toolResponse.WasDuplicateReplay Then
                             SharedLibrary.Agents.ToolCallSequencing.NoteToolExecutionMetadata(
                                 context.SequencingState,
@@ -1631,6 +1752,10 @@ Partial Public Class ThisAddIn
                             Else
                                 If context.SequencingState IsNot Nothing Then
                                     context.SequencingState.NoteSuccessfulProgress()
+
+                                    If toolConfig IsNot Nothing AndAlso toolConfig.PrefersSingleInvocation Then
+                                        context.SequencingState.NoteConsolidatableToolSuccess(tc.ToolName)
+                                    End If
                                 End If
                             End If
 
@@ -1674,20 +1799,37 @@ Partial Public Class ThisAddIn
                         If toolResponse.Success AndAlso
                            tc.ToolName.Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase) Then
 
-                            restartAfterToolLoader = True
+                            If LoaderResponseExposedNewTools(toolResponse.Response) Then
+                                restartAfterToolLoader = True
+                                context.PendingContinuationGuardPrompt = BuildToolLoaderBarrierGuardPrompt()
+                                context.PendingGuardTitle = "HOST TOOL LOADER BARRIER"
+                                context.PendingRejectedTurnExplanation =
+                                    "The previous turn successfully loaded tools. Newly loaded tool schemas are available only from the next turn onward."
+                                context.PendingRejectedAssistantTurn = If(currentResponse, "")
+                                context.PrematureTextRetryCount = 0
+                                stopCurrentBatchAfterTool = True
+
+                                context.LogWarn(
+                                    "Stopping current tool-call batch after successful tool_loader call.",
+                                    details:=$"host={context.HostKind}; tool={tc.ToolName}", visibleToUser:=False)
+
+                                Exit For
+                            End If
+
+                            ' No new tool schemas were exposed (all requested tools were already
+                            ' loaded). Do not consume an extra iteration or stop the batch; instead
+                            ' steer the model back toward an already-exposed tool. Capability-driven:
+                            ' relies solely on the loader's own "loaded" array, no tool-name heuristics.
                             context.PendingContinuationGuardPrompt = BuildToolLoaderBarrierGuardPrompt()
-                            context.PendingGuardTitle = "HOST TOOL LOADER BARRIER"
+                            context.PendingGuardTitle = "HOST TOOL LOADER NO-OP"
                             context.PendingRejectedTurnExplanation =
-                                "The previous turn successfully loaded tools. Newly loaded tool schemas are available only from the next turn onward."
-                            context.PendingRejectedAssistantTurn = If(currentResponse, "")
+                                "The requested tools were already loaded. Their schemas are already available; call one of the exposed tools instead of loading again."
+                            context.PendingRejectedAssistantTurn = ""
                             context.PrematureTextRetryCount = 0
-                            stopCurrentBatchAfterTool = True
 
                             context.LogWarn(
-                                "Stopping current tool-call batch after successful tool_loader call.",
+                                "Ignoring no-op tool_loader call; all requested tools were already loaded.",
                                 details:=$"host={context.HostKind}; tool={tc.ToolName}", visibleToUser:=False)
-
-                            Exit For
                         End If
 
                         If RegisterToolFailureLoopState(tc, toolResponse, context) Then
@@ -1741,6 +1883,31 @@ Partial Public Class ThisAddIn
                                 context.FailedToolCallCounts(toolCallSignature) += 1
                             Else
                                 context.FailedToolCallCounts(toolCallSignature) = 1
+                            End If
+
+                            ' A repair-loop advisor may signal that the failure is terminal (repair budget
+                            ' exhausted or non-recoverable). Stop the batch and request a no-tool finalization
+                            ' so the model produces a user-facing status instead of guessing further variations.
+                            ' This serves both Outlook loops (Local Agent and AutoPilot) that share this path.
+                            If toolResponse.RepairLoopTerminal Then
+                                Dim repairAbortReason As String =
+                                    If(String.IsNullOrWhiteSpace(toolResponse.RepairLoopTerminalReason),
+                                       "The repair loop was stopped because no further automatic recovery is possible.",
+                                       toolResponse.RepairLoopTerminalReason)
+
+                                context.LogWarn($"Stopping after terminal repair-loop outcome for '{tc.ToolName}'.",
+                                                details:=repairAbortReason)
+
+                                context.ForceNoToolFinalizationRequested = True
+                                context.ForceNoToolFinalizationReason = repairAbortReason
+                                context.PendingContinuationGuardPrompt = BuildToolFailureReassessmentGuardPrompt(tc.ToolName)
+                                context.PendingGuardTitle = "HOST TOOL FAILURE RECOVERY"
+                                context.PendingRejectedTurnExplanation =
+                                    "The previous tool step cannot be automatically recovered. Do not retry it; summarize the outcome for the user."
+                                context.PendingRejectedAssistantTurn = ""
+                                context.PrematureTextRetryCount = 0
+                                stopCurrentBatchAfterTool = True
+                                Exit For
                             End If
 
                             Select Case toolConfig.ToolErrorHandling?.ToLowerInvariant()
@@ -1821,7 +1988,7 @@ Partial Public Class ThisAddIn
                     Next
 
                     If restartAfterExposureMiss Then
-                        Dim preparedToolResponsesAfterExposureMiss As String = BuildToolResponsesForModel(
+                        Dim preparedToolResponsesAfterExposureMiss As String = BuildToolResponsesForModelBudgeted(
                             context.AllToolResponses,
                             context.ToolingModel,
                             compactForSubAgent:=subAgentMode)
@@ -1832,7 +1999,7 @@ Partial Public Class ThisAddIn
                     End If
 
                     If restartAfterToolLoader Then
-                        Dim preparedToolResponsesAfterLoader As String = BuildToolResponsesForModel(
+                        Dim preparedToolResponsesAfterLoader As String = BuildToolResponsesForModelBudgeted(
                             context.AllToolResponses,
                             context.ToolingModel,
                             compactForSubAgent:=subAgentMode)
@@ -1843,7 +2010,7 @@ Partial Public Class ThisAddIn
                     End If
 
                     If restartForRequiredMemoryGrounding Then
-                        Dim preparedToolResponses As String = BuildToolResponsesForModel(
+                        Dim preparedToolResponses As String = BuildToolResponsesForModelBudgeted(
                             context.AllToolResponses,
                             context.ToolingModel,
                             compactForSubAgent:=subAgentMode)
@@ -1860,7 +2027,7 @@ Partial Public Class ThisAddIn
                         Exit While
                     End If
 
-                    Dim toolResponses = BuildToolResponsesForModel(
+                    Dim toolResponses = BuildToolResponsesForModelBudgeted(
     context.AllToolResponses,
     context.ToolingModel,
     compactForSubAgent:=subAgentMode)
@@ -1996,6 +2163,23 @@ Partial Public Class ThisAddIn
                             SharedLibrary.Agents.ToolCallSequencing.ClearNonBlockingUnresolvedToolFailure(
                                 context.SequencingState,
                                 "host_exposure_recovery")
+
+                            ' Skill/Agent authoring postcondition: a 'create/modify a skill' task must have
+                            ' written under an authorized skill/resource root. A successful workspace_write
+                            ' does NOT satisfy this - workspace outputs are temporary and do not install a skill.
+                            If SharedLibrary.Agents.SkillAuthoringPostcondition.RequiresSkillRootMutation(context) AndAlso
+                               Not SharedLibrary.Agents.SkillAuthoringPostcondition.HasSkillRootMutation(context) Then
+                                If System.Convert.ToInt32(context.PrematureTextRetryCount) < ToolExecutionContext.MaxContinuationRetries Then
+                                    context.PendingContinuationGuardPrompt = SharedLibrary.Agents.SkillAuthoringPostcondition.GuardPrompt
+                                    context.PendingGuardTitle = "Skill not actually created"
+                                    context.PendingRejectedTurnExplanation = "Skill authoring task completed without any write under an authorized skill root."
+                                    context.PendingRejectedAssistantTurn = currentResponse
+                                    context.PrematureTextRetryCount = System.Convert.ToInt32(context.PrematureTextRetryCount) + 1
+                                    context.Log("Final-turn rejected at 'complete' branch: skill task wrote only to the workspace.", "warn")
+                                    Continue While
+                                End If
+                                context.LogWarn("Skill-authoring postcondition unmet; repair budget exhausted, accepting candidate.")
+                            End If
 
                             currentResponse = StripTaskStatus(currentResponse)
                             acceptedFinalStatus = "complete"
@@ -2609,7 +2793,10 @@ Partial Public Class ThisAddIn
             ToolingFileLogger.LogStep(
     $"Host final response prepared: len={finalResponseLength}; origin={finalResponseOrigin}; blocked={If(context.FinalizationBlocked, "true", "false")}; empty={If(context.EmptyMainModelResponse, "true", "false")}; abortedDueToToolError={If(abortDueToToolError, "true", "false")}")
 
-            Dim sessionSucceeded As Boolean = (Not abortDueToToolError) AndAlso (Not context.EmptyMainModelResponse) AndAlso (Not context.FinalizationBlocked)
+            ' A final turn accepted with status "blocked" is an unfinished/blocked outcome
+            ' and must not be reported as a successful session, even when it carries
+            ' substantive prose (which leaves context.FinalizationBlocked unset).
+            Dim sessionSucceeded As Boolean = (Not abortDueToToolError) AndAlso (Not context.EmptyMainModelResponse) AndAlso (Not context.FinalizationBlocked) AndAlso Not String.Equals(acceptedFinalStatus, "blocked", StringComparison.OrdinalIgnoreCase)
             Dim sessionSummary As String =
     $"Iterations: {iteration}, Tool calls: {context.AllToolResponses.Count}, Success: {successCount}, Failed: {failedCount}" &
     If(deferredCount > 0, $", Deferred: {deferredCount}", "")
@@ -2639,6 +2826,18 @@ Partial Public Class ThisAddIn
             If workflowScope IsNot Nothing Then
                 workflowScope.Dispose()
                 workflowScope = Nothing
+            End If
+
+            ' Release stored large tool-result bodies for this run. Sub-agents share the
+            ' parent's WorkflowId, so only the top-level run may clear the store.
+            If Not subAgentMode Then
+                Try
+                    SharedLibrary.Agents.ToolResultStore.ClearWorkflow(context.WorkflowId)
+                    SharedLibrary.Agents.SkillAuthoringPostcondition.Clear(context.WorkflowId)
+                    ToolingFileLogger.LogStep($"ClearWorkflow: tool result store cleared for workflow '{context.WorkflowId}'.")
+                Catch ex As Exception
+                    ToolingFileLogger.LogWarn("Failed to clear tool result store.", ex:=ex)
+                End Try
             End If
 
             _activeToolingContext = parentToolingContext
@@ -3608,6 +3807,30 @@ Partial Public Class ThisAddIn
         Return response
     End Function
 
+    ''' <summary>
+    ''' Returns True when a tool_loader response actually exposed at least one new tool
+    ''' (its "loaded" array is non-empty). Used to avoid consuming an extra orchestration
+    ''' iteration on no-op loader calls where every requested tool was already loaded.
+    ''' Capability-driven: inspects only the loader's own structured output.
+    ''' </summary>
+    Private Function LoaderResponseExposedNewTools(loaderResponse As String) As Boolean
+        If String.IsNullOrWhiteSpace(loaderResponse) Then
+            Return False
+        End If
+
+        Try
+            Dim obj As JObject = JObject.Parse(loaderResponse)
+            Dim loadedToken As JToken = obj("loaded")
+            Return loadedToken IsNot Nothing AndAlso
+                   loadedToken.Type = JTokenType.Array AndAlso
+                   DirectCast(loadedToken, JArray).Count > 0
+        Catch
+            ' On parse failure, fall back to the conservative (barrier) behavior by
+            ' treating it as a real load so the caller preserves existing semantics.
+            Return True
+        End Try
+    End Function
+
 #End Region
 
 
@@ -3758,6 +3981,7 @@ Partial Public Class ThisAddIn
 
         Select Case toolName.Trim().ToLowerInvariant()
             Case "tool_loader",
+                 "report_progress",
                  "agent_workspace_get",
                  "agent_workspace_list",
                  "agent_workspace_find_files",
@@ -3892,6 +4116,14 @@ Partial Public Class ThisAddIn
 
         sb.AppendLine(SharedLibrary.Agents.ToolCallSequencing.DependentBatchingInstruction)
 
+        If selectedTools IsNot Nothing AndAlso selectedTools.Any(
+                Function(t) t IsNot Nothing AndAlso
+                            (SharedLibrary.Agents.ContextExpandTool.IsContextExpandTool(t.ToolName) OrElse
+                             SharedLibrary.Agents.ContextCompactTool.IsContextCompactTool(t.ToolName))) Then
+            sb.AppendLine()
+            sb.AppendLine(SharedLibrary.Agents.ToolCallSequencing.ContextDrawerInstruction)
+        End If
+
         Dim workflowAddendum As String = BuildToolWorkflowInstructionAddendum(selectedTools)
         If Not String.IsNullOrWhiteSpace(workflowAddendum) Then
             sb.AppendLine()
@@ -3944,9 +4176,17 @@ Partial Public Class ThisAddIn
             Return result
         End If
 
+        ' Always expose the internal report_progress tool so the model can announce major
+        ' steps (B1) via a real tool call. Host-derived progress (A) is independent of this.
+        Dim progressReportTool As ModelConfig = GetInternalProgressReportTool()
+        If progressReportTool IsNot Nothing Then
+            result.Add(progressReportTool)
+        End If
+
         Dim deduplicatedTools As List(Of ModelConfig) =
             allowedTools.
                 Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
+                Where(Function(t) Not IsReportProgressToolName(t.ToolName)).
                 GroupBy(Function(t) t.ToolName, StringComparer.OrdinalIgnoreCase).
                 Select(Function(g) g.First()).
                 ToList()
@@ -4511,6 +4751,30 @@ Partial Public Class ThisAddIn
                 ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
                 GoTo __AfterDispatch
             End If
+
+            If SharedLibrary.Agents.ContextExpandTool.IsContextExpandTool(toolCall.ToolName) Then
+                response.Response = SharedLibrary.Agents.ContextExpandTool.Execute(toolCall.Arguments)
+                response.Success = Not String.IsNullOrWhiteSpace(response.Response)
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+                GoTo __AfterDispatch
+            End If
+
+            If SharedLibrary.Agents.AskUserTool.IsAskUserTool(toolCall.ToolName) Then
+                response.Response = SharedLibrary.Agents.AskUserTool.Execute(toolCall.Arguments)
+                response.Success = Not String.IsNullOrWhiteSpace(response.Response)
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+                GoTo __AfterDispatch
+            End If
+
+            If SharedLibrary.Agents.ContextCompactTool.IsContextCompactTool(toolCall.ToolName) Then
+                response.Response = SharedLibrary.Agents.ContextCompactTool.Execute(
+                    toolCall.Arguments,
+                    SharedLibrary.Agents.WorkflowContinuity.CurrentWorkflowId)
+                response.Success = Not String.IsNullOrWhiteSpace(response.Response)
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+                GoTo __AfterDispatch
+            End If
+
             ' Agent layer (memory_*, skill_use, agent_*) — single-line dispatcher.
             If SharedLibrary.Agents.AgentToolRouter.IsAgentLayerTool(toolCall.ToolName) Then
                 Dim __agentJson = Await SharedLibrary.Agents.AgentToolRouter.TryHandleAsync(
@@ -4533,6 +4797,16 @@ Partial Public Class ThisAddIn
                     response.ErrorCode = "agent_empty_result"
                     response.ErrorMessage = "js_run returned no usable result. Ensure the script explicitly returns the computed value."
                     response.Response = "{""summary"":""Sub-agent returned no usable result."",""result"":null,""resultKind"":""error"",""error"":{""code"":""agent_empty_result"",""phase"":""final_output_parse"",""message"":""Sub-agent returned no usable final result.""}}"
+                End If
+
+                If String.Equals(toolCall.ToolName, SharedLibrary.Agents.SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) AndAlso response.Success Then
+                    Dim __skillName As String = Nothing
+                    If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("name") Then
+                        __skillName = System.Convert.ToString(toolCall.Arguments("name"))
+                    End If
+                    If Not String.IsNullOrWhiteSpace(__skillName) Then
+                        ToolingFileLogger.SetTopLevelSkillName(__skillName)
+                    End If
                 End If
 
                 ToolingFileLogger.LogSubAgentReturn($"Agent-layer tool ({toolCall.ToolName})", response.Response)
@@ -4565,6 +4839,7 @@ Partial Public Class ThisAddIn
                     response.ErrorMessage = "Skill invocation returned no usable result."
                 End If
 
+                ToolingFileLogger.SetTopLevelSkillName(toolCall.ToolName.Substring("skill_".Length))
                 ToolingFileLogger.LogSubAgentReturn($"Agent-layer skill ({toolCall.ToolName})", response.Response)
                 GoTo __AfterDispatch
             End If
@@ -4846,6 +5121,9 @@ __AfterDispatch:
             tools.Add(SharedLibrary.Agents.JsRunTool.Build())
             tools.Add(SharedLibrary.Agents.SkillInvokeTool.Build())
             tools.Add(SharedLibrary.Agents.ToolDescribeTool.Build())
+            tools.Add(SharedLibrary.Agents.ContextExpandTool.Build())
+            tools.Add(SharedLibrary.Agents.ContextCompactTool.Build())
+            If Not _apActive Then tools.Add(SharedLibrary.Agents.AskUserTool.Build())
 
             Dim __agentReg As New SharedLibrary.Agents.ToolRegistry()
             SharedLibrary.Agents.ToolRegistryBuilder.AddSkills(__agentReg, SharedLibrary.Agents.AgentResources.Skills)

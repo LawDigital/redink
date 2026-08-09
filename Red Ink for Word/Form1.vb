@@ -341,6 +341,7 @@ Public Class frmAIChat
     ''' After the first call to UpdateToolingControlsState, mid-session user toggles are preserved.
     ''' </summary>
     Private _toolingControlsInitialized As Boolean = False
+    Private _suppressToolingLogPreferenceSync As Boolean = False
 
     ' =========================================================================
     ' UI Controls - Buttons
@@ -1332,7 +1333,7 @@ Public Class frmAIChat
                     Try
                         Me.TopMost = False
                         _selectedToolsForChat = Globals.ThisAddIn.SelectToolsForSession(
-                            forceDialog:=toolTriggerDetected)
+                            forceDialog:=False)
                     Finally
                         Me.TopMost = wasTopMost
                     End Try
@@ -1434,7 +1435,13 @@ Public Class frmAIChat
                         If(toolTriggerDetected, True, _useSecondApi),
                         fullPromptOverride:=fullPrompt.ToString(),
                         hideSplash:=True,
-                        hideLogWindow:=Not chkShowToolingLog.Checked)
+                        hideLogWindow:=Not chkShowToolingLog.Checked,
+                        progressSink:=Sub(status)
+                                          Try
+                                              Me.BeginInvoke(New MethodInvoker(Sub() UpdateAssistantThinking(status)))
+                                          Catch
+                                          End Try
+                                      End Sub)
                 Finally
                     If appliedOverride AndAlso backupConfig IsNot Nothing Then
                         SharedMethods.RestoreDefaults(_context, backupConfig)
@@ -1827,8 +1834,12 @@ Public Class frmAIChat
     ''' and by the (t) trigger path, even when the checkbox is disabled.
     ''' </summary>
     Private Sub chkShowToolingLog_CheckedChanged(sender As Object, e As EventArgs)
-        ' No persistence — checkbox state lives only for the current session.
-        ' Value is read at call time via: hideLogWindow:=Not chkShowToolingLog.Checked
+        If _suppressToolingLogPreferenceSync Then
+            Return
+        End If
+
+        Globals.ThisAddIn.SetToolingLogWindowOverride(chkShowToolingLog.Checked)
+        Globals.ThisAddIn.RefreshOpenToolingLogPreferenceWindows()
     End Sub
 
 
@@ -2035,6 +2046,26 @@ Public Class frmAIChat
     ''' When only ToolDefaultModel is available, checking "Enable tooling" means:
     ''' treat every request as if it had "(t)".
     ''' </remarks>
+    Public Sub SyncToolingLogPreferenceFromSettings()
+        If Me.IsDisposed Then
+            Return
+        End If
+
+        Dim effectiveSetting As Boolean = Globals.ThisAddIn.GetEffectiveToolingLogWindowSetting()
+
+        If chkShowToolingLog.Checked = effectiveSetting Then
+            Return
+        End If
+
+        _suppressToolingLogPreferenceSync = True
+
+        Try
+            chkShowToolingLog.Checked = effectiveSetting
+        Finally
+            _suppressToolingLogPreferenceSync = False
+        End Try
+    End Sub
+
     Private Sub UpdateToolingControlsState()
         Dim currentConfig As ModelConfig = Nothing
 
@@ -2061,7 +2092,7 @@ Public Class frmAIChat
         End If
 
         If Not _toolingControlsInitialized Then
-            chkShowToolingLog.Checked = _context.INI_ToolingLogWindow
+            SyncToolingLogPreferenceFromSettings()
             _toolingControlsInitialized = True
         End If
     End Sub

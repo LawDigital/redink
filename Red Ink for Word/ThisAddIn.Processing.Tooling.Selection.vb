@@ -196,6 +196,9 @@ Partial Public Class ThisAddIn
             tools.Add(SharedLibrary.Agents.JsRunTool.Build())
             tools.Add(SharedLibrary.Agents.SkillInvokeTool.Build())
             tools.Add(SharedLibrary.Agents.ToolDescribeTool.Build())
+            tools.Add(SharedLibrary.Agents.ContextExpandTool.Build())
+            tools.Add(SharedLibrary.Agents.ContextCompactTool.Build())
+            tools.Add(SharedLibrary.Agents.AskUserTool.Build())
 
             Dim __agentReg As New SharedLibrary.Agents.ToolRegistry()
             SharedLibrary.Agents.ToolRegistryBuilder.AddSkills(__agentReg, SharedLibrary.Agents.AgentResources.Skills)

@@ -362,10 +362,39 @@ Namespace Agents
             Catch
             End Try
 
+            ' Configured resource ROOTS (local and central) are always readable so the author
+            ' can consult root-level reference material such as Red_Ink_Tool_List.md and Inky.md,
+            ' even when the user only has LOCAL authoring (write) rights. This is read-only; write
+            ' access to the central tree still requires SkillAuthorMode.AllowCentralWrites above.
+            Dim resourceReadRoots As New List(Of String)()
+            Try
+                Dim localRoot As String = AgentResources.ConfiguredLocalPath
+                If Not String.IsNullOrWhiteSpace(localRoot) AndAlso Directory.Exists(localRoot) Then
+                    resourceReadRoots.Add(Path.GetFullPath(localRoot))
+                End If
+                Dim centralRoot As String = AgentResources.ConfiguredCentralPath
+                If Not String.IsNullOrWhiteSpace(centralRoot) AndAlso Directory.Exists(centralRoot) Then
+                    resourceReadRoots.Add(Path.GetFullPath(centralRoot))
+                End If
+            Catch
+            End Try
+
             readRoots.AddRange(skillReadRoots)
             readRoots.AddRange(skillFullRoots)
             readRoots.AddRange(agentFullRoots)
             readRoots.AddRange(authorBaseRoots)
+            readRoots.AddRange(resourceReadRoots)
+
+            ' Local diagnostics folder (previous tooling-run logs) is always readable so the
+            ' skill-author skill can inspect the last run to diagnose the tooling loop.
+            Try
+                Dim diagLocalRoot As String = AgentResources.ConfiguredLocalPath
+                If Not String.IsNullOrWhiteSpace(diagLocalRoot) Then
+                    Dim diagDir As String = Path.GetFullPath(Path.Combine(diagLocalRoot, "diagnostics"))
+                    If Directory.Exists(diagDir) Then readRoots.Add(diagDir)
+                End If
+            Catch
+            End Try
             If _chatAuthor.Value OrElse SkillAuthorMode.IsActive Then
                 writeRoots.AddRange(skillFullRoots)
                 writeRoots.AddRange(agentFullRoots)
@@ -374,7 +403,12 @@ Namespace Agents
 
             Dim roots = If(access = PathAccess.Write, writeRoots, readRoots)
             For Each r In roots
-                If IsUnder(full, r) Then Return full
+                If IsUnder(full, r) Then
+                    If access = PathAccess.Write Then
+                        RecordSkillAuthoringWriteClassification(full, skillFullRoots, agentFullRoots, authorBaseRoots)
+                    End If
+                    Return full
+                End If
             Next
 
             ' For read access, allow a relative path to resolve against a skill directory
@@ -385,6 +419,64 @@ Namespace Agents
             End If
 
             Throw New UnauthorizedAccessException("Path is outside the allowed roots for " & access.ToString().ToLowerInvariant() & " access.")
+        End Function
+
+        ''' <summary>
+        ''' Classifies an allowed write for the skill-authoring postcondition: a write under a
+        ''' resource root (skill/agent folders or the skills/ and agents/ base dirs) counts as a
+        ''' real resource mutation; a skill/agent-like file written elsewhere (temporary workspace)
+        ''' is recorded as a wrong-target write. Structure-driven only; never inspects request text.
+        ''' </summary>
+        Private Shared Sub RecordSkillAuthoringWriteClassification(full As String,
+                                                                   skillFullRoots As List(Of String),
+                                                                   agentFullRoots As List(Of String),
+                                                                   authorBaseRoots As List(Of String))
+            Try
+                Dim isResourceRoot As Boolean = False
+
+                For Each r In skillFullRoots
+                    If IsUnder(full, r) Then isResourceRoot = True : Exit For
+                Next
+                If Not isResourceRoot Then
+                    For Each r In agentFullRoots
+                        If IsUnder(full, r) Then isResourceRoot = True : Exit For
+                    Next
+                End If
+                If Not isResourceRoot Then
+                    For Each r In authorBaseRoots
+                        If IsUnder(full, r) Then isResourceRoot = True : Exit For
+                    Next
+                End If
+
+                If isResourceRoot Then
+                    SkillAuthoringPostcondition.NoteResourceRootWrite()
+                    Return
+                End If
+
+                Dim leaf As String = Path.GetFileName(full)
+                Dim looksLikeSkillResource As Boolean =
+                    String.Equals(leaf, "SKILL.md", StringComparison.OrdinalIgnoreCase) OrElse
+                    String.Equals(leaf, "AGENT.md", StringComparison.OrdinalIgnoreCase) OrElse
+                    PathHasSegment(full, "skills") OrElse
+                    PathHasSegment(full, "agents")
+
+                If looksLikeSkillResource Then
+                    SkillAuthoringPostcondition.NoteWorkspaceSkillLikeWrite()
+                End If
+            Catch
+                ' Never let classification break path resolution.
+            End Try
+        End Sub
+
+        ''' <summary>True when <paramref name="full"/> contains <paramref name="segment"/> as a path segment.</summary>
+        Private Shared Function PathHasSegment(full As String, segment As String) As Boolean
+            If String.IsNullOrEmpty(full) Then Return False
+            Dim parts = full.Split(New Char() {Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar},
+                                   StringSplitOptions.RemoveEmptyEntries)
+            For Each p In parts
+                If String.Equals(p, segment, StringComparison.OrdinalIgnoreCase) Then Return True
+            Next
+            Return False
         End Function
 
         ''' <summary>

@@ -73,6 +73,22 @@ Namespace SharedLibrary
         Public Property ToolErrorHandling As String = "skip"
         Public Property APICall_ToolCallPart_Template As String = ""
 
+        ' Project preference: capability-driven flag (not tool-specific) marking tools that are designed to
+        ' complete an entire logical task in a single call (e.g. sandboxed script execution). The tooling loop
+        ' uses this to discourage repeated, expensive re-invocations for work that could have been consolidated.
+        Public Property PrefersSingleInvocation As Boolean = False
+
+        ' Project preference: capability-driven flag (not tool-specific) marking a tool that is a general-purpose
+        ' fallback strategy rather than a specialized tool. When a fallback tool fails on its first attempt and a
+        ' capable non-fallback alternative (sharing a CapabilityTags entry) is available in the same session, the
+        ' tooling loop advises re-routing to the specialized tool instead of entering a sticky repair loop.
+        Public Property IsFallbackStrategy As Boolean = False
+
+        ' Project preference: capability-driven, tool-agnostic capability identifiers this tool can act on
+        ' (comma/semicolon/space separated, e.g. "docx_edit"). Used only to match a fallback tool against
+        ' specialized alternatives that provide the same capability; never contains host- or tool-name logic.
+        Public Property CapabilityTags As String = ""
+
         Public Function Clone() As ModelConfig
             Return DirectCast(Me.MemberwiseClone(), ModelConfig)
         End Function

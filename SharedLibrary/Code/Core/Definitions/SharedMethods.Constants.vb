@@ -1,4 +1,6 @@
-﻿' Part of "Red Ink" (SharedLibrary)
+﻿Option Strict On
+Option Explicit On
+' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
 ' =============================================================================
@@ -24,8 +26,8 @@
 '    consumers before changing names or defaults.
 ' =============================================================================
 
-Option Strict On
-Option Explicit On
+Imports System.Security.Cryptography
+Imports Microsoft.Office.Tools.Ribbon
 
 Namespace SharedLibrary
 
@@ -38,6 +40,7 @@ Namespace SharedLibrary
         Public Const AN5 As String = "Red%20Ink"  ' Name of first part of VSTO installer subdirectory (before "for Word" etc)
         Public Const AN7 As String = "http://localhost:12333/inky"  ' Localhost URL for Inky
         Public Const AN8 As String = "Inky"
+        Public Const AN9 As String = "RI"
 
 
         Public Shared CopyrightNotice As String = "Copyright © LawDigital Ltd. 2025-"
@@ -443,7 +446,7 @@ Namespace SharedLibrary
         ' Tooling Defaults
 
         Public Const DEFAULT_TOOLING_MAXIMUMITERATIONS As Integer = 50
-        Public Const DEFAULT_BOOL_TOOLINGLOGWINDOW As Boolean = True
+        Public Const DEFAULT_BOOL_TOOLINGLOGWINDOW As Boolean = False
 
         ' Tooling Constants
 
@@ -453,6 +456,8 @@ Namespace SharedLibrary
         Public Const ToolCallMatchingStart As String = "(toolcall:"   ' it follows <pattern> with the pattern to detect tool calls in LLM response, enclosed by < and >
         Public Const ToolCallMatchingMiddle As String = ":"
         Public Const ToolCallMatchingEnd As String = ")"
+
+        Public Const DotInkyZip As String = ".inky.zip"
 
         ''' <summary>
         ''' Controls whether the sandboxed DOCX reader includes headers, footers, footnotes and endnotes
