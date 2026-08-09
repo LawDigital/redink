@@ -39,6 +39,7 @@ Namespace Agents
         End Sub
 
         Public Const ToolCopy As String = "file_copy"
+        Public Const ToolList As String = "file_list"
         Public Const ToolMove As String = "file_move"
         Public Const ToolRename As String = "file_rename"
         Public Const ToolDelete As String = "file_delete"
@@ -48,7 +49,7 @@ Namespace Agents
         Public Shared Function IsFileTool(name As String) As Boolean
             If String.IsNullOrWhiteSpace(name) Then Return False
             Select Case name
-                Case ToolCopy, ToolMove, ToolRename, ToolDelete, ToolMakeDir, ToolRemoveDir
+                Case ToolCopy, ToolList, ToolMove, ToolRename, ToolDelete, ToolMakeDir, ToolRemoveDir
                     Return True
                 Case Else
                     Return False
@@ -57,7 +58,7 @@ Namespace Agents
 
         Public Shared Function BuildAll() As List(Of ModelConfig)
             Return New List(Of ModelConfig) From {
-                BuildCopy(), BuildMove(), BuildRename(), BuildDelete(), BuildMakeDir(), BuildRemoveDir()
+                BuildCopy(), BuildList(), BuildMove(), BuildRename(), BuildDelete(), BuildMakeDir(), BuildRemoveDir()
             }
         End Function
 
@@ -67,6 +68,7 @@ Namespace Agents
             Try
                 Select Case toolName
                     Case ToolCopy : Return ExecuteCopy(arguments)
+                    Case ToolList : Return ExecuteList(arguments)
                     Case ToolMove : Return ExecuteMove(arguments)
                     Case ToolRename : Return ExecuteRename(arguments)
                     Case ToolDelete : Return ExecuteDelete(arguments)
@@ -191,8 +193,69 @@ Namespace Agents
             Return JsonConvert.SerializeObject(New With {Key .path = p, Key .to_trash = toTrash, Key .removed = True})
         End Function
 
-        ' --------------------------------------------------------------- permission helpers
+        Private Shared Function ExecuteList(args As IDictionary(Of String, Object)) As String
+            Dim baseDir = PathPolicy.Resolve(GetStr(args, "path"), PathAccess.Read)
+            If File.Exists(baseDir) Then Return Err_("not_directory", "Path is a file. " & ToolList & " requires a directory path.")
+            If Not Directory.Exists(baseDir) Then Return Err_("not_found", "Directory not found.")
 
+            Dim glob = GetStr(args, "glob")
+            Dim recursive = GetBool(args, "recursive", False)
+            Dim includeFiles = GetBool(args, "include_files", True)
+            Dim includeDirectories = GetBool(args, "include_directories", True)
+            Dim maxItems = Math.Min(Math.Max(GetInt(args, "max_items", 500), 1), 5000)
+
+            If Not includeFiles AndAlso Not includeDirectories Then
+                Return Err_("invalid_arguments", "At least one of include_files or include_directories must be true.")
+            End If
+
+            Dim pattern As String = If(String.IsNullOrWhiteSpace(glob), "*", glob)
+            Dim searchOpt As System.IO.SearchOption =
+                If(recursive, System.IO.SearchOption.AllDirectories, System.IO.SearchOption.TopDirectoryOnly)
+            Dim items As New List(Of Object)()
+
+            For Each entry As String In Directory.EnumerateFileSystemEntries(baseDir, pattern, searchOpt)
+                If items.Count >= maxItems Then Exit For
+
+                Try
+                    Dim relativePath As String =
+                        entry.Substring(baseDir.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+
+                    If Directory.Exists(entry) Then
+                        If Not includeDirectories Then Continue For
+
+                        Dim di As New DirectoryInfo(entry)
+                        items.Add(New With {
+                            Key .path = entry,
+                            Key .relative_path = relativePath,
+                            Key .kind = "dir",
+                            Key .last_write_utc = di.LastWriteTimeUtc.ToString("yyyy-MM-ddTHH:mm:ssZ")
+                        })
+                    ElseIf File.Exists(entry) Then
+                        If Not includeFiles Then Continue For
+
+                        Dim fi As New FileInfo(entry)
+                        items.Add(New With {
+                            Key .path = entry,
+                            Key .relative_path = relativePath,
+                            Key .kind = "file",
+                            Key .size = fi.Length,
+                            Key .last_write_utc = fi.LastWriteTimeUtc.ToString("yyyy-MM-ddTHH:mm:ssZ")
+                        })
+                    End If
+                Catch
+                End Try
+            Next
+
+            Return JsonConvert.SerializeObject(New With {
+                Key .base_path = baseDir,
+                Key .glob = pattern,
+                Key .recursive = recursive,
+                Key .count = items.Count,
+                Key .items = items
+            })
+        End Function
+
+        ' --------------------------------------------------------------- permission helpers
         ''' <summary>
         ''' Enforces the user-configured workspace MoveCopyRename permission for a target
         ''' that resolves under the workspace root. Non-workspace roots (staging, skills,
@@ -242,6 +305,19 @@ Namespace Agents
             Return System.Convert.ToString(v)
         End Function
 
+        Private Shared Function GetInt(args As IDictionary(Of String, Object), name As String, defaultValue As Integer) As Integer
+            If args Is Nothing Then Return defaultValue
+            Dim v As Object = Nothing
+            If Not args.TryGetValue(name, v) OrElse v Is Nothing Then Return defaultValue
+            Try
+                Return System.Convert.ToInt32(v)
+            Catch
+                Dim parsed As Integer
+                If Integer.TryParse(System.Convert.ToString(v), parsed) Then Return parsed
+                Return defaultValue
+            End Try
+        End Function
+
         Private Shared Function GetBool(args As IDictionary(Of String, Object), name As String, defaultValue As Boolean) As Boolean
             If args Is Nothing Then Return defaultValue
             Dim v As Object = Nothing
@@ -264,6 +340,26 @@ Namespace Agents
             "and skill scripts/references. Reading skill files is always allowed; writing into a skill's " &
             "folder requires skill-author mode. Workspace operations honor the user's configured " &
             "read/write/move/delete permissions. Binary files are fully supported."
+
+        Private Shared Function BuildList() As ModelConfig
+            Dim def =
+                "{""name"":""" & ToolList & """," &
+                """description"":""List files and/or directories under a path. " & RootsDescription &
+                " Use this to discover exact filenames under the allowed roots before reading, copying, moving, or deleting them. Prefer this over guessing filenames or probing the host filesystem through js_run or python_execute."",""parameters"":{""type"":""object""," &
+                """properties"":{" &
+                """path"":{""type"":""string"",""description"":""Directory path to enumerate.""}," &
+                """glob"":{""type"":""string"",""description"":""Optional search pattern, for example '*.txt'. Default '*'.""}," &
+                """recursive"":{""type"":""boolean"",""description"":""Recurse into subdirectories. Default false.""}," &
+                """include_files"":{""type"":""boolean"",""description"":""Include files in the result. Default true.""}," &
+                """include_directories"":{""type"":""boolean"",""description"":""Include directories in the result. Default true.""}," &
+                """max_items"":{""type"":""integer"",""description"":""Maximum number of returned items (1..5000, default 500).""}}," &
+                """required"":[""path""]}}"
+            Return New ModelConfig() With {
+                .ToolName = ToolList, .ToolDefinition = def, .Tool = True, .ToolPriority = 914, .ToolErrorHandling = "skip",
+                .ModelDescription = "File/directory listing",
+                .ToolInstructionsPrompt = ToolList & ": List files and/or directories under an allowed root. Use this to discover exact filenames before reading or modifying them. Prefer this over guessing filenames or attempting filesystem access through js_run or python_execute."
+            }
+        End Function
 
         Private Shared Function BuildCopy() As ModelConfig
             Dim def =

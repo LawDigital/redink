@@ -44,6 +44,7 @@ Namespace Agents
             TextTools.ToolSemanticIndexResetConversation,
             TextTools.ToolSemanticIndexInvalidateCache,
             FileTools.ToolCopy,
+            FileTools.ToolList,
             FileTools.ToolMove,
             FileTools.ToolRename,
             FileTools.ToolDelete,

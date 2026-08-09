@@ -922,6 +922,8 @@ Partial Public Class ThisAddIn
 
                     If Not subAgentMode AndAlso
                        lastSuccess IsNot Nothing AndAlso
+                       context.SequencingState IsNot Nothing AndAlso
+                       context.SequencingState.RequestRequiresCreatedDeliverable AndAlso
                        SharedLibrary.Agents.ToolCallSequencing.IsSuccessfulDeliverableResult(
                            If(lastSuccess.Response, "")) Then
 

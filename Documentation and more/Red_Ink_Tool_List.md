@@ -72,6 +72,7 @@ These binary-safe tools operate across the PathPolicy-governed roots (the agent 
 | Tool | Description | Word | Outlook | AutoPilot |
 |---|---|---:|---:|---:|
 | `file_copy` | Copies a file or directory (binary-safe) between the workspace, staging area, and skill references/scripts. | Yes | Yes | Yes |
+| `file_list` | Lists files and/or directories under an allowed root, with optional glob filtering and recursion. | Yes | Yes | Yes |
 | `file_move` | Moves a file or directory (binary-safe) between the allowed roots. | Yes | Yes | Yes |
 | `file_rename` | Renames a file or directory in place. | Yes | Yes | Yes |
 | `file_delete` | Deletes a single file (Recycle Bin by default). | Yes | Yes | Yes |

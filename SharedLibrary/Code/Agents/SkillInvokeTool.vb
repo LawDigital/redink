@@ -218,7 +218,7 @@ Namespace Agents
                 "Do not invent new paths for existing resources, and do not copy a central resource into local_root unless the user asks to fork it."
 
             If authorActive Then
-                Dim diagPrefix As String = SharedLibrary.SharedMethods.AN5
+                Dim diagPrefix As String = SharedLibrary.SharedMethods.AN9
                 Dim diagnosticsDir As String = ""
                 If Not String.IsNullOrWhiteSpace(localRoot) Then
                     diagnosticsDir = Path.Combine(localRoot, "diagnostics")

@@ -6,6 +6,7 @@ allowed-tools:
   - text_write
   - text_search
   - file_copy
+  - file_list
   - file_move
   - file_rename
   - file_delete
@@ -267,19 +268,43 @@ memory alone — read the diagnostics logs, which are the ground truth of the to
    - `RI_SubAgent_Returns__<timestamp>__<skill>.txt` — sub-agent / skill return payloads.
    The newest five of each kind are kept; the most recent timestamp is the latest run. A tooling log is
    always written even when no skill name was captured, so a run is never missing from `diagnostics/`.
-3. Identify the RIGHT file. List the `diagnostics/` folder, sort by the timestamp in each filename, and
-   take the newest 4–5 runs of `RI_Tooling_Log__*`. Read each briefly (header + final
-   `Success:`/`Failed:` summary) and build a short inventory: for every run note its timestamp, the skill
-   name if present in the filename, and whether it ended in Success or Failure. Default to diagnosing the
-   MOST RECENT run. Only when it is genuinely ambiguous which run the user means should you call
-   `ask_user` with one concise question and the 4–5 most recent runs as concrete `options` (each label =
-   timestamp + skill name + Success/Failed). `ask_user` is non-blocking: in an unattended run it returns
-   immediately without an answer, so in that case do not wait — proceed with the latest run and state that
-   assumption. Whichever path you take, include the 4–5-line inventory in your final response so the user
-   can redirect you to a different run on the next turn.
+3. Identify the RIGHT file deterministically. Never guess a fixed filename such as `run.log`, and never
+   fabricate fallback paths. Prefer `resource_index.diagnostics_files`: it is the authoritative
+   diagnostics inventory for this run and already contains the exact available filenames plus metadata.
+   When `resource_index.diagnostics_files` is non-empty, use it DIRECTLY as the inventory and do NOT
+   also call `file_list` — the inventory already lists the exact files under the permitted read root.
+   When `resource_index.diagnostics_files` is empty or absent, and `file_list` is allowed and available,
+   call `file_list` on `local_root + "\diagnostics\"` to enumerate the exact files under that permitted
+   read root. Do not use `js_run`, `python_execute`, or other sandbox workarounds to probe the host
+   filesystem. If neither `resource_index.diagnostics_files` nor `file_list` yields a deterministic
+   diagnostics inventory, STOP immediately and end with
+   `<TASK_STATUS>{"status":"blocked","reason":"No deterministic diagnostics file inventory is available in this run, so the previous tooling run cannot be diagnosed safely from logs."}</TASK_STATUS>`.
+   From the returned filenames, keep only `RI_Tooling_Log__*.txt`, sort by the timestamp embedded in
+   each filename (or by returned write-time metadata when present), and take the newest 4–5 runs. Read
+   each briefly (header + final `Success:`/`Failed:` summary) and build a short inventory: for every
+   run note its timestamp, the skill name if present in the filename, and whether it ended in Success
+   or Failure. EXCLUDE the current in-progress diagnosing run from selection: the run that is executing
+   this diagnosis writes its own `RI_Tooling_Log__<timestamp>__skill_author.txt` first, so the newest
+   entry is normally THIS run, not the run the user wants diagnosed. Drop that self-referential newest
+   entry (the largest timestamp whose skill slug is this authoring run) and diagnose the newest run that
+   remains. If, after excluding the current run, exactly one prior run remains, diagnose it WITHOUT
+   asking. If MORE THAN ONE prior run remains, you MUST call `ask_user` before reading any log unless the
+   user's request already named a specific run (by timestamp, skill name, or an unambiguous phrase like
+   "the last failed run"). This is a mandatory disambiguation step, not a discretionary one: with several
+   candidate logs the most recent run is NOT a "harmless obvious default", because diagnosing the wrong
+   run wastes the whole turn and misleads the user. Do not skip `ask_user` on the grounds that a default
+   exists, that the newest run is probably meant, or that a chat sentence would be simpler — for this
+   multi-run case the `ask_user` tool is the required channel. Present one concise question with the 4–5
+   most recent PRIOR runs as concrete `options` (each label = timestamp + skill name + Success/Failed).
+   `ask_user` is non-blocking: in an unattended run it returns immediately without an answer, so in that
+   case do not wait — proceed with the latest prior run and state that assumption explicitly.
+   4–5-line inventory in your final response so the user can redirect you to a different run on the next
+   turn. Do not use `js_run` to access the filesystem, and do not use `require(...)`, `fs`, `process`,
+   `__dirname`, or other Node APIs there; `js_run` is only for in-memory computation on data already
+   read by file/text tools.
 4. Read the chosen log with `text_read` (the `diagnostics/` folder is a permitted read root). For large
-   logs use `text_search` for the tools-loaded list, `workspace_write` vs. skill-root writes, and the
-   final `Success:`/`Failed:` summary.
+   logs use `text_search` for the tools-loaded list, `text_read: not_found` or other path errors,
+   `js_run` misuse, `workspace_write` vs. skill-root writes, and the final `Success:`/`Failed:` summary.
 5. Diagnose against this skill's authoring rules: was the authoring skill loaded and used; did writes
    land under an authorized resource root rather than the temporary workspace; does the claimed
    completion match the real destination? Report the root cause and the exact fix.
