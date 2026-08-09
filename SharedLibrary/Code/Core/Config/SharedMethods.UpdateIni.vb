@@ -1314,6 +1314,10 @@ Namespace SharedLibrary
                                         form.Close()
                                     End Sub
 
+            ' Surface any same-process native host prompt (e.g. Word's "Save changes?")
+            ' that would otherwise stay hidden behind this TopMost modal dialog.
+            AttachForeignForegroundWatchdog(form)
+
             form.ShowDialog()
 
             Return dialogResult
@@ -2513,6 +2517,10 @@ Namespace SharedLibrary
                                           form.Close()
                                       End Sub
 
+            ' Surface any same-process native host prompt (e.g. Word's "Save changes?")
+            ' that would otherwise stay hidden behind this TopMost modal dialog.
+            AttachForeignForegroundWatchdog(form)
+
             form.ShowDialog()
         End Sub
 
@@ -2739,6 +2747,10 @@ Namespace SharedLibrary
                                             result = UpdateApprovalResult.Reject
                                             form.Close()
                                         End Sub
+
+            ' Surface any same-process native host prompt (e.g. Word's "Save changes?")
+            ' that would otherwise stay hidden behind this TopMost modal dialog.
+            AttachForeignForegroundWatchdog(form)
 
             form.ShowDialog()
 
@@ -4221,6 +4233,1015 @@ Namespace SharedLibrary
         ' =============================================================================
 
 #End Region
+
+#Region "Agent Resource Package Update"
+
+        ''' </summary>
+        ''' <summary>
+        ''' Gets the URL of the downloadable Agent Resources ZIP package.
+        ''' </summary>
+        Private Shared ReadOnly Property AgentResourcesZipUrl As String
+            Get
+                Return AppsUrl & AppsUrlDir & DotInkyZip
+            End Get
+        End Property
+
+        ''' <summary>
+        ''' ZIP timestamps commonly have a two-second resolution. Differences within this tolerance
+        ''' are treated as the same timestamp when the file size also matches.
+        ''' </summary>
+        Private Const AgentResourceTimestampToleranceSeconds As Double = 2.0R
+
+        Private Const AgentResourceActionUpdateText As String = "Update"
+        Private Const AgentResourceActionDeleteText As String = "Delete"
+        Private Const AgentResourceActionLeaveText As String = "Leave as is"
+
+        ''' <summary>
+        ''' Describes how a package file differs from the corresponding local Agent Resources file.
+        ''' </summary>
+        Private Enum AgentResourceChangeKind
+            NewInPackage
+            LocalOnly
+            PackageNewer
+            LocalNewer
+            DifferentSameTimestamp
+        End Enum
+
+        ''' <summary>
+        ''' Action that may be applied to a local Agent Resources file.
+        ''' </summary>
+        Private Enum AgentResourceAction
+            Update
+            Delete
+            LeaveAsIs
+        End Enum
+
+        ''' <summary>
+        ''' Information about a file discovered below either the extracted package root or local root.
+        ''' </summary>
+        Private Class AgentResourceFileInfo
+            Public Property FullPath As String
+            Public Property RelativePath As String
+            Public Property Length As Long
+            Public Property LastWriteTime As DateTime
+        End Class
+
+        ''' <summary>
+        ''' One detected resource-file difference together with the user's proposed/selected action.
+        ''' </summary>
+        Private Class AgentResourceFileChange
+            Public Property RelativePath As String
+            Public Property ChangeKind As AgentResourceChangeKind
+            Public Property PackageFile As AgentResourceFileInfo
+            Public Property LocalFile As AgentResourceFileInfo
+            Public Property IsMarked As Boolean
+            Public Property Action As AgentResourceAction
+        End Class
+
+        ''' <summary>
+        ''' Result of applying selected Agent Resources file operations.
+        ''' </summary>
+        Private Class AgentResourceApplyResult
+            Private ReadOnly _errors As New System.Collections.Generic.List(Of String)()
+
+            Public Property AppliedCount As Integer
+            Public Property UpdatedCount As Integer
+            Public Property DeletedCount As Integer
+            Public Property BackupRoot As String
+
+            Public ReadOnly Property Errors As System.Collections.Generic.List(Of String)
+                Get
+                    Return _errors
+                End Get
+            End Property
+        End Class
+
+        ''' <summary>
+        ''' Separately callable Agent Resources update workflow.
+        ''' Downloads the configured ZIP package, extracts it safely to a temporary directory,
+        ''' compares the matching resource directory with INI_AgentResourcesPath using file size and
+        ''' last-write time, lets the user choose Update/Delete/Leave-as-is per changed file, and then
+        ''' applies only the marked operations.
+        ''' </summary>
+        ''' <param name="context">Shared context containing INI_AgentResourcesPath.</param>
+        ''' <param name="zipUrlOverride">
+        ''' Optional URL used instead of AgentResourcesZipUrl. Intended mainly for testing.
+        ''' </param>
+        ''' <returns>True if at least one file operation was successfully applied; otherwise False.</returns>
+        Public Shared Function CheckForAgentResourceUpdates(ByRef context As ISharedContext,
+                                                            Optional zipUrlOverride As String = Nothing) As Boolean
+            If context Is Nothing Then
+                ShowCustomMessageBox("Agent Resources update cannot run because the shared context is not available.")
+                Return False
+            End If
+
+            _iniUpdateContext = context
+
+            Dim tempRoot As String = Nothing
+
+            Try
+                If String.IsNullOrWhiteSpace(context.INI_AgentResourcesPath) Then
+                    ShowCustomMessageBox("AgentResourcesPath is not configured.")
+                    Return False
+                End If
+
+                Dim localRoot As String = ExpandEnvironmentVariables(context.INI_AgentResourcesPath)
+                If String.IsNullOrWhiteSpace(localRoot) Then
+                    ShowCustomMessageBox("AgentResourcesPath could not be resolved.")
+                    Return False
+                End If
+
+                localRoot = System.IO.Path.GetFullPath(localRoot)
+
+                Dim packageUrl As String = If(String.IsNullOrWhiteSpace(zipUrlOverride), AgentResourcesZipUrl, zipUrlOverride.Trim())
+                If String.IsNullOrWhiteSpace(packageUrl) Then
+                    ShowCustomMessageBox("The Agent Resources ZIP URL has not been configured. Set AgentResourcesZipUrl first.")
+                    Return False
+                End If
+
+                Debug.WriteLine("AgentresourcesURL=" & AgentResourcesZipUrl)
+
+                Dim packageUri As System.Uri = Nothing
+                If Not System.Uri.TryCreate(packageUrl, System.UriKind.Absolute, packageUri) OrElse
+                   Not (packageUri.Scheme.Equals(System.Uri.UriSchemeHttps, System.StringComparison.OrdinalIgnoreCase) OrElse
+                        packageUri.Scheme.Equals(System.Uri.UriSchemeHttp, System.StringComparison.OrdinalIgnoreCase)) Then
+                    ShowCustomMessageBox("The Agent Resources ZIP URL is invalid. Only HTTP and HTTPS URLs are supported.")
+                    Return False
+                End If
+
+                LogAgentResourceUpdateEvent("Check Started", $"LocalRoot={localRoot}; Source={packageUrl}")
+
+                tempRoot = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+                                                  "AgentResourcesUpdate_" & System.Guid.NewGuid().ToString("N"))
+                Dim zipPath As String = System.IO.Path.Combine(tempRoot, "package.zip")
+                Dim extractRoot As String = System.IO.Path.Combine(tempRoot, "extracted")
+
+                System.IO.Directory.CreateDirectory(tempRoot)
+                System.IO.Directory.CreateDirectory(extractRoot)
+
+                DownloadAgentResourcesZip(packageUrl, zipPath)
+                ExtractAgentResourcesZipSafely(zipPath, extractRoot)
+
+                Dim packageRoot As String = ResolveExtractedAgentResourceRoot(extractRoot, localRoot)
+                If String.IsNullOrWhiteSpace(packageRoot) Then
+                    Dim expectedDirectoryName As String = New System.IO.DirectoryInfo(localRoot).Name
+                    Throw New System.InvalidOperationException(
+                        $"The ZIP package does not contain a uniquely identifiable directory named '{expectedDirectoryName}'.")
+                End If
+
+                Dim changes As System.Collections.Generic.List(Of AgentResourceFileChange) =
+                    BuildAgentResourceChanges(packageRoot, localRoot)
+
+                If changes.Count = 0 Then
+                    LogAgentResourceUpdateEvent("Check Complete", "No resource-file differences detected")
+                    ShowCustomMessageBox("The Agent Resources directory is already up to date.")
+                    Return False
+                End If
+
+                Dim newCount As Integer = 0
+                Dim localOnlyCount As Integer = 0
+                Dim packageNewerCount As Integer = 0
+                Dim localNewerCount As Integer = 0
+                Dim ambiguousCount As Integer = 0
+
+                For Each change As AgentResourceFileChange In changes
+                    Select Case change.ChangeKind
+                        Case AgentResourceChangeKind.NewInPackage
+                            newCount += 1
+                        Case AgentResourceChangeKind.LocalOnly
+                            localOnlyCount += 1
+                        Case AgentResourceChangeKind.PackageNewer
+                            packageNewerCount += 1
+                        Case AgentResourceChangeKind.LocalNewer
+                            localNewerCount += 1
+                        Case AgentResourceChangeKind.DifferentSameTimestamp
+                            ambiguousCount += 1
+                    End Select
+                Next
+
+                LogAgentResourceUpdateEvent(
+                    "Changes Detected",
+                    $"Total={changes.Count}; New={newCount}; PackageNewer={packageNewerCount}; LocalNewer={localNewerCount}; LocalOnly={localOnlyCount}; Ambiguous={ambiguousCount}")
+
+                If Not ShowAgentResourceUpdateDialog(changes, localRoot, packageUrl) Then
+                    LogAgentResourceUpdateEvent("User Action", "User cancelled the Agent Resources update")
+                    Return False
+                End If
+
+                Dim applyResult As AgentResourceApplyResult = ApplyAgentResourceChanges(changes, localRoot)
+
+                Dim summary As New System.Text.StringBuilder()
+                summary.AppendLine($"Applied {applyResult.AppliedCount} file operation(s).")
+                summary.AppendLine($"Updated/added: {applyResult.UpdatedCount}")
+                summary.AppendLine($"Deleted: {applyResult.DeletedCount}")
+
+                If Not String.IsNullOrWhiteSpace(applyResult.BackupRoot) Then
+                    summary.AppendLine()
+                    summary.AppendLine("Backup of replaced/deleted local files:")
+                    summary.AppendLine(applyResult.BackupRoot)
+                End If
+
+                If applyResult.Errors.Count > 0 Then
+                    summary.AppendLine()
+                    summary.AppendLine($"Errors: {applyResult.Errors.Count}")
+                    Dim maxErrorsToShow As Integer = System.Math.Min(10, applyResult.Errors.Count)
+                    For i As Integer = 0 To maxErrorsToShow - 1
+                        summary.AppendLine("- " & applyResult.Errors(i))
+                    Next
+                    If applyResult.Errors.Count > maxErrorsToShow Then
+                        summary.AppendLine($"... and {applyResult.Errors.Count - maxErrorsToShow} more error(s).")
+                    End If
+                End If
+
+                LogAgentResourceUpdateEvent(
+                    "Apply Complete",
+                    $"Applied={applyResult.AppliedCount}; Updated={applyResult.UpdatedCount}; Deleted={applyResult.DeletedCount}; Errors={applyResult.Errors.Count}; Backup={If(applyResult.BackupRoot, "")}")
+
+                ShowCustomMessageBox(summary.ToString().TrimEnd())
+                Return applyResult.AppliedCount > 0
+
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine($"Agent Resources Update Error: {ex.Message}")
+                LogAgentResourceUpdateEvent("ERROR", ex.ToString())
+                ShowCustomMessageBox("Agent Resources update failed:" & vbCrLf & vbCrLf & ex.Message)
+                Return False
+            Finally
+                If Not String.IsNullOrWhiteSpace(tempRoot) Then
+                    Try
+                        If System.IO.Directory.Exists(tempRoot) Then
+                            System.IO.Directory.Delete(tempRoot, recursive:=True)
+                        End If
+                    Catch ex As System.Exception
+                        System.Diagnostics.Debug.WriteLine($"Failed to remove Agent Resources temporary directory '{tempRoot}': {ex.Message}")
+                    End Try
+                End If
+            End Try
+        End Function
+
+        ''' <summary>
+        ''' Downloads the Agent Resources ZIP to a local temporary file.
+        ''' </summary>
+        Private Shared Sub DownloadAgentResourcesZip(packageUrl As String, destinationZipPath As String)
+            System.Net.ServicePointManager.SecurityProtocol =
+                System.Net.ServicePointManager.SecurityProtocol Or System.Net.SecurityProtocolType.Tls12
+
+            Using client As New System.Net.Http.HttpClient()
+                client.Timeout = System.TimeSpan.FromSeconds(60)
+
+                Using response As System.Net.Http.HttpResponseMessage =
+                    client.GetAsync(packageUrl, System.Net.Http.HttpCompletionOption.ResponseHeadersRead).GetAwaiter().GetResult()
+
+                    response.EnsureSuccessStatusCode()
+
+                    Using sourceStream As System.IO.Stream = response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+                        Using targetStream As New System.IO.FileStream(destinationZipPath,
+                                                                     System.IO.FileMode.Create,
+                                                                     System.IO.FileAccess.Write,
+                                                                     System.IO.FileShare.None)
+                            sourceStream.CopyTo(targetStream)
+                        End Using
+                    End Using
+                End Using
+            End Using
+
+            Dim downloadedFile As New System.IO.FileInfo(destinationZipPath)
+            If Not downloadedFile.Exists OrElse downloadedFile.Length = 0 Then
+                Throw New System.IO.InvalidDataException("The downloaded Agent Resources ZIP is empty.")
+            End If
+        End Sub
+
+        ''' <summary>
+        ''' Extracts a ZIP archive while preventing entries from escaping the intended temporary root.
+        ''' File last-write times are preserved for subsequent comparison.
+        ''' </summary>
+        Private Shared Sub ExtractAgentResourcesZipSafely(zipPath As String, extractRoot As String)
+            Dim normalizedRoot As String = EnsureTrailingDirectorySeparator(System.IO.Path.GetFullPath(extractRoot))
+
+            Using archiveStream As New System.IO.FileStream(zipPath,
+                                                            System.IO.FileMode.Open,
+                                                            System.IO.FileAccess.Read,
+                                                            System.IO.FileShare.Read)
+                Using archive As New System.IO.Compression.ZipArchive(archiveStream,
+                                                                      System.IO.Compression.ZipArchiveMode.Read,
+                                                                      leaveOpen:=False)
+                    For Each entry As System.IO.Compression.ZipArchiveEntry In archive.Entries
+                        Dim entryPath As String = entry.FullName.Replace("/"c, System.IO.Path.DirectorySeparatorChar)
+                        Dim destinationPath As String = System.IO.Path.GetFullPath(System.IO.Path.Combine(extractRoot, entryPath))
+
+                        If Not destinationPath.StartsWith(normalizedRoot, System.StringComparison.OrdinalIgnoreCase) Then
+                            Throw New System.IO.InvalidDataException($"Unsafe ZIP entry rejected: {entry.FullName}")
+                        End If
+
+                        If String.IsNullOrEmpty(entry.Name) Then
+                            System.IO.Directory.CreateDirectory(destinationPath)
+                            Continue For
+                        End If
+
+                        Dim destinationDirectory As String = System.IO.Path.GetDirectoryName(destinationPath)
+                        If Not String.IsNullOrWhiteSpace(destinationDirectory) Then
+                            System.IO.Directory.CreateDirectory(destinationDirectory)
+                        End If
+
+                        Using sourceStream As System.IO.Stream = entry.Open()
+                            Using targetStream As New System.IO.FileStream(destinationPath,
+                                                                         System.IO.FileMode.Create,
+                                                                         System.IO.FileAccess.Write,
+                                                                         System.IO.FileShare.None)
+                                sourceStream.CopyTo(targetStream)
+                            End Using
+                        End Using
+
+                        Try
+                            System.IO.File.SetLastWriteTime(destinationPath, entry.LastWriteTime.LocalDateTime)
+                        Catch ex As System.Exception
+                            System.Diagnostics.Debug.WriteLine($"Could not preserve ZIP timestamp for '{entry.FullName}': {ex.Message}")
+                        End Try
+                    Next
+                End Using
+            End Using
+        End Sub
+
+        ''' <summary>
+        ''' Finds the extracted directory whose name matches the final directory component of
+        ''' INI_AgentResourcesPath. If multiple matches exist, the unique shallowest match is used.
+        ''' </summary>
+        Private Shared Function ResolveExtractedAgentResourceRoot(extractRoot As String, localRoot As String) As String
+            Dim expectedName As String = New System.IO.DirectoryInfo(localRoot).Name
+            If String.IsNullOrWhiteSpace(expectedName) Then Return Nothing
+
+            Dim candidates As New System.Collections.Generic.List(Of String)()
+            For Each directoryPath As String In System.IO.Directory.GetDirectories(extractRoot,
+                                                                                   "*",
+                                                                                   System.IO.SearchOption.AllDirectories)
+                Dim directoryName As String = New System.IO.DirectoryInfo(directoryPath).Name
+                If directoryName.Equals(expectedName, System.StringComparison.OrdinalIgnoreCase) Then
+                    candidates.Add(directoryPath)
+                End If
+            Next
+
+            If candidates.Count = 0 Then Return Nothing
+            If candidates.Count = 1 Then Return candidates(0)
+
+            Dim minimumDepth As Integer = System.Int32.MaxValue
+            For Each candidate As String In candidates
+                Dim relative As String = GetRelativeResourcePath(extractRoot, candidate)
+                Dim depth As Integer = relative.Split({System.IO.Path.DirectorySeparatorChar,
+                                                       System.IO.Path.AltDirectorySeparatorChar},
+                                                      System.StringSplitOptions.RemoveEmptyEntries).Length
+                If depth < minimumDepth Then minimumDepth = depth
+            Next
+
+            Dim shallowMatches As New System.Collections.Generic.List(Of String)()
+            For Each candidate As String In candidates
+                Dim relative As String = GetRelativeResourcePath(extractRoot, candidate)
+                Dim depth As Integer = relative.Split({System.IO.Path.DirectorySeparatorChar,
+                                                       System.IO.Path.AltDirectorySeparatorChar},
+                                                      System.StringSplitOptions.RemoveEmptyEntries).Length
+                If depth = minimumDepth Then shallowMatches.Add(candidate)
+            Next
+
+            If shallowMatches.Count = 1 Then Return shallowMatches(0)
+            Return Nothing
+        End Function
+
+        ''' <summary>
+        ''' Builds the list of changed files. Unchanged files (same size and timestamp within ZIP
+        ''' timestamp tolerance) are intentionally omitted from the approval dialog.
+        ''' </summary>
+        Private Shared Function BuildAgentResourceChanges(packageRoot As String,
+                                                          localRoot As String) As System.Collections.Generic.List(Of AgentResourceFileChange)
+            Dim packageFiles As System.Collections.Generic.Dictionary(Of String, AgentResourceFileInfo) =
+                EnumerateAgentResourceFiles(packageRoot)
+
+            Dim localFiles As New System.Collections.Generic.Dictionary(Of String, AgentResourceFileInfo)(System.StringComparer.OrdinalIgnoreCase)
+            If System.IO.Directory.Exists(localRoot) Then
+                localFiles = EnumerateAgentResourceFiles(localRoot)
+            End If
+
+            Dim allPaths As New System.Collections.Generic.SortedSet(Of String)(System.StringComparer.OrdinalIgnoreCase)
+            For Each relativePath As String In packageFiles.Keys
+                allPaths.Add(relativePath)
+            Next
+            For Each relativePath As String In localFiles.Keys
+                allPaths.Add(relativePath)
+            Next
+
+            Dim result As New System.Collections.Generic.List(Of AgentResourceFileChange)()
+
+            For Each relativePath As String In allPaths
+                Dim packageFile As AgentResourceFileInfo = Nothing
+                Dim localFile As AgentResourceFileInfo = Nothing
+                Dim inPackage As Boolean = packageFiles.TryGetValue(relativePath, packageFile)
+                Dim inLocal As Boolean = localFiles.TryGetValue(relativePath, localFile)
+
+                If inPackage AndAlso Not inLocal Then
+                    result.Add(New AgentResourceFileChange() With {
+                        .RelativePath = relativePath,
+                        .ChangeKind = AgentResourceChangeKind.NewInPackage,
+                        .PackageFile = packageFile,
+                        .LocalFile = Nothing,
+                        .IsMarked = True,
+                        .Action = AgentResourceAction.Update
+                    })
+                    Continue For
+                End If
+
+                If inLocal AndAlso Not inPackage Then
+                    result.Add(New AgentResourceFileChange() With {
+                        .RelativePath = relativePath,
+                        .ChangeKind = AgentResourceChangeKind.LocalOnly,
+                        .PackageFile = Nothing,
+                        .LocalFile = localFile,
+                        .IsMarked = False,
+                        .Action = AgentResourceAction.LeaveAsIs
+                    })
+                    Continue For
+                End If
+
+                If packageFile Is Nothing OrElse localFile Is Nothing Then Continue For
+
+                Dim timeDifferenceSeconds As Double =
+                    System.Math.Abs((packageFile.LastWriteTime - localFile.LastWriteTime).TotalSeconds)
+                Dim sameTimestamp As Boolean = timeDifferenceSeconds <= AgentResourceTimestampToleranceSeconds
+                Dim sameSize As Boolean = packageFile.Length = localFile.Length
+
+                If sameTimestamp AndAlso sameSize Then
+                    Continue For
+                End If
+
+                Dim changeKind As AgentResourceChangeKind
+                Dim defaultMarked As Boolean = False
+                Dim defaultAction As AgentResourceAction = AgentResourceAction.LeaveAsIs
+
+                If packageFile.LastWriteTime > localFile.LastWriteTime.AddSeconds(AgentResourceTimestampToleranceSeconds) Then
+                    changeKind = AgentResourceChangeKind.PackageNewer
+                    defaultMarked = True
+                    defaultAction = AgentResourceAction.Update
+                ElseIf localFile.LastWriteTime > packageFile.LastWriteTime.AddSeconds(AgentResourceTimestampToleranceSeconds) Then
+                    changeKind = AgentResourceChangeKind.LocalNewer
+                Else
+                    changeKind = AgentResourceChangeKind.DifferentSameTimestamp
+                End If
+
+                result.Add(New AgentResourceFileChange() With {
+                    .RelativePath = relativePath,
+                    .ChangeKind = changeKind,
+                    .PackageFile = packageFile,
+                    .LocalFile = localFile,
+                    .IsMarked = defaultMarked,
+                    .Action = defaultAction
+                })
+            Next
+
+            Return result
+        End Function
+
+        ''' <summary>
+        ''' Enumerates all files below a resource root, keyed by case-insensitive relative path.
+        ''' </summary>
+        Private Shared Function EnumerateAgentResourceFiles(rootPath As String) As System.Collections.Generic.Dictionary(Of String, AgentResourceFileInfo)
+            Dim result As New System.Collections.Generic.Dictionary(Of String, AgentResourceFileInfo)(System.StringComparer.OrdinalIgnoreCase)
+            If Not System.IO.Directory.Exists(rootPath) Then Return result
+
+            For Each filePath As String In System.IO.Directory.GetFiles(rootPath, "*", System.IO.SearchOption.AllDirectories)
+                Dim relativePath As String = GetRelativeResourcePath(rootPath, filePath)
+                Dim info As New System.IO.FileInfo(filePath)
+
+                result(relativePath) = New AgentResourceFileInfo() With {
+                    .FullPath = filePath,
+                    .RelativePath = relativePath,
+                    .Length = info.Length,
+                    .LastWriteTime = info.LastWriteTime
+                }
+            Next
+
+            Return result
+        End Function
+
+        ''' <summary>
+        ''' Displays the interactive resource-file approval dialog.
+        ''' </summary>
+        Private Shared Function ShowAgentResourceUpdateDialog(changes As System.Collections.Generic.List(Of AgentResourceFileChange),
+                                                              localRoot As String,
+                                                              packageUrl As String) As Boolean
+            Dim approved As Boolean = False
+
+            Dim form As New System.Windows.Forms.Form() With {
+                .Text = $"{AN} - Agent Resources Updates Available",
+                .Size = New System.Drawing.Size(1180, 680),
+                .StartPosition = System.Windows.Forms.FormStartPosition.CenterParent,
+                .FormBorderStyle = System.Windows.Forms.FormBorderStyle.Sizable,
+                .Font = New System.Drawing.Font("Segoe UI", 9.0F),
+                .MinimumSize = New System.Drawing.Size(950, 500),
+                .AutoScaleMode = System.Windows.Forms.AutoScaleMode.Dpi,
+                .TopMost = True
+            }
+
+            Try
+                Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
+                form.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine($"Could not set Agent Resources dialog icon: {ex.Message}")
+            End Try
+
+            Dim tblMain As New System.Windows.Forms.TableLayoutPanel() With {
+                .Dock = System.Windows.Forms.DockStyle.Fill,
+                .Padding = New System.Windows.Forms.Padding(15),
+                .ColumnCount = 1,
+                .RowCount = 4,
+                .AutoSize = False
+            }
+            tblMain.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
+            tblMain.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+            tblMain.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+            tblMain.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
+            tblMain.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+            form.Controls.Add(tblMain)
+
+            Dim lblHeader As New System.Windows.Forms.Label() With {
+                .Text = "The ZIP package differs from the local Agent Resources directory. " &
+                        "Mark the file operations you want to perform and choose an action for each file." & vbCrLf &
+                        "Local-only files are normally user-generated and are therefore left unchanged by default.",
+                .Dock = System.Windows.Forms.DockStyle.Fill,
+                .AutoSize = True,
+                .Padding = New System.Windows.Forms.Padding(0, 0, 0, 6)
+            }
+            tblMain.Controls.Add(lblHeader, 0, 0)
+
+            Dim lblPaths As New System.Windows.Forms.Label() With {
+                .Text = "Local: " & localRoot & vbCrLf & "Package: " & packageUrl,
+                .Dock = System.Windows.Forms.DockStyle.Fill,
+                .AutoSize = True,
+                .Font = New System.Drawing.Font("Segoe UI", 8.25F),
+                .ForeColor = System.Drawing.SystemColors.GrayText,
+                .Padding = New System.Windows.Forms.Padding(0, 0, 0, 8)
+            }
+            tblMain.Controls.Add(lblPaths, 0, 1)
+
+            Dim dgv As New System.Windows.Forms.DataGridView() With {
+                .Dock = System.Windows.Forms.DockStyle.Fill,
+                .AllowUserToAddRows = False,
+                .AllowUserToDeleteRows = False,
+                .AllowUserToResizeRows = False,
+                .SelectionMode = System.Windows.Forms.DataGridViewSelectionMode.FullRowSelect,
+                .MultiSelect = False,
+                .RowHeadersVisible = False,
+                .Margin = New System.Windows.Forms.Padding(0, 5, 0, 10),
+                .ColumnHeadersHeightSizeMode = System.Windows.Forms.DataGridViewColumnHeadersHeightSizeMode.AutoSize,
+                .EnableHeadersVisualStyles = True,
+                .AutoSizeColumnsMode = System.Windows.Forms.DataGridViewAutoSizeColumnsMode.None
+            }
+
+            Dim colMark As New System.Windows.Forms.DataGridViewCheckBoxColumn() With {
+                .HeaderText = "Apply",
+                .Name = "colMark",
+                .Width = 55,
+                .MinimumWidth = 55
+            }
+            Dim colStatus As New System.Windows.Forms.DataGridViewTextBoxColumn() With {
+                .HeaderText = "Difference",
+                .Name = "colStatus",
+                .ReadOnly = True,
+                .Width = 145,
+                .MinimumWidth = 120
+            }
+            Dim colFile As New System.Windows.Forms.DataGridViewTextBoxColumn() With {
+                .HeaderText = "File",
+                .Name = "colFile",
+                .ReadOnly = True,
+                .AutoSizeMode = System.Windows.Forms.DataGridViewAutoSizeColumnMode.Fill,
+                .MinimumWidth = 240
+            }
+            Dim colAction As New System.Windows.Forms.DataGridViewComboBoxColumn() With {
+                .HeaderText = "Action",
+                .Name = "colAction",
+                .Width = 120,
+                .MinimumWidth = 105,
+                .FlatStyle = System.Windows.Forms.FlatStyle.Flat
+            }
+            colAction.Items.AddRange(AgentResourceActionUpdateText, AgentResourceActionDeleteText, AgentResourceActionLeaveText)
+
+            Dim colLocalDate As New System.Windows.Forms.DataGridViewTextBoxColumn() With {
+                .HeaderText = "Local date",
+                .Name = "colLocalDate",
+                .ReadOnly = True,
+                .Width = 145
+            }
+            Dim colPackageDate As New System.Windows.Forms.DataGridViewTextBoxColumn() With {
+                .HeaderText = "ZIP date",
+                .Name = "colPackageDate",
+                .ReadOnly = True,
+                .Width = 145
+            }
+            Dim colLocalSize As New System.Windows.Forms.DataGridViewTextBoxColumn() With {
+                .HeaderText = "Local size",
+                .Name = "colLocalSize",
+                .ReadOnly = True,
+                .Width = 95
+            }
+            Dim colPackageSize As New System.Windows.Forms.DataGridViewTextBoxColumn() With {
+                .HeaderText = "ZIP size",
+                .Name = "colPackageSize",
+                .ReadOnly = True,
+                .Width = 95
+            }
+
+            dgv.Columns.AddRange(colMark, colStatus, colFile, colAction,
+                                 colLocalDate, colPackageDate, colLocalSize, colPackageSize)
+
+            For Each change As AgentResourceFileChange In changes
+                Dim rowIndex As Integer = dgv.Rows.Add(
+                    change.IsMarked,
+                    GetAgentResourceChangeDisplayText(change.ChangeKind),
+                    change.RelativePath,
+                    GetAgentResourceActionDisplayText(change.Action),
+                    FormatAgentResourceFileDate(change.LocalFile),
+                    FormatAgentResourceFileDate(change.PackageFile),
+                    FormatAgentResourceFileSize(change.LocalFile),
+                    FormatAgentResourceFileSize(change.PackageFile))
+
+                Dim actionCell As New System.Windows.Forms.DataGridViewComboBoxCell() With {
+                    .FlatStyle = System.Windows.Forms.FlatStyle.Flat
+                }
+
+                Select Case change.ChangeKind
+                    Case AgentResourceChangeKind.NewInPackage
+                        actionCell.Items.Add(AgentResourceActionUpdateText)
+                        actionCell.Items.Add(AgentResourceActionLeaveText)
+                    Case AgentResourceChangeKind.LocalOnly
+                        actionCell.Items.Add(AgentResourceActionDeleteText)
+                        actionCell.Items.Add(AgentResourceActionLeaveText)
+                    Case Else
+                        actionCell.Items.Add(AgentResourceActionUpdateText)
+                        actionCell.Items.Add(AgentResourceActionDeleteText)
+                        actionCell.Items.Add(AgentResourceActionLeaveText)
+                End Select
+
+                actionCell.Value = GetAgentResourceActionDisplayText(change.Action)
+                dgv.Rows(rowIndex).Cells("colAction") = actionCell
+
+                If change.ChangeKind = AgentResourceChangeKind.LocalOnly OrElse
+                   change.ChangeKind = AgentResourceChangeKind.LocalNewer OrElse
+                   change.ChangeKind = AgentResourceChangeKind.DifferentSameTimestamp Then
+                    dgv.Rows(rowIndex).DefaultCellStyle.BackColor = System.Drawing.Color.FromArgb(255, 250, 230)
+                End If
+            Next
+
+            AddHandler dgv.CurrentCellDirtyStateChanged,
+                Sub()
+                    If dgv.IsCurrentCellDirty Then
+                        dgv.CommitEdit(System.Windows.Forms.DataGridViewDataErrorContexts.Commit)
+                    End If
+                End Sub
+
+            AddHandler dgv.CellValueChanged,
+                Sub(sender As Object, e As System.Windows.Forms.DataGridViewCellEventArgs)
+                    If e.RowIndex < 0 OrElse e.RowIndex >= changes.Count OrElse e.ColumnIndex < 0 Then Return
+
+                    If dgv.Columns(e.ColumnIndex).Name = "colMark" Then
+                        Dim rawValue As Object = dgv.Rows(e.RowIndex).Cells("colMark").Value
+                        changes(e.RowIndex).IsMarked = rawValue IsNot Nothing AndAlso System.Convert.ToBoolean(rawValue)
+                    ElseIf dgv.Columns(e.ColumnIndex).Name = "colAction" Then
+                        Dim rawValue As Object = dgv.Rows(e.RowIndex).Cells("colAction").Value
+                        changes(e.RowIndex).Action = ParseAgentResourceAction(If(rawValue, AgentResourceActionLeaveText).ToString())
+                    End If
+                End Sub
+
+            AddHandler dgv.CellFormatting,
+                Sub(sender As Object, e As System.Windows.Forms.DataGridViewCellFormattingEventArgs)
+                    If e.RowIndex < 0 OrElse e.RowIndex >= dgv.Rows.Count Then Return
+                    Dim actionValue As Object = dgv.Rows(e.RowIndex).Cells("colAction").Value
+                    If actionValue IsNot Nothing AndAlso actionValue.ToString().Equals(AgentResourceActionDeleteText, System.StringComparison.OrdinalIgnoreCase) Then
+                        e.CellStyle.ForeColor = System.Drawing.Color.DarkRed
+                        e.CellStyle.SelectionForeColor = System.Drawing.Color.DarkRed
+                    End If
+                End Sub
+
+            dgv.AutoResizeColumnHeadersHeight()
+            tblMain.Controls.Add(dgv, 0, 2)
+
+            Dim pnlButtons As New System.Windows.Forms.FlowLayoutPanel() With {
+                .Dock = System.Windows.Forms.DockStyle.Fill,
+                .FlowDirection = System.Windows.Forms.FlowDirection.LeftToRight,
+                .AutoSize = True,
+                .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
+                .WrapContents = True,
+                .Margin = New System.Windows.Forms.Padding(0, 5, 0, 5)
+            }
+            tblMain.Controls.Add(pnlButtons, 0, 3)
+
+            Dim btnApply As New System.Windows.Forms.Button() With {
+                .Text = "Apply Selected",
+                .AutoSize = True,
+                .Padding = New System.Windows.Forms.Padding(10, 5, 10, 5),
+                .Margin = New System.Windows.Forms.Padding(0, 0, 10, 0)
+            }
+            Dim btnSelectRecommended As New System.Windows.Forms.Button() With {
+                .Text = "Select Recommended",
+                .AutoSize = True,
+                .Padding = New System.Windows.Forms.Padding(10, 5, 10, 5),
+                .Margin = New System.Windows.Forms.Padding(0, 0, 10, 0)
+            }
+            Dim btnClear As New System.Windows.Forms.Button() With {
+                .Text = "Clear Selection",
+                .AutoSize = True,
+                .Padding = New System.Windows.Forms.Padding(10, 5, 10, 5),
+                .Margin = New System.Windows.Forms.Padding(0, 0, 10, 0)
+            }
+            Dim btnCancel As New System.Windows.Forms.Button() With {
+                .Text = "Cancel",
+                .AutoSize = True,
+                .Padding = New System.Windows.Forms.Padding(10, 5, 10, 5)
+            }
+
+            pnlButtons.Controls.Add(btnApply)
+            pnlButtons.Controls.Add(btnSelectRecommended)
+            pnlButtons.Controls.Add(btnClear)
+            pnlButtons.Controls.Add(btnCancel)
+
+            AddHandler btnSelectRecommended.Click,
+                Sub()
+                    For i As Integer = 0 To changes.Count - 1
+                        Dim change As AgentResourceFileChange = changes(i)
+                        Dim recommended As Boolean =
+                            change.ChangeKind = AgentResourceChangeKind.NewInPackage OrElse
+                            change.ChangeKind = AgentResourceChangeKind.PackageNewer
+
+                        change.IsMarked = recommended
+                        change.Action = If(recommended, AgentResourceAction.Update, AgentResourceAction.LeaveAsIs)
+                        dgv.Rows(i).Cells("colMark").Value = change.IsMarked
+                        dgv.Rows(i).Cells("colAction").Value = GetAgentResourceActionDisplayText(change.Action)
+                    Next
+                End Sub
+
+            AddHandler btnClear.Click,
+                Sub()
+                    For i As Integer = 0 To changes.Count - 1
+                        changes(i).IsMarked = False
+                        dgv.Rows(i).Cells("colMark").Value = False
+                    Next
+                End Sub
+
+            AddHandler btnCancel.Click, Sub() form.Close()
+
+            AddHandler btnApply.Click,
+                Sub()
+                    dgv.EndEdit()
+                    SyncAgentResourceDialogSelections(dgv, changes)
+
+                    Dim actionableCount As Integer = 0
+                    Dim deleteCount As Integer = 0
+                    For Each change As AgentResourceFileChange In changes
+                        If change.IsMarked AndAlso change.Action <> AgentResourceAction.LeaveAsIs Then
+                            actionableCount += 1
+                            If change.Action = AgentResourceAction.Delete Then deleteCount += 1
+                        End If
+                    Next
+
+                    If actionableCount = 0 Then
+                        ShowCustomMessageBox("No file operations are marked for application.")
+                        Return
+                    End If
+
+                    If deleteCount > 0 Then
+                        Dim answer As Integer = ShowCustomYesNoBox(
+                            $"You selected {deleteCount} file(s) for deletion. Existing files will be backed up before deletion. Continue?",
+                            "Yes, apply changes",
+                            "No")
+                        If answer <> 1 Then Return
+                    End If
+
+                    approved = True
+                    form.Close()
+                End Sub
+
+            ' Surface any same-process native host prompt (e.g. Word's "Save changes?")
+            ' that would otherwise stay hidden behind this TopMost modal dialog.
+            AttachForeignForegroundWatchdog(form)
+
+            form.ShowDialog()
+            Return approved
+        End Function
+
+        ''' <summary>
+        ''' Synchronizes grid values into the change objects before the dialog closes.
+        ''' </summary>
+        Private Shared Sub SyncAgentResourceDialogSelections(dgv As System.Windows.Forms.DataGridView,
+                                                             changes As System.Collections.Generic.List(Of AgentResourceFileChange))
+            For i As Integer = 0 To changes.Count - 1
+                Dim markValue As Object = dgv.Rows(i).Cells("colMark").Value
+                changes(i).IsMarked = markValue IsNot Nothing AndAlso System.Convert.ToBoolean(markValue)
+
+                Dim actionValue As Object = dgv.Rows(i).Cells("colAction").Value
+                changes(i).Action = ParseAgentResourceAction(If(actionValue, AgentResourceActionLeaveText).ToString())
+            Next
+        End Sub
+
+        ''' <summary>
+        ''' Applies all marked file operations and creates a single timestamped sibling backup
+        ''' directory for any existing local files that are replaced or deleted.
+        ''' </summary>
+        Private Shared Function ApplyAgentResourceChanges(changes As System.Collections.Generic.List(Of AgentResourceFileChange),
+                                                          localRoot As String) As AgentResourceApplyResult
+            Dim result As New AgentResourceApplyResult()
+
+            For Each change As AgentResourceFileChange In changes
+                If Not change.IsMarked OrElse change.Action = AgentResourceAction.LeaveAsIs Then Continue For
+
+                Try
+                    Dim localPath As String = GetSafeResourceDestinationPath(localRoot, change.RelativePath)
+
+                    Select Case change.Action
+                        Case AgentResourceAction.Update
+                            If change.PackageFile Is Nothing OrElse Not System.IO.File.Exists(change.PackageFile.FullPath) Then
+                                Throw New System.IO.FileNotFoundException("The ZIP source file is not available.", change.RelativePath)
+                            End If
+
+                            If System.IO.File.Exists(localPath) Then
+                                BackupAgentResourceFile(localRoot, localPath, result)
+                            End If
+
+                            Dim localDirectory As String = System.IO.Path.GetDirectoryName(localPath)
+                            If Not String.IsNullOrWhiteSpace(localDirectory) Then
+                                System.IO.Directory.CreateDirectory(localDirectory)
+                            End If
+
+                            System.IO.File.Copy(change.PackageFile.FullPath, localPath, overwrite:=True)
+                            System.IO.File.SetLastWriteTime(localPath, change.PackageFile.LastWriteTime)
+
+                            result.AppliedCount += 1
+                            result.UpdatedCount += 1
+                            LogAgentResourceUpdateEvent("File Updated", change.RelativePath)
+
+                        Case AgentResourceAction.Delete
+                            If System.IO.File.Exists(localPath) Then
+                                BackupAgentResourceFile(localRoot, localPath, result)
+                                System.IO.File.Delete(localPath)
+                                result.AppliedCount += 1
+                                result.DeletedCount += 1
+                                LogAgentResourceUpdateEvent("File Deleted", change.RelativePath)
+                            End If
+                    End Select
+
+                Catch ex As System.Exception
+                    Dim errorText As String = $"{change.RelativePath}: {ex.Message}"
+                    result.Errors.Add(errorText)
+                    LogAgentResourceUpdateEvent("File Error", errorText)
+                End Try
+            Next
+
+            Return result
+        End Function
+
+        ''' <summary>
+        ''' Backs up one existing local file into the run's timestamped backup directory.
+        ''' </summary>
+        Private Shared Sub BackupAgentResourceFile(localRoot As String,
+                                                   localFilePath As String,
+                                                   result As AgentResourceApplyResult)
+            If String.IsNullOrWhiteSpace(result.BackupRoot) Then
+                Dim trimmedLocalRoot As String = localRoot.TrimEnd(System.IO.Path.DirectorySeparatorChar,
+                                                                  System.IO.Path.AltDirectorySeparatorChar)
+                Dim parentDirectory As String = System.IO.Path.GetDirectoryName(trimmedLocalRoot)
+                Dim localDirectoryName As String = New System.IO.DirectoryInfo(trimmedLocalRoot).Name
+
+                If String.IsNullOrWhiteSpace(parentDirectory) Then
+                    parentDirectory = System.IO.Path.GetTempPath()
+                End If
+
+                result.BackupRoot = System.IO.Path.Combine(
+                    parentDirectory,
+                    localDirectoryName & "_backup_" & System.DateTime.Now.ToString("yyyyMMdd_HHmmss_fff"))
+
+                System.IO.Directory.CreateDirectory(result.BackupRoot)
+                LogAgentResourceUpdateEvent("Backup Created", result.BackupRoot)
+            End If
+
+            Dim relativePath As String = GetRelativeResourcePath(localRoot, localFilePath)
+            Dim backupPath As String = GetSafeResourceDestinationPath(result.BackupRoot, relativePath)
+            Dim backupDirectory As String = System.IO.Path.GetDirectoryName(backupPath)
+
+            If Not String.IsNullOrWhiteSpace(backupDirectory) Then
+                System.IO.Directory.CreateDirectory(backupDirectory)
+            End If
+
+            System.IO.File.Copy(localFilePath, backupPath, overwrite:=False)
+            System.IO.File.SetLastWriteTime(backupPath, System.IO.File.GetLastWriteTime(localFilePath))
+        End Sub
+
+        ''' <summary>
+        ''' Returns a path below rootPath and rejects any relative path that would escape the root.
+        ''' </summary>
+        Private Shared Function GetSafeResourceDestinationPath(rootPath As String, relativePath As String) As String
+            Dim normalizedRoot As String = EnsureTrailingDirectorySeparator(System.IO.Path.GetFullPath(rootPath))
+            Dim fullPath As String = System.IO.Path.GetFullPath(System.IO.Path.Combine(rootPath, relativePath))
+
+            If Not fullPath.StartsWith(normalizedRoot, System.StringComparison.OrdinalIgnoreCase) Then
+                Throw New System.IO.InvalidDataException($"Unsafe resource path rejected: {relativePath}")
+            End If
+
+            Return fullPath
+        End Function
+
+        ''' <summary>
+        ''' Returns the normalized path of fullPath relative to rootPath.
+        ''' </summary>
+        Private Shared Function GetRelativeResourcePath(rootPath As String, fullPath As String) As String
+            Dim normalizedRoot As String = EnsureTrailingDirectorySeparator(System.IO.Path.GetFullPath(rootPath))
+            Dim normalizedFullPath As String = System.IO.Path.GetFullPath(fullPath)
+
+            If normalizedFullPath.Equals(normalizedRoot.TrimEnd(System.IO.Path.DirectorySeparatorChar,
+                                                                 System.IO.Path.AltDirectorySeparatorChar),
+                                         System.StringComparison.OrdinalIgnoreCase) Then
+                Return String.Empty
+            End If
+
+            If Not normalizedFullPath.StartsWith(normalizedRoot, System.StringComparison.OrdinalIgnoreCase) Then
+                Throw New System.ArgumentException("The supplied path is outside the specified resource root.", NameOf(fullPath))
+            End If
+
+            Return normalizedFullPath.Substring(normalizedRoot.Length).
+                Replace(System.IO.Path.AltDirectorySeparatorChar, System.IO.Path.DirectorySeparatorChar)
+        End Function
+
+        ''' <summary>
+        ''' Ensures a directory path ends with the platform directory separator.
+        ''' </summary>
+        Private Shared Function EnsureTrailingDirectorySeparator(pathValue As String) As String
+            If String.IsNullOrEmpty(pathValue) Then Return pathValue
+            If pathValue.EndsWith(System.IO.Path.DirectorySeparatorChar.ToString(), System.StringComparison.Ordinal) OrElse
+               pathValue.EndsWith(System.IO.Path.AltDirectorySeparatorChar.ToString(), System.StringComparison.Ordinal) Then
+                Return pathValue
+            End If
+            Return pathValue & System.IO.Path.DirectorySeparatorChar
+        End Function
+
+        Private Shared Function GetAgentResourceChangeDisplayText(changeKind As AgentResourceChangeKind) As String
+            Select Case changeKind
+                Case AgentResourceChangeKind.NewInPackage
+                    Return "New in ZIP"
+                Case AgentResourceChangeKind.LocalOnly
+                    Return "Local only"
+                Case AgentResourceChangeKind.PackageNewer
+                    Return "ZIP newer"
+                Case AgentResourceChangeKind.LocalNewer
+                    Return "Local newer"
+                Case AgentResourceChangeKind.DifferentSameTimestamp
+                    Return "Size differs / same date"
+                Case Else
+                    Return changeKind.ToString()
+            End Select
+        End Function
+
+        Private Shared Function GetAgentResourceActionDisplayText(action As AgentResourceAction) As String
+            Select Case action
+                Case AgentResourceAction.Update
+                    Return AgentResourceActionUpdateText
+                Case AgentResourceAction.Delete
+                    Return AgentResourceActionDeleteText
+                Case Else
+                    Return AgentResourceActionLeaveText
+            End Select
+        End Function
+
+        Private Shared Function ParseAgentResourceAction(value As String) As AgentResourceAction
+            If value.Equals(AgentResourceActionUpdateText, System.StringComparison.OrdinalIgnoreCase) Then
+                Return AgentResourceAction.Update
+            End If
+            If value.Equals(AgentResourceActionDeleteText, System.StringComparison.OrdinalIgnoreCase) Then
+                Return AgentResourceAction.Delete
+            End If
+            Return AgentResourceAction.LeaveAsIs
+        End Function
+
+        Private Shared Function FormatAgentResourceFileDate(fileInfo As AgentResourceFileInfo) As String
+            If fileInfo Is Nothing Then Return "—"
+            Return fileInfo.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss")
+        End Function
+
+        Private Shared Function FormatAgentResourceFileSize(fileInfo As AgentResourceFileInfo) As String
+            If fileInfo Is Nothing Then Return "—"
+            Return fileInfo.Length.ToString("N0", System.Globalization.CultureInfo.CurrentCulture)
+        End Function
+
+        ''' <summary>
+        ''' Writes Agent Resources update activity to the same update log used by the INI updater,
+        ''' but with a separate event prefix.
+        ''' </summary>
+        Private Shared Sub LogAgentResourceUpdateEvent(eventType As String, details As String)
+            Try
+                Dim message As String = $"[Agent Resources Update] [{eventType}]"
+                If Not String.IsNullOrWhiteSpace(details) Then
+                    message &= vbCrLf & "  " & details.Replace(vbCrLf, vbCrLf & "  ")
+                End If
+                UpdateHandler.WriteUpdateLog(message)
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine($"Failed to log Agent Resources update event: {ex.Message}")
+            End Try
+        End Sub
+
+#End Region
+
 
     End Class
 End Namespace

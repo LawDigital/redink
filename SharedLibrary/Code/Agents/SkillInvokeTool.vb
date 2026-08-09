@@ -217,6 +217,25 @@ Namespace Agents
                 "To modify an EXISTING resource, edit the exact 'file' path shown for it (each entry carries its 'origin' = local or central). " &
                 "Do not invent new paths for existing resources, and do not copy a central resource into local_root unless the user asks to fork it."
 
+            If authorActive Then
+                Dim diagPrefix As String = SharedLibrary.SharedMethods.AN9
+                Dim diagnosticsDir As String = ""
+                If Not String.IsNullOrWhiteSpace(localRoot) Then
+                    diagnosticsDir = Path.Combine(localRoot, "diagnostics")
+                End If
+
+                idx("diagnostics_hint") =
+                    "Diagnostics: previous tooling runs are logged under local_root + '\diagnostics\'. " &
+                    "Tooling-loop traces are named '" & diagPrefix & "_Tooling_Log__<stamp>.txt' or, when a top-level " &
+                    "skill was recorded, '" & diagPrefix & "_Tooling_Log__<stamp>__<skill>.txt' (where <stamp> is " &
+                    "yyyyMMdd-HHmmss and <skill> is the sanitized skill name). Sub-agent/skill return payloads use the " &
+                    "matching '" & diagPrefix & "_SubAgent_Returns__<stamp>[__<skill>].txt' names. Do NOT guess an exact " &
+                    "filename: use resource_index.diagnostics_files to get the exact available files, then read the most " &
+                    "recent relevant '" & diagPrefix & "_Tooling_Log__' file for the run you are diagnosing."
+
+                idx("diagnostics_files") = JArray.FromObject(InventoryDiagnosticsDir(diagnosticsDir, diagPrefix & "_"))
+            End If
+
             Return idx
         End Function
 
@@ -237,6 +256,32 @@ Namespace Agents
                 Next
             Catch
             End Try
+            Return list
+        End Function
+
+        Private Shared Function InventoryDiagnosticsDir(dir As String, prefix As String) As List(Of Object)
+            Dim list As New List(Of Object)
+            If String.IsNullOrWhiteSpace(dir) OrElse Not Directory.Exists(dir) Then Return list
+
+            Try
+                Dim files As New List(Of FileInfo)(
+                    New DirectoryInfo(dir).EnumerateFiles(prefix & "*.txt", SearchOption.TopDirectoryOnly))
+
+                files.Sort(Function(a, b) b.LastWriteTimeUtc.CompareTo(a.LastWriteTimeUtc))
+
+                For Each fi In files
+                    Try
+                        list.Add(New With {
+                            Key .path = fi.Name,
+                            Key .size = fi.Length,
+                            Key .last_write_utc = fi.LastWriteTimeUtc.ToString("yyyy-MM-ddTHH:mm:ssZ")
+                        })
+                    Catch
+                    End Try
+                Next
+            Catch
+            End Try
+
             Return list
         End Function
 

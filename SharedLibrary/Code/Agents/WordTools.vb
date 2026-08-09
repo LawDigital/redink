@@ -150,7 +150,17 @@ Namespace Agents
             Dim ignoreCase As Boolean = GetBool(args, "ignore_case", True)
             Dim maxHits As Integer = System.Math.Min(System.Math.Max(GetInt(args, "max_hits", 50), 1), 500)
 
-            Using doc As WordprocessingDocument = WordprocessingDocument.Open(p, isEditable:=False)
+            ' Fast-fail read: opening the package directly can block for minutes when the file is
+            ' open/locked in Word, on a slow network share, or an un-hydrated cloud placeholder.
+            ' Copy the bytes with shared read access under a bounded wait, then open from memory so
+            ' a stalled file surfaces a clear error instead of hanging the agent loop.
+            Dim documentBytes As Byte() = Nothing
+            Dim readErrorMessage As String = Nothing
+            If Not TryReadAllBytesFastFail(p, documentBytes, readErrorMessage) Then
+                Return Err_("file_unavailable", readErrorMessage)
+            End If
+
+            Using doc As WordprocessingDocument = WordprocessingDocument.Open(New MemoryStream(documentBytes, writable:=False), isEditable:=False)
                 Dim paragraphs As List(Of ParagraphRow) = ExtractParagraphs(doc)
                 Dim hits As New List(Of Object)()
                 Dim cmp As StringComparison = If(ignoreCase, StringComparison.OrdinalIgnoreCase, StringComparison.Ordinal)
@@ -1926,6 +1936,53 @@ Namespace Agents
             }
         End Function
 
+        ' Reads a file's bytes with shared read/write access under a bounded wait so a document
+        ' that is open/locked in Word, on a slow/unavailable network share, or an un-hydrated
+        ' cloud placeholder fails fast with a clear message instead of blocking for minutes.
+        Private Shared Function TryReadAllBytesFastFail(path As String,
+                                                        ByRef bytes As Byte(),
+                                                        ByRef errorMessage As String) As Boolean
+            bytes = Nothing
+            errorMessage = Nothing
+
+            Try
+                Dim attrs As System.IO.FileAttributes = File.GetAttributes(path)
+                If (attrs And System.IO.FileAttributes.Offline) <> 0 Then
+                    errorMessage = "The document is not available locally (offline/cloud placeholder). Open or download it first, then retry."
+                    Return False
+                End If
+            Catch
+            End Try
+
+            ' Copy ByRef parameter to a local before using it inside the lambda.
+            Dim localPath As String = path
+            Dim readTask As System.Threading.Tasks.Task(Of Byte()) =
+                System.Threading.Tasks.Task.Run(
+                    Function() As Byte()
+                        Using fs As New FileStream(localPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
+                            Using buffer As New MemoryStream()
+                                fs.CopyTo(buffer)
+                                Return buffer.ToArray()
+                            End Using
+                        End Using
+                    End Function)
+
+            If Not readTask.Wait(TimeSpan.FromSeconds(15)) Then
+                errorMessage = "Reading the document timed out (it may be locked by another application or stored on a slow/unavailable location)."
+                Return False
+            End If
+
+            If readTask.IsFaulted Then
+                Dim ex As System.Exception = readTask.Exception
+                If ex IsNot Nothing AndAlso ex.InnerException IsNot Nothing Then ex = ex.InnerException
+                errorMessage = "Could not read the document: " & If(ex Is Nothing, "unknown error", ex.Message)
+                Return False
+            End If
+
+            bytes = readTask.Result
+            Return True
+        End Function
+
         Private Shared Function Err_(code As String, message As String) As String
             Return JsonConvert.SerializeObject(New With {
                 Key .error = code,
@@ -2018,6 +2075,7 @@ Namespace Agents
                 .ToolPriority = 882,
                 .ToolErrorHandling = "skip",
                 .ModelDescription = "Word (write, no markup)",
+                .CapabilityTags = "docx_edit",
                 .ToolDefinition = "{""name"":""" & ToolWrite & """,""description"":""Modify text in a .docx WITHOUT tracked changes, in the main body AND in footnotes and endnotes, preserving fields, images, comments and run formatting. Ops: replace | insert_before | insert_after | append (append targets the main body) | delete_paragraph. 'find' must not span a paragraph break; to merge two paragraphs, replace the first and delete_paragraph the second. Pass multiple edits at once via 'tasks'."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string""},""op"":{""type"":""string"",""enum"":[""replace"",""insert_before"",""insert_after"",""append"",""delete_paragraph""]},""find"":{""type"":""string""},""text"":{""type"":""string""},""only_first"":{""type"":""boolean"",""description"":""Default true.""},""tasks"":{""type"":""array"",""description"":""Batch of edits applied in order; each may match text produced by earlier tasks."",""items"":{""type"":""object"",""properties"":{""op"":{""type"":""string"",""enum"":[""replace"",""insert_before"",""insert_after"",""append"",""delete_paragraph""]},""find"":{""type"":""string""},""text"":{""type"":""string""},""only_first"":{""type"":""boolean""}}}}},""required"":[""path""]}}",
                 .ToolInstructionsPrompt = ToolWrite & ": Edit a .docx without revision marks. Same behavior as word_markup but without tracked changes. Batch related edits in one call via 'tasks'. The result 'status' may be complete, partial, or none: partial/none is NOT a block or failure. When status is partial/none, re-read the document to get the CURRENT text and retry ONLY the failed tasks[].find values (see tasks[].suggestions); then report completion normally. " &
                     "Prefer the Outlook and Autopilot tools (like process_word_document) when they can accomplish the task; only fall back to word_* tools when those tools are not suitable, or when a skill or the user explicitly asks to use word_* tools."
@@ -2031,6 +2089,7 @@ Namespace Agents
                 .ToolPriority = 883,
                 .ToolErrorHandling = "skip",
                 .ModelDescription = "Word (markup / tracked changes)",
+                .CapabilityTags = "docx_edit",
                 .ToolDefinition = "{""name"":""" & ToolMarkup & """,""description"":""Modify text in a .docx using tracked changes (Word revision marks), in the main body AND in footnotes and endnotes, preserving fields, images, comments, existing tracked changes and run formatting. Only inserted/deleted words are marked (word-level diff; large rewrites collapse to a single change). 'find' must not span a paragraph break; to merge two paragraphs, replace the first and delete_paragraph the second. Pass multiple edits at once via 'tasks'."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string""},""op"":{""type"":""string"",""enum"":[""replace"",""insert_before"",""insert_after"",""append"",""delete_paragraph""]},""find"":{""type"":""string""},""text"":{""type"":""string""},""author"":{""type"":""string""},""only_first"":{""type"":""boolean""},""tasks"":{""type"":""array"",""description"":""Batch of edits applied in order; each may match text produced by earlier tasks."",""items"":{""type"":""object"",""properties"":{""op"":{""type"":""string"",""enum"":[""replace"",""insert_before"",""insert_after"",""append"",""delete_paragraph""]},""find"":{""type"":""string""},""text"":{""type"":""string""},""only_first"":{""type"":""boolean""}}}}},""required"":[""path""]}}",
                 .ToolInstructionsPrompt = ToolMarkup & ": Edit a .docx with revision marks (tracked changes). Batch related edits in one call via 'tasks'. The result 'status' may be complete, partial, or none: partial/none is NOT a block or failure. When status is partial/none, re-read the document to get the CURRENT text and retry ONLY the failed tasks[].find values (see tasks[].suggestions); then report completion normally. " &
                 "Prefer the Outlook and Autopilot tools when they can accomplish the task; only fall back to word_* tools when those tools are not suitable, or when a skill or the user explicitly asks to use word_* tools."
@@ -2044,6 +2103,7 @@ Namespace Agents
                 .ToolPriority = 884,
                 .ToolErrorHandling = "skip",
                 .ModelDescription = "Word (comment add)",
+                .CapabilityTags = "docx_edit",
                 .ToolDefinition = "{""name"":""" & ToolCommentAdd & """,""description"":""Attach Word comment(s) to matched text, preserving footnotes, fields, images and formatting. 'find' uses format/whitespace-insensitive matching within a single paragraph. Add many comments at once via 'tasks'. Result reports status (complete/partial/none) with per-task applied flag and suggestions for anchors that were not found."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string""},""find"":{""type"":""string""},""text"":{""type"":""string""},""author"":{""type"":""string""},""initials"":{""type"":""string""},""tasks"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{""find"":{""type"":""string""},""text"":{""type"":""string""},""author"":{""type"":""string""},""initials"":{""type"":""string""}}}}},""required"":[""path""]}}",
                 .ToolInstructionsPrompt = ToolCommentAdd & ": Add Word bubble comment(s) to matched span(s). Add many at once via 'tasks'. The result 'status' may be complete, partial, or none: partial/none is NOT a block or failure. When status is partial/none, re-read the document for the CURRENT text and retry ONLY the failed tasks[].find values (see tasks[].suggestions); then report completion normally. " &
                                 "Prefer the Outlook and Autopilot tools when they can accomplish the task; only fall back to word_* tools when those tools are not suitable, or when a skill or the user explicitly asks to use word_* tools."

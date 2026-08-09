@@ -871,6 +871,30 @@ Namespace My
                 Me("RestrictedModelAccessCode") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property SkillAuthorModeEnabled() As Boolean
+            Get
+                Return CType(Me("SkillAuthorModeEnabled"),Boolean)
+            End Get
+            Set
+                Me("SkillAuthorModeEnabled") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property SkillAuthorCentralWrites() As Boolean
+            Get
+                Return CType(Me("SkillAuthorCentralWrites"),Boolean)
+            End Get
+            Set
+                Me("SkillAuthorCentralWrites") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

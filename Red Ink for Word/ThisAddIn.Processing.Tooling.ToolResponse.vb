@@ -82,6 +82,12 @@ Partial Public Class ThisAddIn
         Public Property NormalizedCallSignature As String
         Public Property WasDuplicateReplay As Boolean
 
+        ''' <summary>True when a repair-loop advisor determined the failure is terminal (budget exhausted or non-recoverable).</summary>
+        Public Property RepairLoopTerminal As Boolean
+
+        ''' <summary>Human-readable reason for <see cref="RepairLoopTerminal"/>, surfaced to abort/finalization handling.</summary>
+        Public Property RepairLoopTerminalReason As String
+
         ''' <summary>
         ''' Initializes a new tool response instance with default success state.
         ''' </summary>
@@ -92,8 +98,98 @@ Partial Public Class ThisAddIn
     End Class
 
 
+    ''' <summary>
+    ''' Wraps <see cref="BuildToolResponsesForModel"/> with a payload-size budget. The first
+    ''' pass keeps the most recent results fully visible. Only when the overall payload grows
+    ''' beyond the budget does it progressively shrink the recent-full window and then
+    ''' reference-compact older medium-sized results using lower thresholds. Everything moved
+    ''' this way stays fully retrievable via context_expand, so compaction is lossless. The
+    ''' model can also voluntarily tighten this via the context_compact tool.
+    ''' Capability-driven: no tool-name or content-type heuristics.
+    ''' </summary>
+    Public Function BuildToolResponsesForModelBudgeted(responses As List(Of ToolResponse),
+                                                       toolingModel As ModelConfig,
+                                                       Optional compactForSubAgent As Boolean = False) As String
+        Dim keepRecentFullCount As Integer = 2
+
+        Dim requestedKeep As Integer
+        If SharedLibrary.Agents.ToolResultStore.TryGetRequestedKeepRecent(
+                SharedLibrary.Agents.WorkflowContinuity.CurrentWorkflowId, requestedKeep) Then
+            keepRecentFullCount = Math.Min(keepRecentFullCount, requestedKeep)
+        End If
+
+        Dim payload As String = BuildToolResponsesForModel(
+            responses,
+            toolingModel,
+            compactForSubAgent:=compactForSubAgent,
+            compactStaleLargeResponses:=True,
+            keepRecentFullCount:=keepRecentFullCount)
+
+        Dim budget As Integer =
+            If(ThisAddIn.INI_ToolResponsePayloadBudgetChars > 0,
+               ThisAddIn.INI_ToolResponsePayloadBudgetChars,
+               SharedLibrary.Agents.ToolingConstants.ToolResponsePayloadBudgetChars)
+        Dim mediumThreshold As Integer =
+            If(ThisAddIn.INI_BudgetMediumCompactionThresholdChars > 0,
+               ThisAddIn.INI_BudgetMediumCompactionThresholdChars,
+               SharedLibrary.Agents.ToolingConstants.BudgetMediumCompactionThresholdChars)
+        Dim aggressiveThreshold As Integer =
+            If(ThisAddIn.INI_BudgetAggressiveCompactionThresholdChars > 0,
+               ThisAddIn.INI_BudgetAggressiveCompactionThresholdChars,
+               SharedLibrary.Agents.ToolingConstants.BudgetAggressiveCompactionThresholdChars)
+        Dim previewChars As Integer =
+            If(ThisAddIn.INI_BudgetCompactionPreviewChars > 0,
+               ThisAddIn.INI_BudgetCompactionPreviewChars,
+               SharedLibrary.Agents.ToolingConstants.BudgetCompactionPreviewChars)
+
+        If budget <= 0 OrElse String.IsNullOrEmpty(payload) OrElse payload.Length <= budget Then
+            Return payload
+        End If
+
+        ' Stage 1: shrink the recent-full window (down to 0). Lossless.
+        While payload.Length > budget AndAlso keepRecentFullCount > 0
+            keepRecentFullCount -= 1
+            payload = BuildToolResponsesForModel(
+                responses,
+                toolingModel,
+                compactForSubAgent:=compactForSubAgent,
+                compactStaleLargeResponses:=True,
+                keepRecentFullCount:=keepRecentFullCount)
+        End While
+
+        If payload.Length <= budget Then
+            Return payload
+        End If
+
+        ' Stage 2: reference-compact older medium-sized results using progressively
+        ' lower thresholds until the payload fits or the floor is reached.
+        For Each mediumThresholdChars As Integer In New Integer() {mediumThreshold, aggressiveThreshold}
+            payload = BuildToolResponsesForModel(
+                responses,
+                toolingModel,
+                compactForSubAgent:=compactForSubAgent,
+                compactStaleLargeResponses:=True,
+                keepRecentFullCount:=0,
+                staleCompactionThresholdChars:=mediumThresholdChars,
+                staleCompactionPreviewChars:=previewChars)
+            If payload.Length <= budget Then
+                Exit For
+            End If
+        Next
+
+        If payload.Length > budget Then
+            ToolingFileLogger.LogWarn(
+                "Tool response payload still exceeds budget after progressive compaction.",
+                details:=$"payloadChars={payload.Length}; budgetChars={budget}")
+        End If
+
+        Return payload
+    End Function
+
     Private Function BuildToolResponseContentForModel(resp As ToolResponse,
-                                                  Optional compactForSubAgent As Boolean = False) As String
+                                                  Optional compactForSubAgent As Boolean = False,
+                                                  Optional overrideThresholdChars As Integer = -1,
+                                                  Optional overridePreviewChars As Integer = -1) As String
         If resp Is Nothing Then Return ""
 
         Dim rawContent As String
@@ -110,34 +206,148 @@ Partial Public Class ThisAddIn
             Return rawContent
         End If
 
-        Return CompactToolResponseContentForSubAgent(resp, rawContent)
+        Return CompactToolResponseContentForSubAgent(resp, rawContent, overrideThresholdChars, overridePreviewChars)
     End Function
 
-    Private Function CompactToolResponseContentForSubAgent(resp As ToolResponse, rawContent As String) As String
+    ''' <summary>
+    ''' Returns True when a large tool response must be replayed in full rather than
+    ''' compacted, because truncation could drop deliverable/M365 reference fields
+    ''' (path, saved_path, output_reference, memory_key, reference) that downstream
+    ''' logic relies on. Capability-driven: no tool-name-specific heuristics.
+    ''' </summary>
+    Private Function MustPreserveFullResponseForReplay(resp As ToolResponse, rawContent As String) As Boolean
+        If resp Is Nothing Then Return False
+
+        Dim toolName As String = If(resp.ToolName, "").Trim()
+        If toolName <> "" Then
+            Try
+                Dim deliverableTools = SharedLibrary.Agents.HostToolRegistration.GetDeliverableCapableToolNames(
+                    SharedLibrary.Agents.ToolingHostKind.Word)
+                If deliverableTools IsNot Nothing AndAlso deliverableTools.Contains(toolName) Then
+                    Return True
+                End If
+            Catch
+            End Try
+        End If
+
+        Dim raw As String = If(rawContent, "")
+        If raw <> "" Then
+            Try
+                If Not String.IsNullOrWhiteSpace(
+                    SharedLibrary.Agents.WorkflowContinuity.ExtractStructuredResultReference(raw)) Then
+                    Return True
+                End If
+
+                If Not String.IsNullOrWhiteSpace(
+                    SharedLibrary.Agents.WorkflowContinuity.ExtractOutputReference(raw)) Then
+                    Return True
+                End If
+            Catch
+            End Try
+        End If
+
+        Return False
+    End Function
+
+    ''' <summary>
+    ''' When a stale response is a previously expanded window (carries a result_ref plus a
+    ''' content_window), returns a compact stub that keeps the navigation pointer but drops
+    ''' the window body. The full result remains retrievable via context_expand, so this is
+    ''' lossless. Returns Nothing when the response is not a windowed reference.
+    ''' </summary>
+    Private Function TryBuildReferencedWindowStub(rawContent As String) As String
+        Dim raw As String = If(rawContent, "")
+        If raw = "" Then Return Nothing
+
+        Dim obj As JObject
+        Try
+            obj = JObject.Parse(raw)
+        Catch
+            Return Nothing
+        End Try
+
+        Dim refToken = obj("result_ref")
+        Dim windowToken = obj("content_window")
+        If refToken Is Nothing OrElse windowToken Is Nothing Then Return Nothing
+
+        Dim refValue As String = refToken.ToString()
+        If String.IsNullOrWhiteSpace(refValue) Then Return Nothing
+
+        Dim windowLength As Integer = windowToken.ToString().Length
+        If windowLength <= 1024 Then Return Nothing
+
+        Dim toolValue As String = If(obj("tool") IsNot Nothing, obj("tool").ToString(), "")
+
+        Dim stub As New JObject(
+            New JProperty("ok", True),
+            New JProperty("tool", toolValue),
+            New JProperty("result_ref", refValue),
+            New JProperty("start_char", obj("start_char")),
+            New JProperty("returned_chars", obj("returned_chars")),
+            New JProperty("total_chars", obj("total_chars")),
+            New JProperty("next_offset", obj("next_offset")),
+            New JProperty("truncated", obj("truncated")),
+            New JProperty("omitted_window_chars", windowLength),
+            New JProperty("note", "A previously expanded window was omitted from context to save space. Call context_expand with this result_ref and the offsets to re-read it."))
+
+        Return stub.ToString(Formatting.None)
+    End Function
+
+    Private Function CompactToolResponseContentForSubAgent(resp As ToolResponse, rawContent As String,
+                                                           Optional overrideThresholdChars As Integer = -1,
+                                                           Optional overridePreviewChars As Integer = -1) As String
         If resp Is Nothing Then Return If(rawContent, "")
 
         Dim raw As String = If(rawContent, "")
-        If raw.Length <= SubAgentLargeToolResponseThresholdChars Then
+
+        Dim thresholdChars As Integer =
+            If(overrideThresholdChars > 0, overrideThresholdChars, SubAgentLargeToolResponseThresholdChars)
+        Dim previewChars As Integer =
+            If(overridePreviewChars > 0, overridePreviewChars, SubAgentLargeToolResponseExcerptChars)
+
+        Dim windowStub As String = TryBuildReferencedWindowStub(raw)
+        If windowStub IsNot Nothing Then
+            resp.ModelReplayContent = windowStub
+            resp.ModelReplaySummary = BuildToolReplaySummary(resp)
+            resp.WasCompactedForModelReplay = True
+            Return windowStub
+        End If
+
+        If raw.Length <= thresholdChars Then
             resp.ModelReplayContent = raw
             resp.ModelReplaySummary = BuildToolReplaySummary(resp)
             resp.WasCompactedForModelReplay = False
             Return raw
         End If
 
-        Dim excerptLength As Integer = Math.Min(SubAgentLargeToolResponseExcerptChars, raw.Length)
+        If MustPreserveFullResponseForReplay(resp, raw) Then
+            resp.ModelReplayContent = raw
+            resp.ModelReplaySummary = BuildToolReplaySummary(resp)
+            resp.WasCompactedForModelReplay = False
+            Return raw
+        End If
+
+        Dim excerptLength As Integer = Math.Min(previewChars, raw.Length)
         Dim excerpt As String = raw.Substring(0, excerptLength)
         Dim summary As String = BuildToolReplaySummary(resp)
+
+        Dim stored As SharedLibrary.Agents.ToolResultStore.StoredResult =
+            SharedLibrary.Agents.ToolResultStore.Put(
+                SharedLibrary.Agents.WorkflowContinuity.CurrentWorkflowId,
+                If(resp.ToolName, ""),
+                raw)
 
         Dim compactObj As New JObject(
         New JProperty("ok", resp.Success),
         New JProperty("tool", If(resp.ToolName, "")),
         New JProperty("summary", summary),
-        New JProperty("content_excerpt", excerpt),
+        New JProperty("result_ref", stored.Ref),
+        New JProperty("preview", excerpt),
         New JProperty("total_chars", raw.Length),
         New JProperty("returned_chars", excerptLength),
         New JProperty("truncated", True),
         New JProperty("next_offset", excerptLength),
-        New JProperty("continuation", "If more content is needed, call the same tool again with a smaller window using max_chars and start_char/offset."))
+        New JProperty("continuation", "The full result is stored. To read more, call context_expand with this result_ref, using start_char and max_chars to page through the full content."))
 
         resp.ModelReplayContent = compactObj.ToString(Formatting.None)
         resp.ModelReplaySummary = summary

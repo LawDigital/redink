@@ -89,7 +89,10 @@ Namespace Agents
                 .ModelDescription = "Secure Python Execution" & displaySuffix,
                 .Tool = True,
                 .ToolPriority = toolPriority,
-                .ToolErrorHandling = "skip"
+                .ToolErrorHandling = "skip",
+                .PrefersSingleInvocation = True,
+                .IsFallbackStrategy = True,
+                .CapabilityTags = "docx_edit,artifact_generation"
             }
         End Function
 

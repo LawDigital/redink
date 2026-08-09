@@ -1139,6 +1139,8 @@ Partial Public Class ThisAddIn
 
         AddonInstruct += NoFormulasInstruct.Replace("; add", ",")
 
+        GoTo SkipPromptWin
+
         Dim PromptLibInstruct As String = ""
         If INI_PromptLib Then
             PromptLibInstruct = " or press 'OK' or '/' for the prompt library"
@@ -1163,6 +1165,246 @@ Partial Public Class ThisAddIn
             OtherPrompt = Trim(SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute {PromptLibInstruct} (the result will be shown to you before inserting anything into your worksheet); {PaneInstruct}{BatchInstruct}{PureInstruct}{ExtInstruct}{AddonInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle (using " & If(UseSecondAPI, INI_Model_2, INI_Model) & ")", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons, _context))
             DoRange = True
         End If
+
+SkipPromptWin:
+
+        ' =============================================================
+        ' FREESTYLE PROMPT UI
+        ' =============================================================
+
+        Dim promptOptions As New SLib.FreestylePromptOptions() With {
+            .Title = $"{AN} Freestyle",
+            .Heading = "What would you like Red Ink to do?",
+            .ModeCaption = "Processing",
+            .ModelText = If(UseSecondAPI, INI_Model_2, INI_Model),
+            .ContextStatusText = If(NoSelectedCells, "No cells selected", "The current Excel selection will be used as context"),
+            .LastPrompt = My.Settings.LastPrompt,
+            .PromptLibraryEnabled = INI_PromptLib,
+            .Context = _context
+        }
+
+        ' =============================================================
+        ' PROCESSING / OUTPUT PREFIXES
+        '
+        ' Covers:
+        ' CellByCellPrefix
+        ' CellByCellPrefix2
+        ' TextPrefix
+        ' TextPrefix2
+        ' BubblesPrefix
+        ' PanePrefix
+        ' BatchPrefix
+        ' PurePrefix
+        ' =============================================================
+
+        Dim modeDefault As New SLib.FreestylePromptMode() With {
+            .Id = "default",
+            .Text = "Configured default",
+            .Prefix = System.String.Empty,
+            .ManualSyntax = DefaultPrefix,
+            .IsDefault = True
+        }
+
+        promptOptions.Modes.Add(modeDefault)
+
+
+        Dim modeCellByCell As New SLib.FreestylePromptMode() With {
+            .Id = "cell-by-cell",
+            .Text = "Cell by cell",
+            .Prefix = CellByCellPrefix,
+            .ManualSyntax = CellByCellPrefix & " / " & CellByCellPrefix2,
+            .IsAvailable = Not NoSelectedCells,
+            .UnavailableReason = "Cell-by-cell processing requires a selected Excel range."
+        }
+
+        modeCellByCell.Prefixes.Add(CellByCellPrefix)
+        modeCellByCell.Prefixes.Add(CellByCellPrefix2)
+
+        promptOptions.Modes.Add(modeCellByCell)
+
+
+        Dim modeTextOnly As New SLib.FreestylePromptMode() With {
+            .Id = "text-only",
+            .Text = "Text cells only",
+            .Prefix = TextPrefix,
+            .ManualSyntax = TextPrefix & " / " & TextPrefix2,
+            .IsAvailable = Not NoSelectedCells,
+            .UnavailableReason = "Text-cell processing requires a selected Excel range."
+        }
+
+        modeTextOnly.Prefixes.Add(TextPrefix)
+        modeTextOnly.Prefixes.Add(TextPrefix2)
+
+        promptOptions.Modes.Add(modeTextOnly)
+
+
+        Dim modeComments As New SLib.FreestylePromptMode() With {
+            .Id = "comments",
+            .Text = "Comments only",
+            .Prefix = BubblesPrefix,
+            .ManualSyntax = BubblesPrefix,
+            .IsAvailable = Not NoSelectedCells,
+            .UnavailableReason = "Comment output requires a selected Excel range."
+        }
+
+        modeComments.Prefixes.Add(BubblesPrefix)
+
+        promptOptions.Modes.Add(modeComments)
+
+
+        Dim modePane As New SLib.FreestylePromptMode() With {
+            .Id = "pane",
+            .Text = "Side pane",
+            .Prefix = PanePrefix,
+            .ManualSyntax = PanePrefix
+        }
+
+        modePane.Prefixes.Add(PanePrefix)
+
+        promptOptions.Modes.Add(modePane)
+
+
+        Dim modeBatch As New SLib.FreestylePromptMode() With {
+            .Id = "batch",
+            .Text = "Batch files",
+            .Prefix = BatchPrefix,
+            .ManualSyntax = BatchPrefix
+        }
+
+        modeBatch.Prefixes.Add(BatchPrefix)
+
+        promptOptions.Modes.Add(modeBatch)
+
+
+        Dim modePure As New SLib.FreestylePromptMode() With {
+            .Id = "pure",
+            .Text = "Direct prompt",
+            .Prefix = PurePrefix,
+            .ManualSyntax = PurePrefix
+        }
+
+        modePure.Prefixes.Add(PurePrefix)
+
+        promptOptions.Modes.Add(modePure)
+
+        ' =============================================================
+        ' ADD CONTEXT
+        '
+        ' Covers:
+        ' ExtTrigger
+        ' ExtTriggerFixed
+        ' ExtDirTrigger
+        ' ExtWSTrigger
+        ' ObjectTrigger
+        ' ObjectTrigger2
+        ' =============================================================
+
+        promptOptions.InsertOptions.Add(
+            New SLib.FreestylePromptInsertOption() With {
+                .Id = "file",
+                .Text = "File",
+                .Description = "Select and include the text of a document or file (" & ExtTrigger & ").",
+                .InsertText = ExtTrigger
+            })
+
+        If Not System.String.IsNullOrWhiteSpace(ExtTriggerFixed) AndAlso ExtTriggerFixed.IndexOf("[path]", System.StringComparison.OrdinalIgnoreCase) >= 0 Then
+
+            promptOptions.InsertOptions.Add(
+                New SLib.FreestylePromptInsertOption() With {
+                    .Id = "file-path",
+                    .Text = "File path",
+                    .Description = "Enter a specific file path and insert the completed path command into the prompt.",
+                    .RequiresValue = True,
+                    .ValuePrompt = "Enter the full path of the file to include:",
+                    .ValueTitle = $"{AN} Freestyle - File path",
+                    .ValueTemplate = ExtTriggerFixed,
+                    .ValuePlaceholder = "[path]"
+                })
+
+        End If
+
+        promptOptions.InsertOptions.Add(
+            New SLib.FreestylePromptInsertOption() With {
+                .Id = "folder",
+                .Text = "Folder",
+                .Description = "Select and include files from a directory (" & ExtDirTrigger & ").",
+                .InsertText = ExtDirTrigger
+            })
+
+        promptOptions.InsertOptions.Add(
+            New SLib.FreestylePromptInsertOption() With {
+                .Id = "worksheet",
+                .Text = "Other worksheets",
+                .Description = "Include one or more other open worksheets (" & ExtWSTrigger & ").",
+                .InsertText = ExtWSTrigger
+            })
+
+        If DoFileObject Then
+
+            promptOptions.InsertOptions.Add(
+                New SLib.FreestylePromptInsertOption() With {
+                    .Id = "file-object",
+                    .Text = "File object",
+                    .Description = "Attach a file as an LLM object (" & ObjectTrigger & ").",
+                    .InsertText = ObjectTrigger
+                })
+
+            promptOptions.InsertOptions.Add(
+                New SLib.FreestylePromptInsertOption() With {
+                    .Id = "clipboard-object",
+                    .Text = "Clipboard object",
+                    .Description = "Use the clipboard as an LLM object (" & ObjectTrigger2 & ").",
+                    .InsertText = ObjectTrigger2
+                })
+
+        End If
+
+        ' =============================================================
+        ' MORE OPTIONS
+        '
+        ' Covers:
+        ' ColorTrigger
+        ' NoFormulasTrigger
+        ' =============================================================
+
+        Dim processingSection As New SLib.FreestylePromptSection() With {
+            .Id = "processing",
+            .Caption = "Processing"
+        }
+
+        processingSection.Options.Add(
+            New SLib.FreestylePromptToggleOption() With {
+                .Id = "colour-codes",
+                .Text = "Check cell colours",
+                .Trigger = ColorTrigger,
+                .ManualSyntax = ColorTrigger,
+                .Description = "Include cell colour information when processing the selection."
+            })
+
+        processingSection.Options.Add(
+            New SLib.FreestylePromptToggleOption() With {
+                .Id = "no-formulas",
+                .Text = "Ignore formulas",
+                .Trigger = NoFormulasTrigger,
+                .ManualSyntax = NoFormulasTrigger,
+                .Description = "Do not process formulas in cells."
+            })
+
+        promptOptions.Sections.Add(processingSection)
+
+        ' =============================================================
+        ' SHOW
+        ' =============================================================
+
+        Dim promptResult As SLib.FreestylePromptResult = SLib.ShowFreestylePromptForm(promptOptions)
+
+        If promptResult Is Nothing OrElse Not promptResult.Accepted Then
+            Return False
+        End If
+
+        OtherPrompt = SLib.ComposeFreestylePrompt(promptResult).Trim()
+
+
         If String.IsNullOrEmpty(OtherPrompt) And OtherPrompt <> "ESC" And INI_PromptLib Then
             Dim promptlibresult As (String, Boolean, Boolean, Boolean)
             promptlibresult = ShowPromptSelector(INI_PromptLibPath, INI_PromptLibPathLocal, Nothing, Nothing)

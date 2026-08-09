@@ -2043,6 +2043,14 @@ Namespace SharedLibrary
                     Return context.INI_ToolingDryRun.ToString()
                 Case "ToolingMaximumIterations"
                     Return context.INI_ToolingMaximumIterations.ToString()
+                Case "ToolResponsePayloadBudgetChars"
+                    Return context.INI_ToolResponsePayloadBudgetChars.ToString()
+                Case "BudgetMediumCompactionThresholdChars"
+                    Return context.INI_BudgetMediumCompactionThresholdChars.ToString()
+                Case "BudgetAggressiveCompactionThresholdChars"
+                    Return context.INI_BudgetAggressiveCompactionThresholdChars.ToString()
+                Case "BudgetCompactionPreviewChars"
+                    Return context.INI_BudgetCompactionPreviewChars.ToString()
                 Case "UpdateIni"
                     Return context.INI_UpdateIni.ToString()
                 Case "UpdateIniAllowRemote"
@@ -2333,6 +2341,14 @@ Namespace SharedLibrary
                     context.INI_M365TenantId = value
                 Case "M365Scopes"
                     context.INI_M365Scopes = value
+                Case "ToolResponsePayloadBudgetChars"
+                    context.INI_ToolResponsePayloadBudgetChars = Integer.Parse(value)
+                Case "BudgetMediumCompactionThresholdChars"
+                    context.INI_BudgetMediumCompactionThresholdChars = Integer.Parse(value)
+                Case "BudgetAggressiveCompactionThresholdChars"
+                    context.INI_BudgetAggressiveCompactionThresholdChars = Integer.Parse(value)
+                Case "BudgetCompactionPreviewChars"
+                    context.INI_BudgetCompactionPreviewChars = Integer.Parse(value)
                 Case "ISearch"
                     context.INI_ISearch = Boolean.Parse(value)
                 Case "ISearch_Approve"
@@ -2922,6 +2938,10 @@ Namespace SharedLibrary
                     {"ToolingLogWindow", context.INI_ToolingLogWindow.ToString()},
                     {"ToolingDryRun", context.INI_ToolingDryRun.ToString()},
                     {"ToolingMaximumIterations", context.INI_ToolingMaximumIterations.ToString()},
+                    {"ToolResponsePayloadBudgetChars", context.INI_ToolResponsePayloadBudgetChars.ToString()},
+                    {"BudgetMediumCompactionThresholdChars", context.INI_BudgetMediumCompactionThresholdChars.ToString()},
+                    {"BudgetAggressiveCompactionThresholdChars", context.INI_BudgetAggressiveCompactionThresholdChars.ToString()},
+                    {"BudgetCompactionPreviewChars", context.INI_BudgetCompactionPreviewChars.ToString()},
                     {"UpdateIni", context.INI_UpdateIni.ToString()},
                     {"UpdateIniAllowRemote", context.INI_UpdateIniAllowRemote.ToString()},
                     {"UpdateIniNoSignature", context.INI_UpdateIniNoSignature.ToString()},
@@ -4447,6 +4467,10 @@ Namespace SharedLibrary
             variableValues.Add("ToolingLogWindow", context.INI_ToolingLogWindow)
             variableValues.Add("ToolingDryRun", context.INI_ToolingDryRun)
             variableValues.Add("ToolingMaximumIterations", context.INI_ToolingMaximumIterations)
+            variableValues.Add("ToolResponsePayloadBudgetChars", context.INI_ToolResponsePayloadBudgetChars)
+            variableValues.Add("BudgetMediumCompactionThresholdChars", context.INI_BudgetMediumCompactionThresholdChars)
+            variableValues.Add("BudgetAggressiveCompactionThresholdChars", context.INI_BudgetAggressiveCompactionThresholdChars)
+            variableValues.Add("BudgetCompactionPreviewChars", context.INI_BudgetCompactionPreviewChars)
             variableValues.Add("UpdateIni", context.INI_UpdateIni)
             variableValues.Add("UpdateIniAllowRemote", context.INI_UpdateIniAllowRemote)
             variableValues.Add("UpdateIniNoSignature", context.INI_UpdateIniNoSignature)
@@ -4739,6 +4763,10 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("ToolingLogWindow") Then context.INI_ToolingLogWindow = CBool(updatedValues("ToolingLogWindow"))
                 If updatedValues.ContainsKey("ToolingDryRun") Then context.INI_ToolingDryRun = CBool(updatedValues("ToolingDryRun"))
                 If updatedValues.ContainsKey("ToolingMaximumIterations") Then context.INI_ToolingMaximumIterations = CInt(updatedValues("ToolingMaximumIterations"))
+                If updatedValues.ContainsKey("ToolResponsePayloadBudgetChars") Then context.INI_ToolResponsePayloadBudgetChars = CInt(updatedValues("ToolResponsePayloadBudgetChars"))
+                If updatedValues.ContainsKey("BudgetMediumCompactionThresholdChars") Then context.INI_BudgetMediumCompactionThresholdChars = CInt(updatedValues("BudgetMediumCompactionThresholdChars"))
+                If updatedValues.ContainsKey("BudgetAggressiveCompactionThresholdChars") Then context.INI_BudgetAggressiveCompactionThresholdChars = CInt(updatedValues("BudgetAggressiveCompactionThresholdChars"))
+                If updatedValues.ContainsKey("BudgetCompactionPreviewChars") Then context.INI_BudgetCompactionPreviewChars = CInt(updatedValues("BudgetCompactionPreviewChars"))
                 If updatedValues.ContainsKey("UpdateIni") Then context.INI_UpdateIni = CBool(updatedValues("UpdateIni"))
                 If updatedValues.ContainsKey("UpdateIniAllowRemote") Then context.INI_UpdateIniAllowRemote = CBool(updatedValues("UpdateIniAllowRemote"))
                 If updatedValues.ContainsKey("UpdateIniNoSignature") Then context.INI_UpdateIniNoSignature = CBool(updatedValues("UpdateIniNoSignature"))

@@ -172,6 +172,64 @@ Partial Public Class ThisAddIn
 
         Public Property LogPrefix As String
         Public Property ExternalLogSink As Action(Of String, String)
+        Public Property ProgressSink As Action(Of String)
+
+        Private _lastProgressText As String = ""
+        Private _lastProgressHeading As String = ""
+        Private _lastEmittedProgress As String = ""
+
+        ''' <summary>
+        ''' Forwards the host-derived per-step progress note (A) to the optional progress sink.
+        ''' This channel is always emitted on its own and never depends on a major-step heading (B1)
+        ''' ever being present, so A still reaches the user even if no report_progress call occurs.
+        ''' </summary>
+        Public Sub ReportProgress(text As String)
+            Dim a As String = If(text, "").Trim()
+            If a = "" Then Return
+            _lastProgressText = a
+            EmitProgress()
+        End Sub
+
+        ''' <summary>
+        ''' Records the model-authored major-step heading (B1) emitted via the report_progress tool.
+        ''' The heading is optional: when present it prefixes the current A note; when absent the A note
+        ''' is shown on its own. This method never suppresses the A channel.
+        ''' </summary>
+        Public Sub ReportMajorProgress(heading As String)
+            Dim h As String = If(heading, "").Trim()
+            If h = "" Then Return
+            _lastProgressHeading = h
+            EmitProgress()
+        End Sub
+
+        ''' <summary>
+        ''' Composes and forwards the combined progress line, skipping empty text and consecutive
+        ''' duplicates. When a B1 heading exists it becomes the lead statement and the English A note
+        ''' is shown on the next indented line; otherwise the A note is emitted standalone. Never throws.
+        ''' </summary>
+        Private Sub EmitProgress()
+            If ProgressSink Is Nothing Then Return
+
+            Dim msg As String
+            If _lastProgressHeading <> "" AndAlso _lastProgressText <> "" Then
+                msg = _lastProgressHeading & " [" & _lastProgressText & "]"
+            ElseIf _lastProgressHeading <> "" Then
+                msg = _lastProgressHeading
+            Else
+                msg = _lastProgressText
+            End If
+
+            msg = msg.Trim()
+            If msg = "" Then Return
+            If String.Equals(_lastEmittedProgress, msg, StringComparison.Ordinal) Then Return
+            _lastEmittedProgress = msg
+
+            Try
+                ProgressSink.Invoke(msg)
+            Catch ex As Exception
+                ToolingFileLogger.LogWarn("Failed to forward progress entry.", ex:=ex)
+            End Try
+        End Sub
 
         ''' <summary>
         ''' Appends a message to the in-memory log, debugger output, optional UI log window, and the tooling file log.

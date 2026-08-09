@@ -2583,6 +2583,46 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Function HasToolingLogWindowOverride() As Boolean
+        Try
+            Return My.Settings.ToolingLogWindowOverrideEnabled
+        Catch
+            Return False
+        End Try
+    End Function
+
+    Public Function GetEffectiveToolingLogWindowSetting() As Boolean
+        Try
+            If My.Settings.ToolingLogWindowOverrideEnabled Then
+                Return My.Settings.ToolingLogWindowOverrideValue
+            End If
+        Catch
+        End Try
+
+        Return _context IsNot Nothing AndAlso _context.INI_ToolingLogWindow
+    End Function
+
+    Public Sub ApplyEffectiveToolingLogWindowSettingToContext()
+        If _context Is Nothing Then
+            Return
+        End If
+
+        _context.INI_ToolingLogWindow = GetEffectiveToolingLogWindowSetting()
+    End Sub
+
+    Public Sub SetToolingLogWindowOverride(value As Boolean)
+        Try
+            My.Settings.ToolingLogWindowOverrideEnabled = True
+            My.Settings.ToolingLogWindowOverrideValue = value
+            My.Settings.Save()
+        Catch
+        End Try
+
+        If _context IsNot Nothing Then
+            _context.INI_ToolingLogWindow = value
+        End If
+    End Sub
+
     Public Shared Property INI_ToolingDryRun As Boolean
         Get
             Return _context.INI_ToolingDryRun
@@ -2598,6 +2638,42 @@ Partial Public Class ThisAddIn
         End Get
         Set(value As Integer)
             _context.INI_ToolingMaximumIterations = value
+        End Set
+    End Property
+
+    Public Shared Property INI_ToolResponsePayloadBudgetChars As Integer
+        Get
+            Return _context.INI_ToolResponsePayloadBudgetChars
+        End Get
+        Set(value As Integer)
+            _context.INI_ToolResponsePayloadBudgetChars = value
+        End Set
+    End Property
+
+    Public Shared Property INI_BudgetMediumCompactionThresholdChars As Integer
+        Get
+            Return _context.INI_BudgetMediumCompactionThresholdChars
+        End Get
+        Set(value As Integer)
+            _context.INI_BudgetMediumCompactionThresholdChars = value
+        End Set
+    End Property
+
+    Public Shared Property INI_BudgetAggressiveCompactionThresholdChars As Integer
+        Get
+            Return _context.INI_BudgetAggressiveCompactionThresholdChars
+        End Get
+        Set(value As Integer)
+            _context.INI_BudgetAggressiveCompactionThresholdChars = value
+        End Set
+    End Property
+
+    Public Shared Property INI_BudgetCompactionPreviewChars As Integer
+        Get
+            Return _context.INI_BudgetCompactionPreviewChars
+        End Get
+        Set(value As Integer)
+            _context.INI_BudgetCompactionPreviewChars = value
         End Set
     End Property
 

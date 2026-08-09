@@ -283,6 +283,7 @@ Public Class DiscussInky
     Private _personaSelectedThisSession As Boolean = False
     Private _isUpdatingPersistCheckbox As Boolean = False ' Prevents recursive event handling    
     Private _toolingControlsInitialized As Boolean = False
+    Private _suppressToolingLogPreferenceSync As Boolean = False
     Private _noPersonaLibraryConfigured As Boolean = False ' True when no persona path is defined
     Private _suppressTalkToMeForwarding As Boolean = False
     Private _activeDialogueArchiveName As String = ""
@@ -1483,8 +1484,8 @@ Public Class DiscussInky
         Try : _chkEnableTooling.Checked = My.Settings.DiscussEnableTooling : Catch : _chkEnableTooling.Checked = False : End Try
         _chkAdvancedTools.Checked = Globals.ThisAddIn.GetDiscussInkyAdvancedToolsEnabled()
 
-        ' Tooling log checkbox always reflects the INI setting (not persisted separately)
-        _chkShowToolingLog.Checked = _context.INI_ToolingLogWindow
+        ' Tooling log checkbox reflects the effective local override when present, otherwise the INI default.
+        SyncToolingLogPreferenceFromSettings()
 
         ' Load personas
         LoadPersonas()
@@ -2082,7 +2083,8 @@ Public Class DiscussInky
                     useSecondApi,
                     fullPromptOverride:=userPrompt,
                     hideSplash:=True,
-                    hideLogWindow:=hideLog).ConfigureAwait(False)
+                    hideLogWindow:=hideLog,
+                    progressSink:=Sub(status) UpdateAssistantThinking(status)).ConfigureAwait(False)
             Else
                 ' Standard LLM call
                 Return Await LLM(_context,
@@ -2112,6 +2114,26 @@ Public Class DiscussInky
     ''' <summary>
     ''' Updates enabled state of tooling controls based on current model support and "(t)" availability.
     ''' </summary>
+    Public Sub SyncToolingLogPreferenceFromSettings()
+        If Me.IsDisposed Then
+            Return
+        End If
+
+        Dim effectiveSetting As Boolean = Globals.ThisAddIn.GetEffectiveToolingLogWindowSetting()
+
+        If _chkShowToolingLog.Checked = effectiveSetting Then
+            Return
+        End If
+
+        _suppressToolingLogPreferenceSync = True
+
+        Try
+            _chkShowToolingLog.Checked = effectiveSetting
+        Finally
+            _suppressToolingLogPreferenceSync = False
+        End Try
+    End Sub
+
     Private Sub UpdateToolingControlsState()
         Dim currentConfig As ModelConfig = Nothing
 
@@ -2138,7 +2160,7 @@ Public Class DiscussInky
         End If
 
         If Not _toolingControlsInitialized Then
-            _chkShowToolingLog.Checked = _context.INI_ToolingLogWindow
+            SyncToolingLogPreferenceFromSettings()
             _toolingControlsInitialized = True
         End If
     End Sub
@@ -2151,7 +2173,12 @@ Public Class DiscussInky
     ''' <param name="e">Event arguments.</param>
 
     Private Sub OnShowToolingLogChanged(sender As Object, e As EventArgs)
-        ' No special handling needed - just uses the Checked state when calling ExecuteToolingLoop
+        If _suppressToolingLogPreferenceSync Then
+            Return
+        End If
+
+        Globals.ThisAddIn.SetToolingLogWindowOverride(_chkShowToolingLog.Checked)
+        Globals.ThisAddIn.RefreshOpenToolingLogPreferenceWindows()
     End Sub
 
     ''' <summary>
@@ -5634,7 +5661,7 @@ Public Class DiscussInky
 
                 ' Ensure tools are selected
                 If _selectedToolsForChat Is Nothing OrElse _selectedToolsForChat.Count = 0 Then
-                    _selectedToolsForChat = Globals.ThisAddIn.SelectDiscussInkyToolsForSession(forceDialog:=True)
+                    _selectedToolsForChat = Globals.ThisAddIn.SelectDiscussInkyToolsForSession(forceDialog:=False)
 
                     If _selectedToolsForChat Is Nothing OrElse _selectedToolsForChat.Count = 0 Then
                         RemoveAssistantThinking()

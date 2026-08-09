@@ -303,6 +303,10 @@ Public Class DragDropForm
         Me.TopMost = True
         Me.BringToFront()
         Me.Activate()
+
+        ' Surface any same-process native host prompt (e.g. Word's "Save changes?")
+        ' that would otherwise stay hidden behind this TopMost modal dialog.
+        SharedMethods.AttachForeignForegroundWatchdog(Me)
     End Sub
 
     ''' <summary>

@@ -40,6 +40,7 @@ Namespace SharedLibrary
 
         Private Shared SessionId As System.String
         Private Shared AddInName As System.String
+        Private Shared RdvVersionValue As System.String
         Private Shared LogFilePathValue As System.String
 
         Private Shared AddInAssembly As System.Reflection.Assembly
@@ -55,7 +56,8 @@ Namespace SharedLibrary
             ByVal addInDisplayName As System.String,
             ByVal executingAddInAssembly As System.Reflection.Assembly,
             ByVal diagnosticsAreEnabled As System.Boolean,
-            Optional ByVal captureExtendedSnapshot As System.Boolean = True)
+            Optional ByVal captureExtendedSnapshot As System.Boolean = True,
+            Optional ByVal rdvVersion As System.String = Nothing)
 
             If Not diagnosticsAreEnabled Then
                 Return
@@ -79,6 +81,7 @@ Namespace SharedLibrary
                         "Unknown add-in",
                         addInDisplayName)
 
+                RdvVersionValue = rdvVersion
                 AddInAssembly = executingAddInAssembly
 
                 Dim appDataDirectory As System.String =
@@ -1460,6 +1463,15 @@ Namespace SharedLibrary
             record.AppendLine(
                 "AddIn=" &
                 AddInName)
+
+            If Not System.String.IsNullOrWhiteSpace(
+                RdvVersionValue) Then
+
+                record.AppendLine(
+                    "RDV=" &
+                    RdvVersionValue)
+
+            End If
 
             record.AppendLine(
                 "Event=" &

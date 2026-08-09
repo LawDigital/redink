@@ -481,7 +481,7 @@ Namespace SharedLibrary
                     End If
                 End If
 
-                ' === INI Configuration Updates (manual check) ===                
+                ' === INI Configuration Updates (manual check) ===
                 ''' <summary>
                 ''' When a shared context is provided, attempts an INI configuration update check and shows a message
                 ''' if no updates were applied.
@@ -489,16 +489,31 @@ Namespace SharedLibrary
                 If context IsNot Nothing Then
                     Try
                         If MainControl IsNot Nothing AndAlso MainControl.InvokeRequired Then
-                            MainControl.Invoke(Sub() If Not SharedMethods.CheckForIniUpdates(context) Then UIInvokeMessage(
-                                "No configuration updates available or made",
-                                $"{SharedMethods.AN} INI Updater"))
+                            MainControl.Invoke(
+                                Sub()
+                                    If Not SharedMethods.CheckForIniUpdates(context) Then
+                                        UIInvokeMessage(
+                                            "No configuration updates available or made",
+                                            $"{SharedMethods.AN} INI Updater")
+                                    End If
+
+                                    If Not String.IsNullOrWhiteSpace(context.INI_AgentResourcesPath) Then
+                                        SharedMethods.CheckForAgentResourceUpdates(context)
+                                    End If
+                                End Sub)
                         Else
-                            If Not SharedMethods.CheckForIniUpdates(context) Then UIInvokeMessage(
-                                "No configuration updates available or made",
-                                $"{SharedMethods.AN} INI Updater")
+                            If Not SharedMethods.CheckForIniUpdates(context) Then
+                                UIInvokeMessage(
+                                    "No configuration updates available or made",
+                                    $"{SharedMethods.AN} INI Updater")
+                            End If
+
+                            If Not String.IsNullOrWhiteSpace(context.INI_AgentResourcesPath) Then
+                                SharedMethods.CheckForAgentResourceUpdates(context)
+                            End If
                         End If
                     Catch iniEx As Exception
-                        WriteUpdateLog("[CheckAndInstallUpdates] INI update check failed", iniEx)
+                        WriteUpdateLog("[CheckAndInstallUpdates] INI or agent resource update check failed", iniEx)
                     End Try
                 End If
 

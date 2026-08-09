@@ -1144,6 +1144,38 @@
                     "description": "Maximum number of tool-execution iterations Red Ink may perform in one tooling or agent session before it aborts the loop. Increase this only for complex workflows because each iteration can add cost and runtime. Example: 50. [ToolingMaximumIterations]"
                 },
                 {
+                    "key": "ToolResponsePayloadBudgetChars",
+                    "label": "Tool Response Payload Budget (chars)",
+                    "type": "integer",
+                    "validation": ">0",
+                    "default": "120000",
+                    "description": "Maximum total character budget for the serialized tool-response payload that is replayed into the next tooling turn. When the accumulated tool history grows beyond this budget, older results are progressively compacted by reference and remain readable via context_expand. Example: 120000. [ToolResponsePayloadBudgetChars]"
+                },
+                {
+                    "key": "BudgetMediumCompactionThresholdChars",
+                    "label": "Medium Compaction Threshold (chars)",
+                    "type": "integer",
+                    "validation": ">0",
+                    "default": "6000",
+                    "description": "First threshold used under budget pressure for older stale tool results. Older responses whose body is at least this large may be replaced by a short preview plus result_ref, which saves context while preserving retrievability. Example: 6000. [BudgetMediumCompactionThresholdChars]"
+                },
+                {
+                    "key": "BudgetAggressiveCompactionThresholdChars",
+                    "label": "Aggressive Compaction Threshold (chars)",
+                    "type": "integer",
+                    "validation": ">0",
+                    "default": "2000",
+                    "description": "Second and more aggressive threshold used if the payload is still above budget after the milder pass. Lower values compact more older medium-sized results, which is useful for smaller-context models but increases reliance on context_expand. Example: 2000. [BudgetAggressiveCompactionThresholdChars]"
+                },
+                {
+                    "key": "BudgetCompactionPreviewChars",
+                    "label": "Compaction Preview Size (chars)",
+                    "type": "integer",
+                    "validation": ">0",
+                    "default": "600",
+                    "description": "How many leading characters are kept inline when an older result is compacted by reference under budget pressure. Larger previews help strong models continue without re-expanding, while smaller previews save more context for smaller models. Example: 600. [BudgetCompactionPreviewChars]"
+                },
+                {
                     "key": "LogPath",
                     "label": "Anonymous Log Directory",
                     "type": "path",

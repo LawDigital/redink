@@ -374,6 +374,10 @@ Namespace SharedLibrary
             Property INI_ToolingLogWindow As Boolean
             Property INI_ToolingDryRun As Boolean
             Property INI_ToolingMaximumIterations As Integer
+            Property INI_ToolResponsePayloadBudgetChars As Integer
+            Property INI_BudgetMediumCompactionThresholdChars As Integer
+            Property INI_BudgetAggressiveCompactionThresholdChars As Integer
+            Property INI_BudgetCompactionPreviewChars As Integer
 
             Property INI_APICall_ToolInstructions_2 As String
             Property INI_APICall_ToolInstructions_Template_2 As String
@@ -735,6 +739,10 @@ Namespace SharedLibrary
         Public Property INI_ToolingLogWindow As Boolean Implements ISharedContext.INI_ToolingLogWindow
         Public Property INI_ToolingDryRun As Boolean Implements ISharedContext.INI_ToolingDryRun
         Public Property INI_ToolingMaximumIterations As Integer Implements ISharedContext.INI_ToolingMaximumIterations
+        Public Property INI_ToolResponsePayloadBudgetChars As Integer Implements ISharedContext.INI_ToolResponsePayloadBudgetChars
+        Public Property INI_BudgetMediumCompactionThresholdChars As Integer Implements ISharedContext.INI_BudgetMediumCompactionThresholdChars
+        Public Property INI_BudgetAggressiveCompactionThresholdChars As Integer Implements ISharedContext.INI_BudgetAggressiveCompactionThresholdChars
+        Public Property INI_BudgetCompactionPreviewChars As Integer Implements ISharedContext.INI_BudgetCompactionPreviewChars
         Public Property INI_APICall_ToolInstructions_2 As String Implements ISharedContext.INI_APICall_ToolInstructions_2
         Public Property INI_APICall_ToolInstructions_Template_2 As String Implements ISharedContext.INI_APICall_ToolInstructions_Template_2
         Public Property INI_APICall_ToolResponses_2 As String Implements ISharedContext.INI_APICall_ToolResponses_2

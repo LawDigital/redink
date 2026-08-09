@@ -81,7 +81,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Reference Include="BouncyCastle.Cryptography, Version=2.0.0.0, Culture=neutral, PublicKeyToken=072edcf4a5328938, processorArchitecture=MSIL">
-      <HintPath>..\packages\BouncyCastle.Cryptography.2.6.2\lib\net461\BouncyCastle.Cryptography.dll</HintPath>
+      <HintPath>..\packages\BouncyCastle.Cryptography.2.7.0\lib\net461\BouncyCastle.Cryptography.dll</HintPath>
     </Reference>
     <Reference Include="CommunityToolkit.HighPerformance, Version=8.4.0.0, Culture=neutral, PublicKeyToken=4aff67a105548ee2, processorArchitecture=MSIL">
       <HintPath>..\packages\CommunityToolkit.HighPerformance.8.4.2\lib\netstandard2.0\CommunityToolkit.HighPerformance.dll</HintPath>
@@ -129,19 +129,19 @@
       <HintPath>..\packages\Google.Protobuf.3.35.1\lib\net45\Google.Protobuf.dll</HintPath>
     </Reference>
     <Reference Include="Grpc.Auth, Version=2.0.0.0, Culture=neutral, PublicKeyToken=d754f35622e28bad, processorArchitecture=MSIL">
-      <HintPath>..\packages\Grpc.Auth.2.80.0\lib\net462\Grpc.Auth.dll</HintPath>
+      <HintPath>..\packages\Grpc.Auth.2.83.0\lib\net462\Grpc.Auth.dll</HintPath>
     </Reference>
     <Reference Include="Grpc.Core, Version=2.0.0.0, Culture=neutral, PublicKeyToken=d754f35622e28bad, processorArchitecture=MSIL">
       <HintPath>..\packages\Grpc.Core.2.46.6\lib\net45\Grpc.Core.dll</HintPath>
     </Reference>
     <Reference Include="Grpc.Core.Api, Version=2.0.0.0, Culture=neutral, PublicKeyToken=d754f35622e28bad, processorArchitecture=MSIL">
-      <HintPath>..\packages\Grpc.Core.Api.2.80.0\lib\net462\Grpc.Core.Api.dll</HintPath>
+      <HintPath>..\packages\Grpc.Core.Api.2.83.0\lib\net462\Grpc.Core.Api.dll</HintPath>
     </Reference>
     <Reference Include="Grpc.Net.Client, Version=2.0.0.0, Culture=neutral, PublicKeyToken=d754f35622e28bad, processorArchitecture=MSIL">
-      <HintPath>..\packages\Grpc.Net.Client.2.80.0\lib\net462\Grpc.Net.Client.dll</HintPath>
+      <HintPath>..\packages\Grpc.Net.Client.2.83.0\lib\net462\Grpc.Net.Client.dll</HintPath>
     </Reference>
     <Reference Include="Grpc.Net.Common, Version=2.0.0.0, Culture=neutral, PublicKeyToken=d754f35622e28bad, processorArchitecture=MSIL">
-      <HintPath>..\packages\Grpc.Net.Common.2.80.0\lib\netstandard2.0\Grpc.Net.Common.dll</HintPath>
+      <HintPath>..\packages\Grpc.Net.Common.2.83.0\lib\netstandard2.0\Grpc.Net.Common.dll</HintPath>
     </Reference>
     <Reference Include="HtmlAgilityPack, Version=1.12.4.0, Culture=neutral, PublicKeyToken=bd319b19eaf3b43a, processorArchitecture=MSIL">
       <HintPath>..\packages\HtmlAgilityPack.1.12.4\lib\Net45\HtmlAgilityPack.dll</HintPath>
@@ -166,7 +166,7 @@
     </Reference>
     <Reference Include="Microsoft.CSharp" />
     <Reference Include="Microsoft.Extensions.AI.Abstractions, Version=10.8.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Extensions.AI.Abstractions.10.8.1\lib\net462\Microsoft.Extensions.AI.Abstractions.dll</HintPath>
+      <HintPath>..\packages\Microsoft.Extensions.AI.Abstractions.10.8.3\lib\net462\Microsoft.Extensions.AI.Abstractions.dll</HintPath>
     </Reference>
     <Reference Include="Microsoft.Extensions.DependencyInjection.Abstractions, Version=10.0.0.10, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
       <HintPath>..\packages\Microsoft.Extensions.DependencyInjection.Abstractions.10.0.10\lib\net462\Microsoft.Extensions.DependencyInjection.Abstractions.dll</HintPath>
@@ -180,8 +180,8 @@
     <Reference Include="Microsoft.Identity.Client.Extensions.Msal, Version=4.87.0.0, Culture=neutral, PublicKeyToken=0a613f4dd989e8ae, processorArchitecture=MSIL">
       <HintPath>..\packages\Microsoft.Identity.Client.Extensions.Msal.4.87.0\lib\netstandard2.0\Microsoft.Identity.Client.Extensions.Msal.dll</HintPath>
     </Reference>
-    <Reference Include="Microsoft.IdentityModel.Abstractions, Version=8.21.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.IdentityModel.Abstractions.8.21.0\lib\net472\Microsoft.IdentityModel.Abstractions.dll</HintPath>
+    <Reference Include="Microsoft.IdentityModel.Abstractions, Version=8.22.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.IdentityModel.Abstractions.8.22.0\lib\net472\Microsoft.IdentityModel.Abstractions.dll</HintPath>
     </Reference>
     <Reference Include="Microsoft.ML.OnnxRuntime, Version=1.28.0.0, Culture=neutral, PublicKeyToken=f27f157f0a5b7bb6, processorArchitecture=MSIL">
       <HintPath>..\packages\Microsoft.ML.OnnxRuntime.Managed.1.28.0\lib\netstandard2.0\Microsoft.ML.OnnxRuntime.dll</HintPath>
@@ -205,14 +205,14 @@
     <Reference Include="Microsoft.Office.Tools.Common, Version=10.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
       <EmbedInteropTypes>True</EmbedInteropTypes>
     </Reference>
-    <Reference Include="Microsoft.Web.WebView2.Core, Version=1.0.4078.44, Culture=neutral, PublicKeyToken=2a8ab48044d2601e, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Web.WebView2.1.0.4078.44\lib\net462\Microsoft.Web.WebView2.Core.dll</HintPath>
+    <Reference Include="Microsoft.Web.WebView2.Core, Version=1.0.4129.50, Culture=neutral, PublicKeyToken=2a8ab48044d2601e, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Web.WebView2.1.0.4129.50\lib\net462\Microsoft.Web.WebView2.Core.dll</HintPath>
     </Reference>
-    <Reference Include="Microsoft.Web.WebView2.WinForms, Version=1.0.4078.44, Culture=neutral, PublicKeyToken=2a8ab48044d2601e, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Web.WebView2.1.0.4078.44\lib\net462\Microsoft.Web.WebView2.WinForms.dll</HintPath>
+    <Reference Include="Microsoft.Web.WebView2.WinForms, Version=1.0.4129.50, Culture=neutral, PublicKeyToken=2a8ab48044d2601e, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Web.WebView2.1.0.4129.50\lib\net462\Microsoft.Web.WebView2.WinForms.dll</HintPath>
     </Reference>
-    <Reference Include="Microsoft.Web.WebView2.Wpf, Version=1.0.4078.44, Culture=neutral, PublicKeyToken=2a8ab48044d2601e, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Web.WebView2.1.0.4078.44\lib\net462\Microsoft.Web.WebView2.Wpf.dll</HintPath>
+    <Reference Include="Microsoft.Web.WebView2.Wpf, Version=1.0.4129.50, Culture=neutral, PublicKeyToken=2a8ab48044d2601e, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Web.WebView2.1.0.4129.50\lib\net462\Microsoft.Web.WebView2.Wpf.dll</HintPath>
     </Reference>
     <Reference Include="Microsoft.Win32.Registry, Version=5.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
       <HintPath>..\packages\Microsoft.Win32.Registry.5.0.0\lib\net461\Microsoft.Win32.Registry.dll</HintPath>
@@ -302,6 +302,11 @@
     </Reference>
     <Reference Include="System.IO, Version=4.1.1.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
       <HintPath>..\packages\System.IO.4.3.0\lib\net462\System.IO.dll</HintPath>
+      <Private>True</Private>
+      <Private>True</Private>
+    </Reference>
+    <Reference Include="System.IO.Compression, Version=4.1.2.0, Culture=neutral, PublicKeyToken=b77a5c561934e089, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.IO.Compression.4.3.0\lib\net46\System.IO.Compression.dll</HintPath>
       <Private>True</Private>
       <Private>True</Private>
     </Reference>
@@ -448,7 +453,13 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Code\Agents\AgentToolRouter.vb" />
+    <Compile Include="Code\Agents\AskUserTool.vb" />
+    <Compile Include="Code\Agents\ContextCompactTool.vb" />
+    <Compile Include="Code\Agents\ContextExpandTool.vb" />
     <Compile Include="Code\Agents\FileTools.vb" />
+    <Compile Include="Code\Agents\LargeToolResultProcessor.vb" />
+    <Compile Include="Code\Agents\PythonExecuteRepairAdvisor.vb" />
+    <Compile Include="Code\Agents\PythonExecuteRepairAdvisorSelfTests.vb" />
     <Compile Include="Code\Agents\PythonExecuteToolConfig.vb" />
     <Compile Include="Code\Agents\RedinkPythonAgentClient.vb" />
     <Compile Include="Code\Agents\HostToolRegistration.vb" />
@@ -467,6 +478,8 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Code\Agents\SessionMemory.vb" />
+    <Compile Include="Code\Agents\ShowMethods.AskUser.vb" />
+    <Compile Include="Code\Agents\SkillAuthoringPostcondition.vb" />
     <Compile Include="Code\Agents\SkillAuthorMode.vb" />
     <Compile Include="Code\Agents\SkillInvokeTool.vb" />
     <Compile Include="Code\Agents\SubAgentRunner.vb" />
@@ -484,6 +497,7 @@
     <Compile Include="Code\Agents\ToolLoaderTool.vb" />
     <Compile Include="Code\Agents\ToolRegistry.vb" />
     <Compile Include="Code\Agents\ToolRegistryBuilder.vb" />
+    <Compile Include="Code\Agents\ToolResultStore.vb" />
     <Compile Include="Code\Agents\WebGroundingTool.vb" />
     <Compile Include="Code\Agents\WebView2JsSandbox.vb" />
     <Compile Include="Code\Agents\WordDocTools.vb" />
@@ -680,6 +694,7 @@
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </EmbeddedResource>
     <None Include="Code\Agents\Red_Ink_Tool_List.md" />
+    <None Include="Code\Agents\skill-author.md" />
     <None Include="My Project\Application.myapp">
       <Generator>MyApplicationCodeGenerator</Generator>
       <LastGenOutput>Application.Designer.vb</LastGenOutput>
@@ -783,10 +798,10 @@
     <Error Condition="!Exists('..\packages\Whisper.net.Runtime.Cuda.Windows.1.9.1\build\Whisper.net.Runtime.Cuda.Windows.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Whisper.net.Runtime.Cuda.Windows.1.9.1\build\Whisper.net.Runtime.Cuda.Windows.targets'))" />
     <Error Condition="!Exists('..\packages\Whisper.net.Runtime.Metal.1.9.1\build\Whisper.net.Runtime.Metal.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Whisper.net.Runtime.Metal.1.9.1\build\Whisper.net.Runtime.Metal.targets'))" />
     <Error Condition="!Exists('..\packages\Whisper.net.Runtime.1.9.1\build\Whisper.net.Runtime.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Whisper.net.Runtime.1.9.1\build\Whisper.net.Runtime.targets'))" />
-    <Error Condition="!Exists('..\packages\Microsoft.Web.WebView2.1.0.4078.44\build\Microsoft.Web.WebView2.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Microsoft.Web.WebView2.1.0.4078.44\build\Microsoft.Web.WebView2.targets'))" />
     <Error Condition="!Exists('..\packages\Microsoft.ML.OnnxRuntime.Managed.1.28.0\build\netstandard2.0\Microsoft.ML.OnnxRuntime.Managed.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Microsoft.ML.OnnxRuntime.Managed.1.28.0\build\netstandard2.0\Microsoft.ML.OnnxRuntime.Managed.targets'))" />
     <Error Condition="!Exists('..\packages\Microsoft.ML.OnnxRuntime.1.28.0\build\netstandard2.0\Microsoft.ML.OnnxRuntime.props')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Microsoft.ML.OnnxRuntime.1.28.0\build\netstandard2.0\Microsoft.ML.OnnxRuntime.props'))" />
     <Error Condition="!Exists('..\packages\Microsoft.ML.OnnxRuntime.1.28.0\build\netstandard2.0\Microsoft.ML.OnnxRuntime.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Microsoft.ML.OnnxRuntime.1.28.0\build\netstandard2.0\Microsoft.ML.OnnxRuntime.targets'))" />
+    <Error Condition="!Exists('..\packages\Microsoft.Web.WebView2.1.0.4129.50\build\Microsoft.Web.WebView2.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Microsoft.Web.WebView2.1.0.4129.50\build\Microsoft.Web.WebView2.targets'))" />
   </Target>
   <Import Project="..\packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets" Condition="Exists('..\packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets')" />
   <Import Project="..\packages\Google.Api.CommonProtos.2.17.0\build\Google.Api.CommonProtos.targets" Condition="Exists('..\packages\Google.Api.CommonProtos.2.17.0\build\Google.Api.CommonProtos.targets')" />
@@ -795,7 +810,7 @@
   <Import Project="..\packages\Whisper.net.Runtime.Cuda.Windows.1.9.1\build\Whisper.net.Runtime.Cuda.Windows.targets" Condition="Exists('..\packages\Whisper.net.Runtime.Cuda.Windows.1.9.1\build\Whisper.net.Runtime.Cuda.Windows.targets')" />
   <Import Project="..\packages\Whisper.net.Runtime.Metal.1.9.1\build\Whisper.net.Runtime.Metal.targets" Condition="Exists('..\packages\Whisper.net.Runtime.Metal.1.9.1\build\Whisper.net.Runtime.Metal.targets')" />
   <Import Project="..\packages\Whisper.net.Runtime.1.9.1\build\Whisper.net.Runtime.targets" Condition="Exists('..\packages\Whisper.net.Runtime.1.9.1\build\Whisper.net.Runtime.targets')" />
-  <Import Project="..\packages\Microsoft.Web.WebView2.1.0.4078.44\build\Microsoft.Web.WebView2.targets" Condition="Exists('..\packages\Microsoft.Web.WebView2.1.0.4078.44\build\Microsoft.Web.WebView2.targets')" />
   <Import Project="..\packages\Microsoft.ML.OnnxRuntime.Managed.1.28.0\build\netstandard2.0\Microsoft.ML.OnnxRuntime.Managed.targets" Condition="Exists('..\packages\Microsoft.ML.OnnxRuntime.Managed.1.28.0\build\netstandard2.0\Microsoft.ML.OnnxRuntime.Managed.targets')" />
   <Import Project="..\packages\Microsoft.ML.OnnxRuntime.1.28.0\build\netstandard2.0\Microsoft.ML.OnnxRuntime.targets" Condition="Exists('..\packages\Microsoft.ML.OnnxRuntime.1.28.0\build\netstandard2.0\Microsoft.ML.OnnxRuntime.targets')" />
+  <Import Project="..\packages\Microsoft.Web.WebView2.1.0.4129.50\build\Microsoft.Web.WebView2.targets" Condition="Exists('..\packages\Microsoft.Web.WebView2.1.0.4129.50\build\Microsoft.Web.WebView2.targets')" />
 </Project>

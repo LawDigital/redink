@@ -103,6 +103,10 @@ Namespace Transcription
             End Get
         End Property
 
+        Private Sub RaiseStatusMessage(message As String, Optional progressPercent As System.Nullable(Of Integer) = Nothing)
+            RaiseEvent Status(Me, New TranscriptionStatusEventArgs(message, progressPercent))
+        End Sub
+
         Private ReadOnly _endpoint As String
         Private ReadOnly _tokenFactory As Func(Of Task(Of String))
 
@@ -197,6 +201,7 @@ Namespace Transcription
 
         Public Async Function TranscribeFileAsync(filePath As String, opts As TranscriptionOptions, ct As CancellationToken) As Task Implements ITranscriptionEngine.TranscribeFileAsync
             _opts = opts
+            RaiseStatusMessage("Preparing file…", 0)
             Await BuildClientOnly()
 
             Dim pcm As Byte() = VoskEngine.LoadAudioToPcm16Mono16k(filePath)
@@ -204,6 +209,9 @@ Namespace Transcription
             Dim sliceSize As Integer = 50 * bytesPerSec
             Dim overlap As Integer = 2 * bytesPerSec
             Dim offset As Integer = 0
+            Dim lastProgressPercent As Integer = -1
+
+            RaiseStatusMessage("Transcribing file…", 0)
 
             While offset < pcm.Length AndAlso Not ct.IsCancellationRequested
                 Dim endPos As Integer = Math.Min(offset + sliceSize, pcm.Length)
@@ -220,6 +228,14 @@ Namespace Transcription
                     End If
                 Next
 
+                Dim progressPercent As Integer =
+                    CInt(Math.Truncate((CDbl(endPos) / Math.Max(1.0R, CDbl(pcm.Length))) * 100.0R))
+
+                If progressPercent <> lastProgressPercent Then
+                    lastProgressPercent = progressPercent
+                    RaiseStatusMessage("Transcribing file…", progressPercent)
+                End If
+
                 If endPos >= pcm.Length Then
                     Exit While
                 End If
@@ -229,6 +245,12 @@ Namespace Transcription
                     offset = 0
                 End If
             End While
+
+            If ct.IsCancellationRequested Then
+                RaiseStatusMessage("File transcription canceled.")
+            Else
+                RaiseStatusMessage("File transcription completed.", 100)
+            End If
         End Function
 
         Private Function BuildConfig(opts As TranscriptionOptions) As RecognitionConfig
