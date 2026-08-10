@@ -426,6 +426,8 @@ Partial Public Class ThisAddIn
             Dim fileNames As New List(Of String)()
             Dim singleName = GetArgString(toolCall.Arguments, "attachment_name")
             Dim batchNames = GetArgStringArray(toolCall.Arguments, "attachment_names")
+            Dim outputFormatRaw As String = If(GetArgString(toolCall.Arguments, "output_format"), "text").Trim()
+            Dim readAsMarkdown As Boolean = False
 
             If batchNames.Count > 0 Then
                 fileNames.AddRange(batchNames)
@@ -436,6 +438,18 @@ Partial Public Class ThisAddIn
             If fileNames.Count = 0 Then
                 response.Success = False
                 response.Response = "Missing required parameter: attachment_name or attachment_names"
+                Return response
+            End If
+
+            If outputFormatRaw.Length = 0 Then
+                outputFormatRaw = "text"
+            End If
+
+            If outputFormatRaw.Equals("markdown", StringComparison.OrdinalIgnoreCase) Then
+                readAsMarkdown = True
+            ElseIf Not outputFormatRaw.Equals("text", StringComparison.OrdinalIgnoreCase) Then
+                response.Success = False
+                response.Response = "Invalid output_format. Use 'text' or 'markdown'."
                 Return response
             End If
 
@@ -467,7 +481,7 @@ Partial Public Class ThisAddIn
                 End If
 
                 context.Log($"Reading attachment: {fileName}")
-                Dim text = Await ReadSingleAttachmentText(att, context)
+                Dim text = Await ReadSingleAttachmentText(att, context, readAsMarkdown)
 
                 If Not String.IsNullOrWhiteSpace(text) Then
                     If text.Length > 50000 Then

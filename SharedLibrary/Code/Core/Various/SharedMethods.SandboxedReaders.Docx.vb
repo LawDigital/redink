@@ -43,7 +43,7 @@ Namespace SharedLibrary
 
 
         ''' <summary>
-        ''' Dependency-free DOCX-to-text extractor.
+        ''' Dependency-free DOCX-to-text / Markdown extractor.
         '''
         ''' Features:
         ''' - Word automatic paragraph/list/heading numbering from numbering.xml and styles.xml.
@@ -97,14 +97,15 @@ Namespace SharedLibrary
             ''' </summary>
             Public Shared Function WriteDocxTextFile(
                 docxPath As System.String,
-                textFilePath As System.String
+                textFilePath As System.String,
+                Optional returnMarkdown As System.Boolean = False
             ) As System.String
                 If System.String.IsNullOrWhiteSpace(textFilePath) Then
                     Return "Error: Output text-file path is empty."
                 End If
 
                 Try
-                    Dim extractedText As System.String = ReadDocxSandboxed(docxPath)
+                    Dim extractedText As System.String = ReadDocxSandboxed(docxPath, returnMarkdown)
                     If extractedText.StartsWith("Error:", System.StringComparison.Ordinal) Then
                         Return extractedText
                     End If
@@ -127,9 +128,14 @@ Namespace SharedLibrary
             End Function
 
             ''' <summary>
-            ''' Reads a DOCX file and returns a plain-text representation.
+            ''' Reads a DOCX file and returns either the established plain-text representation
+            ''' or, when returnMarkdown is True, a Markdown representation built from the same
+            ''' sandboxed OpenXML analysis model. The default False value preserves all existing callers.
             ''' </summary>
-            Public Shared Function ReadDocxSandboxed(docxPath As System.String) As System.String
+            Public Shared Function ReadDocxSandboxed(
+                docxPath As System.String,
+                Optional returnMarkdown As System.Boolean = False
+            ) As System.String
                 If System.String.IsNullOrWhiteSpace(docxPath) OrElse Not System.IO.File.Exists(docxPath) Then
                     Return "Error: File not found."
                 End If
@@ -201,29 +207,58 @@ Namespace SharedLibrary
                     Dim output As New System.Text.StringBuilder(8192)
                     Dim fieldState As New FieldEvaluationState()
 
-                    If DocxIncludeLineNumberSettings AndAlso context.LineNumberSettings.Count > 0 Then
-                        output.AppendLine("--- Line numbering settings ---")
-                        For Each settingText As System.String In context.LineNumberSettings
-                            output.AppendLine(settingText)
-                        Next
-                        output.AppendLine()
-                    End If
-
-                    RenderBlocks(bodyStory.Blocks, context, fieldState, output, 0)
-
-                    For Each story As StorySection In supplementaryStories
-                        Dim storyBuilder As New System.Text.StringBuilder()
-                        RenderBlocks(story.Blocks, context, New FieldEvaluationState(), storyBuilder, 0)
-
-                        Dim storyText As System.String = storyBuilder.ToString().Trim()
-                        If storyText.Length > 0 Then
+                    If returnMarkdown Then
+                        If DocxIncludeLineNumberSettings AndAlso context.LineNumberSettings.Count > 0 Then
+                            output.AppendLine("## Line numbering settings")
                             output.AppendLine()
-                            output.AppendLine("--- " & story.Label & " ---")
-                            output.AppendLine(storyText)
+                            For Each settingText As System.String In context.LineNumberSettings
+                                output.AppendLine("- " & EscapeMarkdownInline(settingText))
+                            Next
+                            output.AppendLine()
                         End If
-                    Next
 
-                    RenderNoteSections(noteStories, context, output)
+                        RenderBlocksMarkdown(bodyStory.Blocks, context, fieldState, output, 0)
+
+                        For Each story As StorySection In supplementaryStories
+                            Dim storyBuilder As New System.Text.StringBuilder()
+                            RenderBlocksMarkdown(story.Blocks, context, New FieldEvaluationState(), storyBuilder, 0)
+
+                            Dim storyText As System.String = storyBuilder.ToString().Trim()
+                            If storyText.Length > 0 Then
+                                AppendMarkdownBlankLine(output)
+                                output.AppendLine("## " & EscapeMarkdownInline(story.Label))
+                                output.AppendLine()
+                                output.AppendLine(storyText)
+                            End If
+                        Next
+
+                        RenderNoteSectionsMarkdown(noteStories, context, output)
+                    Else
+                        ' IMPORTANT: the established plain-text path is deliberately unchanged.
+                        If DocxIncludeLineNumberSettings AndAlso context.LineNumberSettings.Count > 0 Then
+                            output.AppendLine("--- Line numbering settings ---")
+                            For Each settingText As System.String In context.LineNumberSettings
+                                output.AppendLine(settingText)
+                            Next
+                            output.AppendLine()
+                        End If
+
+                        RenderBlocks(bodyStory.Blocks, context, fieldState, output, 0)
+
+                        For Each story As StorySection In supplementaryStories
+                            Dim storyBuilder As New System.Text.StringBuilder()
+                            RenderBlocks(story.Blocks, context, New FieldEvaluationState(), storyBuilder, 0)
+
+                            Dim storyText As System.String = storyBuilder.ToString().Trim()
+                            If storyText.Length > 0 Then
+                                output.AppendLine()
+                                output.AppendLine("--- " & story.Label & " ---")
+                                output.AppendLine(storyText)
+                            End If
+                        Next
+
+                        RenderNoteSections(noteStories, context, output)
+                    End If
 
                     Dim result As System.String = output.ToString().TrimEnd()
 
@@ -279,6 +314,7 @@ Namespace SharedLibrary
                     Me.BookmarkNames = New System.Collections.Generic.List(Of System.String)()
                     Me.MarginParagraphs = New System.Collections.Generic.List(Of ParagraphInfo)()
                     Me.NumberText = System.String.Empty
+                    Me.ListNumberFormat = System.String.Empty
                     Me.CachedPlainText = System.String.Empty
                     Me.StoryName = System.String.Empty
                     Me.AnchorText = System.String.Empty
@@ -288,6 +324,8 @@ Namespace SharedLibrary
                 Public Property BookmarkNames As System.Collections.Generic.List(Of System.String)
                 Public Property MarginParagraphs As System.Collections.Generic.List(Of ParagraphInfo)
                 Public Property NumberText As System.String
+                Public Property ListLevel As System.Nullable(Of System.Int32)
+                Public Property ListNumberFormat As System.String
                 Public Property CachedPlainText As System.String
                 Public Property StoryName As System.String
                 Public Property SequenceIndex As System.Int32
@@ -1427,6 +1465,17 @@ Namespace SharedLibrary
 
                 Dim numbering As ParagraphNumberingProperties = ResolveParagraphNumbering(paragraphNode, namespaceManager, context)
                 If numbering IsNot Nothing Then
+                    paragraph.ListLevel = numbering.Level
+                    Dim effectiveListDefinition As NumberingLevelDefinition = GetEffectiveLevelDefinition(
+                        numbering.NumberingId,
+                        numbering.Level,
+                        context,
+                        New System.Collections.Generic.HashSet(Of System.Int32)()
+                    )
+                    If effectiveListDefinition IsNot Nothing Then
+                        paragraph.ListNumberFormat = effectiveListDefinition.NumberFormat
+                    End If
+
                     paragraph.NumberText = AdvanceAndFormatNumber(numbering, context, numberingState)
                     paragraph.HasAutomaticNumber = Not System.String.IsNullOrWhiteSpace(paragraph.NumberText)
                 End If
@@ -2393,6 +2442,386 @@ Namespace SharedLibrary
                 output.AppendLine(indent & "[/Table " & table.DisplayNumber & "]")
                 output.AppendLine()
             End Sub
+
+            ' -----------------------------------------------------------------------------
+            ' Markdown rendering
+            ' -----------------------------------------------------------------------------
+
+            Private Shared Sub RenderBlocksMarkdown(
+                blocks As System.Collections.Generic.List(Of DocumentBlock),
+                context As ExtractionContext,
+                fieldState As FieldEvaluationState,
+                output As System.Text.StringBuilder,
+                nestingLevel As System.Int32
+            )
+                Dim previousWasList As System.Boolean = False
+
+                For Each block As DocumentBlock In blocks
+                    Select Case block.Kind
+                        Case DocumentBlockKind.Paragraph
+                            Dim paragraph As ParagraphInfo = block.Paragraph
+                            Dim paragraphText As System.String = RenderParagraphText(paragraph, context, fieldState)
+
+                            If System.String.IsNullOrWhiteSpace(paragraphText) Then
+                                If Not previousWasList Then
+                                    AppendMarkdownBlankLine(output)
+                                End If
+                                previousWasList = False
+                                Continue For
+                            End If
+
+                            If paragraph.HeadingLevel.HasValue Then
+                                AppendMarkdownBlankLine(output)
+                                Dim headingLevel As System.Int32 = System.Math.Max(1, System.Math.Min(6, paragraph.HeadingLevel.Value))
+                                output.AppendLine(New System.String("#"c, headingLevel) & " " & EscapeMarkdownInline(paragraphText))
+                                output.AppendLine()
+                                previousWasList = False
+                            ElseIf IsMarkdownListParagraph(paragraph) Then
+                                Dim listText As System.String = RenderMarkdownListItemText(paragraph, context, fieldState)
+                                Dim listIndent As System.Int32 = If(paragraph.ListLevel.HasValue, paragraph.ListLevel.Value, 0)
+                                listIndent += nestingLevel
+                                output.Append(New System.String(" "c, System.Math.Max(0, listIndent) * 4))
+                                output.Append(GetMarkdownListMarker(paragraph))
+                                output.AppendLine(EscapeMarkdownInline(listText))
+                                previousWasList = True
+                            Else
+                                If previousWasList Then
+                                    output.AppendLine()
+                                End If
+                                output.AppendLine(EscapeMarkdownInline(paragraphText).Replace(System.Environment.NewLine, "  " & System.Environment.NewLine))
+                                output.AppendLine()
+                                previousWasList = False
+                            End If
+
+                            If DocxIncludeMarginText AndAlso paragraph.MarginParagraphs.Count > 0 Then
+                                If previousWasList Then
+                                    output.AppendLine()
+                                    previousWasList = False
+                                End If
+                                For Each marginParagraph As ParagraphInfo In paragraph.MarginParagraphs
+                                    Dim marginText As System.String = RenderParagraphText(
+                                        marginParagraph,
+                                        context,
+                                        New FieldEvaluationState()
+                                    )
+                                    If Not System.String.IsNullOrWhiteSpace(marginText) Then
+                                        output.AppendLine("> **Margin:** " & EscapeMarkdownInline(marginText))
+                                        output.AppendLine(">")
+                                    End If
+                                Next
+                            End If
+
+                        Case DocumentBlockKind.Table
+                            If previousWasList Then
+                                output.AppendLine()
+                                previousWasList = False
+                            End If
+                            RenderTableMarkdown(block.Table, context, fieldState, output, nestingLevel)
+                    End Select
+                Next
+            End Sub
+
+            Private Shared Function IsMarkdownListParagraph(paragraph As ParagraphInfo) As System.Boolean
+                Return paragraph IsNot Nothing AndAlso
+                    paragraph.HasAutomaticNumber AndAlso
+                    paragraph.ListLevel.HasValue AndAlso
+                    Not paragraph.HeadingLevel.HasValue
+            End Function
+
+            Private Shared Function RenderMarkdownListItemText(
+                paragraph As ParagraphInfo,
+                context As ExtractionContext,
+                fieldState As FieldEvaluationState
+            ) As System.String
+                Dim builder As New System.Text.StringBuilder()
+                For Each token As InlineToken In paragraph.Tokens
+                    If token.Kind = InlineTokenKind.Text Then
+                        builder.Append(token.Text)
+                    Else
+                        builder.Append(EvaluateField(token, paragraph, context, fieldState, False))
+                    End If
+                Next
+
+                Dim plainText As System.String = builder.ToString().Trim()
+                If StartsWithEquivalentNumber(plainText, paragraph.NumberText) Then
+                    Dim numberText As System.String = paragraph.NumberText.Trim()
+                    If plainText.Length > numberText.Length Then
+                        plainText = plainText.Substring(numberText.Length).TrimStart()
+                    End If
+                End If
+                Return plainText
+            End Function
+
+            Private Shared Function GetMarkdownListMarker(paragraph As ParagraphInfo) As System.String
+                Dim numberFormat As System.String = If(paragraph.ListNumberFormat, System.String.Empty).ToLowerInvariant()
+                If numberFormat = "bullet" OrElse LooksLikeBullet(paragraph.NumberText) Then
+                    Return "- "
+                End If
+
+                Select Case numberFormat
+                    Case "decimal", "decimalzero", "ordinal"
+                        Return "1. "
+                    Case Else
+                        Dim visibleNumber As System.String = paragraph.NumberText.Trim()
+                        If System.String.IsNullOrWhiteSpace(visibleNumber) Then
+                            Return "1. "
+                        End If
+                        Return visibleNumber & " "
+                End Select
+            End Function
+
+            Private Shared Function LooksLikeBullet(value As System.String) As System.Boolean
+                If System.String.IsNullOrWhiteSpace(value) Then
+                    Return False
+                End If
+                Dim firstCharacter As System.Char = value.Trim()(0)
+                Return "•▪▫◦●○*+‣⁃▸-".IndexOf(firstCharacter) >= 0
+            End Function
+
+            Private Shared Sub RenderTableMarkdown(
+                table As TableInfo,
+                context As ExtractionContext,
+                fieldState As FieldEvaluationState,
+                output As System.Text.StringBuilder,
+                nestingLevel As System.Int32
+            )
+                AppendMarkdownBlankLine(output)
+
+                If table.Rows.Count = 0 Then
+                    output.AppendLine("*Empty table*")
+                    output.AppendLine()
+                    Return
+                End If
+
+                If CanRenderAsPipeTable(table) Then
+                    RenderPipeTableMarkdown(table, context, fieldState, output, nestingLevel)
+                Else
+                    RenderHtmlTableMarkdown(table, context, fieldState, output, nestingLevel)
+                End If
+
+                output.AppendLine()
+            End Sub
+
+            Private Shared Function CanRenderAsPipeTable(table As TableInfo) As System.Boolean
+                If table Is Nothing OrElse table.Rows.Count = 0 Then
+                    Return False
+                End If
+
+                Dim expectedCells As System.Int32 = -1
+                For Each row As TableRowInfo In table.Rows
+                    If expectedCells < 0 Then
+                        expectedCells = row.Cells.Count
+                    ElseIf row.Cells.Count <> expectedCells Then
+                        Return False
+                    End If
+
+                    For Each cell As TableCellInfo In row.Cells
+                        If cell.GridSpan <> 1 OrElse Not System.String.IsNullOrWhiteSpace(cell.VerticalMerge) Then
+                            Return False
+                        End If
+                        For Each block As DocumentBlock In cell.Blocks
+                            If block.Kind = DocumentBlockKind.Table Then
+                                Return False
+                            End If
+                        Next
+                    Next
+                Next
+
+                Return expectedCells > 0
+            End Function
+
+            Private Shared Sub RenderPipeTableMarkdown(
+                table As TableInfo,
+                context As ExtractionContext,
+                fieldState As FieldEvaluationState,
+                output As System.Text.StringBuilder,
+                nestingLevel As System.Int32
+            )
+                Dim columnCount As System.Int32 = table.Rows(0).Cells.Count
+                Dim renderedRows As New System.Collections.Generic.List(Of System.Collections.Generic.List(Of System.String))()
+
+                For Each row As TableRowInfo In table.Rows
+                    Dim renderedRow As New System.Collections.Generic.List(Of System.String)()
+                    For Each cell As TableCellInfo In row.Cells
+                        renderedRow.Add(RenderMarkdownTableCell(cell, context, fieldState, nestingLevel + 1))
+                    Next
+                    renderedRows.Add(renderedRow)
+                Next
+
+                output.Append("|")
+                For columnIndex As System.Int32 = 0 To columnCount - 1
+                    output.Append(" " & renderedRows(0)(columnIndex) & " |")
+                Next
+                output.AppendLine()
+
+                output.Append("|")
+                For columnIndex As System.Int32 = 0 To columnCount - 1
+                    output.Append(" --- |")
+                Next
+                output.AppendLine()
+
+                For rowIndex As System.Int32 = 1 To renderedRows.Count - 1
+                    output.Append("|")
+                    For columnIndex As System.Int32 = 0 To columnCount - 1
+                        output.Append(" " & renderedRows(rowIndex)(columnIndex) & " |")
+                    Next
+                    output.AppendLine()
+                Next
+            End Sub
+
+            Private Shared Sub RenderHtmlTableMarkdown(
+                table As TableInfo,
+                context As ExtractionContext,
+                fieldState As FieldEvaluationState,
+                output As System.Text.StringBuilder,
+                nestingLevel As System.Int32
+            )
+                output.AppendLine("<table>")
+                For Each row As TableRowInfo In table.Rows
+                    output.AppendLine("  <tr>")
+                    For Each cell As TableCellInfo In row.Cells
+                        Dim attributes As New System.Text.StringBuilder()
+                        If cell.GridSpan > 1 Then
+                            attributes.Append(" colspan=""")
+                            attributes.Append(cell.GridSpan.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                            attributes.Append("""")
+                        End If
+                        If System.String.Equals(cell.VerticalMerge, "restart", System.StringComparison.OrdinalIgnoreCase) Then
+                            Dim rowSpan As System.Int32 = CountVerticalMergeSpan(table, row, cell)
+                            If rowSpan > 1 Then
+                                attributes.Append(" rowspan=""")
+                                attributes.Append(rowSpan.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                                attributes.Append("""")
+                            End If
+                        ElseIf System.String.Equals(cell.VerticalMerge, "continue", System.StringComparison.OrdinalIgnoreCase) Then
+                            Continue For
+                        End If
+
+                        Dim cellText As System.String = RenderMarkdownTableCell(cell, context, fieldState, nestingLevel + 1)
+                        output.AppendLine("    <td" & attributes.ToString() & ">" & EscapeHtml(cellText) & "</td>")
+                    Next
+                    output.AppendLine("  </tr>")
+                Next
+                output.AppendLine("</table>")
+            End Sub
+
+            Private Shared Function CountVerticalMergeSpan(
+                table As TableInfo,
+                startRow As TableRowInfo,
+                startCell As TableCellInfo
+            ) As System.Int32
+                Dim startRowIndex As System.Int32 = table.Rows.IndexOf(startRow)
+                Dim cellIndex As System.Int32 = startRow.Cells.IndexOf(startCell)
+                If startRowIndex < 0 OrElse cellIndex < 0 Then
+                    Return 1
+                End If
+
+                Dim span As System.Int32 = 1
+                For rowIndex As System.Int32 = startRowIndex + 1 To table.Rows.Count - 1
+                    If cellIndex >= table.Rows(rowIndex).Cells.Count Then
+                        Exit For
+                    End If
+                    Dim candidate As TableCellInfo = table.Rows(rowIndex).Cells(cellIndex)
+                    If Not System.String.Equals(candidate.VerticalMerge, "continue", System.StringComparison.OrdinalIgnoreCase) Then
+                        Exit For
+                    End If
+                    span += 1
+                Next
+                Return span
+            End Function
+
+            Private Shared Function RenderMarkdownTableCell(
+                cell As TableCellInfo,
+                context As ExtractionContext,
+                fieldState As FieldEvaluationState,
+                nestingLevel As System.Int32
+            ) As System.String
+                Dim builder As New System.Text.StringBuilder()
+                RenderBlocksMarkdown(cell.Blocks, context, fieldState, builder, nestingLevel)
+                Dim text As System.String = builder.ToString().Trim()
+                text = text.Replace("|", "\|")
+                text = System.Text.RegularExpressions.Regex.Replace(text, "\r?\n\s*\r?\n", "<br><br>")
+                text = text.Replace(System.Environment.NewLine, "<br>")
+                Return text
+            End Function
+
+            Private Shared Sub RenderNoteSectionsMarkdown(
+                notes As System.Collections.Generic.List(Of NoteSection),
+                context As ExtractionContext,
+                output As System.Text.StringBuilder
+            )
+                If notes.Count = 0 Then
+                    Return
+                End If
+
+                Dim grouped As New System.Collections.Generic.Dictionary(Of System.String, System.Collections.Generic.List(Of NoteSection))(System.StringComparer.OrdinalIgnoreCase)
+                For Each note As NoteSection In notes
+                    Dim group As System.Collections.Generic.List(Of NoteSection) = Nothing
+                    If Not grouped.TryGetValue(note.Label, group) Then
+                        group = New System.Collections.Generic.List(Of NoteSection)()
+                        grouped(note.Label) = group
+                    End If
+                    group.Add(note)
+                Next
+
+                For Each pair As System.Collections.Generic.KeyValuePair(Of System.String, System.Collections.Generic.List(Of NoteSection)) In grouped
+                    AppendMarkdownBlankLine(output)
+                    output.AppendLine("## " & EscapeMarkdownInline(pair.Key & "s"))
+                    output.AppendLine()
+
+                    For Each note As NoteSection In pair.Value
+                        Dim noteBuilder As New System.Text.StringBuilder()
+                        RenderBlocksMarkdown(note.Blocks, context, New FieldEvaluationState(), noteBuilder, 0)
+                        Dim noteText As System.String = noteBuilder.ToString().Trim()
+                        If noteText.Length > 0 Then
+                            noteText = RemoveLeadingNoteReferenceMarker(noteText, pair.Key, note.NoteId)
+                            noteText = System.Text.RegularExpressions.Regex.Replace(noteText, "\r?\n", " ").Trim()
+                            output.AppendLine("- **" & EscapeMarkdownInline(pair.Key & " " & note.NoteId) & ":** " & noteText)
+                        End If
+                    Next
+                    output.AppendLine()
+                Next
+            End Sub
+
+            Private Shared Sub AppendMarkdownBlankLine(output As System.Text.StringBuilder)
+                If output.Length = 0 Then
+                    Return
+                End If
+
+                Dim current As System.String = output.ToString()
+                If current.EndsWith(System.Environment.NewLine & System.Environment.NewLine, System.StringComparison.Ordinal) Then
+                    Return
+                End If
+                If current.EndsWith(System.Environment.NewLine, System.StringComparison.Ordinal) Then
+                    output.AppendLine()
+                Else
+                    output.AppendLine()
+                    output.AppendLine()
+                End If
+            End Sub
+
+            Private Shared Function EscapeMarkdownInline(value As System.String) As System.String
+                If System.String.IsNullOrEmpty(value) Then
+                    Return System.String.Empty
+                End If
+
+                Dim result As System.String = value
+                result = result.Replace("\", "\\")
+                result = result.Replace("`", "\`")
+                result = result.Replace("*", "\*")
+                result = result.Replace("_", "\_")
+                result = result.Replace("[", "\[")
+                result = result.Replace("]", "\]")
+                result = result.Replace("|", "\|")
+                Return result
+            End Function
+
+            Private Shared Function EscapeHtml(value As System.String) As System.String
+                If System.String.IsNullOrEmpty(value) Then
+                    Return System.String.Empty
+                End If
+                Return value.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;").Replace("""", "&quot;")
+            End Function
 
             Private Shared Sub RenderNoteSections(
                 notes As System.Collections.Generic.List(Of NoteSection),

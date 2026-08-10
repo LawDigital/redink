@@ -519,29 +519,19 @@ Partial Public Class ThisAddIn
 
             For i As Integer = 1 To session.Stores.Count
                 Dim store As Store = Nothing
-                Dim sentItems As MAPIFolder = Nothing
-                Dim deletedItems As MAPIFolder = Nothing
+                Dim rootFolder As MAPIFolder = Nothing
 
                 Try
                     store = session.Stores(i)
                     If Not ShouldProcessAutoDeleteStore(store, targetStoreId) Then Continue For
 
                     Try
-                        sentItems = store.GetDefaultFolder(OlDefaultFolders.olFolderSentMail)
-                        ApplyEligibilityToGroupInFolderTree(sentItems, groupId, answeredUtc, deleteAfterUtc, stampedCount)
+                        rootFolder = store.GetRootFolder()
+                        ApplyEligibilityToGroupInFolderTree(rootFolder, groupId, answeredUtc, deleteAfterUtc, stampedCount)
                     Catch
                     Finally
-                        If sentItems IsNot Nothing Then Try : Marshal.ReleaseComObject(sentItems) : Catch : End Try
-                        sentItems = Nothing
-                    End Try
-
-                    Try
-                        deletedItems = store.GetDefaultFolder(OlDefaultFolders.olFolderDeletedItems)
-                        ApplyEligibilityToGroupInFolderTree(deletedItems, groupId, answeredUtc, deleteAfterUtc, stampedCount)
-                    Catch
-                    Finally
-                        If deletedItems IsNot Nothing Then Try : Marshal.ReleaseComObject(deletedItems) : Catch : End Try
-                        deletedItems = Nothing
+                        If rootFolder IsNot Nothing Then Try : Marshal.ReleaseComObject(rootFolder) : Catch : End Try
+                        rootFolder = Nothing
                     End Try
 
                     Exit For

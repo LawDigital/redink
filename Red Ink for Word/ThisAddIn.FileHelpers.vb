@@ -49,7 +49,8 @@ Partial Public Class ThisAddIn
                                            Optional AskUser As Boolean = True,
                                            Optional AskWorksheetSelection As Boolean = False,
                                            Optional OcrAdditionalInstruction As String = Nothing,
-                                           Optional ShowOCRProgress As Boolean = False) As Task(Of FileReadResult)
+                                           Optional ShowOCRProgress As Boolean = False,
+                                           Optional ReturnMarkdown As Boolean = False) As Task(Of FileReadResult)
 
         Dim result As New FileReadResult()
         Dim filePath As String = ""
@@ -95,7 +96,7 @@ Partial Public Class ThisAddIn
                             FromFile = "Error: File type not supported (disabled for security)."
                         End If
                     Case ".docx"
-                        FromFile = ReadDocxSandboxed(filePath)
+                        FromFile = ReadDocxSandboxed(filePath, ReturnMarkdown)
                     Case ".xlsx"
                         FromFile = ReadXlsxSandboxed(filePath, Silent, AskWorksheetSelection)
                         If String.Equals(FromFile, XlsxSelectionCancelledMarker, StringComparison.Ordinal) Then
@@ -112,7 +113,9 @@ Partial Public Class ThisAddIn
                             DoOCR,
                             AskUser,
                             _context,
-                            OcrAdditionalInstruction, ShowOCRProgress)
+                            OcrAdditionalInstruction,
+                            ShowOCRProgress,
+                            ReturnMarkdown)
                         FromFile = pdfResult.Content
                         result.PdfMayBeIncomplete = pdfResult.OcrWasSkippedDueToHeuristics
                     Case ".eml"
@@ -168,9 +171,10 @@ Partial Public Class ThisAddIn
                                          Optional AskUser As Boolean = True,
                                          Optional AskWorksheetSelection As Boolean = False,
                                          Optional OcrAdditionalInstruction As String = Nothing,
-                                         Optional ShowOCRProgress As Boolean = False) As Task(Of String)
+                                         Optional ShowOCRProgress As Boolean = False,
+                                         Optional ReturnMarkdown As Boolean = False) As Task(Of String)
 
-        Dim result = Await GetFileContentEx(optionalFilePath, Silent, DoOCR, AskUser, AskWorksheetSelection, OcrAdditionalInstruction, ShowOCRProgress)
+        Dim result = Await GetFileContentEx(optionalFilePath, Silent, DoOCR, AskUser, AskWorksheetSelection, OcrAdditionalInstruction, ShowOCRProgress, ReturnMarkdown)
         Return result.Content
     End Function
 

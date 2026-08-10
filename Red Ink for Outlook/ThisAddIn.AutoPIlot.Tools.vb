@@ -291,12 +291,17 @@ Partial Public Class ThisAddIn
         .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ExtractPdfText,
         .ModelDescription = "Extract PDF Text (built-in)",
         .ToolInstructionsPrompt =
-            AP_Tool_ExtractPdfText & ": Extracts the text content from one or more PDF attachments.",
+            AP_Tool_ExtractPdfText & ": Extracts content from one or more PDF attachments. " &
+            "By default it returns plain text. If the user wants Markdown, pass output_format='markdown'. " &
+            "For text-based PDFs, Markdown uses the direct PDF-to-Markdown extractor without OCR. " &
+            "If OCR is needed and available, the OCR path is retained and should return Markdown when Markdown was requested.",
         .ToolDefinition =
             "{""name"":""" & AP_Tool_ExtractPdfText & """," &
-            """description"":""Extracts text from PDF file attachments""," &
+            """description"":""Extracts content from PDF file attachments. " &
+            "Optional output_format='markdown' returns Markdown instead of plain text when possible.""," &
             """parameters"":{""type"":""object"",""properties"":{" &
-            """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of the PDF attachments to extract text from. If empty, processes all PDFs.""}" &
+            """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of the PDF attachments to extract text from. If empty, processes all PDFs.""}," &
+            """output_format"":{""type"":""string"",""enum"":[""text"",""markdown""],""description"":""Optional output format. Default is 'text'. Use 'markdown' to request Markdown output.""}" &
             "},""required"":[]}}"
     })
 
@@ -320,22 +325,27 @@ Partial Public Class ThisAddIn
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ReadAttachment,
             .ModelDescription = "Read Attachment Content (built-in)",
             .ToolInstructionsPrompt =
-                AP_Tool_ReadAttachment & ": Reads and returns the text content of one or more supported attachments " &
-                "(DOCX, PDF, TXT, CSV, HTML, XML, JSON, XLSX, XLS, PPTX). " &
+                AP_Tool_ReadAttachment & ": Reads and returns the content of one or more supported attachments. " &
+                "By default it returns plain text. If the user wants Markdown, pass output_format='markdown'. " &
+                "For Word documents (.docx), Markdown uses the sandboxed DOCX-to-Markdown path. " &
+                "For PDFs (.pdf), Markdown uses the direct PDF-to-Markdown extractor without OCR unless OCR is explicitly requested by another tool. " &
+                "Other supported formats continue to return plain text even when Markdown is requested. " &
                 "Embedded mail files (.msg, .eml) are automatically unpacked — their body text and nested attachments " &
                 "are extracted recursively and appear as separate attachments that you can reference by name. " &
                 "Use attachment_name for a single file or attachment_names for batch reading.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_ReadAttachment & """," &
-                """description"":""Reads and returns the text content of one or more attachment files. " &
+                """description"":""Reads and returns the content of one or more attachment files. " &
                 "Supports Word documents (.docx), PDFs (.pdf), Excel spreadsheets (.xlsx, .xls), " &
                 "PowerPoint presentations (.pptx), and text-based files (.txt, .csv, .html, .xml, .json, .md, .log). " &
+                "Optional output_format='markdown' enables Markdown output for DOCX and PDF files; other formats remain plain text. " &
                 "Embedded mail files (.msg, .eml) are automatically unpacked at intake — their text content " &
                 "and nested attachments appear as separate files in the attachment list. " &
                 "For Word documents, also reports if comments or tracked changes are present.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """attachment_name"":{""type"":""string"",""description"":""Filename of a single attachment to read""}," &
-                """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of multiple attachments to read in batch. Use this instead of attachment_name when reading several files.""}" &
+                """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of multiple attachments to read in batch. Use this instead of attachment_name when reading several files.""}," &
+                """output_format"":{""type"":""string"",""enum"":[""text"",""markdown""],""description"":""Optional output format. Default is 'text'. Use 'markdown' to request Markdown output for DOCX and PDF attachments.""}" &
                 "},""required"":[]}}"
         })
 
@@ -1882,32 +1892,34 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Reads text from a single attachment, using cache when available.
-    ''' </summary>
-    ''' 
-    ''' <summary>
-    ''' Reads text from a single attachment, using cache when available.
-    ''' Prefers sandboxed (COM-free) readers for Office formats and mail files.
-    ''' </summary>
-    ''' <summary>
-    ''' Reads text from a single attachment, using cache when available.
     ''' Prefers sandboxed (COM-free) readers for OpenXML and mail formats.
     ''' Respects <see cref="INI_AllowLegacyDocFiles"/> for .doc files.
     ''' </summary>
-    Private Async Function ReadSingleAttachmentText(att As AutoPilotAttachmentInfo, context As ToolExecutionContext) As Task(Of String)
-        ' Return cache if available
-        If att.CachedText IsNot Nothing Then Return att.CachedText
-
+    Private Async Function ReadSingleAttachmentText(att As AutoPilotAttachmentInfo,
+                                                    context As ToolExecutionContext,
+                                                    Optional returnMarkdown As Boolean = False) As Task(Of String)
+        If att Is Nothing Then Return Nothing
         If att.TempFilePath Is Nothing OrElse Not File.Exists(att.TempFilePath) Then Return Nothing
+
+        Dim ext As String = Path.GetExtension(att.TempFilePath).ToLowerInvariant()
+        Dim markdownCapable As Boolean = (ext = ".docx" OrElse ext = ".pdf")
+        Dim useMarkdown As Boolean = returnMarkdown AndAlso markdownCapable
+
+        ' Return cache if available
+        If useMarkdown Then
+            If att.CachedMarkdownText IsNot Nothing Then Return att.CachedMarkdownText
+        ElseIf att.CachedText IsNot Nothing Then
+            Return att.CachedText
+        End If
 
         Dim text As String = Nothing
         Dim extracted As Boolean = False
 
         ' ── Sandboxed readers first (no COM interop) ──
-        Dim ext = Path.GetExtension(att.TempFilePath).ToLowerInvariant()
         Try
             Select Case ext
                 Case ".docx"
-                    text = SharedMethods.ReadDocxSandboxed(att.TempFilePath)
+                    text = SharedMethods.ReadDocxSandboxed(att.TempFilePath, useMarkdown)
                     extracted = Not String.IsNullOrWhiteSpace(text) AndAlso Not text.StartsWith("Error")
                 Case ".xlsx"
                     text = SharedMethods.ReadXlsxSandboxed(att.TempFilePath)
@@ -1932,7 +1944,7 @@ Partial Public Class ThisAddIn
         End Try
 
         ' ── Fallback: Office COM interop for .doc, .xls, .ppt, .rtf (legacy formats) ──
-        If Not extracted AndAlso ext <> ".doc" OrElse (ext = ".doc" AndAlso INI_AllowLegacyDocFiles) Then
+        If Not extracted AndAlso (Not useMarkdown) AndAlso (ext <> ".doc" OrElse (ext = ".doc" AndAlso INI_AllowLegacyDocFiles)) Then
             Try
                 Dim label As String = Nothing
                 extracted = TryExtractOfficeText(att.TempFilePath, text, label)
@@ -1941,7 +1953,7 @@ Partial Public Class ThisAddIn
         End If
 
         ' ── Fallback: text-like files ──
-        If Not extracted Then
+        If Not extracted AndAlso (Not useMarkdown) Then
             Try
                 Dim label As String = Nothing
                 extracted = TryExtractTextLike(att.TempFilePath, text, label)
@@ -1949,17 +1961,26 @@ Partial Public Class ThisAddIn
             End Try
         End If
 
-        ' ── Fallback: PDF ──
+        ' ── PDF extraction ──
         If Not extracted AndAlso ext = ".pdf" Then
             Try
-                text = Await SharedMethods.ReadPdfAsText(att.TempFilePath, ReturnErrorInsteadOfEmpty:=True, DoOCR:=False, AskUser:=False)
-                extracted = Not String.IsNullOrWhiteSpace(text)
+                text = Await SharedMethods.ReadPdfAsText(
+                    att.TempFilePath,
+                    ReturnErrorInsteadOfEmpty:=True,
+                    DoOCR:=False,
+                    AskUser:=False,
+                    ReturnMarkdown:=useMarkdown)
+                extracted = Not String.IsNullOrWhiteSpace(text) AndAlso Not text.StartsWith("Error")
             Catch
             End Try
         End If
 
         If extracted AndAlso Not String.IsNullOrWhiteSpace(text) Then
-            att.CachedText = text
+            If useMarkdown Then
+                att.CachedMarkdownText = text
+            Else
+                att.CachedText = text
+            End If
             Return text
         End If
 

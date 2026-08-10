@@ -2658,6 +2658,7 @@ Partial Public Class ThisAddIn
         If _apCurrentAttachments IsNot Nothing Then
             For Each att In _apCurrentAttachments
                 att.CachedText = Nothing
+                att.CachedMarkdownText = Nothing
                 att.CachedDocxHint = Nothing
             Next
         End If
@@ -5890,6 +5891,7 @@ Partial Public Class ThisAddIn
         Public Property LastModifiedTime As DateTime?
         Public Property OutputFiles As New List(Of String)()
         Property CachedText As String
+        Property CachedMarkdownText As String
         Property CachedDocxHint As String
         Public Property IsToolOutput As Boolean = False
 
