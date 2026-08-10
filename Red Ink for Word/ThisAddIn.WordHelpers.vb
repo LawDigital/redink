@@ -2061,11 +2061,18 @@ Partial Public Class ThisAddIn
         ).ToList()
         Dim pdfCount As Integer = pdfFiles.Count
 
+        ' Detect files that support direct Markdown output
+        Dim markdownEligibleFiles As List(Of String) = filesToProcess.Where(
+            Function(f)
+                Dim ext As String = IO.Path.GetExtension(f).ToLowerInvariant()
+                Return ext = ".docx" OrElse ext = ".pdf"
+            End Function
+        ).ToList()
+
         ' Determine OCR settings
         Dim doOcr As Boolean = False
-        Dim askUserPerFile As Boolean = False
         Dim flattenBeforeOcr As Boolean = False
-        Dim useMarkdownOutputForFlattenedOcr As Boolean = False
+        Dim useMarkdownOutputWhenSupported As Boolean = False
         Dim ocrMarkdownInstruction As String = String.Empty
 
         If pdfCount >= 2 AndAlso SharedMethods.IsOcrAvailable(_context) Then
@@ -2080,13 +2087,10 @@ Partial Public Class ThisAddIn
                 Return ' User aborted
             ElseIf ocrChoice = 1 Then
                 doOcr = True
-                askUserPerFile = False
             Else
                 doOcr = False
-                askUserPerFile = False
             End If
         ElseIf pdfCount = 1 AndAlso SharedMethods.IsOcrAvailable(_context) Then
-            ' Single PDF - still ask once upfront, but don't interrupt during processing
             Dim ocrChoice As Integer = ShowCustomYesNoBox(
                 "The PDF may require OCR to extract text from scanned content." & vbCrLf & vbCrLf &
                 "Do you want to enable OCR?",
@@ -2096,7 +2100,6 @@ Partial Public Class ThisAddIn
                 Return ' User aborted
             End If
             doOcr = (ocrChoice = 1)
-            askUserPerFile = False ' User already decided — don't interrupt during processing
         End If
 
         ' Offer PDF flattening before OCR when OCR is enabled
@@ -2114,20 +2117,20 @@ Partial Public Class ThisAddIn
             flattenBeforeOcr = (flattenChoice = 1)
         End If
 
-        ' Only ask about Markdown if OCR is enabled AND PDFs will be flattened first
-        If doOcr AndAlso flattenBeforeOcr Then
+        If markdownEligibleFiles.Count > 0 Then
             Dim markdownChoice As Integer = ShowCustomYesNoBox(
-                "Do you want OCR results for those flattened PDFs to be saved as Markdown files (.md) instead of plain text (.txt)?" & vbCrLf & vbCrLf &
-                "If yes, the OCR prompt will explicitly request Markdown output and the saved file extension will be changed to .md.",
-                "Yes, save OCR results as Markdown",
+                "You can have your Word documents (.docx) and PDF files converted to Markdown, conserving at least some of their formatting. This is done without OCR." & vbCrLf & vbCrLf &
+                "If the quality is not what you need, you may want to try to have your files converted to PDF, flattened to an image and OCR'd by your model, if it supports so. You can use the same Word Helper you just used to process the PDF." & vbCrLf & vbCrLf &
+                "Do you want supported files to be saved as Markdown (.md) instead of plain text (.txt)?",
+                "Yes, use Markdown where supported",
                 "No, keep plain text")
             If markdownChoice = 0 Then
                 Return ' User aborted
             End If
 
-            useMarkdownOutputForFlattenedOcr = (markdownChoice = 1)
+            useMarkdownOutputWhenSupported = (markdownChoice = 1)
 
-            If useMarkdownOutputForFlattenedOcr Then
+            If useMarkdownOutputWhenSupported Then
                 ocrMarkdownInstruction = Add_OcrMarkdownInstruction
             End If
         End If
@@ -2163,6 +2166,9 @@ Partial Public Class ThisAddIn
         Dim failedFiles As New List(Of String)()
         Dim emptyContentFiles As New List(Of String)()
         Dim flattenedPdfCount As Integer = 0
+        Dim markdownOutputCount As Integer = 0
+        Dim markdownPdfCount As Integer = 0
+        Dim markdownDocxCount As Integer = 0
         ' Collected successfully-extracted content for the optional combine/index step.
         Dim extractedDocuments As New List(Of (Name As String, Content As String))()
         Dim singleExtractedOutputPath As String = Nothing
@@ -2182,11 +2188,13 @@ Partial Public Class ThisAddIn
                 ProgressBarModule.GlobalProgressLabel = $"Processing file {i + 1} of {filesToProcess.Count}: {fileName}"
 
                 Try
-                    ' Determine OCR settings for this file
-                    Dim isPdf As Boolean = IO.Path.GetExtension(filePath).Equals(".pdf", StringComparison.OrdinalIgnoreCase)
+                    ' Determine OCR and Markdown settings for this file
+                    Dim fileExtension As String = IO.Path.GetExtension(filePath).ToLowerInvariant()
+                    Dim isPdf As Boolean = fileExtension = ".pdf"
+                    Dim isDocx As Boolean = fileExtension = ".docx"
                     Dim useOcrForThisFile As Boolean = isPdf AndAlso doOcr
                     Dim useMarkdownForThisFile As Boolean =
-                        isPdf AndAlso useOcrForThisFile AndAlso flattenBeforeOcr AndAlso useMarkdownOutputForFlattenedOcr
+                        useMarkdownOutputWhenSupported AndAlso (isPdf OrElse isDocx)
                     Dim outputExtension As String = If(useMarkdownForThisFile, ".md", ".txt")
 
                     ' If flattening is requested for PDFs, flatten to temp file first
@@ -2221,7 +2229,9 @@ Partial Public Class ThisAddIn
                             Silent:=True,
                             DoOCR:=useOcrForThisFile,
                             AskUser:=False,
-                            OcrAdditionalInstruction:=If(useMarkdownForThisFile, ocrMarkdownInstruction, ""), ShowOCRProgress:=True)
+                            OcrAdditionalInstruction:=If(useMarkdownForThisFile AndAlso useOcrForThisFile, ocrMarkdownInstruction, ""),
+                            ShowOCRProgress:=True,
+                            ReturnMarkdown:=useMarkdownForThisFile)
 
                         If String.IsNullOrWhiteSpace(content) Then
                             emptyContentFiles.Add($"{fileName} ({IO.Path.GetExtension(filePath).ToLowerInvariant()})")
@@ -2256,6 +2266,16 @@ Partial Public Class ThisAddIn
 
                         IO.File.WriteAllText(outputPath, content, System.Text.Encoding.UTF8)
                         successCount += 1
+
+                        If useMarkdownForThisFile Then
+                            markdownOutputCount += 1
+                            If isPdf Then
+                                markdownPdfCount += 1
+                            ElseIf isDocx Then
+                                markdownDocxCount += 1
+                            End If
+                        End If
+
                         extractedDocuments.Add((fileName, content))
                         If successCount = 1 Then
                             singleExtractedOutputPath = outputPath
@@ -2396,13 +2416,20 @@ Partial Public Class ThisAddIn
                 summary.AppendLine($"Index file: {indexOutputPath}")
             End If
 
-            If doOcr Then
-            summary.AppendLine($"OCR was enabled for PDF files.")
+        If doOcr Then
+            summary.AppendLine("OCR was enabled for PDF files.")
             If flattenBeforeOcr Then
                 summary.AppendLine($"PDFs were flattened to images before OCR ({flattenedPdfCount} file(s)).")
-                If useMarkdownOutputForFlattenedOcr Then
-                    summary.AppendLine("Flattened PDF OCR results were saved as Markdown (.md).")
-                End If
+            End If
+        End If
+
+        If useMarkdownOutputWhenSupported Then
+            summary.AppendLine($"Markdown output was used for {markdownOutputCount} supported file(s).")
+            If markdownDocxCount > 0 Then
+                summary.AppendLine($"  • DOCX → Markdown: {markdownDocxCount}")
+            End If
+            If markdownPdfCount > 0 Then
+                summary.AppendLine($"  • PDF → Markdown: {markdownPdfCount}")
             End If
         End If
 

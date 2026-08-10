@@ -233,42 +233,61 @@ Namespace SharedLibrary
 #Region "Main Entry Point"
 
         ''' <summary>
+        ''' Determines whether an INI-governed update workflow may run for the current context.
+        ''' Uses the same master switch, client allow-list and NoLocalConfig session override as the
+        ''' INI update flow so related update checks stay aligned.
+        ''' </summary>
+        Friend Shared Function CanRunIniGovernedUpdate(ByRef context As ISharedContext,
+                                                       updateDisplayName As String) As Boolean
+            If context Is Nothing Then
+                Return False
+            End If
+
+            _iniUpdateContext = context
+
+            If Not _iniUpdateContext.INI_UpdateIni Then
+                Debug.WriteLine($"{updateDisplayName} Update: Disabled via _iniUpdateContext.INI_UpdateIni")
+                Return False
+            End If
+
+            If IsClientAllowedToUpdate() Then
+                Return True
+            End If
+
+            If NoLocalConfigSessionUnlocked Then
+                Dim overrideAnswer As Integer = ShowCustomYesNoBox(
+                    $"Your client is not allowed to check for or apply {updateDisplayName} updates. " &
+                    "However, because you unlocked the expert configuration with the central configuration password, " &
+                    $"you may still check for {updateDisplayName} updates now. Do you want to check for updates?",
+                    $"Yes, check for {updateDisplayName} updates", "No")
+                If overrideAnswer <> 1 Then
+                    Debug.WriteLine($"{updateDisplayName} Update: Client not authorized; user declined the override check")
+                    Return False
+                End If
+                LogIniUpdateEvent("Client Check",
+                    $"Client not authorized, but expert configuration was unlocked in this session - user chose to check for {updateDisplayName} updates")
+            Else
+                Debug.WriteLine($"{updateDisplayName} Update: This client is not authorized to perform updates")
+                Return False
+            End If
+
+            Return True
+        End Function
+
+        ''' <summary>
         ''' Main entry point for INI update checking. Called from UpdateHandler at startup.
         ''' </summary>
         ''' <param name="context">The shared context containing configuration.</param>
         ''' <returns>True if updates were applied, False otherwise.</returns>
-        Public Shared Function CheckForIniUpdates(ByRef context As ISharedContext) As Boolean
+        Public Shared Function CheckForIniUpdates(ByRef context As ISharedContext,
+                                                  Optional skipAuthorizationGate As Boolean = False) As Boolean
 
             ' Store context for use by helper methods
             _iniUpdateContext = context
 
             Try
-                ' Check master switch
-                If Not _iniUpdateContext.INI_UpdateIni Then
-                    Debug.WriteLine("INI Update: Disabled via _iniUpdateContext.INI_UpdateIni")
+                If Not skipAuthorizationGate AndAlso Not CanRunIniGovernedUpdate(context, "INI configuration") Then
                     Return False
-                End If
-
-                ' Check if this client is allowed to perform updates
-                If Not IsClientAllowedToUpdate() Then
-                    If NoLocalConfigSessionUnlocked Then
-                        ' The user unlocked the expert/central configuration in this session, so allow an
-                        ' explicit, user-approved check even though this client is not in the allowed list.
-                        Dim overrideAnswer As Integer = ShowCustomYesNoBox(
-                            "Your client is not allowed to check for or apply INI configuration updates. " &
-                            "However, because you unlocked the expert configuration with the central configuration password, " &
-                            "you may still check for an INI update now. Do you want to check for updates?",
-                            "Yes, check for INI updates", "No")
-                        If overrideAnswer <> 1 Then
-                            Debug.WriteLine("INI Update: Client not authorized; user declined the override check")
-                            Return False
-                        End If
-                        LogIniUpdateEvent("Client Check",
-                            "Client not authorized, but expert configuration was unlocked in this session - user chose to check for updates")
-                    Else
-                        Debug.WriteLine("INI Update: This client is not authorized to perform updates")
-                        Return False
-                    End If
                 End If
 
                 ' Check registry for silent update permission - override silent mode if not permitted
@@ -4329,13 +4348,18 @@ Namespace SharedLibrary
         ''' </param>
         ''' <returns>True if at least one file operation was successfully applied; otherwise False.</returns>
         Public Shared Function CheckForAgentResourceUpdates(ByRef context As ISharedContext,
-                                                            Optional zipUrlOverride As String = Nothing) As Boolean
+                                                            Optional zipUrlOverride As String = Nothing,
+                                                            Optional skipAuthorizationGate As Boolean = False) As Boolean
             If context Is Nothing Then
                 ShowCustomMessageBox("Agent Resources update cannot run because the shared context is not available.")
                 Return False
             End If
 
             _iniUpdateContext = context
+
+            If Not skipAuthorizationGate AndAlso Not CanRunIniGovernedUpdate(context, "Agent Resources") Then
+                Return False
+            End If
 
             Dim tempRoot As String = Nothing
 

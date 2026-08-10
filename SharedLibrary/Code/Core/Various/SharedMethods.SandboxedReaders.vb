@@ -65,8 +65,13 @@ Namespace SharedLibrary
         '  DOCX — Sandboxed
         ' ═══════════════════════════════════════════════════════════════════════
 
-        Public Shared Function ReadDocxSandboxed(docxPath As String) As String
-            Return DocxTextExtractor.ReadDocxSandboxed(docxPath)
+        Public Shared Function ReadDocxSandboxed(docxPath As String,
+                                                 Optional returnMarkdown As System.Boolean = False) As String
+            Return DocxTextExtractor.ReadDocxSandboxed(docxPath, returnMarkdown)
+        End Function
+
+        Public Shared Function ReadPdfMarkdownSandboxed(pdfPath As String) As String
+            Return PdfMarkdownExtractor.ReadPdfAsMarkdown(pdfPath)
         End Function
 
 

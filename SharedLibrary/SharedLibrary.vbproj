@@ -639,6 +639,7 @@
     <Compile Include="Code\Core\Various\SharedLogger.vb" />
     <Compile Include="Code\Core\Various\SharedMethods.FileImporter.vb" />
     <Compile Include="Code\Core\Various\SharedMethods.InkyMemory.vb" />
+    <Compile Include="Code\Core\Various\SharedMethods.PdfMarkdownExtractor.vb" />
     <Compile Include="Code\Core\Various\SharedMethods.ProcessParameterPlaceholders.vb" />
     <Compile Include="Code\Core\Various\SharedMethods.SandboxedReaders.Docx.vb" />
     <Compile Include="Code\Core\Various\SharedMethods.SandboxedReaders.vb" />

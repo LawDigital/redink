@@ -64,6 +64,9 @@ Namespace SharedLibrary
         ''' <summary>Name shown in the chat UI for assistant messages.</summary>
         Private Const AssistantName As String = AN8
 
+        ''' <summary>Refresh interval for cached remote manuals and indexed sources.</summary>
+        Private Const RemoteManualCacheRefreshHours As Integer = 72
+
         ''' <summary>Shared configuration/context provider (prompts, INI paths, model settings, etc.).</summary>
         Private ReadOnly _context As ISharedContext
 
@@ -689,7 +692,9 @@ Namespace SharedLibrary
                 Dim retrievalPath As String = configuredPath
 
                 If isRemote Then
-                    retrievalPath = Await EnsureLocalSemanticSearchIndexPathAsync(configuredPath).ConfigureAwait(False)
+                    retrievalPath = Await EnsureLocalSemanticSearchIndexPathAsync(
+                        configuredPath,
+                        AddressOf UpdateAssistantThinking).ConfigureAwait(False)
                 End If
 
                 Dim retrievalIndexed As Boolean =
@@ -1131,7 +1136,9 @@ Namespace SharedLibrary
                 Return ""
             End If
 
-            Dim retrievalPath As String = Await EnsureLocalSemanticSearchIndexPathAsync(configuredPath).ConfigureAwait(False)
+            Dim retrievalPath As String = Await EnsureLocalSemanticSearchIndexPathAsync(
+                configuredPath,
+                AddressOf UpdateAssistantThinking).ConfigureAwait(False)
 
             If Not String.IsNullOrWhiteSpace(retrievalPath) AndAlso
                SharedMethods.IsPotentiallySemanticSearchIndexedTextFile(retrievalPath) Then
@@ -1146,12 +1153,19 @@ Namespace SharedLibrary
 
             Return Await GetManualOnceAsync().ConfigureAwait(False)
         End Function
+
         ''' <summary>
         ''' Returns a local file path for semantic-search retrieval. Remote indexed manuals are cached to
-        ''' a deterministic temp file and refreshed at least once per day.
+        ''' a deterministic temp file and refreshed at least every 72 hours.
         ''' </summary>
-        Private Async Function EnsureLocalSemanticSearchIndexPathAsync(pathOrUrl As String) As System.Threading.Tasks.Task(Of String)
-            Dim localPath As String = Await EnsureLocalManualFileCopyAsync(pathOrUrl).ConfigureAwait(False)
+        Private Async Function EnsureLocalSemanticSearchIndexPathAsync(
+            pathOrUrl As String,
+            Optional statusReporter As System.Action(Of String) = Nothing) As System.Threading.Tasks.Task(Of String)
+
+            Dim localPath As String = Await EnsureLocalManualFileCopyAsync(
+                pathOrUrl,
+                "Indexed manual — downloading refreshed source...",
+                statusReporter).ConfigureAwait(False)
             If String.IsNullOrWhiteSpace(localPath) Then
                 Return ""
             End If
@@ -1165,9 +1179,13 @@ Namespace SharedLibrary
 
         ''' <summary>
         ''' Returns a local file path for a manual source. Remote URLs are cached to a deterministic temp
-        ''' file and refreshed at least once per day.
+        ''' file and refreshed at least every 72 hours.
         ''' </summary>
-        Private Shared Async Function EnsureLocalManualFileCopyAsync(pathOrUrl As String) As System.Threading.Tasks.Task(Of String)
+        Private Shared Async Function EnsureLocalManualFileCopyAsync(
+            pathOrUrl As String,
+            Optional downloadStatusText As String = "",
+            Optional statusReporter As System.Action(Of String) = Nothing) As System.Threading.Tasks.Task(Of String)
+
             Dim source As String = If(pathOrUrl, "").Trim()
             If String.IsNullOrWhiteSpace(source) Then
                 Return ""
@@ -1184,6 +1202,11 @@ Namespace SharedLibrary
             Dim freshCachePath As String = GetFreshRemoteManualCachePath(source)
             If Not String.IsNullOrWhiteSpace(freshCachePath) Then
                 Return freshCachePath
+            End If
+
+            If statusReporter IsNot Nothing AndAlso
+               Not String.IsNullOrWhiteSpace(downloadStatusText) Then
+                statusReporter(downloadStatusText)
             End If
 
             Await _remoteManualCacheSemaphore.WaitAsync().ConfigureAwait(False)
@@ -1369,7 +1392,7 @@ Namespace SharedLibrary
 
             Try
                 Dim cacheAge As TimeSpan = DateTime.UtcNow - File.GetLastWriteTimeUtc(cachePath)
-                Return cacheAge < TimeSpan.FromDays(1)
+                Return cacheAge < TimeSpan.FromHours(RemoteManualCacheRefreshHours)
             Catch
                 Return False
             End Try

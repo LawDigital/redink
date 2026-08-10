@@ -246,9 +246,16 @@ flags from the `skill_use` `resource_index` BEFORE any write and act determinist
 
 - NEW skill: `new_resource_root + "\skills\<name>\SKILL.md"`.
 - NEW agent: `new_resource_root + "\agents\<name>\AGENT.md"` (or `...\agents\<name>.md`).
-- Always use ABSOLUTE paths from `resource_index`. A relative path resolves into the temporary
-  workspace and the resource is lost. Do not use `agent_workspace_*` on the `.inky` tree — it is not
-  a workspace and those calls fail with "No active workspace".
+- Always use ABSOLUTE paths from `resource_index` for EVERY resource write. NEVER omit the `path`
+  argument and NEVER pass a relative path when creating or editing a skill/agent. Author mode only
+  *permits* writing into the resource tree; it does NOT redirect a default write there. An omitted or
+  relative path is resolved against the default writable root (connected workspace, else session
+  staging, else the user's DESKTOP) — so without a connected workspace the resource is written to the
+  Desktop and is NOT installed. Construct the target explicitly, e.g.
+  `new_resource_root + "\skills\<name>\SKILL.md"`, and confirm it is under `local_root` (or
+  `central_root` when `central_writes_allowed`) before writing.
+- Do not use `agent_workspace_*` on the `.inky` tree — it is not a workspace and those calls fail
+  with "No active workspace".
 - Create `references/` / `scripts/` with `file_make_dir`; place text with `text_write`, binaries with
   `file_copy`/`file_move`/`file_rename`. Ensure any referenced template exists before finishing.
 
