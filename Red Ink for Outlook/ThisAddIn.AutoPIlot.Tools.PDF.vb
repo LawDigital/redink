@@ -300,6 +300,25 @@ Partial Public Class ThisAddIn
 
         Try
             Dim targetNames = GetArgStringArray(toolCall.Arguments, "attachment_names")
+            Dim outputFormatRaw As String = If(GetArgString(toolCall.Arguments, "output_format"), "text").Trim()
+            Dim returnMarkdown As Boolean = False
+            Dim ocrMarkdownInstruction As String = String.Empty
+
+            If outputFormatRaw.Length = 0 Then
+                outputFormatRaw = "text"
+            End If
+
+            If outputFormatRaw.Equals("markdown", StringComparison.OrdinalIgnoreCase) Then
+                returnMarkdown = True
+                ocrMarkdownInstruction =
+                    "Provide the output as Markdown. " &
+                    "Use Markdown formatting where it helps preserve the original structure, including headings, lists, tables and other tabular content. " &
+                    "Return only the Markdown content and no surrounding code fences."
+            ElseIf Not outputFormatRaw.Equals("text", StringComparison.OrdinalIgnoreCase) Then
+                response.Success = False
+                response.Response = "Invalid output_format. Use 'text' or 'markdown'."
+                Return response
+            End If
 
             Dim toProcess As List(Of AutoPilotAttachmentInfo)
             If targetNames.Count > 0 Then
@@ -323,7 +342,12 @@ Partial Public Class ThisAddIn
                 ApDashboardLog($"📄 Extracting text from: {att.OriginalFileName}", "step")
 
                 Dim pdfResult As PdfReadResult = Await SharedMethods.ReadPdfAsTextEx(
-                    att.TempFilePath, ReturnErrorInsteadOfEmpty:=True, DoOCR:=False, AskUser:=False, context:=_context)
+                    att.TempFilePath,
+                    ReturnErrorInsteadOfEmpty:=True,
+                    DoOCR:=False,
+                    AskUser:=False,
+                    context:=_context,
+                    ReturnMarkdown:=returnMarkdown)
 
                 Dim text As String = If(pdfResult IsNot Nothing, pdfResult.Content, "")
                 Dim usedOcr As Boolean = False
@@ -336,7 +360,13 @@ Partial Public Class ThisAddIn
                     ApDashboardLog($"🔍 Running OCR on: {att.OriginalFileName}", "step")
                     context.Log($"OCR: {att.OriginalFileName}")
                     Dim ocrResult As PdfReadResult = Await SharedMethods.ReadPdfAsTextEx(
-                        att.TempFilePath, ReturnErrorInsteadOfEmpty:=True, DoOCR:=True, AskUser:=False, context:=_context)
+                        att.TempFilePath,
+                        ReturnErrorInsteadOfEmpty:=True,
+                        DoOCR:=True,
+                        AskUser:=False,
+                        context:=_context,
+                        ocrAdditionalInstruction:=If(returnMarkdown, ocrMarkdownInstruction, Nothing),
+                        ReturnMarkdown:=returnMarkdown)
                     Dim ocrText As String = If(ocrResult IsNot Nothing, ocrResult.Content, "")
                     If Not String.IsNullOrWhiteSpace(ocrText) Then
                         text = ocrText

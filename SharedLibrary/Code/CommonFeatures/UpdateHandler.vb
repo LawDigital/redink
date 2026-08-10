@@ -491,25 +491,29 @@ Namespace SharedLibrary
                         If MainControl IsNot Nothing AndAlso MainControl.InvokeRequired Then
                             MainControl.Invoke(
                                 Sub()
-                                    If Not SharedMethods.CheckForIniUpdates(context) Then
-                                        UIInvokeMessage(
-                                            "No configuration updates available or made",
-                                            $"{SharedMethods.AN} INI Updater")
-                                    End If
+                                    If SharedMethods.CanRunIniGovernedUpdate(context, "INI configuration") Then
+                                        If Not SharedMethods.CheckForIniUpdates(context, skipAuthorizationGate:=True) Then
+                                            UIInvokeMessage(
+                                                "No configuration updates available or made",
+                                                $"{SharedMethods.AN} INI Updater")
+                                        End If
 
-                                    If Not String.IsNullOrWhiteSpace(context.INI_AgentResourcesPath) Then
-                                        SharedMethods.CheckForAgentResourceUpdates(context)
+                                        If Not String.IsNullOrWhiteSpace(context.INI_AgentResourcesPath) Then
+                                            SharedMethods.CheckForAgentResourceUpdates(context, skipAuthorizationGate:=True)
+                                        End If
                                     End If
                                 End Sub)
                         Else
-                            If Not SharedMethods.CheckForIniUpdates(context) Then
-                                UIInvokeMessage(
-                                    "No configuration updates available or made",
-                                    $"{SharedMethods.AN} INI Updater")
-                            End If
+                            If SharedMethods.CanRunIniGovernedUpdate(context, "INI configuration") Then
+                                If Not SharedMethods.CheckForIniUpdates(context, skipAuthorizationGate:=True) Then
+                                    UIInvokeMessage(
+                                        "No configuration updates available or made",
+                                        $"{SharedMethods.AN} INI Updater")
+                                End If
 
-                            If Not String.IsNullOrWhiteSpace(context.INI_AgentResourcesPath) Then
-                                SharedMethods.CheckForAgentResourceUpdates(context)
+                                If Not String.IsNullOrWhiteSpace(context.INI_AgentResourcesPath) Then
+                                    SharedMethods.CheckForAgentResourceUpdates(context, skipAuthorizationGate:=True)
+                                End If
                             End If
                         End If
                     Catch iniEx As Exception
