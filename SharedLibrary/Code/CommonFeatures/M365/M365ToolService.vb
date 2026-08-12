@@ -224,7 +224,9 @@ Namespace SharedLibrary
             "'event_end_date_anchor_utc', 'event_start_date_anchor_user', 'event_end_date_anchor_user', " &
             "'event_start_local_date' and 'event_end_local_date'. Teams hits may include 'createdDateTime', " &
             "'created_date_iso_utc' and 'created_date_anchor_utc'. " &
-            "If you mention a date from a hit, copy the corresponding '*_anchor_utc' value exactly. " &
+            "For calendar hits, when presenting appointment times to the user, prefer " &
+            "'event_start_date_anchor_user' and 'event_end_date_anchor_user'. " &
+            "Use the '*_anchor_utc' values only when the user explicitly asks for UTC or when a stable UTC reference is required. " &
             "Do not reinterpret, relocalize or reformat numeric ISO dates. " &
             "Pass ids to m365_get_mail, m365_get_mail_thread, m365_get_file, m365_get_event, " &
             "m365_get_chat_thread or m365_get_onenote_page to fetch full content.",
@@ -269,11 +271,10 @@ Namespace SharedLibrary
         .ToolName = GetMailToolName,
         .ToolDefinition = def.ToString(Formatting.None),
         .ToolInstructionsPrompt =
-            "m365_get_mail: Returns headers, body and (by default) extracted attachment text. " &
-            "Provide message_id (required). Optional: include_attachments, ocr_pdf, max_chars. " &
-            "If the output contains SentAnchor/SentISO or ReceivedAnchor/ReceivedISO, prefer the *Anchor values " &
-            "when referring to dates or times, and copy them exactly. Do not reinterpret, relocalize or " &
-            "reformat numeric ISO dates.",
+            "m365_get_event: Returns calendar event details. Provide event_id. " &
+            "When the output contains StartLocal or EndLocal, prefer those values for user-facing dates and times. " &
+            "Use StartUtc or EndUtc only when the user explicitly asks for UTC or when a stable UTC reference is required. " &
+            "Copy rendered date/time values exactly.",
         .ModelDescription = "M365: Read e-mail" & suffix,
         .Tool = True,
         .ToolPriority = 995,

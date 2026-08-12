@@ -333,7 +333,7 @@ Namespace SharedLibrary
             End Try
 
             Try
-                Await CanonicalizeSearchHitDatesAsync(context, result.Hits, ct).ConfigureAwait(False)
+                Await CanonicalizeSearchHitDatesAsync(context, result.Hits, options, ct).ConfigureAwait(False)
             Catch ex As OperationCanceledException
                 Throw
             Catch ex As Exception
@@ -476,10 +476,11 @@ Namespace SharedLibrary
                         End If
 
                         Dim hit = ParseSearchHit(wrapped, M365SearchSources.Calendar, options)
-                        If hit IsNot Nothing Then
-                            matchedHits.Add(hit)
-                            If matchedHits.Count >= neededMatches Then Exit For
-                        End If
+                        If hit Is Nothing Then Continue For
+                        If Not CalendarHitFallsWithinRequestedDateRange(hit, effectiveFromDate, effectiveToDate) Then Continue For
+
+                        matchedHits.Add(hit)
+                        If matchedHits.Count >= neededMatches Then Exit For
                     Next
                 End If
 
@@ -497,6 +498,25 @@ Namespace SharedLibrary
             Dim localMidnight As New DateTime(dateValue.Year, dateValue.Month, dateValue.Day, 0, 0, 0, DateTimeKind.Unspecified)
             Dim offset As TimeSpan = timeZone.GetUtcOffset(localMidnight)
             Return New DateTimeOffset(localMidnight, offset)
+        End Function
+
+        Private Function CalendarHitFallsWithinRequestedDateRange(hit As M365SearchHit,
+                                                                  fromDate As Date,
+                                                                  toDate As Date) As Boolean
+            If hit Is Nothing OrElse hit.RawJson Is Nothing Then Return False
+
+            Dim resource As JObject = TryCast(hit.RawJson("resource"), JObject)
+            If resource Is Nothing Then Return False
+
+            Dim startUtc As DateTime? = TryParseGraphDateTimeTimeZone(TryCast(resource("start"), JObject))
+            If Not startUtc.HasValue Then Return False
+
+            Dim localStart As DateTime = System.TimeZoneInfo.ConvertTimeFromUtc(
+                DateTime.SpecifyKind(startUtc.Value, DateTimeKind.Utc),
+                System.TimeZoneInfo.Local)
+
+            Dim localDate As Date = localStart.Date
+            Return localDate >= fromDate AndAlso localDate <= toDate
         End Function
 
         Private Function FormatGraphDateTimeOffset(value As DateTimeOffset) As String
@@ -793,12 +813,17 @@ Namespace SharedLibrary
         End Function
 
         Private Async Function CanonicalizeSearchHitDatesAsync(context As ISharedContext,
-                                                       hits As IList(Of M365SearchHit),
-                                                       ct As CancellationToken) As Task
+                                                        hits As IList(Of M365SearchHit),
+                                                        options As M365SearchOptions,
+                                                        ct As CancellationToken) As Task
             If context Is Nothing OrElse hits Is Nothing OrElse hits.Count = 0 Then Return
 
             Await CanonicalizeMailSearchHitDatesAsync(context, hits, ct).ConfigureAwait(False)
-            Await CanonicalizeCalendarSearchHitDatesAsync(context, hits, ct).ConfigureAwait(False)
+
+            If Not ShouldUseCalendarView(options) Then
+                Await CanonicalizeCalendarSearchHitDatesAsync(context, hits, ct).ConfigureAwait(False)
+            End If
+
             Await CanonicalizeTeamsSearchHitDatesAsync(context, hits, ct).ConfigureAwait(False)
         End Function
 

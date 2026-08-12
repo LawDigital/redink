@@ -97,6 +97,8 @@ Partial Public Class ThisAddIn
 
     Private ReadOnly _chatAgentWorkspaceHistory As New List(Of String)()
     Private Const CA_MaxWorkspaceHistoryEntries As Integer = 12
+    Private Const CA_WorkspacePresetCount As Integer = 5
+    Private Const CA_WorkspacePresetSettingPrefix As String = "Inky_WorkspacePreset"
 
     Friend Class ChatAgentWorkspaceState
         Public Property RootPath As String = ""
@@ -107,6 +109,12 @@ Partial Public Class ThisAddIn
         Public Property AllowDelete As Boolean = SharedMethods.WorkspaceDeleteByDefaultOn
         Public Property SaveDroppedFilesToWorkspace As Boolean = False
         Public Property IncludeHiddenSystem As Boolean = False
+    End Class
+
+    Private Class ChatAgentWorkspacePresetInfo
+        Public Property Slot As Integer
+        Public Property RootPath As String = ""
+        Public Property Label As String = ""
     End Class
 
     Private Function BuildAutoPilotTempWorkspaceState() As ChatAgentWorkspaceState
@@ -957,6 +965,437 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
+    Private Function IsValidWorkspacePresetSlot(slot As Integer) As Boolean
+        Return slot >= 1 AndAlso slot <= CA_WorkspacePresetCount
+    End Function
+
+    Private Function GetWorkspacePresetPathSettingName(slot As Integer) As String
+        Return CA_WorkspacePresetSettingPrefix & slot.ToString(CultureInfo.InvariantCulture) & "Path"
+    End Function
+
+    Private Function GetWorkspacePresetLabelSettingName(slot As Integer) As String
+        Return CA_WorkspacePresetSettingPrefix & slot.ToString(CultureInfo.InvariantCulture) & "Label"
+    End Function
+
+    Private Function TrySetAppSettingValue(settingName As String, value As Object) As Boolean
+        Try
+            Dim p = GetType(My.MySettings).GetProperty(
+                settingName,
+                System.Reflection.BindingFlags.Public Or System.Reflection.BindingFlags.Instance)
+
+            If p Is Nothing OrElse Not p.CanWrite Then Return False
+
+            p.SetValue(My.Settings, value, Nothing)
+            Return True
+        Catch
+            Return False
+        End Try
+    End Function
+
+    Private Function GetWorkspacePresetEntries() As List(Of ChatAgentWorkspacePresetInfo)
+        Dim result As New List(Of ChatAgentWorkspacePresetInfo)()
+
+        For slot As Integer = 1 To CA_WorkspacePresetCount
+            Dim rootPath As String = TryGetAppSetting(Of String)(GetWorkspacePresetPathSettingName(slot), "")
+            Dim label As String = TryGetAppSetting(Of String)(GetWorkspacePresetLabelSettingName(slot), "")
+
+            If Not String.IsNullOrWhiteSpace(rootPath) Then
+                Try
+                    rootPath = Path.GetFullPath(rootPath.Trim())
+                Catch
+                    rootPath = rootPath.Trim()
+                End Try
+            Else
+                rootPath = ""
+            End If
+
+            result.Add(New ChatAgentWorkspacePresetInfo() With {
+                .Slot = slot,
+                .RootPath = rootPath,
+                .Label = If(label, "")
+            })
+        Next
+
+        Return result
+    End Function
+
+    Private Function CleanWorkspaceLabelToken(value As String) As String
+        Dim cleaned As String = If(value, "").Trim()
+
+        cleaned = cleaned.Replace("_", " ").Replace("-", " ")
+        cleaned = System.Text.RegularExpressions.Regex.Replace(cleaned, "[^\p{L}\p{Nd} ]+", " ")
+        cleaned = System.Text.RegularExpressions.Regex.Replace(cleaned, "\s+", " ").Trim()
+
+        If cleaned.Length > 24 Then
+            cleaned = cleaned.Substring(0, 24).Trim()
+        End If
+
+        Return cleaned
+    End Function
+
+    Private Function NormalizeWorkspacePresetLabel(label As String, fallbackLabel As String) As String
+        Dim cleaned As String = If(label, "").Trim()
+
+        cleaned = cleaned.Replace("`", " ").Replace("""", " ").Replace("'", " ")
+        cleaned = CleanWorkspaceLabelToken(cleaned)
+
+        If String.IsNullOrWhiteSpace(cleaned) Then
+            cleaned = CleanWorkspaceLabelToken(fallbackLabel)
+        End If
+
+        If String.IsNullOrWhiteSpace(cleaned) Then
+            cleaned = "Workspace"
+        End If
+
+        Dim words = cleaned.Split(New Char() {" "c}, StringSplitOptions.RemoveEmptyEntries)
+        If words.Length > 2 Then
+            cleaned = words(0) & " " & words(1)
+        End If
+
+        If cleaned.Length > 24 Then
+            cleaned = cleaned.Substring(0, 24).Trim()
+        End If
+
+        Return cleaned
+    End Function
+
+    Private Function SplitWorkspacePathSegments(rootPath As String) As List(Of String)
+        Dim result As New List(Of String)()
+
+        If String.IsNullOrWhiteSpace(rootPath) Then Return result
+
+        Dim normalized As String = rootPath
+
+        Try
+            normalized = Path.GetFullPath(rootPath)
+        Catch
+        End Try
+
+        normalized = normalized.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+
+        For Each rawSegment In normalized.Split(New Char() {Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar}, StringSplitOptions.RemoveEmptyEntries)
+            Dim segment = CleanWorkspaceLabelToken(rawSegment)
+            If String.IsNullOrWhiteSpace(segment) Then Continue For
+            If segment.EndsWith(":", StringComparison.Ordinal) Then Continue For
+            result.Add(segment)
+        Next
+
+        Return result
+    End Function
+
+    Private Function BuildWorkspacePresetFallbackLabels(entries As List(Of ChatAgentWorkspacePresetInfo)) As Dictionary(Of Integer, String)
+        Dim labels As New Dictionary(Of Integer, String)()
+        Dim tokenMap As New Dictionary(Of Integer, List(Of String))()
+
+        If entries Is Nothing Then Return labels
+
+        For Each entry In entries
+            If entry Is Nothing OrElse String.IsNullOrWhiteSpace(entry.RootPath) Then Continue For
+
+            Dim tokens = SplitWorkspacePathSegments(entry.RootPath)
+            tokenMap(entry.Slot) = tokens
+
+            Dim leaf As String = If(tokens.Count > 0, tokens(tokens.Count - 1), "Workspace")
+            labels(entry.Slot) = NormalizeWorkspacePresetLabel(leaf, "Workspace " & entry.Slot.ToString(CultureInfo.InvariantCulture))
+        Next
+
+        Dim duplicateGroups =
+            labels.GroupBy(Function(kvp) kvp.Value, StringComparer.OrdinalIgnoreCase).
+                   Where(Function(g) g.Count() > 1).
+                   ToList()
+
+        For Each group In duplicateGroups
+            For Each item In group
+                Dim tokens As List(Of String) = Nothing
+                If Not tokenMap.TryGetValue(item.Key, tokens) Then Continue For
+
+                Dim leaf As String = If(tokens.Count > 0, tokens(tokens.Count - 1), "Workspace")
+                Dim parent As String = If(tokens.Count > 1, tokens(tokens.Count - 2), "")
+
+                Dim candidate As String
+                If Not String.IsNullOrWhiteSpace(parent) Then
+                    candidate = parent & " " & leaf
+                Else
+                    candidate = leaf & " " & item.Key.ToString(CultureInfo.InvariantCulture)
+                End If
+
+                labels(item.Key) = NormalizeWorkspacePresetLabel(candidate, leaf & " " & item.Key.ToString(CultureInfo.InvariantCulture))
+            Next
+        Next
+
+        duplicateGroups =
+            labels.GroupBy(Function(kvp) kvp.Value, StringComparer.OrdinalIgnoreCase).
+                   Where(Function(g) g.Count() > 1).
+                   ToList()
+
+        For Each group In duplicateGroups
+            For Each item In group
+                Dim tokens As List(Of String) = Nothing
+                If Not tokenMap.TryGetValue(item.Key, tokens) Then Continue For
+
+                Dim leaf As String = If(tokens.Count > 0, tokens(tokens.Count - 1), "Workspace")
+                labels(item.Key) = NormalizeWorkspacePresetLabel(
+                    leaf & " " & item.Key.ToString(CultureInfo.InvariantCulture),
+                    "Workspace " & item.Key.ToString(CultureInfo.InvariantCulture))
+            Next
+        Next
+
+        Return labels
+    End Function
+
+    Private Async Function RefreshWorkspacePresetLabelsAsync() As Task(Of Boolean)
+        Dim allEntries = GetWorkspacePresetEntries()
+        Dim populated =
+            allEntries.
+                Where(Function(entry) entry IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(entry.RootPath)).
+                ToList()
+
+        Dim fallbackLabels = BuildWorkspacePresetFallbackLabels(populated)
+        Dim resolvedLabels As New Dictionary(Of Integer, String)()
+
+        For Each kvp In fallbackLabels
+            resolvedLabels(kvp.Key) = kvp.Value
+        Next
+
+        If populated.Count > 0 Then
+            Try
+                Dim sysPrompt As String =
+                    "You create ultra-short UI labels for saved workspace folder paths. Return strict JSON only."
+
+                Dim userPrompt As New StringBuilder()
+                userPrompt.AppendLine("Create unique memory-button labels for these workspace paths.")
+                userPrompt.AppendLine("Return JSON only in this exact shape:")
+                userPrompt.AppendLine("[{""slot"":1,""label"":""Client Docs""}]")
+                userPrompt.AppendLine("Rules:")
+                userPrompt.AppendLine("- One object per slot shown below.")
+                userPrompt.AppendLine("- label must be 1 or 2 words only.")
+                userPrompt.AppendLine("- Keep labels distinct across the full list.")
+                userPrompt.AppendLine("- Prefer the most distinguishing folder name or two folder names from the path.")
+                userPrompt.AppendLine("- No punctuation except spaces.")
+                userPrompt.AppendLine("- No explanations, markdown, or prose.")
+                userPrompt.AppendLine("Paths:")
+
+                For Each entry In populated
+                    userPrompt.AppendLine("- slot " &
+                                          entry.Slot.ToString(CultureInfo.InvariantCulture) &
+                                          ": " & entry.RootPath)
+                Next
+
+                Dim llmOut As String =
+                    Await RunLlmAsync(
+                        sysPrompt,
+                        userPrompt.ToString(),
+                        False,
+                        False,
+                        "",
+                        CancellationToken.None).ConfigureAwait(False)
+
+                llmOut = If(llmOut, "").Trim()
+
+                If llmOut.StartsWith("```", StringComparison.Ordinal) Then
+                    Dim firstLf = llmOut.IndexOf(vbLf, StringComparison.Ordinal)
+                    If firstLf >= 0 Then
+                        llmOut = llmOut.Substring(firstLf + 1).Trim()
+                    End If
+
+                    Dim fenceEnd = llmOut.LastIndexOf("```", StringComparison.Ordinal)
+                    If fenceEnd >= 0 Then
+                        llmOut = llmOut.Substring(0, fenceEnd).Trim()
+                    End If
+                End If
+
+                Dim arr = JArray.Parse(llmOut)
+
+                For Each item As JToken In arr
+                    Dim slot As Integer = 0
+                    If Not Integer.TryParse(item("slot")?.ToString(), slot) Then Continue For
+                    If Not IsValidWorkspacePresetSlot(slot) Then Continue For
+
+                    Dim fallbackLabel As String =
+                        If(fallbackLabels.ContainsKey(slot),
+                           fallbackLabels(slot),
+                           "Workspace " & slot.ToString(CultureInfo.InvariantCulture))
+
+                    Dim label As String = NormalizeWorkspacePresetLabel(item("label")?.ToString(), fallbackLabel)
+                    If Not String.IsNullOrWhiteSpace(label) Then
+                        resolvedLabels(slot) = label
+                    End If
+                Next
+            Catch
+            End Try
+        End If
+
+        For Each entry In allEntries
+            Dim label As String = ""
+
+            If Not String.IsNullOrWhiteSpace(entry.RootPath) Then
+                Dim fallbackLabel As String =
+                    If(fallbackLabels.ContainsKey(entry.Slot),
+                       fallbackLabels(entry.Slot),
+                       "Workspace " & entry.Slot.ToString(CultureInfo.InvariantCulture))
+
+                label =
+                    If(resolvedLabels.ContainsKey(entry.Slot),
+                       NormalizeWorkspacePresetLabel(resolvedLabels(entry.Slot), fallbackLabel),
+                       fallbackLabel)
+            End If
+
+            If Not TrySetAppSettingValue(GetWorkspacePresetLabelSettingName(entry.Slot), label) Then
+                Return False
+            End If
+        Next
+
+        Try
+            My.Settings.Save()
+            Return True
+        Catch
+            Return False
+        End Try
+    End Function
+
+    Friend Async Function ChatAgentWorkspaceSaveCurrentPresetAsync(slot As Integer) As Task(Of String)
+        If Not IsValidWorkspacePresetSlot(slot) Then
+            Return "Invalid workspace memory slot."
+        End If
+
+        LoadChatAgentWorkspaceIfNeeded()
+
+        Dim rootPath As String = If(_chatAgentWorkspace?.RootPath, "")
+        If String.IsNullOrWhiteSpace(rootPath) OrElse Not Directory.Exists(rootPath) Then
+            Return "No workspace is currently connected."
+        End If
+
+        rootPath = Path.GetFullPath(rootPath)
+
+        If Not TrySetAppSettingValue(GetWorkspacePresetPathSettingName(slot), rootPath) Then
+            Return "Workspace memory settings are not available."
+        End If
+
+        If Not TrySetAppSettingValue(GetWorkspacePresetLabelSettingName(slot), "") Then
+            Return "Workspace memory settings are not available."
+        End If
+
+        Dim saved As Boolean = Await RefreshWorkspacePresetLabelsAsync().ConfigureAwait(False)
+        If Not saved Then
+            Return "The workspace memory could not be saved."
+        End If
+
+        Return Nothing
+    End Function
+
+    Friend Async Function ChatAgentWorkspaceClearPresetAsync(slot As Integer) As Task(Of String)
+        If Not IsValidWorkspacePresetSlot(slot) Then
+            Return "Invalid workspace memory slot."
+        End If
+
+        If Not TrySetAppSettingValue(GetWorkspacePresetPathSettingName(slot), "") Then
+            Return "Workspace memory settings are not available."
+        End If
+
+        If Not TrySetAppSettingValue(GetWorkspacePresetLabelSettingName(slot), "") Then
+            Return "Workspace memory settings are not available."
+        End If
+
+        Dim saved As Boolean = Await RefreshWorkspacePresetLabelsAsync().ConfigureAwait(False)
+        If Not saved Then
+            Return "The workspace memory could not be cleared."
+        End If
+
+        Return Nothing
+    End Function
+
+    Friend Function ChatAgentWorkspaceApplyPreset(slot As Integer) As String
+        If Not IsValidWorkspacePresetSlot(slot) Then
+            Return "Invalid workspace memory slot."
+        End If
+
+        Dim presetPath As String = TryGetAppSetting(Of String)(GetWorkspacePresetPathSettingName(slot), "")
+        If String.IsNullOrWhiteSpace(presetPath) Then
+            Return "That workspace memory is empty."
+        End If
+
+        Try
+            presetPath = Path.GetFullPath(presetPath.Trim())
+        Catch
+            Return "The saved workspace path is invalid."
+        End Try
+
+        If Not Directory.Exists(presetPath) Then
+            Return "The saved workspace path no longer exists."
+        End If
+
+        LoadChatAgentWorkspaceIfNeeded()
+
+        Dim persistUntilRevoked As Boolean = If(_chatAgentWorkspace?.PersistUntilRevoked, False)
+
+        If Not ChatAgentWorkspaceSetRoot(presetPath, persistUntilRevoked) Then
+            Return "The saved workspace path could not be activated."
+        End If
+
+        Return Nothing
+    End Function
+
+    Friend Function GetAgentWorkspacePresetsForBrowser() As List(Of Object)
+        Dim result As New List(Of Object)()
+        Dim entries = GetWorkspacePresetEntries()
+        Dim populated =
+            entries.
+                Where(Function(entry) entry IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(entry.RootPath)).
+                ToList()
+
+        Dim fallbackLabels = BuildWorkspacePresetFallbackLabels(populated)
+
+        Dim currentRoot As String = ""
+        If IsChatAgentWorkspaceConnected() Then
+            Try
+                currentRoot =
+                    Path.GetFullPath(_chatAgentWorkspace.RootPath).
+                        TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            Catch
+                currentRoot = ""
+            End Try
+        End If
+
+        For Each entry In entries
+            Dim assigned As Boolean = Not String.IsNullOrWhiteSpace(entry.RootPath)
+            Dim exists As Boolean = assigned AndAlso Directory.Exists(entry.RootPath)
+
+            Dim fallbackLabel As String =
+                If(fallbackLabels.ContainsKey(entry.Slot),
+                   fallbackLabels(entry.Slot),
+                   "Workspace " & entry.Slot.ToString(CultureInfo.InvariantCulture))
+
+            Dim displayLabel As String =
+                If(assigned,
+                   NormalizeWorkspacePresetLabel(entry.Label, fallbackLabel),
+                   "")
+
+            Dim isActive As Boolean = False
+            If assigned AndAlso exists AndAlso Not String.IsNullOrWhiteSpace(currentRoot) Then
+                Try
+                    Dim presetRoot =
+                        Path.GetFullPath(entry.RootPath).
+                            TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+
+                    isActive = presetRoot.Equals(currentRoot, StringComparison.OrdinalIgnoreCase)
+                Catch
+                    isActive = False
+                End Try
+            End If
+
+            result.Add(New With {
+                .slot = entry.Slot,
+                .path = If(assigned, entry.RootPath, ""),
+                .label = displayLabel,
+                .assigned = assigned,
+                .exists = exists,
+                .active = isActive
+            })
+        Next
+
+        Return result
+    End Function
+
     Friend Function GetAgentWorkspaceForBrowser() As Object
         LoadChatAgentWorkspaceIfNeeded()
 
@@ -973,7 +1412,8 @@ Partial Public Class ThisAddIn
             .allowMoveCopyRename = If(_chatAgentWorkspace?.AllowMoveCopyRename, True),
             .allowDelete = If(_chatAgentWorkspace?.AllowDelete, SharedMethods.WorkspaceDeleteByDefaultOn),
             .saveDroppedFilesToWorkspace = If(_chatAgentWorkspace?.SaveDroppedFilesToWorkspace, False),
-            .includeHiddenSystem = If(_chatAgentWorkspace?.IncludeHiddenSystem, False)
+            .includeHiddenSystem = If(_chatAgentWorkspace?.IncludeHiddenSystem, False),
+            .presets = GetAgentWorkspacePresetsForBrowser()
         }
     End Function
 

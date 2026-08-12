@@ -577,10 +577,20 @@ Namespace SharedLibrary
             End If
 
             Dim utc = value.Value.ToUniversalTime()
+            Dim localValue As DateTimeOffset = New DateTimeOffset(utc, TimeSpan.Zero).ToLocalTime()
 
-            Debug.WriteLine($"[M365Date] {label}: rawUtc='{If(value.HasValue, value.Value.ToString("o"), "")}' rendered='{If(value.HasValue, value.Value.ToUniversalTime().ToString("dd MMM yyyy HH:mm 'UTC'", Globalization.CultureInfo.InvariantCulture), "")}'")
+            Debug.WriteLine(
+                $"[M365Date] {label}: rawUtc='{If(value.HasValue, value.Value.ToString("o"), "")}' " &
+                $"local='{localValue.ToString("dd MMM yyyy HH:mm", Globalization.CultureInfo.InvariantCulture)} local (UTC{localValue.ToString("zzz", Globalization.CultureInfo.InvariantCulture)})' " &
+                $"utc='{utc.ToString("dd MMM yyyy HH:mm 'UTC'", Globalization.CultureInfo.InvariantCulture)}'")
 
-            sb.AppendLine(label & ": " & utc.ToString("dd MMM yyyy HH:mm 'UTC'", Globalization.CultureInfo.InvariantCulture))
+            sb.AppendLine(
+                label & ": " &
+                localValue.ToString("dd MMM yyyy HH:mm", Globalization.CultureInfo.InvariantCulture) &
+                " local (UTC" &
+                localValue.ToString("zzz", Globalization.CultureInfo.InvariantCulture) &
+                ")")
+            sb.AppendLine(label & "Utc: " & utc.ToString("dd MMM yyyy HH:mm 'UTC'", Globalization.CultureInfo.InvariantCulture))
         End Sub
 
         ''' <summary>
