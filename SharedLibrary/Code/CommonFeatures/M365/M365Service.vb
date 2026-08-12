@@ -477,7 +477,6 @@ Namespace SharedLibrary
 
                         Dim hit = ParseSearchHit(wrapped, M365SearchSources.Calendar, options)
                         If hit Is Nothing Then Continue For
-                        If Not CalendarHitFallsWithinRequestedDateRange(hit, effectiveFromDate, effectiveToDate) Then Continue For
 
                         matchedHits.Add(hit)
                         If matchedHits.Count >= neededMatches Then Exit For
@@ -506,10 +505,13 @@ Namespace SharedLibrary
             If hit Is Nothing OrElse hit.RawJson Is Nothing Then Return False
 
             Dim resource As JObject = TryCast(hit.RawJson("resource"), JObject)
-            If resource Is Nothing Then Return False
+
+            ' calendarView is already server-bounded.
+            ' Only exclude a hit here when the local-date comparison can be evaluated successfully.
+            If resource Is Nothing Then Return True
 
             Dim startUtc As DateTime? = TryParseGraphDateTimeTimeZone(TryCast(resource("start"), JObject))
-            If Not startUtc.HasValue Then Return False
+            If Not startUtc.HasValue Then Return True
 
             Dim localStart As DateTime = System.TimeZoneInfo.ConvertTimeFromUtc(
                 DateTime.SpecifyKind(startUtc.Value, DateTimeKind.Utc),
@@ -622,6 +624,46 @@ Namespace SharedLibrary
             Dim rawDateTime As String = SafeStr(value, "dateTime").Trim()
             If String.IsNullOrWhiteSpace(rawDateTime) Then Return Nothing
 
+            Dim localDateTime As DateTime
+            Dim localFormats As String() = {
+                "yyyy-MM-dd'T'HH:mm:ss",
+                "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF",
+                "yyyy-MM-dd HH:mm:ss",
+                "yyyy-MM-dd HH:mm",
+                "yyyy-MM-dd",
+                "dd.MM.yyyy HH:mm:ss",
+                "d.MM.yyyy HH:mm:ss",
+                "dd.M.yyyy HH:mm:ss",
+                "d.M.yyyy HH:mm:ss",
+                "dd.MM.yyyy HH:mm",
+                "d.MM.yyyy HH:mm",
+                "dd.M.yyyy HH:mm",
+                "d.M.yyyy HH:mm",
+                "dd.MM.yyyy",
+                "d.MM.yyyy",
+                "dd.M.yyyy",
+                "d.M.yyyy"
+            }
+
+            If DateTime.TryParseExact(
+                rawDateTime,
+                localFormats,
+                Globalization.CultureInfo.InvariantCulture,
+                Globalization.DateTimeStyles.None,
+                localDateTime) Then
+
+                Dim tz As System.TimeZoneInfo = ResolveGraphTimeZone(SafeStr(value, "timeZone"))
+                If tz Is Nothing Then
+                    tz = System.TimeZoneInfo.Local
+                End If
+
+                Try
+                    localDateTime = DateTime.SpecifyKind(localDateTime, DateTimeKind.Unspecified)
+                    Return System.TimeZoneInfo.ConvertTimeToUtc(localDateTime, tz)
+                Catch
+                End Try
+            End If
+
             Dim dto As DateTimeOffset
             If DateTimeOffset.TryParse(
                 rawDateTime,
@@ -631,35 +673,22 @@ Namespace SharedLibrary
                 Return dto.UtcDateTime
             End If
 
-            Dim localDateTime As DateTime
-            Dim localFormats As String() = {
-                "yyyy-MM-dd'T'HH:mm:ss",
-                "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF",
-                "yyyy-MM-dd HH:mm:ss",
-                "yyyy-MM-dd HH:mm",
-                "yyyy-MM-dd"
-            }
-
-            If DateTime.TryParseExact(
-                rawDateTime,
-                localFormats,
-                Globalization.CultureInfo.InvariantCulture,
-                Globalization.DateTimeStyles.None,
-                localDateTime) OrElse
-               DateTime.TryParse(
+            If DateTime.TryParse(
                 rawDateTime,
                 Globalization.CultureInfo.InvariantCulture,
                 Globalization.DateTimeStyles.None,
                 localDateTime) Then
 
                 Dim tz As System.TimeZoneInfo = ResolveGraphTimeZone(SafeStr(value, "timeZone"))
-                If tz IsNot Nothing Then
-                    Try
-                        localDateTime = DateTime.SpecifyKind(localDateTime, DateTimeKind.Unspecified)
-                        Return System.TimeZoneInfo.ConvertTimeToUtc(localDateTime, tz)
-                    Catch
-                    End Try
+                If tz Is Nothing Then
+                    tz = System.TimeZoneInfo.Local
                 End If
+
+                Try
+                    localDateTime = DateTime.SpecifyKind(localDateTime, DateTimeKind.Unspecified)
+                    Return System.TimeZoneInfo.ConvertTimeToUtc(localDateTime, tz)
+                Catch
+                End Try
             End If
 
             Return TryDate(value, "dateTime")

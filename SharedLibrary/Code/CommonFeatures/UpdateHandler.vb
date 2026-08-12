@@ -323,6 +323,46 @@ Namespace SharedLibrary
             Return IsTrustNotGranted(ex.InnerException)
         End Function
 
+        ''' <summary>
+        ''' Determines whether the current add-in instance was installed via the central MSI package
+        ''' rather than ClickOnce. Any ClickOnce deployment (network-deployed, whether from a local path
+        ''' or a remote URL) returns False; otherwise the presence of a per-host MSI registry marker
+        ''' (Preview or GA channel) indicates an MSI installation.
+        ''' </summary>
+        ''' <param name="appname">Add-in name used to select the host registry marker (prefix: Word/Exce/Outl).</param>
+        Public Shared Function IsRunningFromMsi(appname As String) As Boolean
+
+            ' Any ClickOnce deployment, whether installed from a local path or a remote URL, is not MSI.
+            If System.Deployment.Application.ApplicationDeployment.IsNetworkDeployed Then
+                Return False
+            End If
+
+            Dim host As String
+            Select Case Left(appname, 4)
+                Case "Word" : host = "Word"
+                Case "Exce" : host = "Excel"
+                Case "Outl" : host = "Outlook"
+                Case Else : host = String.Empty
+            End Select
+
+            If host = String.Empty Then Return False
+
+            For Each channel As String In New String() {"Preview", "GA"}
+                Using registryKey As Microsoft.Win32.RegistryKey =
+                    Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                        $"Software\Red Ink\MSI\{channel}\{host}", False)
+
+                    If registryKey IsNot Nothing Then
+                        WriteUpdateLog($"[IsRunningFromMsi] MSI marker found for host='{host}' channel='{channel}'")
+                        Return True
+                    End If
+                End Using
+            Next
+
+            Return False
+
+        End Function
+
 
         ''' <summary>
         ''' Performs a user-initiated update check and, when available, installs the update.
@@ -334,7 +374,12 @@ Namespace SharedLibrary
         Public Sub CheckAndInstallUpdates(appname As String, LocalPath As String, Optional context As ISharedContext = Nothing)
             Try
                 Dim currentDate As Date = Date.Now
-                If ApplicationDeployment.IsNetworkDeployed AndAlso String.IsNullOrWhiteSpace(LocalPath) Then
+                If IsRunningFromMsi(appname) Then
+                    WriteUpdateLog($"[CheckAndInstallUpdates] MSI installation detected app='{appname}' — ClickOnce/local update check suppressed")
+                    UIInvokeMessage(
+                        $"This installation of {SharedMethods.AN} was deployed through a central software distribution (MSI). Automatic program updates are therefore disabled. Please contact your administrator for new versions.",
+                        $"{SharedMethods.AN} Updater")
+                ElseIf ApplicationDeployment.IsNetworkDeployed AndAlso String.IsNullOrWhiteSpace(LocalPath) Then
                     Dim deployment As ApplicationDeployment = ApplicationDeployment.CurrentDeployment
                     WriteUpdateLog($"[CheckAndInstallUpdates] network-deployed app='{appname}' url='{deployment.UpdateLocation}' zone='{GetUrlZoneName(deployment.UpdateLocation.AbsoluteUri)}'")
 
@@ -784,7 +829,9 @@ Namespace SharedLibrary
                     Return
                 End If
 
-                If ApplicationDeployment.IsNetworkDeployed AndAlso String.IsNullOrWhiteSpace(_localPath) Then
+                If IsRunningFromMsi(_appname) Then
+                    WriteUpdateLog($"[PeriodicCheck] MSI installation detected app='{_appname}' — ClickOnce/local update check suppressed (silent)")
+                ElseIf ApplicationDeployment.IsNetworkDeployed AndAlso String.IsNullOrWhiteSpace(_localPath) Then
                     Dim dep = ApplicationDeployment.CurrentDeployment
                     WriteUpdateLog($"[PeriodicCheck] network-deployed url='{dep.UpdateLocation}' zone='{GetUrlZoneName(dep.UpdateLocation.AbsoluteUri)}'")
 
