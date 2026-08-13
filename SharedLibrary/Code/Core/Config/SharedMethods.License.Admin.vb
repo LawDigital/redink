@@ -1007,7 +1007,7 @@ Namespace SharedLibrary
 
                 AddHandler btnClose.Click, Sub() form.Close()
 
-                Dim ownerWnd As System.Windows.Forms.IWin32Window = ResolveDialogOwner()
+                Dim ownerWnd As System.Windows.Forms.IWin32Window = ResolveSameThreadDialogOwner()
                 If ownerWnd IsNot Nothing Then
                     form.ShowDialog(ownerWnd)
                 Else
@@ -2694,7 +2694,7 @@ Namespace SharedLibrary
                         form.Close()
                     End Sub
 
-                Dim ownerWnd As System.Windows.Forms.IWin32Window = ResolveDialogOwner()
+                Dim ownerWnd As System.Windows.Forms.IWin32Window = ResolveSameThreadDialogOwner()
                 Dim ownerScope As System.IDisposable = Nothing
 
                 Try

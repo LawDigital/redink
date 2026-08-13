@@ -2795,7 +2795,7 @@ Partial Public Class ThisAddIn
             End If
 
         Catch ex As System.Exception
-            MsgBox("Error in SearchReplace: " & ex.Message, MsgBoxStyle.Critical)
+            ShowCustomMessageBox("Error in SearchReplace: " & ex.Message)
         End Try
     End Sub
 

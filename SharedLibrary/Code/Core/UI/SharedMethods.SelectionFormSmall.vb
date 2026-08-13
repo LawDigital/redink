@@ -307,7 +307,7 @@ Namespace SharedLibrary
             End If
 
             Dim effectiveOwner As System.Windows.Forms.IWin32Window =
-        If(owner, SharedMethods.ResolveDialogOwner())
+        If(owner, SharedMethods.ResolveSameThreadDialogOwner())
 
             Using frm As New SelectionFormSmall(items.ToList(), defaultValue, prompt, header, actionButtonText, actionButtonValue)
                 If effectiveOwner IsNot Nothing Then

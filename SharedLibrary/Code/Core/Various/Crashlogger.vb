@@ -115,6 +115,11 @@ Namespace SharedLibrary
                 "SESSION_START",
                 BuildStartupInformation())
 
+            Try
+                OfficeWindowWatchdog.StartWatchdog()
+            Catch ex As System.Exception
+            End Try
+
             If captureExtendedSnapshot Then
 
                 Try
@@ -145,6 +150,11 @@ Namespace SharedLibrary
             AppendRecord(
                 "SESSION_END",
                 reason)
+
+            Try
+                OfficeWindowWatchdog.StopWatchdog()
+            Catch ex As System.Exception
+            End Try
 
             SyncLock InitializationLock
 

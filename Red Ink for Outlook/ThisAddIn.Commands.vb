@@ -1669,6 +1669,14 @@ SkipPromptWin:
             ' FREESTYLE PROMPT UI
             ' =============================================================
 
+            Dim freestylePromptUiState As String = ""
+
+            Try
+                freestylePromptUiState = CStr(My.Settings.Item("FreestylePromptUiState"))
+            Catch
+                freestylePromptUiState = ""
+            End Try
+
             Dim promptOptions As New SLib.FreestylePromptOptions() With {
                 .Title = $"{AN} Freestyle",
                 .Heading = "What would you like Red Ink to do?",
@@ -1677,7 +1685,9 @@ SkipPromptWin:
                 .ContextStatusText = If(NoText, "No text selected", "The current mail selection will be used as context"),
                 .LastPrompt = My.Settings.LastPrompt,
                 .PromptLibraryEnabled = INI_PromptLib,
-                .Context = _context
+                .Context = _context,
+                .CallerId = "outlook.freestyle",
+                .PersistedState = freestylePromptUiState
             }
 
             ' =============================================================
@@ -1813,6 +1823,52 @@ SkipPromptWin:
             modeMarkupDiff.Prefixes.Add(MarkupPrefixDiff)
 
             promptOptions.Modes.Add(modeMarkupDiff)
+
+            If Not NoText Then
+
+                promptOptions.QuickButtons.Add(
+                    New SLib.FreestylePromptQuickButton() With {
+                        .Id = "quick-window",
+                        .Text = "Run (window)",
+                        .Description = "Run immediately with the separate window / clipboard prefix.",
+                        .Prefix = ClipboardPrefix
+                    })
+
+                promptOptions.QuickButtons.Add(
+                    New SLib.FreestylePromptQuickButton() With {
+                        .Id = "quick-newdoc",
+                        .Text = "Run (new doc)",
+                        .Description = "Run immediately with the new-Word-document prefix.",
+                        .Prefix = NewDocPrefix
+                    })
+
+                promptOptions.QuickButtons.Add(
+                    New SLib.FreestylePromptQuickButton() With {
+                        .Id = "quick-markup",
+                        .Text = "Run (markup)",
+                        .Description = "Run immediately with the configured markup prefix.",
+                        .Prefix = MarkupPrefix
+                    })
+
+            Else
+
+                promptOptions.QuickButtons.Add(
+                    New SLib.FreestylePromptQuickButton() With {
+                        .Id = "quick-window",
+                        .Text = "Run (window)",
+                        .Description = "Run immediately with the separate window / clipboard prefix.",
+                        .Prefix = ClipboardPrefix
+                    })
+
+                promptOptions.QuickButtons.Add(
+                    New SLib.FreestylePromptQuickButton() With {
+                        .Id = "quick-newdoc",
+                        .Text = "Run (new doc)",
+                        .Description = "Run immediately with the new-Word-document prefix.",
+                        .Prefix = NewDocPrefix
+                    })
+
+            End If
 
             ' =============================================================
             ' ADD CONTEXT
@@ -1961,6 +2017,13 @@ SkipPromptWin:
             If promptResult Is Nothing OrElse Not promptResult.Accepted Then
                 Exit Sub
             End If
+
+            Try
+                My.Settings.Item("FreestylePromptUiState") = promptResult.PersistedState
+                My.Settings.Save()
+            Catch
+                ' non-critical
+            End Try
 
             OtherPrompt = SLib.ComposeFreestylePrompt(promptResult).Trim()
 

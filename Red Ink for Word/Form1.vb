@@ -595,6 +595,15 @@ Public Class frmAIChat
 
     Private _loadedContextContent As String = Nothing
     Private _loadedContextPath As String = Nothing
+
+    ''' <summary>
+    ''' Individual documents currently loaded as external context. Each entry keeps its
+    ''' file name and extracted content so documents can be added or removed individually.
+    ''' The combined _loadedContextContent is rebuilt from this list, always wrapping every
+    ''' document in numbered &lt;documentN name="…"&gt; tags.
+    ''' </summary>
+    Private _loadedContextDocuments As New List(Of ContextDocument)
+
     Private _isUpdatingPersistContextCheckbox As Boolean = False
     Private ReadOnly _contextToolTip As New System.Windows.Forms.ToolTip()
 
@@ -2957,7 +2966,7 @@ Public Class frmAIChat
                 End If
             Next
         Catch ex As Exception
-            MsgBox("Error in ParseCommands: " & ex.Message, MsgBoxStyle.Critical)
+            ShowCustomMessageBox("Error in ParseCommands: " & ex.Message)
         End Try
         Return results
     End Function
@@ -2994,7 +3003,7 @@ Public Class frmAIChat
             output = collapseRegex.Replace(output, Environment.NewLine)
 
         Catch ex As System.Exception
-            MsgBox("Error in RemoveCommands: " & ex.Message, MsgBoxStyle.Critical)
+            ShowCustomMessageBox("Error in RemoveCommands: " & ex.Message)
         End Try
 
         Return output
@@ -3504,7 +3513,7 @@ Public Class frmAIChat
                 End With
             End Using
         Catch ex As Exception
-            MsgBox("Error in ReplaceSpecialCharacter: " & ex.Message, MsgBoxStyle.Critical)
+            ShowCustomMessageBox("Error in ReplaceSpecialCharacter: " & ex.Message)
         Finally
             doc.TrackRevisions = trackChangesEnabled
         End Try
@@ -3932,7 +3941,7 @@ Public Class frmAIChat
             Return found
 
         Catch ex As System.Exception
-            MsgBox("Error in ExecuteFindCommand: " & ex.Message)
+            ShowCustomMessageBox("Error in ExecuteFindCommand: " & ex.Message)
             Return False
 
         Finally
@@ -4409,7 +4418,7 @@ Public Class frmAIChat
 #If DEBUG Then
             System.Diagnostics.Debugger.Break()
 #End If
-            MsgBox("Error in ExecuteReplaceCommand: " & ex.Message, MsgBoxStyle.Critical)
+            ShowCustomMessageBox("Error in ExecuteReplaceCommand: " & ex.Message)
             Return False
 
         Finally
@@ -4715,7 +4724,7 @@ Public Class frmAIChat
             Debug.WriteLine("Stacktrace: " & ex.StackTrace)
             System.Diagnostics.Debugger.Break()
 #End If
-            MsgBox("Error in ExecuteInsertBeforeAfterCommand: " & ex.Message, MsgBoxStyle.Critical)
+            ShowCustomMessageBox("Error in ExecuteInsertBeforeAfterCommand: " & ex.Message)
             Return False
 
         Finally
@@ -4765,7 +4774,7 @@ Public Class frmAIChat
 
             Return True
         Catch ex As Exception
-            MsgBox("Error in ExecuteInsertCommand: " & ex.Message, MsgBoxStyle.Critical)
+            ShowCustomMessageBox("Error in ExecuteInsertCommand: " & ex.Message)
             Return False
         Finally
             doc.TrackRevisions = trackChangesEnabled
@@ -4922,6 +4931,67 @@ Partial Public Class frmAIChat
     ' Load Context and File Handling
     ' =========================================================================
 
+    ''' <summary>
+    ''' Represents a single loaded context document (its file name and extracted text).
+    ''' </summary>
+    Private Structure ContextDocument
+        Public ReadOnly FileName As String
+        Public ReadOnly Content As String
+
+        Public Sub New(fileName As String, content As String)
+            Me.FileName = fileName
+            Me.Content = content
+        End Sub
+    End Structure
+
+    ''' <summary>
+    ''' Rebuilds the combined loaded-context string from the individual documents,
+    ''' always wrapping each in a numbered &lt;documentN name="…"&gt; tag.
+    ''' </summary>
+    Private Sub RebuildLoadedContextContent()
+        If _loadedContextDocuments Is Nothing OrElse _loadedContextDocuments.Count = 0 Then
+            _loadedContextContent = Nothing
+            _cachedLoadedContextContent = Nothing
+            Return
+        End If
+
+        Dim sb As New System.Text.StringBuilder()
+        Dim counter As Integer = 0
+        For Each doc In _loadedContextDocuments
+            counter += 1
+            sb.Append($"<document{counter} name=""{doc.FileName}"">")
+            sb.Append(doc.Content)
+            sb.Append($"</document{counter}>")
+        Next
+
+        _loadedContextContent = sb.ToString()
+        _cachedLoadedContextContent = _loadedContextContent
+    End Sub
+
+    ''' <summary>
+    ''' Populates _loadedContextDocuments by parsing the numbered document tags from
+    ''' _loadedContextContent. Legacy untagged content is treated as a single document.
+    ''' </summary>
+    Private Sub ParseLoadedContextDocuments()
+        _loadedContextDocuments.Clear()
+        If String.IsNullOrWhiteSpace(_loadedContextContent) Then Return
+
+        Dim matches = System.Text.RegularExpressions.Regex.Matches(
+            _loadedContextContent,
+            "<document(\d+) name=""(?<name>[^""]*)"">(?<body>[\s\S]*?)</document\1>")
+
+        If matches.Count = 0 Then
+            ' Legacy single-document content without tags: keep it as one entry.
+            _loadedContextDocuments.Add(New ContextDocument("(Loaded Context)", _loadedContextContent))
+            RebuildLoadedContextContent()
+            Return
+        End If
+
+        For Each m As System.Text.RegularExpressions.Match In matches
+            _loadedContextDocuments.Add(New ContextDocument(m.Groups("name").Value, m.Groups("body").Value))
+        Next
+    End Sub
+
     Private Sub AppendSystemMessage(message As String)
         Try
             AppendToChatHistory(Environment.NewLine & "[System] " & message & Environment.NewLine)
@@ -5058,6 +5128,7 @@ Partial Public Class frmAIChat
         _loadedContextPath = Nothing
         _cachedLoadedContextContent = Nothing
         _cachedLoadedContextPath = Nothing
+        _loadedContextDocuments.Clear()
         DeletePersistedContextFile(False)
     End Sub
 
@@ -5254,12 +5325,12 @@ Partial Public Class frmAIChat
         Return (result.Content, result.PdfMayBeIncomplete)
     End Function
 
-    Private Async Function LoadContextFromPathAsync(selectedPath As String, interactive As Boolean) As Task(Of (CombinedContent As String, DisplayPath As String, LoadedCount As Integer, Summary As String))
+    Private Async Function LoadContextFromPathAsync(selectedPath As String, interactive As Boolean) As Task(Of (Documents As List(Of ContextDocument), DisplayPath As String, LoadedCount As Integer, Summary As String))
         Dim isFile As Boolean = System.IO.File.Exists(selectedPath)
         Dim isDirectory As Boolean = System.IO.Directory.Exists(selectedPath)
 
         If Not isFile AndAlso Not isDirectory Then
-            Return ("", "", 0, "Selected path does not exist.")
+            Return (New List(Of ContextDocument), "", 0, "Selected path does not exist.")
         End If
 
         Dim filesToProcess As New List(Of String)
@@ -5271,7 +5342,7 @@ Partial Public Class frmAIChat
         If isFile Then
             Dim ext = System.IO.Path.GetExtension(selectedPath).ToLowerInvariant()
             If Array.IndexOf(SupportedContextExtensions, ext) < 0 Then
-                Return ("", "", 0, $"The selected file type '{ext}' is not supported for loaded context.")
+                Return (New List(Of ContextDocument), "", 0, $"The selected file type '{ext}' is not supported for loaded context.")
             End If
 
             filesToProcess.Add(selectedPath)
@@ -5296,7 +5367,7 @@ Partial Public Class frmAIChat
                         "No, abort")
 
                     If truncateAnswer <> 1 Then
-                        Return ("", "", 0, "")
+                        Return (New List(Of ContextDocument), "", 0, "")
                     End If
                 End If
 
@@ -5308,18 +5379,16 @@ Partial Public Class frmAIChat
                     "No, abort")
 
                 If confirmAnswer <> 1 Then
-                    Return ("", "", 0, "")
+                    Return (New List(Of ContextDocument), "", 0, "")
                 End If
             End If
 
             If filesToProcess.Count = 0 Then
-                Return ("", "", 0, $"No supported files found in directory '{selectedPath}'.")
+                Return (New List(Of ContextDocument), "", 0, $"No supported files found in directory '{selectedPath}'.")
             End If
         End If
 
-        Dim resultBuilder As New System.Text.StringBuilder()
-        Dim useDocumentTags As Boolean = (filesToProcess.Count > 1)
-        Dim documentCounter As Integer = 0
+        Dim documents As New List(Of ContextDocument)
 
         For Each filePath In filesToProcess
             Dim result = Await LoadSingleContextFileAsync(filePath, interactive)
@@ -5334,17 +5403,8 @@ Partial Public Class frmAIChat
                 Continue For
             End If
 
-            documentCounter += 1
             loadedFiles.Add(Tuple.Create(filePath, content.Length))
-
-            If useDocumentTags Then
-                Dim fileName = System.IO.Path.GetFileName(filePath)
-                resultBuilder.Append($"<document{documentCounter} name=""{fileName}"">")
-                resultBuilder.Append(content)
-                resultBuilder.Append($"</document{documentCounter}>")
-            Else
-                resultBuilder.Append(content)
-            End If
+            documents.Add(New ContextDocument(System.IO.Path.GetFileName(filePath), content))
         Next
 
         Dim summary As New System.Text.StringBuilder()
@@ -5383,7 +5443,7 @@ Partial Public Class frmAIChat
         End If
 
         Return (
-            resultBuilder.ToString(),
+            documents,
             If(isFile, selectedPath, selectedPath & " (directory)"),
             loadedFiles.Count,
             summary.ToString().TrimEnd()
@@ -5436,6 +5496,7 @@ Partial Public Class frmAIChat
         If Not String.IsNullOrWhiteSpace(_cachedLoadedContextContent) AndAlso Not String.IsNullOrWhiteSpace(_cachedLoadedContextPath) Then
             _loadedContextContent = _cachedLoadedContextContent
             _loadedContextPath = _cachedLoadedContextPath
+            ParseLoadedContextDocuments()
             AppendSystemMessage("Context restored from cache.")
             Return
         End If
@@ -5448,6 +5509,7 @@ Partial Public Class frmAIChat
                     _loadedContextPath = "(Persisted Context)"
                     _cachedLoadedContextContent = _loadedContextContent
                     _cachedLoadedContextPath = _loadedContextPath
+                    ParseLoadedContextDocuments()
                     AppendSystemMessage($"Context restored from persisted storage ({_loadedContextContent.Length:N0} characters).")
                     Return
                 Catch ex As System.Exception
@@ -5475,11 +5537,11 @@ Partial Public Class frmAIChat
         End If
 
         Dim restored = Await LoadContextFromPathAsync(savedPath, False)
-        If String.IsNullOrWhiteSpace(restored.CombinedContent) Then Return
+        If restored.Documents Is Nothing OrElse restored.Documents.Count = 0 Then Return
 
-        _loadedContextContent = restored.CombinedContent
+        _loadedContextDocuments = restored.Documents
+        RebuildLoadedContextContent()
         _loadedContextPath = restored.DisplayPath
-        _cachedLoadedContextContent = _loadedContextContent
         _cachedLoadedContextPath = _loadedContextPath
 
         If chkPersistContext.Checked Then
@@ -5493,18 +5555,113 @@ Partial Public Class frmAIChat
     End Function
 
     Private Async Sub btnLoadContext_Click(sender As Object, e As EventArgs)
-        If Not String.IsNullOrWhiteSpace(_loadedContextContent) OrElse HasLoadedIndex() Then
-            RemoveLoadedContext()
+        If HasLoadedIndex() OrElse (_loadedContextDocuments IsNot Nothing AndAlso _loadedContextDocuments.Count > 0) Then
+            Await ManageLoadedContextAsync()
         Else
             Await PromptForLoadedContextAsync()
         End If
     End Sub
 
     ''' <summary>
+    ''' Presents a small management dialog for the loaded context, letting the user add
+    ''' documents, remove an individual document, or remove all loaded material.
+    ''' </summary>
+    Private Async Function ManageLoadedContextAsync() As System.Threading.Tasks.Task
+        Const ActionAdd As Integer = -1
+        Const ActionRemoveAll As Integer = -2
+
+        Dim items As New List(Of SharedMethods.SelectionItem)
+        items.Add(New SharedMethods.SelectionItem("Add document(s) …", ActionAdd))
+
+        If HasLoadedIndex() Then
+            items.Add(New SharedMethods.SelectionItem($"Remove loaded index '{_loadedIndexDisplayName}'", ActionRemoveAll))
+        Else
+            For i As Integer = 0 To _loadedContextDocuments.Count - 1
+                ' Document choices use 1-based values so the dialog's cancel result (0) never collides.
+                items.Add(New SharedMethods.SelectionItem(
+                    $"Remove {i + 1} - {_loadedContextDocuments(i).FileName}", i + 1))
+            Next
+            If _loadedContextDocuments.Count > 1 Then
+                items.Add(New SharedMethods.SelectionItem("Remove all documents", ActionRemoveAll))
+            End If
+        End If
+
+        Dim wasTopMost As Boolean = Me.TopMost
+        Dim choice As Integer
+        Try
+            Me.TopMost = False
+            choice = SharedMethods.SelectValue(
+                items,
+                ActionAdd,
+                "Choose what to do with the loaded context:",
+                "Manage Context",
+                Me,
+                "Close",
+                0)
+        Finally
+            Me.TopMost = wasTopMost
+        End Try
+
+        Select Case choice
+            Case 0
+                ' Cancel / Close: no change.
+                Return
+
+            Case ActionAdd
+                If HasLoadedIndex() Then
+                    Dim confirm = ShowCustomYesNoBox(
+                        "Adding documents will replace the currently loaded index. Continue?",
+                        "Yes, add documents",
+                        "No, keep index")
+                    If confirm <> 1 Then Return
+                End If
+                Await PromptForLoadedContextAsync(appendMode:=Not HasLoadedIndex())
+
+            Case ActionRemoveAll
+                RemoveLoadedContext()
+
+            Case Else
+                Dim docIndex As Integer = choice - 1
+                If Not HasLoadedIndex() AndAlso docIndex >= 0 AndAlso docIndex < _loadedContextDocuments.Count Then
+                    RemoveContextDocument(docIndex)
+                End If
+        End Select
+    End Function
+
+    ''' <summary>
+    ''' Removes a single document from the loaded context, rebuilds the combined content,
+    ''' and re-persists the remaining context (or removes everything if none remain).
+    ''' </summary>
+    Private Sub RemoveContextDocument(index As Integer)
+        If index < 0 OrElse index >= _loadedContextDocuments.Count Then Return
+
+        Dim removedName As String = _loadedContextDocuments(index).FileName
+        _loadedContextDocuments.RemoveAt(index)
+
+        If _loadedContextDocuments.Count = 0 Then
+            RemoveLoadedContext()
+            Return
+        End If
+
+        RebuildLoadedContextContent()
+
+        If chkPersistContext.Checked Then
+            Try
+                PersistLoadedContextToTempFile()
+            Catch ex As System.Exception
+                AppendSystemMessage($"Failed to update persisted context: {ex.Message}")
+            End Try
+        End If
+
+        AppendSystemMessage($"Removed document '{removedName}' from context. {_loadedContextDocuments.Count} document(s) remain.")
+        UpdateLoadContextButtonText()
+    End Sub
+
+    ''' <summary>
     ''' Updates the Load Context button caption to reflect whether external context is loaded.
     ''' </summary>
     Private Sub UpdateLoadContextButtonText()
-        btnLoadContext.Text = If(String.IsNullOrWhiteSpace(_loadedContextContent) AndAlso Not HasLoadedIndex(), "Load Context", "Remove Context")
+        btnLoadContext.Text = If(String.IsNullOrWhiteSpace(_loadedContextContent) AndAlso Not HasLoadedIndex(), "Load Context", "Manage Context")
     End Sub
 
     ''' <summary>
@@ -5517,6 +5674,7 @@ Partial Public Class frmAIChat
         _loadedContextPath = Nothing
         _cachedLoadedContextContent = Nothing
         _cachedLoadedContextPath = Nothing
+        _loadedContextDocuments.Clear()
         DeletePersistedContextFile(False)
 
         ' Removing the context also removes any loaded index and its persisted files.
@@ -5532,7 +5690,7 @@ Partial Public Class frmAIChat
         UpdateLoadContextButtonText()
     End Sub
 
-    Private Async Function PromptForLoadedContextAsync() As System.Threading.Tasks.Task
+    Private Async Function PromptForLoadedContextAsync(Optional appendMode As Boolean = False) As System.Threading.Tasks.Task
         Try
             Globals.ThisAddIn.DragDropFormLabel = "... a file or folder you want to use as external context, or click Browse"
             Globals.ThisAddIn.DragDropFormFilter = GetContextDragDropFilter()
@@ -5577,7 +5735,9 @@ Partial Public Class frmAIChat
 
             Dim loaded = Await LoadContextFromPathAsync(selectedPath, True)
 
-            If String.IsNullOrWhiteSpace(loaded.Summary) AndAlso String.IsNullOrWhiteSpace(loaded.CombinedContent) Then
+            Dim hasLoadedDocuments As Boolean = loaded.Documents IsNot Nothing AndAlso loaded.Documents.Count > 0
+
+            If String.IsNullOrWhiteSpace(loaded.Summary) AndAlso Not hasLoadedDocuments Then
                 Return
             End If
 
@@ -5588,12 +5748,12 @@ Partial Public Class frmAIChat
                     "No, retry")
 
                 If proceedAnswer <> 1 Then
-                    Await PromptForLoadedContextAsync()
+                    Await PromptForLoadedContextAsync(appendMode)
                     Return
                 End If
             End If
 
-            If String.IsNullOrWhiteSpace(loaded.CombinedContent) Then
+            If Not hasLoadedDocuments Then
                 AppendSystemMessage("Failed to load context or all files are empty.")
                 Return
             End If
@@ -5601,9 +5761,12 @@ Partial Public Class frmAIChat
             ' Loading a document context replaces any previously loaded index (either a document or an index).
             ClearLoadedIndexOnly()
 
-            _loadedContextContent = loaded.CombinedContent
+            If Not appendMode Then
+                _loadedContextDocuments.Clear()
+            End If
+            _loadedContextDocuments.AddRange(loaded.Documents)
+            RebuildLoadedContextContent()
             _loadedContextPath = loaded.DisplayPath
-            _cachedLoadedContextContent = _loadedContextContent
             _cachedLoadedContextPath = _loadedContextPath
 
             If chkPersistContext.Checked Then

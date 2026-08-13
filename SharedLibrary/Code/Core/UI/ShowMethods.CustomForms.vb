@@ -356,7 +356,7 @@ Namespace SharedLibrary
 
             SharedMethods.AttachForeignForegroundWatchdog(inputForm)
 
-            Dim ownerWnd As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+            Dim ownerWnd As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
             If ownerWnd IsNot Nothing Then
                 inputForm.ShowDialog(ownerWnd)
             Else
@@ -2467,7 +2467,7 @@ Namespace SharedLibrary
                 End Sub
 
             Dim result As DialogResult
-            Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+            Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
             If __owner IsNot Nothing Then
                 result = inputForm.ShowDialog(__owner)
             Else
@@ -3135,6 +3135,23 @@ Namespace SharedLibrary
         End Class
 
 
+        Public Class FreestylePromptQuickButton
+
+            Public Property Id As System.String
+            Public Property Text As System.String
+            Public Property Description As System.String
+            Public Property Prefix As System.String
+
+            Public Sub New()
+                Me.Id = System.String.Empty
+                Me.Text = System.String.Empty
+                Me.Description = System.String.Empty
+                Me.Prefix = System.String.Empty
+            End Sub
+
+        End Class
+
+
         Public Class FreestylePromptToggleOption
 
             Public Property Id As System.String
@@ -3225,7 +3242,11 @@ Namespace SharedLibrary
             Public Property ShowShortCommandsHint As System.Boolean
             Public Property Context As ISharedContext
 
+            Public Property CallerId As System.String
+            Public Property PersistedState As System.String
+
             Public Property Modes As System.Collections.Generic.List(Of FreestylePromptMode)
+            Public Property QuickButtons As System.Collections.Generic.List(Of FreestylePromptQuickButton)
             Public Property InsertOptions As System.Collections.Generic.List(Of FreestylePromptInsertOption)
             Public Property Sections As System.Collections.Generic.List(Of FreestylePromptSection)
 
@@ -3240,7 +3261,10 @@ Namespace SharedLibrary
                 Me.PromptLibraryEnabled = False
                 Me.ShowShortCommandsHint = False
                 Me.Context = Nothing
+                Me.CallerId = System.String.Empty
+                Me.PersistedState = System.String.Empty
                 Me.Modes = New System.Collections.Generic.List(Of FreestylePromptMode)()
+                Me.QuickButtons = New System.Collections.Generic.List(Of FreestylePromptQuickButton)()
                 Me.InsertOptions = New System.Collections.Generic.List(Of FreestylePromptInsertOption)()
                 Me.Sections = New System.Collections.Generic.List(Of FreestylePromptSection)()
             End Sub
@@ -3256,6 +3280,8 @@ Namespace SharedLibrary
             Public Property SelectedPrefix As System.String
             Public Property SelectedOptionIds As System.Collections.Generic.List(Of System.String)
             Public Property SelectedTriggers As System.Collections.Generic.List(Of System.String)
+            Public Property KnownPrefixes As System.Collections.Generic.List(Of System.String)
+            Public Property PersistedState As System.String
 
             Public Sub New()
                 Me.Accepted = False
@@ -3264,6 +3290,8 @@ Namespace SharedLibrary
                 Me.SelectedPrefix = System.String.Empty
                 Me.SelectedOptionIds = New System.Collections.Generic.List(Of System.String)()
                 Me.SelectedTriggers = New System.Collections.Generic.List(Of System.String)()
+                Me.KnownPrefixes = New System.Collections.Generic.List(Of System.String)()
+                Me.PersistedState = System.String.Empty
             End Sub
 
         End Class
@@ -3357,6 +3385,301 @@ Namespace SharedLibrary
         End Sub
 
 
+        Private Shared Function FindFreestylePromptModeById(ByVal modeId As System.String, ByVal modes As System.Collections.Generic.IEnumerable(Of FreestylePromptMode)) As FreestylePromptMode
+
+            If System.String.IsNullOrWhiteSpace(modeId) OrElse modes Is Nothing Then
+                Return Nothing
+            End If
+
+            For Each mode As FreestylePromptMode In modes
+
+                If mode Is Nothing Then
+                    Continue For
+                End If
+
+                If System.String.Equals(mode.Id, modeId, System.StringComparison.OrdinalIgnoreCase) Then
+                    Return mode
+                End If
+
+            Next
+
+            Return Nothing
+
+        End Function
+
+
+        Private Shared Function FindFreestylePromptModeByPrefix(ByVal prefix As System.String, ByVal modes As System.Collections.Generic.IEnumerable(Of FreestylePromptMode)) As FreestylePromptMode
+
+            If System.String.IsNullOrWhiteSpace(prefix) OrElse modes Is Nothing Then
+                Return Nothing
+            End If
+
+            Dim targetPrefix As System.String = prefix.Trim()
+
+            For Each mode As FreestylePromptMode In modes
+
+                If mode Is Nothing Then
+                    Continue For
+                End If
+
+                If Not System.String.IsNullOrWhiteSpace(mode.Prefix) AndAlso
+                   System.String.Equals(mode.Prefix.Trim(), targetPrefix, System.StringComparison.OrdinalIgnoreCase) Then
+                    Return mode
+                End If
+
+                If mode.Prefixes Is Nothing Then
+                    Continue For
+                End If
+
+                For Each modePrefix As System.String In mode.Prefixes
+
+                    If System.String.IsNullOrWhiteSpace(modePrefix) Then
+                        Continue For
+                    End If
+
+                    If System.String.Equals(modePrefix.Trim(), targetPrefix, System.StringComparison.OrdinalIgnoreCase) Then
+                        Return mode
+                    End If
+
+                Next
+
+            Next
+
+            Return Nothing
+
+        End Function
+
+
+        Private Shared Function GetFreestylePromptKnownPrefixes(ByVal modes As System.Collections.Generic.IEnumerable(Of FreestylePromptMode)) As System.Collections.Generic.List(Of System.String)
+
+            Dim prefixes As New System.Collections.Generic.List(Of System.String)()
+
+            If modes Is Nothing Then
+                Return prefixes
+            End If
+
+            For Each mode As FreestylePromptMode In modes
+
+                If mode Is Nothing Then
+                    Continue For
+                End If
+
+                If Not System.String.IsNullOrWhiteSpace(mode.Prefix) Then
+                    Dim singlePrefix As System.String = mode.Prefix.Trim()
+                    If Not prefixes.Exists(Function(item As System.String) System.String.Equals(item, singlePrefix, System.StringComparison.OrdinalIgnoreCase)) Then
+                        prefixes.Add(singlePrefix)
+                    End If
+                End If
+
+                If mode.Prefixes Is Nothing Then
+                    Continue For
+                End If
+
+                For Each prefix As System.String In mode.Prefixes
+
+                    If System.String.IsNullOrWhiteSpace(prefix) Then
+                        Continue For
+                    End If
+
+                    Dim cleanedPrefix As System.String = prefix.Trim()
+
+                    If Not prefixes.Exists(Function(item As System.String) System.String.Equals(item, cleanedPrefix, System.StringComparison.OrdinalIgnoreCase)) Then
+                        prefixes.Add(cleanedPrefix)
+                    End If
+
+                Next
+
+            Next
+
+            prefixes.Sort(Function(left As System.String, right As System.String) right.Length.CompareTo(left.Length))
+
+            Return prefixes
+
+        End Function
+
+
+        Private Shared Function GetFreestylePromptStateDocument(ByVal persistedState As System.String) As System.Xml.Linq.XDocument
+
+            Try
+
+                If Not System.String.IsNullOrWhiteSpace(persistedState) Then
+
+                    Dim document As System.Xml.Linq.XDocument = System.Xml.Linq.XDocument.Parse(persistedState)
+
+                    If document.Root IsNot Nothing AndAlso
+                       System.String.Equals(document.Root.Name.LocalName, "freestylePromptState", System.StringComparison.OrdinalIgnoreCase) Then
+                        Return document
+                    End If
+
+                End If
+
+            Catch
+            End Try
+
+            Return New System.Xml.Linq.XDocument(
+                New System.Xml.Linq.XElement(
+                    "freestylePromptState",
+                    New System.Xml.Linq.XAttribute("version", "1")))
+
+        End Function
+
+
+        Private Shared Function GetFreestylePromptCallerStateElement(ByVal document As System.Xml.Linq.XDocument, ByVal callerId As System.String, ByVal createIfMissing As System.Boolean) As System.Xml.Linq.XElement
+
+            If document Is Nothing OrElse document.Root Is Nothing OrElse System.String.IsNullOrWhiteSpace(callerId) Then
+                Return Nothing
+            End If
+
+            For Each callerElement As System.Xml.Linq.XElement In document.Root.Elements("caller")
+
+                Dim idAttribute As System.Xml.Linq.XAttribute = callerElement.Attribute("id")
+
+                If idAttribute IsNot Nothing AndAlso
+                   System.String.Equals(idAttribute.Value, callerId, System.StringComparison.OrdinalIgnoreCase) Then
+                    Return callerElement
+                End If
+
+            Next
+
+            If Not createIfMissing Then
+                Return Nothing
+            End If
+
+            Dim newCallerElement As New System.Xml.Linq.XElement(
+                "caller",
+                New System.Xml.Linq.XAttribute("id", callerId))
+
+            document.Root.Add(newCallerElement)
+
+            Return newCallerElement
+
+        End Function
+
+
+        Private Shared Function GetFreestylePromptStateAttribute(ByVal element As System.Xml.Linq.XElement, ByVal attributeName As System.String) As System.String
+
+            If element Is Nothing OrElse System.String.IsNullOrWhiteSpace(attributeName) Then
+                Return System.String.Empty
+            End If
+
+            Dim attribute As System.Xml.Linq.XAttribute = element.Attribute(attributeName)
+
+            If attribute Is Nothing Then
+                Return System.String.Empty
+            End If
+
+            Return If(attribute.Value, System.String.Empty)
+
+        End Function
+
+
+        Private Shared Function BuildFreestylePromptPersistedState(
+            ByVal callerId As System.String,
+            ByVal existingState As System.String,
+            ByVal selectedModeId As System.String,
+            ByVal selectedPrefix As System.String,
+            ByVal expanded As System.Boolean,
+            ByVal toggleCheckBoxes As System.Collections.Generic.IEnumerable(Of System.Windows.Forms.CheckBox),
+            ByVal argumentTextBoxes As System.Collections.Generic.IDictionary(Of System.Windows.Forms.CheckBox, System.Windows.Forms.TextBox)) As System.String
+
+            If System.String.IsNullOrWhiteSpace(callerId) Then
+                Return If(existingState, System.String.Empty)
+            End If
+
+            Dim document As System.Xml.Linq.XDocument = SharedMethods.GetFreestylePromptStateDocument(existingState)
+            Dim callerElement As System.Xml.Linq.XElement = SharedMethods.GetFreestylePromptCallerStateElement(document, callerId, True)
+
+            If callerElement Is Nothing Then
+                Return If(existingState, System.String.Empty)
+            End If
+
+            callerElement.RemoveNodes()
+            callerElement.RemoveAttributes()
+
+            callerElement.SetAttributeValue("id", callerId)
+            callerElement.SetAttributeValue("modeId", If(selectedModeId, System.String.Empty))
+            callerElement.SetAttributeValue("prefix", If(selectedPrefix, System.String.Empty))
+            callerElement.SetAttributeValue("expanded", If(expanded, "1", "0"))
+
+            If toggleCheckBoxes IsNot Nothing Then
+
+                For Each optionCheckBox As System.Windows.Forms.CheckBox In toggleCheckBoxes
+
+                    If optionCheckBox Is Nothing Then
+                        Continue For
+                    End If
+
+                    Dim definition As FreestylePromptToggleOption = TryCast(optionCheckBox.Tag, FreestylePromptToggleOption)
+
+                    If definition Is Nothing OrElse System.String.IsNullOrWhiteSpace(definition.Id) Then
+                        Continue For
+                    End If
+
+                    Dim optionElement As New System.Xml.Linq.XElement("option")
+
+                    optionElement.SetAttributeValue("id", definition.Id)
+                    optionElement.SetAttributeValue("checked", If(optionCheckBox.Checked, "1", "0"))
+
+                    If argumentTextBoxes IsNot Nothing AndAlso argumentTextBoxes.ContainsKey(optionCheckBox) Then
+                        Dim argumentValue As System.String = argumentTextBoxes(optionCheckBox).Text.Trim()
+                        If argumentValue.Length > 0 Then
+                            optionElement.SetAttributeValue("argument", argumentValue)
+                        End If
+                    End If
+
+                    callerElement.Add(optionElement)
+
+                Next
+
+            End If
+
+            Return document.ToString(System.Xml.Linq.SaveOptions.DisableFormatting)
+
+        End Function
+
+
+        Private Shared Function ReplaceFreestyleLeadingPrefix(ByVal text As System.String, ByVal knownPrefixes As System.Collections.Generic.IEnumerable(Of System.String), ByVal replacementPrefix As System.String) As System.String
+
+            Dim prompt As System.String = If(text, System.String.Empty).Trim()
+            Dim prefixToApply As System.String = If(replacementPrefix, System.String.Empty).Trim()
+            Dim prefixToRemove As System.String = System.String.Empty
+
+            If knownPrefixes IsNot Nothing Then
+
+                For Each knownPrefix As System.String In knownPrefixes
+
+                    If System.String.IsNullOrWhiteSpace(knownPrefix) Then
+                        Continue For
+                    End If
+
+                    Dim cleanedPrefix As System.String = knownPrefix.Trim()
+
+                    If prompt.StartsWith(cleanedPrefix, System.StringComparison.OrdinalIgnoreCase) Then
+                        prefixToRemove = cleanedPrefix
+                        Exit For
+                    End If
+
+                Next
+
+            End If
+
+            If prefixToRemove.Length = 0 Then
+                prefixToRemove = SharedMethods.GetFreestyleLeadingColonToken(prompt)
+            End If
+
+            If prefixToRemove.Length > 0 AndAlso prompt.StartsWith(prefixToRemove, System.StringComparison.OrdinalIgnoreCase) Then
+                prompt = prompt.Substring(prefixToRemove.Length).TrimStart()
+            End If
+
+            If prefixToApply.Length = 0 Then
+                Return prompt.Trim()
+            End If
+
+            Return prefixToApply & If(prompt.Length > 0, " " & prompt.Trim(), System.String.Empty)
+
+        End Function
+
+
         Public Shared Function ShowFreestylePromptForm(ByVal options As FreestylePromptOptions) As FreestylePromptResult
 
             Dim returnValue As New FreestylePromptResult()
@@ -3403,6 +3726,8 @@ Namespace SharedLibrary
                                 Dim layoutBusy As System.Boolean = False
                                 Dim expanded As System.Boolean = False
                                 Dim collapsedClientHeight As System.Int32 = preferredHeight
+                                Dim quickSelectedPrefix As System.String = System.String.Empty
+                                Dim quickSelectedModeId As System.String = System.String.Empty
 
                                 freestyleForm.Opacity = 0
                                 freestyleForm.Text = If(System.String.IsNullOrWhiteSpace(options.Title), "Freestyle", options.Title)
@@ -3859,6 +4184,7 @@ Namespace SharedLibrary
 
                                 Dim toggleCheckBoxes As New System.Collections.Generic.List(Of System.Windows.Forms.CheckBox)()
                                 Dim argumentTextBoxes As New System.Collections.Generic.Dictionary(Of System.Windows.Forms.CheckBox, System.Windows.Forms.TextBox)()
+                                Dim toggleById As New System.Collections.Generic.Dictionary(Of System.String, System.Windows.Forms.CheckBox)(System.StringComparer.OrdinalIgnoreCase)
 
                                 Dim visibleSectionIndex As System.Int32 = 0
 
@@ -3958,6 +4284,10 @@ Namespace SharedLibrary
                                         optionHost.Controls.Add(optionCheckBox, 0, 0)
                                         toggleCheckBoxes.Add(optionCheckBox)
 
+                                        If Not System.String.IsNullOrWhiteSpace(definition.Id) AndAlso Not toggleById.ContainsKey(definition.Id) Then
+                                            toggleById.Add(definition.Id, optionCheckBox)
+                                        End If
+
                                         If definition.HasArgument Then
 
                                             Dim argumentTextBox As New System.Windows.Forms.TextBox() With {
@@ -4007,6 +4337,78 @@ Namespace SharedLibrary
                                 Next
 
                                 moreButton.Visible = visibleSectionIndex > 0
+
+                                If Not System.String.IsNullOrWhiteSpace(options.CallerId) AndAlso
+                                   Not System.String.IsNullOrWhiteSpace(options.PersistedState) Then
+
+                                    Dim persistedStateDocument As System.Xml.Linq.XDocument =
+                                        SharedMethods.GetFreestylePromptStateDocument(options.PersistedState)
+
+                                    Dim persistedCallerElement As System.Xml.Linq.XElement =
+                                        SharedMethods.GetFreestylePromptCallerStateElement(
+                                            persistedStateDocument,
+                                            options.CallerId,
+                                            False)
+
+                                    If persistedCallerElement IsNot Nothing Then
+
+                                        Dim savedPrefix As System.String =
+                                            SharedMethods.GetFreestylePromptStateAttribute(persistedCallerElement, "prefix")
+
+                                        Dim savedModeId As System.String =
+                                            SharedMethods.GetFreestylePromptStateAttribute(persistedCallerElement, "modeId")
+
+                                        Dim restoredMode As FreestylePromptMode = Nothing
+
+                                        If savedPrefix.Length > 0 Then
+                                            restoredMode = SharedMethods.FindFreestylePromptModeByPrefix(savedPrefix, options.Modes)
+                                        End If
+
+                                        If restoredMode Is Nothing AndAlso savedModeId.Length > 0 Then
+                                            restoredMode = SharedMethods.FindFreestylePromptModeById(savedModeId, options.Modes)
+                                        End If
+
+                                        If restoredMode IsNot Nothing AndAlso restoredMode.IsAvailable Then
+                                            synchronizingMode = True
+
+                                            Try
+                                                modeCombo.SelectedItem = restoredMode
+                                                lastAvailableMode = restoredMode
+                                            Finally
+                                                synchronizingMode = False
+                                            End Try
+                                        End If
+
+                                        For Each optionElement As System.Xml.Linq.XElement In persistedCallerElement.Elements("option")
+
+                                            Dim optionId As System.String =
+                                                SharedMethods.GetFreestylePromptStateAttribute(optionElement, "id")
+
+                                            Dim optionCheckBox As System.Windows.Forms.CheckBox = Nothing
+
+                                            If optionId.Length = 0 OrElse Not toggleById.TryGetValue(optionId, optionCheckBox) Then
+                                                Continue For
+                                            End If
+
+                                            optionCheckBox.Checked =
+                                                SharedMethods.GetFreestylePromptStateAttribute(optionElement, "checked") = "1"
+
+                                            If argumentTextBoxes.ContainsKey(optionCheckBox) Then
+                                                argumentTextBoxes(optionCheckBox).Text =
+                                                    SharedMethods.GetFreestylePromptStateAttribute(optionElement, "argument")
+                                            End If
+
+                                        Next
+
+                                        expanded =
+                                            SharedMethods.GetFreestylePromptStateAttribute(persistedCallerElement, "expanded") = "1"
+
+                                        advancedGrid.Visible = expanded
+                                        moreButton.Text = If(expanded, "More options ▾", "More options ▸")
+
+                                    End If
+
+                                End If
 
                                 ' =========================================================
                                 ' FOOTER
@@ -4061,6 +4463,69 @@ Namespace SharedLibrary
                                     .Padding = New System.Windows.Forms.Padding(buttonPadX + 2, buttonPadY + 2, buttonPadX + 2, buttonPadY + 2),
                                     .Margin = New System.Windows.Forms.Padding(0)
                                 }
+
+                                If options.QuickButtons IsNot Nothing Then
+
+                                    For Each quickButtonDefinition As FreestylePromptQuickButton In options.QuickButtons
+
+                                        If quickButtonDefinition Is Nothing OrElse
+                                           System.String.IsNullOrWhiteSpace(quickButtonDefinition.Text) OrElse
+                                           System.String.IsNullOrWhiteSpace(quickButtonDefinition.Prefix) Then
+                                            Continue For
+                                        End If
+
+                                        Dim quickRunButton As New System.Windows.Forms.Button() With {
+                                            .Text = quickButtonDefinition.Text,
+                                            .AutoSize = True,
+                                            .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
+                                            .Font = standardFont,
+                                            .Padding = New System.Windows.Forms.Padding(buttonPadX + 2, buttonPadY + 2, buttonPadX + 2, buttonPadY + 2),
+                                            .Margin = New System.Windows.Forms.Padding(0, 0, normalGap, 0),
+                                            .Tag = quickButtonDefinition
+                                        }
+
+                                        promptToolTip.SetToolTip(quickRunButton, quickButtonDefinition.Description)
+
+                                        AddHandler quickRunButton.Click,
+                                            Sub(sender As System.Object, e As System.EventArgs)
+
+                                                Dim clickedButton As System.Windows.Forms.Button = TryCast(sender, System.Windows.Forms.Button)
+
+                                                If clickedButton Is Nothing Then
+                                                    Return
+                                                End If
+
+                                                Dim clickedDefinition As FreestylePromptQuickButton =
+                                                    TryCast(clickedButton.Tag, FreestylePromptQuickButton)
+
+                                                If clickedDefinition Is Nothing OrElse
+                                                   System.String.IsNullOrWhiteSpace(clickedDefinition.Prefix) Then
+                                                    Return
+                                                End If
+
+                                                Dim quickMode As FreestylePromptMode =
+                                                    SharedMethods.FindFreestylePromptModeByPrefix(clickedDefinition.Prefix, options.Modes)
+
+                                                If quickMode IsNot Nothing AndAlso Not quickMode.IsAvailable Then
+                                                    If Not System.String.IsNullOrWhiteSpace(quickMode.UnavailableReason) Then
+                                                        SharedMethods.ShowCustomMessageBox(quickMode.UnavailableReason, "Freestyle")
+                                                    End If
+                                                    Return
+                                                End If
+
+                                                quickSelectedPrefix = clickedDefinition.Prefix.Trim()
+                                                quickSelectedModeId = If(quickMode Is Nothing, System.String.Empty, quickMode.Id)
+
+                                                freestyleForm.DialogResult = System.Windows.Forms.DialogResult.OK
+                                                freestyleForm.Close()
+
+                                            End Sub
+
+                                        actionFlow.Controls.Add(quickRunButton)
+
+                                    Next
+
+                                End If
 
                                 actionFlow.Controls.Add(cancelButton)
                                 actionFlow.Controls.Add(runButton)
@@ -4471,22 +4936,49 @@ Namespace SharedLibrary
 
                                 returnValue.Accepted = True
                                 returnValue.Prompt = promptTextBox.Text
+                                returnValue.KnownPrefixes.AddRange(SharedMethods.GetFreestylePromptKnownPrefixes(options.Modes))
 
                                 Dim finalSelectedMode As FreestylePromptMode = TryCast(modeCombo.SelectedItem, FreestylePromptMode)
+                                Dim effectiveSelectedPrefix As System.String = quickSelectedPrefix.Trim()
+
+                                If quickSelectedModeId.Length > 0 Then
+                                    finalSelectedMode = SharedMethods.FindFreestylePromptModeById(quickSelectedModeId, options.Modes)
+                                End If
 
                                 If finalSelectedMode IsNot Nothing Then
 
                                     returnValue.SelectedModeId = finalSelectedMode.Id
 
-                                    Dim finalMatch As System.Tuple(Of FreestylePromptMode, System.String) = SharedMethods.FindFreestylePromptMode(promptTextBox.Text, options.Modes)
+                                    If effectiveSelectedPrefix.Length = 0 Then
 
-                                    If finalMatch IsNot Nothing AndAlso finalMatch.Item1 Is finalSelectedMode Then
-                                        returnValue.SelectedPrefix = finalMatch.Item2
-                                    Else
-                                        returnValue.SelectedPrefix = finalSelectedMode.Prefix
+                                        Dim finalMatch As System.Tuple(Of FreestylePromptMode, System.String) =
+                                            SharedMethods.FindFreestylePromptMode(promptTextBox.Text, options.Modes)
+
+                                        If finalMatch IsNot Nothing AndAlso finalMatch.Item1 Is finalSelectedMode Then
+                                            effectiveSelectedPrefix = finalMatch.Item2
+                                        Else
+                                            effectiveSelectedPrefix = finalSelectedMode.Prefix
+                                        End If
+
                                     End If
 
+                                ElseIf quickSelectedModeId.Length > 0 Then
+
+                                    returnValue.SelectedModeId = quickSelectedModeId
+
                                 End If
+
+                                returnValue.SelectedPrefix = effectiveSelectedPrefix
+
+                                returnValue.PersistedState =
+                                    SharedMethods.BuildFreestylePromptPersistedState(
+                                        options.CallerId,
+                                        options.PersistedState,
+                                        returnValue.SelectedModeId,
+                                        returnValue.SelectedPrefix,
+                                        expanded,
+                                        toggleCheckBoxes,
+                                        argumentTextBoxes)
 
                                 For Each optionCheckBox As System.Windows.Forms.CheckBox In toggleCheckBoxes
 
@@ -4544,8 +5036,8 @@ Namespace SharedLibrary
 
             Dim prompt As System.String = If(result.Prompt, System.String.Empty).Trim()
 
-            If Not System.String.IsNullOrWhiteSpace(result.SelectedPrefix) AndAlso Not prompt.StartsWith(result.SelectedPrefix, System.StringComparison.OrdinalIgnoreCase) Then
-                prompt = result.SelectedPrefix.Trim() & If(prompt.Length > 0, " " & prompt, System.String.Empty)
+            If Not System.String.IsNullOrWhiteSpace(result.SelectedPrefix) Then
+                prompt = SharedMethods.ReplaceFreestyleLeadingPrefix(prompt, result.KnownPrefixes, result.SelectedPrefix)
             End If
 
             For Each trigger As System.String In result.SelectedTriggers

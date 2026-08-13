@@ -636,6 +636,7 @@
     <Compile Include="Code\Core\UI\SharedMethods.SplashScreen.vb" />
     <Compile Include="Code\Core\UI\ShowMethods.CustomForms.vb" />
     <Compile Include="Code\Core\Various\Crashlogger.vb" />
+    <Compile Include="Code\Core\Various\OfficeWindowWatchdog.vb" />
     <Compile Include="Code\Core\Various\SharedLogger.vb" />
     <Compile Include="Code\Core\Various\SharedMethods.FileImporter.vb" />
     <Compile Include="Code\Core\Various\SharedMethods.InkyMemory.vb" />

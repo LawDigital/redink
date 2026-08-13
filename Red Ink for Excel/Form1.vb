@@ -629,7 +629,7 @@ Public Class frmAIChat
             _chatHistory.Add(("assistant", aiResponse.TrimEnd()))
 
         Catch ex As System.Exception
-            MsgBox("Error in btnSend_Click: " & ex.Message, MsgBoxStyle.Critical)
+            ShowCustomMessageBox("Error in btnSend_Click: " & ex.Message)
         End Try
     End Sub
 
@@ -1031,7 +1031,7 @@ Public Class frmAIChat
             Next
 
         Catch ex As System.Exception
-            MsgBox("Error in ParseCommands: " & ex.Message, MsgBoxStyle.Critical)
+            ShowCustomMessageBox("Error in ParseCommands: " & ex.Message)
         End Try
 
         Return results
@@ -1052,7 +1052,7 @@ Public Class frmAIChat
             output = collapseRegex.Replace(output, Environment.NewLine)
 
         Catch ex As System.Exception
-            MsgBox("Error in RemoveCommands: " & ex.Message, MsgBoxStyle.Critical)
+            ShowCustomMessageBox("Error in RemoveCommands: " & ex.Message)
         End Try
 
         Return output
