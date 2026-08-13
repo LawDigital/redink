@@ -210,7 +210,9 @@ Public Module WordSearchHelper
                     .MatchCase = False : .MatchWildcards = True
                     .Format = False : .IgnoreSpace = True
                 End With
-                If rngLit.Find.Execute() Then
+                Dim hitLit As System.Boolean
+                Try : hitLit = rngLit.Find.Execute() : Catch : hitLit = False : End Try
+                If hitLit Then
                     If rngLit.Start < area.Start OrElse rngLit.End > area.End Then
                         LogHelperDiag($"STRATEGY 1 REJECTED out-of-range hit area=[{area.Start},{area.End}] hit=[{rngLit.Start},{rngLit.End}]")
                     Else

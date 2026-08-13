@@ -605,6 +605,18 @@ Namespace My
                 Me("CrashLog") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property FreestylePromptUiState() As String
+            Get
+                Return CType(Me("FreestylePromptUiState"),String)
+            End Get
+            Set
+                Me("FreestylePromptUiState") = value
+            End Set
+        End Property
     End Class
 End Namespace
 
