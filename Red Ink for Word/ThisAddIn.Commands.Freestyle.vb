@@ -1582,6 +1582,14 @@ SkipPromptInput:
 
             If LastPrompt.Trim() = "" Then
 
+                Dim freestylePromptUiState As String = ""
+
+                Try
+                    freestylePromptUiState = CStr(My.Settings.Item("FreestylePromptUiState"))
+                Catch
+                    freestylePromptUiState = ""
+                End Try
+
                 Dim promptOptions As New SLib.FreestylePromptOptions() With {
                     .Title = $"{AN} Freestyle",
                     .Heading = "What would you like Red Ink to do?",
@@ -1591,7 +1599,9 @@ SkipPromptInput:
                     .LastPrompt = My.Settings.LastPrompt,
                     .PromptLibraryEnabled = INI_PromptLib,
                     .ShowShortCommandsHint = True,
-                    .Context = _context
+                    .Context = _context,
+                    .CallerId = "word.freestyle",
+                    .PersistedState = freestylePromptUiState
                 }
 
                 ' =============================================================
@@ -1838,6 +1848,60 @@ SkipPromptInput:
 
                 modePure.Prefixes.Add(PurePrefix)
                 promptOptions.Modes.Add(modePure)
+
+                If Not NoText Then
+
+                    promptOptions.QuickButtons.Add(
+                        New SLib.FreestylePromptQuickButton() With {
+                            .Id = "quick-window",
+                            .Text = "Run (window)",
+                            .Description = "Run immediately with the separate window / clipboard prefix.",
+                            .Prefix = ClipboardPrefix
+                        })
+
+                    promptOptions.QuickButtons.Add(
+                        New SLib.FreestylePromptQuickButton() With {
+                            .Id = "quick-pane",
+                            .Text = "Run (pane)",
+                            .Description = "Run immediately with the side-pane prefix.",
+                            .Prefix = PanePrefix
+                        })
+
+                    promptOptions.QuickButtons.Add(
+                        New SLib.FreestylePromptQuickButton() With {
+                            .Id = "quick-markup",
+                            .Text = "Run (markup)",
+                            .Description = "Run immediately with the inline-diff markup prefix.",
+                            .Prefix = MarkupPrefixDiff
+                        })
+
+                    promptOptions.QuickButtons.Add(
+                        New SLib.FreestylePromptQuickButton() With {
+                            .Id = "quick-bubbles",
+                            .Text = "Run (bubbles)",
+                            .Description = "Run immediately with the comments / bubbles prefix.",
+                            .Prefix = BubblesPrefix
+                        })
+
+                Else
+
+                    promptOptions.QuickButtons.Add(
+                        New SLib.FreestylePromptQuickButton() With {
+                            .Id = "quick-window",
+                            .Text = "Run (window)",
+                            .Description = "Run immediately with the separate window / clipboard prefix.",
+                            .Prefix = ClipboardPrefix
+                        })
+
+                    promptOptions.QuickButtons.Add(
+                        New SLib.FreestylePromptQuickButton() With {
+                            .Id = "quick-pane",
+                            .Text = "Run (pane)",
+                            .Description = "Run immediately with the side-pane prefix.",
+                            .Prefix = PanePrefix
+                        })
+
+                End If
 
                 ' =============================================================
                 ' CONTEXT
@@ -2146,6 +2210,13 @@ SkipPromptInput:
                 If promptResult Is Nothing OrElse Not promptResult.Accepted Then
                     Return
                 End If
+
+                Try
+                    My.Settings.Item("FreestylePromptUiState") = promptResult.PersistedState
+                    My.Settings.Save()
+                Catch
+                    ' non-critical
+                End Try
 
                 OtherPrompt = SLib.ComposeFreestylePrompt(promptResult).Trim()
 

@@ -1172,6 +1172,14 @@ SkipPromptWin:
         ' FREESTYLE PROMPT UI
         ' =============================================================
 
+        Dim freestylePromptUiState As String = ""
+
+        Try
+            freestylePromptUiState = CStr(My.Settings.Item("FreestylePromptUiState"))
+        Catch
+            freestylePromptUiState = ""
+        End Try
+
         Dim promptOptions As New SLib.FreestylePromptOptions() With {
             .Title = $"{AN} Freestyle",
             .Heading = "What would you like Red Ink to do?",
@@ -1180,7 +1188,9 @@ SkipPromptWin:
             .ContextStatusText = If(NoSelectedCells, "No cells selected", "The current Excel selection will be used as context"),
             .LastPrompt = My.Settings.LastPrompt,
             .PromptLibraryEnabled = INI_PromptLib,
-            .Context = _context
+            .Context = _context,
+            .CallerId = "excel.freestyle",
+            .PersistedState = freestylePromptUiState
         }
 
         ' =============================================================
@@ -1286,6 +1296,14 @@ SkipPromptWin:
         modePure.Prefixes.Add(PurePrefix)
 
         promptOptions.Modes.Add(modePure)
+
+        promptOptions.QuickButtons.Add(
+            New SLib.FreestylePromptQuickButton() With {
+                .Id = "quick-pane",
+                .Text = "Run (pane)",
+                .Description = "Run immediately with the side-pane prefix.",
+                .Prefix = PanePrefix
+            })
 
         ' =============================================================
         ' ADD CONTEXT
@@ -1401,6 +1419,13 @@ SkipPromptWin:
         If promptResult Is Nothing OrElse Not promptResult.Accepted Then
             Return False
         End If
+
+        Try
+            My.Settings.Item("FreestylePromptUiState") = promptResult.PersistedState
+            My.Settings.Save()
+        Catch
+            ' non-critical
+        End Try
 
         OtherPrompt = SLib.ComposeFreestylePrompt(promptResult).Trim()
 

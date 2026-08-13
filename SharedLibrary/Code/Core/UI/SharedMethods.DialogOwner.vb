@@ -64,12 +64,28 @@ Namespace SharedLibrary
         End Function
 
         ''' <summary>
-        ''' Resolves the best available owner for a shared modal dialog on the
-        ''' current thread. Returns the top of the thread-local stack if any, else
-        ''' a <see cref="WindowWrapper"/> around the Office host window if known,
+        ''' Resolves the ambient dialog owner candidate for the current thread.
+        ''' Returns the top of the thread-local stack if any, else a
+        ''' <see cref="WindowWrapper"/> around the Office host window if known,
         ''' otherwise <c>Nothing</c>.
         ''' </summary>
-        Public Shared Function ResolveDialogOwner() As IWin32Window
+        ''' <remarks>
+        ''' Internal helper only. Callers should normally use
+        ''' <see cref="ResolveSameThreadDialogOwner"/> before passing an owner to
+        ''' <c>ShowDialog(owner)</c>. This method may return a window that belongs
+        ''' to another UI thread or Office host process; using such an owner
+        ''' directly can disable that foreign window and cause modal deadlocks.
+        ''' This method exists so <see cref="ResolveSameThreadDialogOwner"/> can
+        ''' first resolve the best candidate and then reject it when it is not on
+        ''' the current thread.
+        ''' </remarks>
+        Private Shared Function ResolveDialogOwner() As IWin32Window
+            Dim resolved As IWin32Window = ResolveDialogOwnerCore()
+            OfficeWindowWatchdog.InspectDialogOwner(resolved, "ResolveDialogOwner", Nothing)
+            Return resolved
+        End Function
+
+        Private Shared Function ResolveDialogOwnerCore() As IWin32Window
             Dim stack = _ownerStack.Value
             If stack IsNot Nothing AndAlso stack.Count > 0 Then
                 Dim top = stack.Peek()

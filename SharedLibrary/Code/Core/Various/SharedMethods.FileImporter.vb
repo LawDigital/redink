@@ -1378,7 +1378,7 @@ Namespace SharedLibrary
                     refreshTimer.Start()
                     localForm.Opacity = 1
 
-                    Dim owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+                    Dim owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
                     Dim ownerScope As System.IDisposable = Nothing
 
                     Try

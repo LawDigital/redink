@@ -48,6 +48,11 @@ Namespace SharedLibrary
         ''' </remarks>
         Public Sub New(handle As IntPtr)
             _hwnd = handle
+            Try
+                SharedLibrary.OfficeWindowWatchdog.InspectCachedHwndUse(
+                    handle, "WindowWrapper.New (raw HWND wrapped as IWin32Window owner/parent)")
+            Catch
+            End Try
         End Sub
 
         ''' <summary>

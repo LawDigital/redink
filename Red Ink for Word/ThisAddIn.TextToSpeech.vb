@@ -1447,7 +1447,7 @@ Partial Public Class ThisAddIn
 
                 synth.Speak($"Hello! I am now using the voice: {chosenVoice}")
             Catch ex As Exception
-                MsgBox("Error selecting voice: " & ex.Message, MsgBoxStyle.Critical, "Error")
+                ShowCustomMessageBox("Error selecting voice: " & ex.Message)
             End Try
         Else
             ShowCustomMessageBox("Invalid voice number entered.", "Text-to-Speech")

@@ -254,5 +254,8 @@
     <Setting Name="Inky_WorkspacePreset5Label" Type="System.String" Scope="User">
       <Value Profile="(Default)" />
     </Setting>
+    <Setting Name="FreestylePromptUiState" Type="System.String" Scope="User">
+      <Value Profile="(Default)" />
+    </Setting>
   </Settings>
 </SettingsFile>
