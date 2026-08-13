@@ -937,6 +937,126 @@ Namespace My
                 Me("ToolingLogWindowOverrideValue") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Inky_WorkspacePreset1Path() As String
+            Get
+                Return CType(Me("Inky_WorkspacePreset1Path"),String)
+            End Get
+            Set
+                Me("Inky_WorkspacePreset1Path") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Inky_WorkspacePreset2Path() As String
+            Get
+                Return CType(Me("Inky_WorkspacePreset2Path"),String)
+            End Get
+            Set
+                Me("Inky_WorkspacePreset2Path") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Inky_WorkspacePreset3Path() As String
+            Get
+                Return CType(Me("Inky_WorkspacePreset3Path"),String)
+            End Get
+            Set
+                Me("Inky_WorkspacePreset3Path") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Inky_WorkspacePreset4Path() As String
+            Get
+                Return CType(Me("Inky_WorkspacePreset4Path"),String)
+            End Get
+            Set
+                Me("Inky_WorkspacePreset4Path") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Inky_WorkspacePreset5Path() As String
+            Get
+                Return CType(Me("Inky_WorkspacePreset5Path"),String)
+            End Get
+            Set
+                Me("Inky_WorkspacePreset5Path") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Inky_WorkspacePreset1Label() As String
+            Get
+                Return CType(Me("Inky_WorkspacePreset1Label"),String)
+            End Get
+            Set
+                Me("Inky_WorkspacePreset1Label") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Inky_WorkspacePreset2Label() As String
+            Get
+                Return CType(Me("Inky_WorkspacePreset2Label"),String)
+            End Get
+            Set
+                Me("Inky_WorkspacePreset2Label") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Inky_WorkspacePreset3Label() As String
+            Get
+                Return CType(Me("Inky_WorkspacePreset3Label"),String)
+            End Get
+            Set
+                Me("Inky_WorkspacePreset3Label") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Inky_WorkspacePreset4Label() As String
+            Get
+                Return CType(Me("Inky_WorkspacePreset4Label"),String)
+            End Get
+            Set
+                Me("Inky_WorkspacePreset4Label") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Inky_WorkspacePreset5Label() As String
+            Get
+                Return CType(Me("Inky_WorkspacePreset5Label"),String)
+            End Get
+            Set
+                Me("Inky_WorkspacePreset5Label") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

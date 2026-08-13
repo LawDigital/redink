@@ -224,7 +224,9 @@ Namespace SharedLibrary
             "'event_end_date_anchor_utc', 'event_start_date_anchor_user', 'event_end_date_anchor_user', " &
             "'event_start_local_date' and 'event_end_local_date'. Teams hits may include 'createdDateTime', " &
             "'created_date_iso_utc' and 'created_date_anchor_utc'. " &
-            "If you mention a date from a hit, copy the corresponding '*_anchor_utc' value exactly. " &
+            "For calendar hits, when presenting appointment times to the user, prefer " &
+            "'event_start_date_anchor_user' and 'event_end_date_anchor_user'. " &
+            "Use the '*_anchor_utc' values only when the user explicitly asks for UTC or when a stable UTC reference is required. " &
             "Do not reinterpret, relocalize or reformat numeric ISO dates. " &
             "Pass ids to m365_get_mail, m365_get_mail_thread, m365_get_file, m365_get_event, " &
             "m365_get_chat_thread or m365_get_onenote_page to fetch full content.",
@@ -269,11 +271,10 @@ Namespace SharedLibrary
         .ToolName = GetMailToolName,
         .ToolDefinition = def.ToString(Formatting.None),
         .ToolInstructionsPrompt =
-            "m365_get_mail: Returns headers, body and (by default) extracted attachment text. " &
-            "Provide message_id (required). Optional: include_attachments, ocr_pdf, max_chars. " &
-            "If the output contains SentAnchor/SentISO or ReceivedAnchor/ReceivedISO, prefer the *Anchor values " &
-            "when referring to dates or times, and copy them exactly. Do not reinterpret, relocalize or " &
-            "reformat numeric ISO dates.",
+            "m365_get_event: Returns calendar event details. Provide event_id. " &
+            "When the output contains StartLocal or EndLocal, prefer those values for user-facing dates and times. " &
+            "Use StartUtc or EndUtc only when the user explicitly asks for UTC or when a stable UTC reference is required. " &
+            "Copy rendered date/time values exactly.",
         .ModelDescription = "M365: Read e-mail" & suffix,
         .Tool = True,
         .ToolPriority = 995,
@@ -794,6 +795,98 @@ Namespace SharedLibrary
             Return Nothing
         End Function
 
+        Private Function TryParseGraphDateTimeTimeZone(value As JObject) As DateTime?
+            If value Is Nothing Then Return Nothing
+
+            Dim rawDateTime As String = GetJsonString(value, "dateTime").Trim()
+            If String.IsNullOrWhiteSpace(rawDateTime) Then Return Nothing
+
+            Dim localDateTime As DateTime
+            Dim localFormats As String() = {
+                "yyyy-MM-dd'T'HH:mm:ss",
+                "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF",
+                "yyyy-MM-dd HH:mm:ss",
+                "yyyy-MM-dd HH:mm",
+                "yyyy-MM-dd",
+                "dd.MM.yyyy HH:mm:ss",
+                "d.MM.yyyy HH:mm:ss",
+                "dd.M.yyyy HH:mm:ss",
+                "d.M.yyyy HH:mm:ss",
+                "dd.MM.yyyy HH:mm",
+                "d.MM.yyyy HH:mm",
+                "dd.M.yyyy HH:mm",
+                "d.M.yyyy HH:mm",
+                "dd.MM.yyyy",
+                "d.MM.yyyy",
+                "dd.M.yyyy",
+                "d.M.yyyy"
+            }
+
+            If DateTime.TryParseExact(
+        rawDateTime,
+        localFormats,
+        Globalization.CultureInfo.InvariantCulture,
+        Globalization.DateTimeStyles.None,
+        localDateTime) Then
+
+                Dim tz As System.TimeZoneInfo = ResolveGraphTimeZone(GetJsonString(value, "timeZone"))
+                If tz Is Nothing Then
+                    tz = System.TimeZoneInfo.Local
+                End If
+
+                Try
+                    localDateTime = DateTime.SpecifyKind(localDateTime, DateTimeKind.Unspecified)
+                    Return System.TimeZoneInfo.ConvertTimeToUtc(localDateTime, tz)
+                Catch
+                End Try
+            End If
+
+            Dim dto As DateTimeOffset
+            If DateTimeOffset.TryParse(
+        rawDateTime,
+        Globalization.CultureInfo.InvariantCulture,
+        Globalization.DateTimeStyles.AssumeUniversal Or Globalization.DateTimeStyles.AdjustToUniversal,
+        dto) Then
+                Return dto.UtcDateTime
+            End If
+
+            If DateTime.TryParse(
+        rawDateTime,
+        Globalization.CultureInfo.InvariantCulture,
+        Globalization.DateTimeStyles.None,
+        localDateTime) Then
+
+                Dim tz As System.TimeZoneInfo = ResolveGraphTimeZone(GetJsonString(value, "timeZone"))
+                If tz Is Nothing Then
+                    tz = System.TimeZoneInfo.Local
+                End If
+
+                Try
+                    localDateTime = DateTime.SpecifyKind(localDateTime, DateTimeKind.Unspecified)
+                    Return System.TimeZoneInfo.ConvertTimeToUtc(localDateTime, tz)
+                Catch
+                End Try
+            End If
+
+            Return TryParseUtcDate(rawDateTime)
+        End Function
+
+        Private Function ResolveGraphTimeZone(timeZoneId As String) As System.TimeZoneInfo
+            Dim tzId As String = If(timeZoneId, "").Trim()
+            If String.IsNullOrWhiteSpace(tzId) Then Return System.TimeZoneInfo.Utc
+
+            Select Case tzId.ToUpperInvariant()
+                Case "UTC", "ETC/UTC", "COORDINATED UNIVERSAL TIME"
+                    Return System.TimeZoneInfo.Utc
+            End Select
+
+            Try
+                Return System.TimeZoneInfo.FindSystemTimeZoneById(tzId)
+            Catch
+                Return Nothing
+            End Try
+        End Function
+
         Private Function GetJsonString(obj As JObject, name As String) As String
             If obj Is Nothing Then Return ""
             Dim tok = obj(name)
@@ -954,7 +1047,7 @@ Namespace SharedLibrary
                         If Not String.IsNullOrWhiteSpace(attendees) Then o("attendees") = attendees
 
                         Dim startObj = TryCast(resource("start"), JObject)
-                        Dim startUtc As DateTime? = TryParseUtcDate(GetJsonString(startObj, "dateTime"))
+                        Dim startUtc As DateTime? = TryParseGraphDateTimeTimeZone(startObj)
                         If startUtc.HasValue Then
                             o("startDateTime") = FormatDateAnchorUtc(startUtc)
                             o("event_start_date_iso_utc") = FormatDateIsoUtc(startUtc)
@@ -967,7 +1060,7 @@ Namespace SharedLibrary
                         End If
 
                         Dim endObj = TryCast(resource("end"), JObject)
-                        Dim endUtc As DateTime? = TryParseUtcDate(GetJsonString(endObj, "dateTime"))
+                        Dim endUtc As DateTime? = TryParseGraphDateTimeTimeZone(endObj)
                         If endUtc.HasValue Then
                             o("endDateTime") = FormatDateAnchorUtc(endUtc)
                             o("event_end_date_iso_utc") = FormatDateIsoUtc(endUtc)

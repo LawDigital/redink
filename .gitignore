@@ -7,3 +7,32 @@ obj/
 *.vs/
 
 /CONTRIBUTING.md
+
+# Red Ink MSI build output
+/Red Ink Installer/Output/
+
+# Visual Studio Installer logs
+/Red Ink Installer/Build/InstallerLogs/
+
+# Generated Visual Studio Installer project output
+/Red Ink Installer/InstallerProjects/Projects/*/Release/
+/Red Ink Installer/InstallerProjects/Projects/*/Debug/
+
+# Visual Studio temporary/user files
+*.user
+*.suo
+.vs/
+
+# Windows Installer generated files
+*.msi
+*.msi.tmp
+setup.exe
+
+# Local MSI publishing / ClickOnce target paths
+/Red Ink Installer/Menu.cmd
+/Red Ink Installer/PUBLISHING-README.md
+/Red Ink Installer/Build/Publish-ChannelZip.ps1
+/Red Ink Installer/Build/Release-Channel.ps1
+/Red Ink Installer/Build/Release-Both.ps1
+
+/Red Ink Installer/Build/Verify-MsiSignatures.ps1
