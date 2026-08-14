@@ -226,7 +226,10 @@ Partial Public Class ThisAddIn
         Dim tools As New List(Of ModelConfig)()
 
         ' Deterministic helper for exact text/data computation inside AutoPilot.
-        tools.Add(SharedLibrary.Agents.JsRunTool.Build())
+        Dim jsRunTool As ModelConfig = SharedLibrary.Agents.JsRunTool.Build(_context)
+        If jsRunTool IsNot Nothing Then
+            tools.Add(jsRunTool)
+        End If
 
         ' Shared file/workspace tools available inside the current AutoPilot workspace.
         tools.AddRange(SharedLibrary.Agents.TextTools.BuildAll())

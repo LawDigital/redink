@@ -1687,7 +1687,8 @@ SkipPromptWin:
                 .PromptLibraryEnabled = INI_PromptLib,
                 .Context = _context,
                 .CallerId = "outlook.freestyle",
-                .PersistedState = freestylePromptUiState
+                .PersistedState = freestylePromptUiState,
+                .RestorePersistedState = False
             }
 
             ' =============================================================

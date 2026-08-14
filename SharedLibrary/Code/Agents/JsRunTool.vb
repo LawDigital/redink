@@ -23,6 +23,7 @@ Imports System.Threading.Tasks
 Imports System.Text.RegularExpressions
 Imports Newtonsoft.Json
 Imports SharedLibrary.SharedLibrary
+Imports SharedLibrary.SharedLibrary.SharedContext
 
 Namespace Agents
 
@@ -38,7 +39,15 @@ Namespace Agents
                    String.Equals(name, ToolName, StringComparison.OrdinalIgnoreCase)
         End Function
 
-        Public Shared Function Build() As ModelConfig
+        Public Shared Function IsDisabled(sharedContext As ISharedContext) As Boolean
+            Return sharedContext IsNot Nothing AndAlso sharedContext.INI_JsRunDisable
+        End Function
+
+        Public Shared Function Build(sharedContext As ISharedContext) As ModelConfig
+            If IsDisabled(sharedContext) Then
+                Return Nothing
+            End If
+
             Dim def =
 "{""name"":""" & ToolName & """," &
 """description"":""Run sandboxed JavaScript inside a hidden WebView2. The 'code' parameter is executed as the BODY of an async function. Therefore, do NOT wrap it in 'async function ... { }' and do NOT invent wrapper parameters such as browser_mode. Always produce the final value with an explicit top-level 'return'. Use this tool for deterministic programmable operations such as exact word counts, character counts, line counts, regex extraction/counting, exact parsing, JSON reshaping, sorting, deduplication, and other rule-based text/data transformations. console.log/console.warn/console.error output is captured. This is a browser-style sandbox, NOT a Node.js runtime: do not use require(...), fs, process, __dirname, or __filename. This tool cannot access the host filesystem, cannot enumerate directories, and cannot read arbitrary local files; use the designated file/text/workspace tools to obtain data first, then use js_run only for in-memory computation on that data. Network access is DISABLED by default; set allow_network=true to permit fetch or controlled page navigation. Browser mode: set navigate_url to load a page into the hidden browser before the code runs against the live DOM. Optional wait_for_selector and wait_after_load_ms may be used. Security: only absolute http/https URLs are allowed; localhost, loopback, and private-network destinations are blocked. Default timeout 15s.""," &
@@ -72,8 +81,16 @@ Namespace Agents
         End Function
 
         Public Shared Async Function ExecuteAsync(arguments As IDictionary(Of String, Object),
+                                                  sharedContext As ISharedContext,
                                                   Optional cancellationToken As CancellationToken = Nothing) As Task(Of String)
             Try
+                If IsDisabled(sharedContext) Then
+                    Return JsonConvert.SerializeObject(New With {
+                        Key .ok = False,
+                        Key .error = "js_run_disabled",
+                        Key .message = "JavaScript execution is disabled by configuration."})
+                End If
+
                 ' Pre-execution guard: the WebView2 sandbox is a browser context with no Node.js
                 ' runtime, so require()/module/process/__dirname and Node's fs are guaranteed to
                 ' throw "X is not defined". Rejecting such code before execution turns a certain

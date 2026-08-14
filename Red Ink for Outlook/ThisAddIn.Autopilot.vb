@@ -203,25 +203,37 @@ Partial Public Class ThisAddIn
     ''' A Private license always grants access regardless of product ID.
     ''' </summary>
     Private Shared ReadOnly AP_PermittedProProductIds As String() = {
-        "1702",
         "1727",
         "1827",
         "2040",
-        "2058",
-        "2059",
-        "2060",
-        "2061",
-        "2062",
-        "2063"
+        "2056",
+        "2257",
+        "2258",
+        "2259",
+        "2260",
+        "2261",
+        "2262",
+        "2263",
+        "3141",
+        "3142",
+        "3143",
+        "3144",
+        "3145",
+        "3146",
+        "3184",
+        "3185"
     }
 
-    '  1702 Pro Special
+    '  1702 Pro Special -- NO
     '  1727 Pro Test Tec
     '  1827 Pro Test
     '  2040 Pro Support
     '  2150 Pro Special 2 -- NO
     '  1693 Pro -- NO
-    '  2058-2063 Special License for AutoPilot
+    '  2056
+    '  2257-2263, 3141-3146 Red Ink AutoPilot
+    '  3184 Red Ink Autopilot Special
+    '  3185 Red Ink Autopilot Special
 
 
     ' ═══════════════════════════════════════════════════════════════════════════

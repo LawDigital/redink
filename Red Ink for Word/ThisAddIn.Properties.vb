@@ -1918,6 +1918,15 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_JsRunDisable As Boolean
+        Get
+            Return _context.INI_JsRunDisable
+        End Get
+        Set(value As Boolean)
+            _context.INI_JsRunDisable = value
+        End Set
+    End Property
+
 
     Public Shared Property INI_UpdateCheckInterval As Integer
         Get

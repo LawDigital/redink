@@ -736,6 +736,7 @@
     <Compile Include="ThisAddIn.vb">
       <SubType>Code</SubType>
     </Compile>
+    <Compile Include="ThisAddIn.Watermark.vb" />
     <Compile Include="ThisAddIn.WebAgent.vb" />
     <Compile Include="ThisAddIn.WebExtension.vb" />
     <Compile Include="ThisAddIn.TranslateDocuments.vb" />

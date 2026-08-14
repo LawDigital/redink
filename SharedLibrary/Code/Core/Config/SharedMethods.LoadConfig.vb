@@ -324,6 +324,7 @@ Namespace SharedLibrary
                 context.INI_NoLocalConfig = ParseBoolean(configDict, "NoLocalConfig")
                 context.INI_ForceDrawioLocal = ParseBoolean(configDict, "ForceDrawioLocal")
                 context.INI_AllowLegacyDocFiles = ParseBoolean(configDict, "AllowLegacyDocFiles")
+                context.INI_JsRunDisable = ParseBoolean(configDict, "JsRunDisable")
                 context.INI_EnablePrivacyForSearch = ParseBoolean(configDict, "EnablePrivacyForSearch")
 
                 context.INI_AutoPilot = If(configDict.ContainsKey("AutoPilot"), configDict("AutoPilot"), "")

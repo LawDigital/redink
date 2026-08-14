@@ -70,7 +70,7 @@ Namespace Agents
             End If
 
             If JsRunTool.IsJsTool(toolName) Then
-                Return Await JsRunTool.ExecuteAsync(arguments, cancellationToken).ConfigureAwait(False)
+                Return Await JsRunTool.ExecuteAsync(arguments, sharedContext, cancellationToken).ConfigureAwait(False)
             End If
 
             If String.Equals(toolName, SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) Then

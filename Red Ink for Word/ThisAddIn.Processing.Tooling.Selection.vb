@@ -193,7 +193,12 @@ Partial Public Class ThisAddIn
             tools.AddRange(SharedLibrary.Agents.WorkspaceTools.BuildAll())
             tools.AddRange(SharedLibrary.Agents.WordTools.BuildAll())
             tools.AddRange(SharedLibrary.Agents.WordDocTools.BuildAll())
-            tools.Add(SharedLibrary.Agents.JsRunTool.Build())
+
+            Dim jsRunTool As ModelConfig = SharedLibrary.Agents.JsRunTool.Build(_context)
+            If jsRunTool IsNot Nothing Then
+                tools.Add(jsRunTool)
+            End If
+
             tools.Add(SharedLibrary.Agents.SkillInvokeTool.Build())
             tools.Add(SharedLibrary.Agents.ToolDescribeTool.Build())
             tools.Add(SharedLibrary.Agents.ContextExpandTool.Build())

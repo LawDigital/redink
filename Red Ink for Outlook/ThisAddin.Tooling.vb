@@ -5118,7 +5118,12 @@ __AfterDispatch:
             tools.AddRange(SharedLibrary.Agents.MemoryTools.BuildAll())
             tools.AddRange(SharedLibrary.Agents.TextTools.BuildAll())
             tools.AddRange(SharedLibrary.Agents.WordTools.BuildAll())
-            tools.Add(SharedLibrary.Agents.JsRunTool.Build())
+
+            Dim jsRunTool As ModelConfig = SharedLibrary.Agents.JsRunTool.Build(_context)
+            If jsRunTool IsNot Nothing Then
+                tools.Add(jsRunTool)
+            End If
+
             tools.Add(SharedLibrary.Agents.SkillInvokeTool.Build())
             tools.Add(SharedLibrary.Agents.ToolDescribeTool.Build())
             tools.Add(SharedLibrary.Agents.ContextExpandTool.Build())
