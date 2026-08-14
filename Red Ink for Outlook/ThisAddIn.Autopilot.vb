@@ -206,7 +206,6 @@ Partial Public Class ThisAddIn
         "1727",
         "1827",
         "2040",
-        "2056",
         "2257",
         "2258",
         "2259",
@@ -220,8 +219,7 @@ Partial Public Class ThisAddIn
         "3144",
         "3145",
         "3146",
-        "3184",
-        "3185"
+        "3184"
     }
 
     '  1702 Pro Special -- NO

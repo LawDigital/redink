@@ -4937,12 +4937,239 @@ Partial Public Class frmAIChat
     Private Structure ContextDocument
         Public ReadOnly FileName As String
         Public ReadOnly Content As String
+        Public ReadOnly SourcePath As String
 
-        Public Sub New(fileName As String, content As String)
+        Public Sub New(
+            fileName As String,
+            content As String,
+            Optional sourcePath As String = Nothing)
+
             Me.FileName = fileName
             Me.Content = content
+            Me.SourcePath = sourcePath
         End Sub
     End Structure
+
+    ' ChatContextPath is retained as the single My.Settings field for source metadata.
+    ' New values are stored as a compact, versioned manifest. A value without this
+    ' header is treated as the legacy single file/folder path.
+    Private Const ContextSourceManifestHeader As String = "RICTX1"
+
+    Private Function EncodeContextManifestValue(value As String) As String
+        If value Is Nothing Then value = ""
+        Return System.Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(value))
+    End Function
+
+    Private Function DecodeContextManifestValue(value As String) As String
+        If String.IsNullOrWhiteSpace(value) Then Return ""
+
+        Try
+            Return System.Text.Encoding.UTF8.GetString(System.Convert.FromBase64String(value))
+        Catch ex As System.Exception
+            Return ""
+        End Try
+    End Function
+
+    Private Sub ReadContextSourceManifest(
+        ByRef documentPaths As System.Collections.Generic.List(Of String),
+        ByRef indexPath As String,
+        ByRef legacyPath As String)
+
+        documentPaths = New System.Collections.Generic.List(Of String)()
+        indexPath = ""
+        legacyPath = ""
+
+        Dim raw As String = ""
+
+        Try
+            raw = My.Settings.ChatContextPath
+        Catch
+            Return
+        End Try
+
+        If String.IsNullOrWhiteSpace(raw) Then Return
+
+        Dim normalized As String =
+            raw.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf)
+
+        If normalized = ContextSourceManifestHeader OrElse
+           normalized.StartsWith(ContextSourceManifestHeader & vbLf, System.StringComparison.Ordinal) Then
+
+            Dim lines As String() =
+                normalized.Split(
+                    New String() {vbLf},
+                    System.StringSplitOptions.RemoveEmptyEntries)
+
+            For i As Integer = 1 To lines.Length - 1
+                Dim line As String = lines(i)
+                Dim separatorIndex As Integer = line.IndexOf("|"c)
+
+                If separatorIndex <= 0 OrElse separatorIndex >= line.Length - 1 Then
+                    Continue For
+                End If
+
+                Dim recordType As String = line.Substring(0, separatorIndex)
+                Dim decodedPath As String =
+                    DecodeContextManifestValue(line.Substring(separatorIndex + 1))
+
+                If String.IsNullOrWhiteSpace(decodedPath) Then Continue For
+
+                If String.Equals(recordType, "D", System.StringComparison.Ordinal) Then
+                    documentPaths.Add(decodedPath)
+                ElseIf String.Equals(recordType, "I", System.StringComparison.Ordinal) Then
+                    indexPath = decodedPath
+                End If
+            Next
+
+            Return
+        End If
+
+        ' Backward compatibility: older builds stored one raw path directly.
+        legacyPath = raw
+    End Sub
+
+    Private Sub ApplySavedSourcePathsToLoadedDocuments(
+        documentPaths As System.Collections.Generic.List(Of String),
+        legacyPath As String)
+
+        If _loadedContextDocuments Is Nothing OrElse
+           _loadedContextDocuments.Count = 0 Then
+            Return
+        End If
+
+        If documentPaths IsNot Nothing AndAlso
+           documentPaths.Count = _loadedContextDocuments.Count Then
+
+            For i As Integer = 0 To _loadedContextDocuments.Count - 1
+                Dim oldDocument As ContextDocument = _loadedContextDocuments(i)
+
+                _loadedContextDocuments(i) =
+                    New ContextDocument(
+                        oldDocument.FileName,
+                        oldDocument.Content,
+                        documentPaths(i))
+            Next
+
+            Return
+        End If
+
+        ' Migrate an old single-file ChatContextPath where possible.
+        If Not String.IsNullOrWhiteSpace(legacyPath) AndAlso
+           System.IO.File.Exists(legacyPath) AndAlso
+           _loadedContextDocuments.Count = 1 Then
+
+            Dim oldDocument As ContextDocument = _loadedContextDocuments(0)
+
+            _loadedContextDocuments(0) =
+                New ContextDocument(
+                    oldDocument.FileName,
+                    oldDocument.Content,
+                    legacyPath)
+
+            Return
+        End If
+
+        ' Migrate an old directory ChatContextPath by matching the stored file names.
+        If Not String.IsNullOrWhiteSpace(legacyPath) AndAlso
+           System.IO.Directory.Exists(legacyPath) Then
+
+            For i As Integer = 0 To _loadedContextDocuments.Count - 1
+                Dim oldDocument As ContextDocument = _loadedContextDocuments(i)
+                Dim candidate As String =
+                    System.IO.Path.Combine(legacyPath, oldDocument.FileName)
+
+                If System.IO.File.Exists(candidate) Then
+                    _loadedContextDocuments(i) =
+                        New ContextDocument(
+                            oldDocument.FileName,
+                            oldDocument.Content,
+                            candidate)
+                End If
+            Next
+        End If
+    End Sub
+
+    Private Sub SaveContextSourceManifest()
+        Dim lines As New System.Collections.Generic.List(Of String) From {
+            ContextSourceManifestHeader
+        }
+
+        If HasLoadedIndex() Then
+            If Not String.IsNullOrWhiteSpace(_loadedIndexSourcePath) Then
+                lines.Add(
+                    "I|" &
+                    EncodeContextManifestValue(_loadedIndexSourcePath))
+            End If
+        Else
+            For Each doc As ContextDocument In _loadedContextDocuments
+                If Not String.IsNullOrWhiteSpace(doc.SourcePath) Then
+                    lines.Add(
+                        "D|" &
+                        EncodeContextManifestValue(doc.SourcePath))
+                End If
+            Next
+        End If
+
+        Try
+            My.Settings.ChatContextPath =
+                String.Join(vbLf, lines.ToArray())
+            My.Settings.Save()
+        Catch
+        End Try
+    End Sub
+
+    Private Sub ClearContextSourceManifest()
+        Try
+            My.Settings.ChatContextPath = ""
+            My.Settings.Save()
+        Catch
+        End Try
+    End Sub
+
+    Private Async Function RestoreLoadedDocumentsFromSourcePathsAsync(
+        documentPaths As System.Collections.Generic.List(Of String)
+    ) As System.Threading.Tasks.Task(Of Integer)
+
+        If documentPaths Is Nothing OrElse documentPaths.Count = 0 Then
+            Return 0
+        End If
+
+        Dim restoredDocuments As New System.Collections.Generic.List(Of ContextDocument)
+
+        For Each sourcePath As String In documentPaths
+            If String.IsNullOrWhiteSpace(sourcePath) OrElse
+               Not System.IO.File.Exists(sourcePath) Then
+                Continue For
+            End If
+
+            Dim result =
+                Await LoadSingleContextFileAsync(
+                    sourcePath,
+                    False)
+
+            If String.IsNullOrWhiteSpace(result.Content) OrElse
+               result.Content.StartsWith(
+                   "Error:",
+                   System.StringComparison.OrdinalIgnoreCase) Then
+                Continue For
+            End If
+
+            restoredDocuments.Add(
+                New ContextDocument(
+                    System.IO.Path.GetFileName(sourcePath),
+                    result.Content,
+                    sourcePath))
+        Next
+
+        If restoredDocuments.Count = 0 Then Return 0
+
+        _loadedContextDocuments = restoredDocuments
+        RebuildLoadedContextContent()
+        _loadedContextPath = "(Saved Context Sources)"
+        _cachedLoadedContextPath = _loadedContextPath
+
+        Return restoredDocuments.Count
+    End Function
 
     ''' <summary>
     ''' Rebuilds the combined loaded-context string from the individual documents,
@@ -5113,11 +5340,7 @@ Partial Public Class frmAIChat
         _cachedLoadedIndexDisplayName = _loadedIndexDisplayName
         _semanticConversationState = New SharedMethods.SemanticSearchConversationState()
 
-        Try
-            My.Settings.ChatContextPath = indexPath
-            My.Settings.Save()
-        Catch
-        End Try
+        SaveContextSourceManifest()
 
         Return True
     End Function
@@ -5237,11 +5460,7 @@ Partial Public Class frmAIChat
                         _cachedLoadedIndexDisplayName = Nothing
                         _semanticConversationState = New SharedMethods.SemanticSearchConversationState()
 
-                        Try
-                            My.Settings.ChatContextPath = ""
-                            My.Settings.Save()
-                        Catch
-                        End Try
+                        ClearContextSourceManifest()
 
                         AppendSystemMessage("The original index file is no longer available. The loaded index was removed.")
                         UpdateLoadContextButtonText()
@@ -5404,7 +5623,7 @@ Partial Public Class frmAIChat
             End If
 
             loadedFiles.Add(Tuple.Create(filePath, content.Length))
-            documents.Add(New ContextDocument(System.IO.Path.GetFileName(filePath), content))
+            documents.Add(New ContextDocument(System.IO.Path.GetFileName(filePath), content, filePath))
         Next
 
         Dim summary As New System.Text.StringBuilder()
@@ -5451,98 +5670,175 @@ Partial Public Class frmAIChat
     End Function
 
     Private Async Function RestoreLoadedContextAsync() As System.Threading.Tasks.Task
-        ' Restore a previously loaded semantic index first (either a document OR an index is active).
-        If Not String.IsNullOrWhiteSpace(_cachedLoadedIndexPath) OrElse Not String.IsNullOrWhiteSpace(_cachedLoadedIndexDisplayName) Then
+        Dim savedDocumentPaths As System.Collections.Generic.List(Of String) = Nothing
+        Dim savedIndexPath As String = ""
+        Dim legacyPath As String = ""
+
+        ReadContextSourceManifest(
+            savedDocumentPaths,
+            savedIndexPath,
+            legacyPath)
+
+        ' Restore a previously loaded semantic index first (either documents OR an index are active).
+        If Not String.IsNullOrWhiteSpace(_cachedLoadedIndexPath) OrElse
+           Not String.IsNullOrWhiteSpace(_cachedLoadedIndexDisplayName) Then
+
             _loadedIndexSourcePath = _cachedLoadedIndexPath
-            _loadedIndexDisplayName = If(_cachedLoadedIndexDisplayName, "(Persisted Index)")
+            _loadedIndexDisplayName =
+                If(_cachedLoadedIndexDisplayName, "(Persisted Index)")
+
             AppendSystemMessage("Index restored from cache.")
             Return
         End If
 
         Dim persistedIndexPath As String = GetPersistedIndexFilePath()
 
-        Dim savedIndexPath As String = ""
-        Try
-            savedIndexPath = My.Settings.ChatContextPath
-        Catch
-        End Try
+        ' Legacy migration: the old ChatContextPath value may itself be an index.
+        If String.IsNullOrWhiteSpace(savedIndexPath) AndAlso
+           Not String.IsNullOrWhiteSpace(legacyPath) AndAlso
+           System.IO.File.Exists(legacyPath) AndAlso
+           SharedMethods.IsPotentiallySemanticSearchIndexedTextFile(legacyPath) Then
+
+            savedIndexPath = legacyPath
+        End If
 
         Dim savedIndexPathIsIndex As Boolean =
             Not String.IsNullOrWhiteSpace(savedIndexPath) AndAlso
             System.IO.File.Exists(savedIndexPath) AndAlso
             SharedMethods.IsPotentiallySemanticSearchIndexedTextFile(savedIndexPath)
 
-        If chkPersistContext.Checked AndAlso System.IO.File.Exists(persistedIndexPath) Then
-            _loadedIndexSourcePath = If(savedIndexPathIsIndex, savedIndexPath, Nothing)
+        If chkPersistContext.Checked AndAlso
+           System.IO.File.Exists(persistedIndexPath) Then
+
+            _loadedIndexSourcePath =
+                If(savedIndexPathIsIndex, savedIndexPath, Nothing)
+
             _loadedIndexDisplayName =
-                If(Not String.IsNullOrWhiteSpace(_loadedIndexSourcePath),
-                   System.IO.Path.GetFileName(_loadedIndexSourcePath),
-                   "(Persisted Index)")
+                If(
+                    Not String.IsNullOrWhiteSpace(_loadedIndexSourcePath),
+                    System.IO.Path.GetFileName(_loadedIndexSourcePath),
+                    "(Persisted Index)")
+
             _cachedLoadedIndexPath = _loadedIndexSourcePath
             _cachedLoadedIndexDisplayName = _loadedIndexDisplayName
+
+            SaveContextSourceManifest()
             AppendSystemMessage("Index restored from persisted storage.")
             Return
         End If
 
         If savedIndexPathIsIndex Then
             _loadedIndexSourcePath = savedIndexPath
-            _loadedIndexDisplayName = System.IO.Path.GetFileName(savedIndexPath)
+            _loadedIndexDisplayName =
+                System.IO.Path.GetFileName(savedIndexPath)
+
             _cachedLoadedIndexPath = _loadedIndexSourcePath
             _cachedLoadedIndexDisplayName = _loadedIndexDisplayName
-            AppendSystemMessage($"Index restored from saved path: {_loadedIndexDisplayName}.")
+
+            SaveContextSourceManifest()
+            AppendSystemMessage(
+                $"Index restored from saved path: {_loadedIndexDisplayName}.")
             Return
         End If
 
-        If Not String.IsNullOrWhiteSpace(_cachedLoadedContextContent) AndAlso Not String.IsNullOrWhiteSpace(_cachedLoadedContextPath) Then
+        If Not String.IsNullOrWhiteSpace(_cachedLoadedContextContent) AndAlso
+           Not String.IsNullOrWhiteSpace(_cachedLoadedContextPath) Then
+
             _loadedContextContent = _cachedLoadedContextContent
             _loadedContextPath = _cachedLoadedContextPath
+
             ParseLoadedContextDocuments()
+            ApplySavedSourcePathsToLoadedDocuments(
+                savedDocumentPaths,
+                legacyPath)
+
+            SaveContextSourceManifest()
             AppendSystemMessage("Context restored from cache.")
             Return
         End If
 
         If chkPersistContext.Checked Then
-            Dim persistPath = GetPersistedContextFilePath()
+            Dim persistPath As String = GetPersistedContextFilePath()
+
             If System.IO.File.Exists(persistPath) Then
                 Try
-                    _loadedContextContent = System.IO.File.ReadAllText(persistPath, System.Text.Encoding.UTF8)
+                    _loadedContextContent =
+                        System.IO.File.ReadAllText(
+                            persistPath,
+                            System.Text.Encoding.UTF8)
+
                     _loadedContextPath = "(Persisted Context)"
                     _cachedLoadedContextContent = _loadedContextContent
                     _cachedLoadedContextPath = _loadedContextPath
+
                     ParseLoadedContextDocuments()
-                    AppendSystemMessage($"Context restored from persisted storage ({_loadedContextContent.Length:N0} characters).")
+                    ApplySavedSourcePathsToLoadedDocuments(
+                        savedDocumentPaths,
+                        legacyPath)
+
+                    SaveContextSourceManifest()
+
+                    AppendSystemMessage(
+                        $"Context restored from persisted storage ({_loadedContextContent.Length:N0} characters).")
                     Return
                 Catch ex As System.Exception
-                    AppendSystemMessage($"Failed to restore persisted context: {ex.Message}")
+                    AppendSystemMessage(
+                        $"Failed to restore persisted context: {ex.Message}")
                 End Try
             End If
         End If
 
-        Dim savedPath As String = ""
-        Try
-            savedPath = My.Settings.ChatContextPath
-        Catch
-            Return
-        End Try
+        ' With no persisted content, reconstruct the current context from every saved source file.
+        If savedDocumentPaths IsNot Nothing AndAlso
+           savedDocumentPaths.Count > 0 Then
 
-        If String.IsNullOrWhiteSpace(savedPath) Then Return
+            Dim restoredCount As Integer =
+                Await RestoreLoadedDocumentsFromSourcePathsAsync(
+                    savedDocumentPaths)
 
-        If Not System.IO.File.Exists(savedPath) AndAlso Not System.IO.Directory.Exists(savedPath) Then
-            Try
-                My.Settings.ChatContextPath = ""
-                My.Settings.Save()
-            Catch
-            End Try
+            If restoredCount > 0 Then
+                SaveContextSourceManifest()
+
+                If chkPersistContext.Checked Then
+                    Try
+                        PersistLoadedContextToTempFile()
+                    Catch
+                    End Try
+                End If
+
+                AppendSystemMessage(
+                    $"Context restored from saved source list ({restoredCount} document(s)).")
+                Return
+            End If
+        End If
+
+        ' Backward compatibility with the old one-path setting.
+        If String.IsNullOrWhiteSpace(legacyPath) Then Return
+
+        If Not System.IO.File.Exists(legacyPath) AndAlso
+           Not System.IO.Directory.Exists(legacyPath) Then
+
+            ClearContextSourceManifest()
             Return
         End If
 
-        Dim restored = Await LoadContextFromPathAsync(savedPath, False)
-        If restored.Documents Is Nothing OrElse restored.Documents.Count = 0 Then Return
+        Dim restored =
+            Await LoadContextFromPathAsync(
+                legacyPath,
+                False)
+
+        If restored.Documents Is Nothing OrElse
+           restored.Documents.Count = 0 Then
+            Return
+        End If
 
         _loadedContextDocuments = restored.Documents
         RebuildLoadedContextContent()
         _loadedContextPath = restored.DisplayPath
         _cachedLoadedContextPath = _loadedContextPath
+
+        ' Migrates the old raw ChatContextPath value to the new manifest format.
+        SaveContextSourceManifest()
 
         If chkPersistContext.Checked Then
             Try
@@ -5551,7 +5847,8 @@ Partial Public Class frmAIChat
             End Try
         End If
 
-        AppendSystemMessage($"Context restored from saved path: {System.IO.Path.GetFileName(savedPath)}.")
+        AppendSystemMessage(
+            $"Context restored from legacy saved path: {System.IO.Path.GetFileName(legacyPath)}.")
     End Function
 
     Private Async Sub btnLoadContext_Click(sender As Object, e As EventArgs)
@@ -5644,6 +5941,7 @@ Partial Public Class frmAIChat
         End If
 
         RebuildLoadedContextContent()
+        SaveContextSourceManifest()
 
         If chkPersistContext.Checked Then
             Try
@@ -5680,11 +5978,7 @@ Partial Public Class frmAIChat
         ' Removing the context also removes any loaded index and its persisted files.
         ClearLoadedIndexOnly()
 
-        Try
-            My.Settings.ChatContextPath = ""
-            My.Settings.Save()
-        Catch
-        End Try
+        ClearContextSourceManifest()
 
         AppendSystemMessage(If(hadIndex, "Loaded index removed.", "Loaded context removed."))
         UpdateLoadContextButtonText()
@@ -5780,11 +6074,7 @@ Partial Public Class frmAIChat
                 AppendSystemMessage($"Context loaded: {loaded.LoadedCount} file(s), {_loadedContextContent.Length:N0} characters total.")
             End If
 
-            Try
-                My.Settings.ChatContextPath = selectedPath
-                My.Settings.Save()
-            Catch
-            End Try
+            SaveContextSourceManifest()
 
         Catch ex As System.Exception
             AppendSystemMessage($"Error loading context: {ex.Message}")
