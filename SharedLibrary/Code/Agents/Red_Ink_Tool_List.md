@@ -6,6 +6,7 @@ Notes:
 
 - Availability can still depend on configuration, feature flags, model support, and current execution mode.
 - `js_run` may be disabled by the user by setting the `JsRunDisable` parameter in the configuration file.
+- `browser_open`, `browser_snapshot`, and `browser_interact` may be disabled by the user by setting the `BrowserToolsDisable` parameter in the configuration file.
 - `python_execute` requires the `redink-pythonagent` helper to be installed and configured; Python execution is unavailable without it.
 - The `Outlook` column refers to Outlook tooling outside AutoPilot, primarily Local Chat / Agent mode.
 - `AutoPilot` is listed separately because it does not expose the full Outlook tool surface.
@@ -45,6 +46,9 @@ Notes:
 | `semantic_index_reset_conversation` | Resets and removes a stored semantic-search conversation handle. | Yes | Yes | Yes |
 | `semantic_index_invalidate_cache` | Invalidates one indexed-file cache entry or the full semantic-search cache. | Yes | Yes | Yes |
 | `js_run` | Executes sandboxed JavaScript in a hidden WebView2 environment. Availability is subject to the user's `JsRunDisable` configuration setting. | Yes | Yes | Yes |
+| `browser_open` | Opens or navigates the shared Playwright browser session to an absolute HTTP/HTTPS URL. After success, call `browser_snapshot` before attempting interaction. | Yes | Yes | No |
+| `browser_snapshot` | Captures the current page as an AI-optimized Playwright ARIA snapshot and returns short-lived refs such as `[ref=e7]` for later interaction. | Yes | Yes | No |
+| `browser_interact` | Performs exactly one Playwright action against one ref from the most recent `browser_snapshot`. After every attempted interaction, take a new snapshot before another interaction. | Yes | Yes | No |
 | `python_execute` | Executes sandboxed Python code through the configured secure Python agent and may return structured results or published output files.1) | Yes | Yes | Yes |
 | `skill_use` | Loads a skill's instructions and file inventory for guided execution. Word and Outlook Local Chat expose this generic loader directly. AutoPilot does not advertise the generic `skill_use` tool, but it can still run selected skills through dynamic `skill_<name>` tools that route internally to the same skill loader. | Yes | Yes | No |
 | `m365_search` | Searches Microsoft 365 content such as mail, files, chats, events, and notes. | Yes | Yes | No |

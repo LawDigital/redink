@@ -235,6 +235,7 @@ Partial Public Class ThisAddIn
         tools.AddRange(SharedLibrary.Agents.TextTools.BuildAll())
         tools.AddRange(SharedLibrary.Agents.FileTools.BuildAll())
         tools.AddRange(SharedLibrary.Agents.WordTools.BuildAll())
+        tools.AddRange(SharedLibrary.Agents.BrowserTools.BuildAll(_context))
         tools.AddRange(SharedLibrary.Agents.WorkspaceTools.BuildAll())
         tools.AddRange(GetAutoPilotAgentWorkspaceTools())
 

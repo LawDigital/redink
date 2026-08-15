@@ -1978,6 +1978,14 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_BrowserToolsDisable As Boolean
+        Get
+            Return _context.INI_BrowserToolsDisable
+        End Get
+        Set(value As Boolean)
+            _context.INI_BrowserToolsDisable = value
+        End Set
+    End Property
     Public Shared Property INI_UpdateCheckInterval As Integer
         Get
             Return _context.INI_UpdateCheckInterval

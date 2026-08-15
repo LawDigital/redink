@@ -105,6 +105,7 @@ Namespace SharedLibrary
             Property INI_PythonAgentPath As String
             Property INI_AllowLegacyDocFiles As Boolean
             Property INI_JsRunDisable As Boolean
+            Property INI_BrowserToolsDisable As Boolean
 
             Property INI_AutoPilotAutoStart As Boolean
             Property INI_AutoPilotSchedulerLocalChat As Boolean
@@ -487,6 +488,7 @@ Namespace SharedLibrary
         Public Property INI_PythonAgentPath As String Implements ISharedContext.INI_PythonAgentPath
         Public Property INI_AllowLegacyDocFiles As Boolean Implements ISharedContext.INI_AllowLegacyDocFiles
         Public Property INI_JsRunDisable As Boolean Implements ISharedContext.INI_JsRunDisable
+        Public Property INI_BrowserToolsDisable As Boolean Implements ISharedContext.INI_BrowserToolsDisable
         Public Property INI_Language1 As String Implements ISharedContext.INI_Language1
         Public Property INI_Language2 As String Implements ISharedContext.INI_Language2
         Public Property INI_MarkdownConvert As Boolean Implements ISharedContext.INI_MarkdownConvert

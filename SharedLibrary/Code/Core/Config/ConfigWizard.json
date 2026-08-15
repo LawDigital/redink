@@ -1197,6 +1197,20 @@
                     "description": "Enable this to hard-disable the js_run JavaScript sandbox tool across the application. When True, JavaScript execution is not exposed to tooling and any direct js_run call is rejected. Example: False. [JsRunDisable]"
                 },
                 {
+                    "key": "JsRunDisable",
+                    "label": "Disable JavaScript Execution",
+                    "type": "boolean",
+                    "default": "False",
+                    "description": "Enable this to hard-disable the js_run JavaScript sandbox tool across the application. When True, JavaScript execution is not exposed to tooling and any direct js_run call is rejected. Example: False. [JsRunDisable]"
+                },
+                {
+                    "key": "BrowserToolsDisable",
+                    "label": "Disable Browser Tools",
+                    "type": "boolean",
+                    "default": "False",
+                    "description": "Enable this to hard-disable the browser tools (PlayWright) across the application. When True, browser tool execution is not exposed to tooling and any direct browser tool call is rejected. Example: False. [BrowserToolsDisable]"
+                },
+                {
                     "key": "InkyMemoryCap",
                     "label": "InkyMemory Item Cap",
                     "type": "integer",

@@ -1689,7 +1689,7 @@ Namespace SharedLibrary
         "DoubleS", "NoEmDash", "Clean", "MarkdownBubbles", "KeepFormat1", "MarkdownConvert", "ReplaceText1", "SimpleMenuOverride",
         "KeepFormat2", "KeepParaFormatInline", "ReplaceText2", "DoMarkupOutlook", "DoMarkupWord", "SimpleMenuDefault", "UseHostColorOutlook",
         "APIDebug", "Crashlog", "AutoPilotAutoStart", "AutoPilotSchedulerLocalChat", "ISearch_Approve", "ISearch", "Lib", "ContextMenu", "NoLocalConfig", "SecondAPI", "APIEncrypted", "APIEncrypted_2",
-        "OAuth2", "OAuth2_2", "PromptLib", "Ignore", "ToolingLogWindow", "ToolingDryRun", "ForceDrawioLocal", "AllowLegacyDocFiles", "JsRunDisable", "EnablePrivacyForSearch",
+        "OAuth2", "OAuth2_2", "PromptLib", "Ignore", "ToolingLogWindow", "ToolingDryRun", "ForceDrawioLocal", "AllowLegacyDocFiles", "JsRunDisable", "BrowserToolsDisable", "EnablePrivacyForSearch",
         "UpdateIni", "UpdateIniAllowRemote", "UpdateIniNoSignature", "UpdateIniSilentLog", "NoHelperDownload", "LicenseCounterAnon", "KnowledgeStoreUseLLMIndex", "KnowledgeStoreBackgroundIndexing"
             }
             Return booleanSettings.Contains(settingKey)
@@ -2003,6 +2003,8 @@ Namespace SharedLibrary
                     Return context.INI_AllowLegacyDocFiles.ToString()
                 Case "JsRunDisable"
                     Return context.INI_JsRunDisable.ToString()
+                Case "BrowserToolsDisable"
+                    Return context.INI_BrowserToolsDisable.ToString()
                 Case "EnablePrivacyForSearch"
                     Return context.INI_EnablePrivacyForSearch.ToString()
                 Case "UpdateCheckInterval"
@@ -2422,6 +2424,8 @@ Namespace SharedLibrary
                     context.INI_AllowLegacyDocFiles = Boolean.Parse(value)
                 Case "JsRunDisable"
                     context.INI_JsRunDisable = Boolean.Parse(value)
+                Case "BrowserToolsDisable"
+                    context.INI_BrowserToolsDisable = Boolean.Parse(value)
                 Case "EnablePrivacyForSearch"
                     context.INI_EnablePrivacyForSearch = Boolean.Parse(value)
                 Case "UpdateCheckInterval"
@@ -2800,6 +2804,7 @@ Namespace SharedLibrary
                     {"ForceDrawioLocal", context.INI_ForceDrawioLocal.ToString()},
                     {"AllowLegacyDocFiles", context.INI_AllowLegacyDocFiles.ToString()},
                     {"JsRunDisable", context.INI_JsRunDisable.ToString()},
+                    {"BrowserToolsDisable", context.INI_BrowserToolsDisable.ToString()},
                     {"EnablePrivacyForSearch", context.INI_EnablePrivacyForSearch.ToString()},
                     {"UpdateCheckInterval", context.INI_UpdateCheckInterval.ToString()},
                     {"UpdatePath", context.INI_UpdatePath},
@@ -4326,6 +4331,7 @@ Namespace SharedLibrary
             variableValues.Add("ForceDrawioLocal", context.INI_ForceDrawioLocal)
             variableValues.Add("AllowLegacyDocFiles", context.INI_AllowLegacyDocFiles)
             variableValues.Add("JsRunDisable", context.INI_JsRunDisable)
+            variableValues.Add("BrowserToolsDisable", context.INI_BrowserToolsDisable)
             variableValues.Add("EnablePrivacyForSearch", context.INI_EnablePrivacyForSearch)
             variableValues.Add("UpdateCheckInterval", context.INI_UpdateCheckInterval)
             variableValues.Add("UpdatePath", context.INI_UpdatePath)
@@ -4735,8 +4741,9 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("ForceDrawioLocal") Then context.INI_ForceDrawioLocal = CBool(updatedValues("ForceDrawioLocal"))
                 If updatedValues.ContainsKey("AllowLegacyDocFiles") Then context.INI_AllowLegacyDocFiles = CBool(updatedValues("AllowLegacyDocFiles"))
                 If updatedValues.ContainsKey("JsRunDisable") Then context.INI_JsRunDisable = CBool(updatedValues("JsRunDisable"))
+                If updatedValues.ContainsKey("BrowserToolsDisable") Then context.INI_BrowserToolsDisable = CBool(updatedValues("BrowserToolsDisable"))
                 If updatedValues.ContainsKey("EnablePrivacyForSearch") Then context.INI_EnablePrivacyForSearch = CBool(updatedValues("EnablePrivacyForSearch"))
-                    If updatedValues.ContainsKey("UpdateCheckInterval") Then context.INI_UpdateCheckInterval = CInt(updatedValues("UpdateCheckInterval"))
+                If updatedValues.ContainsKey("UpdateCheckInterval") Then context.INI_UpdateCheckInterval = CInt(updatedValues("UpdateCheckInterval"))
                     If updatedValues.ContainsKey("UpdatePath") Then context.INI_UpdatePath = CStr(updatedValues("UpdatePath"))
                     If updatedValues.ContainsKey("HelpMeInkyPath") Then context.INI_HelpMeInkyPath = CStr(updatedValues("HelpMeInkyPath"))
                     If updatedValues.ContainsKey("DiscussInkyPath") Then context.INI_DiscussInkyPath = CStr(updatedValues("DiscussInkyPath"))

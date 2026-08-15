@@ -192,6 +192,7 @@ Partial Public Class ThisAddIn
             tools.AddRange(SharedLibrary.Agents.TextTools.BuildAll())
             tools.AddRange(SharedLibrary.Agents.WorkspaceTools.BuildAll())
             tools.AddRange(SharedLibrary.Agents.WordTools.BuildAll())
+            tools.AddRange(SharedLibrary.Agents.BrowserTools.BuildAll(_context))
             tools.AddRange(SharedLibrary.Agents.WordDocTools.BuildAll())
 
             Dim jsRunTool As ModelConfig = SharedLibrary.Agents.JsRunTool.Build(_context)
@@ -314,6 +315,7 @@ Partial Public Class ThisAddIn
            SharedLibrary.Agents.WorkspaceTools.IsWorkspaceTool(toolName) OrElse
            SharedLibrary.Agents.WordTools.IsWordTool(toolName) OrElse
            SharedLibrary.Agents.WordDocTools.IsWordDocTool(toolName) OrElse
+           SharedLibrary.Agents.BrowserTools.IsBrowserTool(toolName) OrElse
            SharedLibrary.Agents.JsRunTool.IsJsTool(toolName) OrElse
            SharedLibrary.Agents.PythonExecuteTool.IsPythonTool(toolName) OrElse
            SharedLibrary.Agents.ToolDescribeTool.IsDescribeTool(toolName) OrElse

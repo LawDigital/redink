@@ -5118,6 +5118,7 @@ __AfterDispatch:
             tools.AddRange(SharedLibrary.Agents.MemoryTools.BuildAll())
             tools.AddRange(SharedLibrary.Agents.TextTools.BuildAll())
             tools.AddRange(SharedLibrary.Agents.WordTools.BuildAll())
+            tools.AddRange(SharedLibrary.Agents.BrowserTools.BuildAll(_context))
 
             Dim jsRunTool As ModelConfig = SharedLibrary.Agents.JsRunTool.Build(_context)
             If jsRunTool IsNot Nothing Then
@@ -5245,6 +5246,7 @@ __AfterDispatch:
            SharedLibrary.Agents.WorkspaceTools.IsWorkspaceTool(toolName) OrElse
            SharedLibrary.Agents.WordTools.IsWordTool(toolName) OrElse
            SharedLibrary.Agents.WordDocTools.IsWordDocTool(toolName) OrElse
+           SharedLibrary.Agents.BrowserTools.IsBrowserTool(toolName) OrElse
            SharedLibrary.Agents.JsRunTool.IsJsTool(toolName) OrElse
            SharedLibrary.Agents.PythonExecuteTool.IsPythonTool(toolName) OrElse
            toolName.Equals(SharedLibrary.Agents.SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) OrElse
