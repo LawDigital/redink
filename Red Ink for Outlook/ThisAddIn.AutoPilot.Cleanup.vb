@@ -100,6 +100,7 @@ Partial Public Class ThisAddIn
         Try
             Dim ct = _apCts?.Token
             If ct Is Nothing OrElse ct.Value.IsCancellationRequested Then Return
+
             Await RunAutoDeleteCleanupAsync(ct.Value, "timer")
         Catch ex As OperationCanceledException
             ' Expected during shutdown
@@ -547,6 +548,85 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
+
+    ''' <summary>
+    ''' Robustly identifies the Outbox/Drafts using the store's own default-folder objects and a
+    ''' name fallback, avoiding the fragile long-vs-short-term EntryID comparison. This is the
+    ''' authoritative gate used to keep the cleanup sweeps out of transmission folders.
+    ''' </summary>
+    Private Function IsTransmissionFolderByType(folder As MAPIFolder) As Boolean
+        If folder Is Nothing Then Return False
+
+        Dim store As Store = Nothing
+        Try
+            Try : store = folder.Store : Catch : End Try
+
+            If store IsNot Nothing Then
+                For Each special In {OlDefaultFolders.olFolderOutbox, OlDefaultFolders.olFolderDrafts}
+                    Dim specialFolder As MAPIFolder = Nothing
+                    Try
+                        specialFolder = store.GetDefaultFolder(special)
+                        If specialFolder IsNot Nothing Then
+                            ' Compare by name AND by EntryID: either match is sufficient.
+                            Dim sameName As Boolean = String.Equals(specialFolder.Name, folder.Name, StringComparison.OrdinalIgnoreCase)
+                            Dim sameId As Boolean = False
+                            Try : sameId = String.Equals(specialFolder.EntryID, folder.EntryID, StringComparison.OrdinalIgnoreCase) : Catch : End Try
+                            If sameName OrElse sameId Then Return True
+                        End If
+                    Catch
+                    Finally
+                        If specialFolder IsNot Nothing Then Try : Marshal.ReleaseComObject(specialFolder) : Catch : End Try
+                    End Try
+                Next
+            End If
+        Catch
+        Finally
+            If store IsNot Nothing Then Try : Marshal.ReleaseComObject(store) : Catch : End Try
+        End Try
+
+        Return False
+    End Function
+
+    ''' <summary>
+    ''' Returns True if the folder is the Outbox or Drafts of its store. These folders hold
+    ''' items in a pending/transmittable state whose submit flag must not be disturbed by a
+    ''' .Save() from the cleanup sweep, so they are always excluded from auto-delete scanning.
+    ''' </summary>
+    Private Function IsTransmissionFolder(folder As MAPIFolder) As Boolean
+        If folder Is Nothing Then Return False
+
+        Dim store As Store = Nothing
+        Try
+            store = folder.Store
+            If store Is Nothing Then Return False
+
+            Dim folderId As String = Nothing
+            Try : folderId = folder.EntryID : Catch : End Try
+            If String.IsNullOrEmpty(folderId) Then Return False
+
+            For Each special In {OlDefaultFolders.olFolderOutbox, OlDefaultFolders.olFolderDrafts}
+                Dim specialFolder As MAPIFolder = Nothing
+                Try
+                    specialFolder = store.GetDefaultFolder(special)
+                    If specialFolder IsNot Nothing AndAlso
+                       String.Equals(specialFolder.EntryID, folderId, StringComparison.OrdinalIgnoreCase) Then
+                        Return True
+                    End If
+                Catch
+                    ' Not every store exposes every special folder (e.g. some IMAP/PST stores).
+                Finally
+                    If specialFolder IsNot Nothing Then Try : Marshal.ReleaseComObject(specialFolder) : Catch : End Try
+                End Try
+            Next
+        Catch
+            Return False
+        Finally
+            If store IsNot Nothing Then Try : Marshal.ReleaseComObject(store) : Catch : End Try
+        End Try
+
+        Return False
+    End Function
+
     Private Function IsAutoDeleteMailFolder(folder As MAPIFolder) As Boolean
         If folder Is Nothing Then Return False
 
@@ -555,6 +635,15 @@ Partial Public Class ThisAddIn
         Catch
             Return False
         End Try
+
+        ' NEVER scan transmission folders (Outbox / Drafts). A reply is stamped with its cleanup
+        ' group ID before .Send() and is briefly present in the Outbox with its submit flag set.
+        ' If the eligibility sweep touches it there and calls StampCleanupMetadata(saveItem:=True),
+        ' the resulting mi.Save() clears PR_SUBMIT_FLAGS — demoting the item to a non-italic saved
+        ' message that Send/Receive ignores, leaving it stuck in the Outbox until manually opened
+        ' and re-sent. Excluding these folders prevents that regression and also avoids ever
+        ' deleting a pending outbound item.
+        If IsTransmissionFolder(folder) Then Return False
 
         ' A folder that defaults to mail items can still report a blank or non-"IPM.Note"
         ' DefaultMessageClass. This is common for Deleted Items and for some Sent Items /
@@ -583,6 +672,10 @@ Partial Public Class ThisAddIn
                                                     ByRef stampedCount As Integer)
 
         If folder Is Nothing Then Return
+
+        If IsTransmissionFolderByType(folder) Then
+            Return
+        End If
 
         Dim items As Items = Nothing
         Dim subFolders As Folders = Nothing

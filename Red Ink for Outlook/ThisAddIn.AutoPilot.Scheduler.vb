@@ -1594,6 +1594,13 @@ Partial Public Class ThisAddIn
             task.DeliverTo = safeRecipients
 
             newMail.To = String.Join("; ", safeRecipients)
+            For Each scheduledRecipient In safeRecipients
+                Try
+                    Dim r = newMail.Recipients.Add(scheduledRecipient)
+                    r.Type = OlMailRecipientType.olTo
+                Catch
+                End Try
+            Next
             newMail.Subject = If(Not String.IsNullOrWhiteSpace(task.Subject),
                                  $"{AN6} Scheduled Task: {task.Subject}",
                                  $"{AN6} Scheduled Task Result")
@@ -1700,7 +1707,18 @@ Partial Public Class ThisAddIn
                 End Try
             End If
 
+            If Not newMail.Recipients.ResolveAll() Then
+                ApDashboardLog($"📅 ERROR: could not resolve scheduled task recipient(s) '{newMail.To}' — result not sent (would remain in Drafts).", "error")
+                Return
+            End If
+
             newMail.Send()
+
+            If Not newMail.Sent Then
+                ApDashboardLog($"📅 ERROR: scheduled task result to '{newMail.To}' was not submitted and remains in Drafts (check Work Offline / send hooks / transport rules).", "error")
+                Return
+            End If
+
             Try : MoveLastSentToInkyReplies(cleanupGroupId, cleanupIsEligible, cleanupAnsweredUtc, cleanupDeleteAfterUtc, newMail.Subject, newMail.To) : Catch : End Try
             ApDashboardLog($"📅 Result e-mail sent to: {String.Join(", ", task.DeliverTo)}", "info")
 
