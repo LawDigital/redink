@@ -1,5 +1,4 @@
-﻿' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
-'
+﻿'
 ' The compiled version of Red Ink also ...
 '
 ' Includes DiffPlex in unchanged form; Copyright (c) 2023 Matthew Manela; licensed under the Apache-2.0 license (http://www.apache.org/licenses/LICENSE-2.0) at GitHub (https://github.com/mmanela/diffplex).
@@ -27,493 +26,406 @@
 ' Includes also various Microsoft distributables and libraries copyrighted by Microsoft Corporation and available, among others, under the Microsoft EULA, the Visual Studio Community 2022 License, the Microsoft.Web.WebView2 License (for Microsoft.Web.WebView2, see license on https://www.nuget.org/packages/Microsoft.Web.WebView2/ and below) and the MIT License (including Microsoft.Bcl.*, Microsoft.Extensions.*, Microsoft.Identity.Client, Microsoft.Identity.Client.Extensions.Msal, System.*, System.Security.*, System.CodeDom, DocumentFormat.OpenXml.*, Microsoft.ml.*, CommunityToolkit.HighPerformance licensed under MIT License) (https://licenses.nuget.org/MIT); Copyright (c) 2016- Microsoft Corp.
 '
 ' =============================================================================
-' Red Ink Shared Library - Architectural Overview
+' Red Ink Source Code Overview
+' Updated: 2026-08-15
 '
 ' Purpose:
-'   Central reusable components for Office add-ins (Word, Excel, Outlook) and
-'   AI-assisted document features: text processing, embeddings, anonymization,
-'   UI, configuration, model orchestration, speech recognition, web automation,
-'   licensing, knowledge stores, agents, Microsoft 365 integration, memory,
-'   and context-aware search.
+'   Consolidated overview of the current hand-authored source files and helper
+'   assets across SharedLibrary and the Word, Excel, and Outlook VSTO add-ins.
 '
 ' Language: VB.NET (.NET Framework 4.8)
-' Target: Microsoft Office VSTO Add-ins
-'
-' =============================================================================
-' SUBSYSTEMS
+' Targets: Microsoft Office VSTO Add-ins (Word, Excel, Outlook)
 ' =============================================================================
 '
-' [Core\Clipboard]
-'   NativeClipboard.vb              - P/Invoke wrappers for Win32 clipboard operations.
-'   ClipboardHelper.vb              - High-level helper (safe open/close, format handling).
-'   SharedMethods.ClipboardSnapshot - Capture current clipboard contents into a serializable snapshot.
-'   SharedMethods.StoreAndRestoreClipboard - RAII-style state preservation.
-'   SharedMethods.PutInClipboard.vb - Write text to clipboard on STA thread; handles RTF with plain-text derivation.
+' =============================================================================
+' SHAREDLIBRARY
+' =============================================================================
 '
-' [Core\Config]
-'   SharedMethods.LoadConfig        - Reads config from INI files on disk/environment variables.
-'                                     Includes InitializeConfig (first-time/reload initialization),
-'                                     ParseBoolean, INIValuesMissing, MissingSettingsWindow,
-'                                     RealAPIKey/RealAPIKeyMC (API key resolution with prefix handling).
-'   SharedMethods.Settings          - Strongly-typed settings accessors, defaults, and settings UI.
-'                                     Includes ShowSettingsWindow, ShowVariableConfigurationWindow,
-'                                     ShowExpertConfiguration, ShowAboutWindow, SwitchModels,
-'                                     UpdateAppConfig, ResetLocalAppConfig, GetActiveConfigFilePath.
-'   SharedMethods.UpdateIni         - INI file modification and update operations.
-'   SharedMethods.License           - Runtime license validation and user messaging.
-'   SharedMethods.License.Core      - Core license validation and state management for Private and
-'                                     Pro licenses, including API-based verification/activation and
-'                                     legacy-license migration enforcement.
-'   SharedMethods.License.Private   - Private license detection, validation, periodic reconfirmation,
-'                                     and activation flow with terms display.
-'   SharedMethods.License.Pro       - Professional license UI and API integration for activation,
-'                                     status checking, deactivation, and license management dialog.
-'   SharedMethods.License.RegistryBackup - Registry-based backup/restore of Pro license credentials
-'                                     to survive user.config deletions from VSTO updates.
-'   SharedMethods.License.Testing   - Debug-only interactive test helpers for license system.
-'   IniImportManager.vb             - INI import from URL/file, sample file download, preview/edit,
-'                                     placeholder handling, trust enforcement, and rollback support.
-'   SharedContext.vb / ISharedContext - Cross-cutting context interface (150+ properties).
-'
-' [Core\LLM]
-'   ModelConfig                     - Model metadata and configuration container.
-'   ModelSelectorForm               - UI for single model selection.
-'   MultiModelSelectorForm          - UI for multi-model selection strategy.
-'   SharedMethods.MainLLM           - Primary orchestration for LLM model invocation.
-'   SharedMethods.AlternateModels   - Fallback / multi-model strategy with secondary API support.
-'   SharedMethods.AlternateModels.Tooling - Tooling capability helpers for model selection.
-'   SharedMethods.MCP               - MCP SSE transport runtime helpers (handshake, tool call,
-'                                     response streaming) for tooling and special-service callers.
-'   JsonTemplateFormatter           - Mustache-like template engine for structured JSON output.
-'   MimeHelper                      - MIME type classification for assets.
-'   ImageDecoder                    - Convert embedded images to suitable analysis forms.
-'   SharedMethods.GoogleOAuthHelper - OAuth2 token handling for Google APIs.
-'   SharedMethods.Signing           - Cryptographic signing operations using BouncyCastle.
-'
-' [Core\Texthandling]
-'   SharedMethods.TextHandling      - Normalization, segmentation, cleaning, word counting.
-'   SharedMethods.TextHandlingExcel - Excel-specific cell/range text extraction.
-'   SharedMethods.Diff              - Diff operations built atop DiffPlex library.
-'
-' [Core\UI]
-'   ProgressForm / ProgressBarModule / DPIProgressForm - Unified DPI-aware progress UI.
-'   SharedMethods.Infobox           - User messages (info/warn/error) via ShowCustomMessageBox.
-'   SharedMethods.Pane              - Docked pane logic for Office task panes.
-'   SelectionFormSmall              - Lightweight selection dialog.
-'   SplashScreen / SplashScreenWorks / SplashScreenCountDown - Startup and progress visuals.
-'   SharedMethods.CustomForms       - Dynamic form generation (ShowCustomInputBox, ShowCustomYesNoBox,
-'                                     ShowCustomWindow, ShowCustomVariableInputForm).
-'   LogWindow.vb                    - Persistent non-activating log window module with thread-safe
-'                                     API (ShowLogWindow/AppendLog/etc.), color-coded entries, and
-'                                     bottom-right initial placement.
-'   SessionMemoryViewerForm.vb      - UI for inspecting and managing persistent session memory entries.
-'   KnowledgeStoreForm.vb           - UI for Knowledge Store administration, stats, repair, and schema editing.
-'
-' [Core\Various]
-'   SharedMethods.FileImporter      - File ingestion pipeline (PDF, DOCX, TXT via PdfPig/OpenXML/Interop).
-'   SharedMethods.ProcessParameterPlaceholders - Placeholder expansion in user prompts.
-'   SharedMethods.VarHelpers        - Generic variable utilities and environment expansion.
-'   SharedLogger.vb                 - Lightweight privacy-preserving async file logger with per-user
-'                                     hash identity, background queue writer, and log analysis utility.
-'   SharedMethods.SandboxedReaders  - COM-free readers for DOCX/XLSX/PPTX/MSG/EML via OpenXML/XML parsing.
-'
-' [CommonFeatures\Embeddings]
-'   EmbeddingStore.vb               - ONNX-based neural embedding store for semantic search.
-'   EmbeddingStore_BagofWords.vb    - Lightweight offline bag-of-words vectorization fallback.
-'   MlNetTokenizer.vb               - SentencePiece tokenization via ML.NET tokenizer APIs.
-'   OnnxAnonymizer.vb               - ONNX-based NER anonymization with reversible placeholders.
-'   SearchResult.vb                 - Search-result DTO with text, score, and location metadata.
-'   TextChunk.vb                    - Text-segment DTO with offsets and optional embeddings.
-'   TokenOffset.vb                  - Token/character offset mapping model used by embedding/tokenizer flows.
-'
-' [CommonFeatures\KnowledgeStore]
-'   KnowledgeEmbeddingService.vb    - Embedding generation/persistence (`.redink\.embeddings.json`) and semantic search.
-'   KnowledgeIndexer.vb             - Text extraction, metadata derivation, and optional LLM-assisted indexing.
-'   KnowledgeQueryService.vb        - Runtime query resolution across active stores with prompt-ready context output.
-'   KnowledgeSourceDossierService.vb - Builds source-dossier summaries from indexed Knowledge Store material.
-'   KnowledgeStore.Schema.vb        - Store schema settings: domain, focus areas, entity types, features, and persistence.
-'   KnowledgeStoreCatalog.vb        - Central/local catalog load/merge for store definitions and permissions.
-'   KnowledgeStoreForegroundIndexer.vb - User-initiated indexing with enumeration, progress, and batch delegation.
-'   KnowledgeStoreForm.vb           - WinForms administration UI for stores, stats, repair, and schema editing.
-'   KnowledgeStoreHostGate.vb       - Coordinates Knowledge Store AI work with host-idle state.
-'   KnowledgeStoreIdleService.vb    - Background idle-time service that drives deferred Knowledge Store work.
-'   KnowledgeStoreManager.vb        - Document-level index persistence (`.redink\.manifest.json`) and `KnowledgeEntry`.
-'   KnowledgeStoreManifest.vb       - Per-store manifest load/save/upsert with safe write semantics.
-'   KnowledgeStoreProcessingService.vb - Shared document-processing pipeline for indexing flows.
-'   KnowledgeStoreWatcher.vb        - File-system watcher and refresh coordination for store changes.
-'   KnowledgeTriggerHelper.vb       - Parses `(kb)` / `(kb:...)` triggers and assembles knowledge blocks.
-'   KnowledgeWikiService.vb         - Wiki orchestration: page merge, section rebuild, repair, and embedding refresh.
-'
-' [CommonFeatures\M365]
-'   M365Models.vb                   - Shared DTOs, enums, options, and result models for Graph search/retrieval.
-'   M365SearchProgressForm.vb       - Progress UI for long-running Microsoft 365 search/retrieval operations.
-'   M365Service.vb                  - Microsoft Graph integration: auth, token caching, cross-source search, and retrieval.
-'   M365Service.Extensions.vb       - Extension methods and helper functions for graph operations.
-'   M365Service.Threads.vb          - Thread/conversation-specific Microsoft 365 retrieval helpers.
-'   M365ToolService.vb              - Host-neutral `m365_*` tool family exposed to tooling loops.
-'
-' [CommonFeatures\Agents]
-'   ActionPromiseValidator.vb       - Validates promised follow-up actions emitted by agent responses.
-'   AgentGate.vb                    - Runtime gating/serialization helpers for agent execution.
-'   AgentResources.vb               - Discovers Claude-style resources: `Inky.md`, `SKILL.md`, `AGENT.md`.
-'   AgentResourcesViewerForm.vb     - Viewer UI for discovered agent/skill resources.
-'   AgentToolRouter.vb              - Centralized dispatch for agent-layer tools.
-'   HostToolRegistration.vb         - Central registry for host-internal tool names, allowlists, and classifications.
-'   InkyPromptBuilder.vb            - Builds main-loop prompt addendum from `Inky.md` plus active skills/agents.
-'   ISubAgentHost.vb                - Host contract for isolated sub-agent execution.
-'   IWordDocumentHost.vb            - Host bridge contract for active-document Word tools.
-'   JsRunTool.vb                    - Sandboxed JavaScript execution tool using hidden WebView2.
-'   LanguageContract.vb             - Shared language/locale contract helpers for agent/tooling flows.
-'   MemoryTools.vb                  - `memory_*` tool family for persistent session memory access.
-'   PathPolicy.vb                   - Path validation and sandbox policy helpers.
-'   SessionMemory.vb                - Persistent session-scoped key/value store.
-'   SessionMemoryViewerForm.vb      - UI for inspecting/managing persistent session memory entries.
-'   SkillAuthorMode.vb              - Authoring helpers for creating or editing skill resources.
-'   SkillInvokeTool.vb              - `skill_use` tool for loading and executing `SKILL.md` resources.
-'   SubAgentRunner.vb               - Sub-agent invocation pipeline and nested-run coordination.
-'   SubAgentRuntimeHardening.vb     - Defensive runtime wrappers and structured failure handling for sub-agents.
-'   SubAgentToolScopeInitializer.vb - Tool-scope initialization and filtering for sub-agent runs.
-'   TaskStatusFooterParser.vb       - Parses/validates `TASK_STATUS` footers from model responses.
-'   TextTools.vb                    - `text_*` file tools for plain-text read/write/search operations.
-'   ToolCallSequencing.vb           - Tool-call ordering, repair guards, and continuation decisions.
-'   ToolExecutorRegistry.vb         - Registry of executable tool handlers/factories.
-'   ToolingConstants.vb             - Shared constants used by agent/tooling infrastructure.
-'   ToolingFinalResponseContract.vb - Final-response contract enums and validation helpers.
-'   ToolingOrchestrator.vb          - Host-agnostic final-turn accept/reject decision logic.
-'   ToolLoaderTool.vb               - `tool_loader` for lazy manifest-only tool exposure.
-'   ToolRegistry.vb                 - Lazy registry of tool manifests/factories.
-'   ToolRegistryBuilder.vb          - Registers eager tools, skills, and agents into session registries.
-'   WebGroundingTool.vb             - Agent-facing web-grounding helper/tool surface.
-'   WebView2JsSandbox.vb            - Shared WebView2 sandbox host for JavaScript execution.
-'   WordDocTools.vb                 - Active-document `worddoc_*` tools via `IWordDocumentHost`.
-'   WordTools.vb                    - File-level `.docx` `word_*` tools via OpenXML.
-'   WorkflowContinuity.vb           - Workflow IDs, checkpoints, source continuity, and sub-agent isolation.
-'   WorkspaceState.vb               - Workspace-scoped runtime state tracking.
-'   WorkspaceTools.vb               - `workspace_*` tools for workspace file operations with permission gating.
+' [Agents]
+'   ActionPromiseValidator.vb        - Validates promised follow-up actions emitted by agent responses.
+'   AgentGate.vb                     - Runtime gating, serialization, and reentrancy protection for agent execution.
+'   AgentResources.vb                - Discovers agent/skill resources such as `Inky.md`, `SKILL.md`, and `AGENT.md`.
+'   AgentResourcesViewerForm.vb      - Viewer UI for discovered agent and skill resources.
+'   AgentToolRouter.vb               - Centralized dispatch for the shared agent-layer tool surface.
+'   AskUserTool.vb                   - Model-facing `ask_user` tool contract and execution helpers.
+'   ContextCompactTool.vb            - Shared `context_compact` tool definition for compacting older large tool results.
+'   ContextExpandTool.vb             - Shared `context_expand` tool definition for retrieving stored large tool results.
+'   FileTools.vb                     - Binary-safe file and directory tools governed by `PathPolicy`.
+'   HostToolRegistration.vb          - Canonical host-tool naming, allowlist, and classification helpers.
+'   InkyPromptBuilder.vb             - Builds prompt addenda from `Inky.md` and active skill/agent resources.
+'   ISubAgentHost.vb                 - Host contract for isolated sub-agent execution.
+'   IWordDocumentHost.vb             - Host bridge contract for active-document Word tooling.
+'   JsRunTool.vb                     - Sandboxed JavaScript execution tool hosted via hidden WebView2.
+'   LanguageContract.vb              - Shared language and locale contract helpers for agent/tooling flows.
+'   LargeToolResultProcessor.vb      - Converts oversized tool results into compact reference envelopes.
+'   MemoryTools.vb                   - Shared `memory_*` tool family for persistent session-memory access.
+'   PathPolicy.vb                    - Path resolution, workspace/resource-root enforcement, and write gating.
+'   PythonExecuteRepairAdvisor.vb    - Retry-vs-repair advisor for `python_execute` failures with model-safe guidance.
+'   PythonExecuteRepairAdvisorSelfTests.vb - DEBUG self-tests for the Python repair-advisor logic.
+'   PythonExecuteTool.vb             - Shared `python_execute` tool surface and host-facing adapter.
+'   PythonExecuteToolConfig.vb       - Configuration models and availability helpers for secure Python execution.
+'   PythonExecuteToolCore.vb         - Host-agnostic execution core for `python_execute`.
+'   RedinkPythonAgentClient.vb       - Secure Python worker protocol, limits, staging, and result parsing.
+'   RedinkPythonAgentHostService.vb  - Safe host-service dispatch and capability routing for Python worker callbacks.
+'   RedInkPythonAgentWebGet.vb       - Safe `web.get` helper for `python_execute` URL/document retrieval.
+'   SessionMemory.vb                 - Persistent session-scoped key/value memory store.
+'   SessionMemoryViewerForm.vb       - UI for inspecting and managing persistent session-memory entries.
+'   ShowMethods.AskUser.vb           - Shared modal dialog implementation behind the internal `ask_user` tool.
+'   SkillAuthoringPostcondition.vb   - Postcondition tracking for skill/agent authoring tasks.
+'   SkillAuthorMode.vb               - Process-wide and scoped activation helpers for skill-author mode.
+'   SkillInvokeTool.vb               - Shared `skill_use` tool for loading and executing `SKILL.md` resources.
+'   SubAgentRunner.vb                - Nested sub-agent invocation pipeline and run coordination.
+'   SubAgentRuntimeHardening.vb      - Defensive runtime wrappers and structured sub-agent failure handling.
+'   SubAgentToolScopeInitializer.vb  - Initializes and filters tool scope for sub-agent runs.
+'   TaskStatusFooterParser.vb        - Parses and validates `TASK_STATUS` footers in model responses.
+'   TextTools.SemanticAndExport.vb   - Agent-layer `text_*` and semantic-index tool family.
+'   TextTools.vb                     - Shared plain-text file read/write/search tools.
+'   ToolCallSequencing.vb            - Tool-call ordering, repair guards, and continuation decision helpers.
+'   ToolDescribeTool.vb              - Internal inspection-only tool for describing tool schemas without exposing them.
+'   ToolExecutorRegistry.vb          - Registry of executable tool handlers and factories.
+'   ToolingConstants.vb              - Shared constants for agent and tooling infrastructure.
+'   ToolingFinalResponseContract.vb  - Final-response contract enums and validation helpers.
+'   ToolingOrchestrator.vb           - Host-agnostic final-turn accept/reject decision logic.
+'   ToolLoaderTool.vb                - Lazy manifest-only loader tool used to keep initial tool exposure small.
+'   ToolRegistry.vb                  - Lazy registry of tool manifests and factories.
+'   ToolRegistryBuilder.vb           - Registers shared tools, skills, and agents into per-run registries.
+'   ToolResultStore.vb               - Workflow-scoped store for full large-result bodies.
+'   WebGroundingTool.vb              - Shared agent-facing web-grounding helper/tool surface.
+'   WebView2JsSandbox.vb             - Shared WebView2 sandbox host for JavaScript execution.
+'   WordDocTools.vb                  - Active-document `worddoc_*` tools implemented against `IWordDocumentHost`.
+'   WordTools.vb                     - File-level `.docx` `word_*` tools implemented via OpenXML.
+'   WorkflowContinuity.vb            - Workflow IDs, checkpoints, source continuity, and sub-agent isolation helpers.
+'   WorkspaceState.vb                - Workspace-scoped runtime state and permissions tracking.
+'   WorkspaceTools.vb                - Shared `workspace_*` tools for workspace inventory and file operations.
 '
 ' [CommonFeatures]
-'   AnonymizationModule.vb          - Top-level anonymization coordinator with reversible mappings.
-'   FactExtractionService.vb        - Multi-file structured fact extraction with schema/date/sort handling.
-'   HelpMeInky.vb                   - Interactive assistant window enriched with product manual and transcript support.
-'   QuickTranslateWidget.vb         - Non-modal translation widget with persisted state and dual-output mode.
-'   SharedMethods.MyStyleHelpers.vb - User writing-style helpers, style database, and style application logic.
-'   SharedMethods.PromptLibrary.vb  - Reusable prompt library loading, parsing, lookup, and caching.
-'   SharedMethods.TextFileEditor.vb - Text file manipulation with encoding support and line transformations.
-'   TalksToMe.Contracts.vb          - Shared contracts/models used by speech and "Talk to Me" features.
-'   TalkToMeWidget.vb               - Shared speech/transcription widget UI used by host integrations.
-'   UpdateHandler.vb                - VSTO update checking with ClickOnce/local-installer support.
-'   WebAgentInterpreter.vb          - JSON-based web automation scripting engine.
+'   AnonymizationModule.vb           - Top-level anonymization coordinator with reversible mappings and prompt helpers.
+'   FactExtractionService.vb         - Multi-file structured fact extraction with schema/date/sort handling.
+'   HelpMeInky.vb                    - Interactive assistant window with manual, knowledge, and transcript support.
+'   QuickTranslateWidget.vb          - Non-modal translation widget with persisted state and dual-output mode.
+'   SharedMethods.MyStyleHelpers.vb  - Writing-style capture, storage, retrieval, and application helpers.
+'   SharedMethods.PromptLibrary.vb   - Reusable prompt-library loading, parsing, lookup, and caching.
+'   SharedMethods.TextFileEditor.vb  - Text-file manipulation helpers with encoding and line-transformation support.
+'   TalksToMe.Contracts.vb           - Shared contracts and models for speech and "Talk to Me" flows.
+'   TalkToMeWidget.vb                - Shared speech/transcription widget UI used by multiple hosts.
+'   UpdateHandler.vb                 - Update checking for ClickOnce and local-installer deployments.
+'   WebAgentInterpreter.vb           - JSON-driven web automation scripting engine.
+'
+' [CommonFeatures\Embeddings]
+'   EmbeddingStore.vb                - ONNX-based neural embedding store for semantic search.
+'   EmbeddingStore_BagofWords.vb     - Lightweight offline bag-of-words semantic-search fallback.
+'   MlNetTokenizer.vb                - SentencePiece tokenization via ML.NET tokenizer APIs.
+'   OnnxAnonymizer.vb                - ONNX-based NER anonymization with reversible placeholders.
+'   SearchResult.vb                  - Search-result DTO with text, score, and location metadata.
+'   TextChunk.vb                     - Text-segment DTO with offsets and optional embeddings.
+'   TokenOffset.vb                   - Token/character offset mapping model used by tokenization flows.
+'
+' [CommonFeatures\InstallationWizard]
+'   AppConfigurationVariable.vb      - Variable data model for configuration forms and first-run setup.
+'   InitialConfig.vb                 - First-run configuration wizard for API keys, models, folders, and host settings.
+'
+' [CommonFeatures\KnowledgeStore]
+'   KnowledgeEmbeddingService.vb     - Embedding generation, persistence, and semantic search for knowledge stores.
+'   KnowledgeIndexer.vb              - Text extraction, metadata derivation, and optional LLM-assisted indexing.
+'   KnowledgeQueryService.vb         - Runtime query resolution across active stores with prompt-ready output.
+'   KnowledgeSourceDossierService.vb - Creates stable wiki dossier pages and blob references for indexed sources.
+'   KnowledgeStore.Schema.vb         - Store schema model and persistence for focus areas, entities, and features.
+'   KnowledgeStoreCatalog.vb         - Catalog load/merge for local and central store definitions and permissions.
+'   KnowledgeStoreForegroundIndexer.vb - User-initiated indexing with progress and batch delegation.
+'   KnowledgeStoreForm.vb            - WinForms administration UI for store management, stats, repair, and schema editing.
+'   KnowledgeStoreHostGate.vb        - Coordinates Knowledge Store AI work with host-idle state.
+'   KnowledgeStoreIdleService.vb     - Background idle-time service for deferred Knowledge Store work.
+'   KnowledgeStoreManager.vb         - Manifest persistence and document-level index management.
+'   KnowledgeStoreManifest.vb        - Per-store manifest load/save/upsert with safe-write semantics.
+'   KnowledgeStoreProcessingService.vb - Shared document-processing pipeline used by indexing flows.
+'   KnowledgeStoreWatcher.vb         - File-system watcher and refresh coordination for store changes.
+'   KnowledgeTriggerHelper.vb        - Parses `(kb)` / `(kb:...)` triggers and assembles knowledge blocks.
+'   KnowledgeWikiService.vb          - Wiki page merge, section rebuild, repair, and embedding-refresh orchestration.
+'
+' [CommonFeatures\M365]
+'   M365Models.vb                    - Shared DTOs, enums, options, and result models for Graph operations.
+'   M365SearchProgressForm.vb        - Progress UI for long-running Microsoft 365 search and retrieval.
+'   M365Service.Extensions.vb        - Extension methods and helper functions for Graph operations.
+'   M365Service.Threads.vb           - Thread and conversation retrieval helpers for Microsoft 365 content.
+'   M365Service.vb                   - Microsoft Graph auth, token caching, cross-source search, and retrieval.
+'   M365ToolService.vb               - Host-neutral `m365_*` tool family exposed to tooling loops.
 '
 ' [CommonFeatures\Transcription]
-'   AudioCaptureService.vb          - Audio capture coordination and device/session plumbing.
-'   AzureSpeechFastRestEngine.vb    - Azure fast REST transcription engine integration.
-'   AzureSpeechRealtimeEngine.vb    - Azure realtime streaming transcription engine integration.
-'   GoogleV1Engine.vb               - Google Speech V1 transcription engine.
-'   GoogleV2Engine.vb               - Google Speech V2 transcription engine.
-'   ITranscriptionEngine.vb         - Common transcription engine contract.
-'   OpenAiRealtimeEngine.vb         - OpenAI realtime transcription engine.
-'   OpenAiRestEngine.vb             - OpenAI REST transcription engine.
-'   TeamsAcsRealtimeEngine.vb       - Teams/ACS realtime transcription engine integration.
-'   VoskEngine.vb                   - Offline/local Vosk transcription engine.
-'   WhisperEngine.vb                - Whisper-based transcription engine integration.
+'   AudioCaptureService.vb           - Audio capture coordination, device management, and session plumbing.
+'   AzureSpeechFastRestEngine.vb     - Azure fast REST transcription engine integration.
+'   AzureSpeechRealtimeEngine.vb     - Azure realtime streaming transcription engine integration.
+'   GoogleV1Engine.vb                - Google Speech V1 transcription engine.
+'   GoogleV2Engine.vb                - Google Speech V2 transcription engine.
+'   ITranscriptionEngine.vb          - Shared transcription-engine contract.
+'   OpenAiRealtimeEngine.vb          - OpenAI realtime transcription engine.
+'   OpenAiRestEngine.vb              - OpenAI REST transcription engine.
+'   TeamsAcsRealtimeEngine.vb        - Teams/ACS realtime transcription engine integration.
+'   VoskEngine.vb                    - Offline/local Vosk transcription engine.
+'   WhisperEngine.vb                 - Whisper transcription engine integration.
 '
-' [InstallationWizard]
-'   AppConfigurationVariable.vb     - Variable data model for configuration forms.
-'   InitialConfig.vb                - First-run setup wizard for API keys, models, folders, and add-in settings.
-'
-' [Interop]
-'   NativeMethods.vb                - Low-level native declarations/constants used by interop wrappers.
-'   WinAPI.vb                       - P/Invoke declarations and managed wrappers for Windows APIs.
-'   WindowsWrapper.vb               - Higher-level Windows API wrapper functions built on `WinAPI`.' [Core\Clipboard]
-'   NativeClipboard.vb              - P/Invoke wrappers for Win32 clipboard (GetClipboardOwner, OpenClipboard,
-'                                     GetClipboardData, SetClipboardData, EmptyClipboard, etc.).
-'   ClipboardHelper.vb              - High-level clipboard helpers: safe open/close, format detection/handling,
-'                                     multi-format reading, exception wrapping.
-'   SharedMethods.ClipboardSnapshot.vb - Serialize current clipboard state into a snapshot object;
-'                                     supports round-trip restore.
-'   SharedMethods.StoreAndRestoreClipboard.vb - RAII-style clipboard state preservation utility
-'                                     (restore on Dispose).
+' [Core\Clipboard]
+'   ClipboardHelper.vb               - High-level clipboard helpers with safe open/close and format handling.
+'   NativeClipboard.vb               - Win32 clipboard P/Invoke wrappers and low-level clipboard operations.
+'   SharedMethods.ClipboardSnapshot.vb - Serializes the current clipboard state into a snapshot object.
+'   SharedMethods.PutInClipboard.vb  - Writes text/RTF to the clipboard on an STA thread.
+'   SharedMethods.StoreAndRestoreClipboard.vb - RAII-style clipboard state preservation and restore helper.
 '
 ' [Core\Config]
-'   SharedMethods.LoadConfig.vb     - INI file reading: load from disk/environment, parse values,
-'                                     handle missing settings, FirstInitialization logic.
-'   SharedMethods.Settings.vb       - Strongly-typed config accessors and defaults; ShowSettingsWindow,
-'                                     ShowVariableConfigurationWindow, ShowExpertConfiguration, ShowAboutWindow,
-'                                     SwitchModels, UpdateAppConfig, ResetLocalAppConfig, GetActiveConfigFilePath.
-'   SharedMethods.UpdateIni.vb      - INI file modification/update: write sections, keys, preserve structure,
-'                                     safe file I/O, atomic rewrites.
-'   SharedMethods.License.vb        - Runtime license validation dispatch and state management factory.
-'   SharedMethods.License.Core.vb   - Core license validation: Private/Pro detection, API verification/activation,
-'                                     legacy-license migration, licensing modes.
-'   SharedMethods.License.Private.vb - Private license workflow: detection, validation, periodic reconfirmation,
-'                                     activation flow with terms display.
-'   SharedMethods.License.Pro.vb    - Professional license UI and API: activation, status checking,
-'                                     deactivation, license management dialog.
-'   SharedMethods.License.RegistryBackup.vb - Registry-based backup/restore of Pro license credentials
-'                                     to survive VSTO user.config deletions on updates.
-'   SharedMethods.License.Testing.vb - Debug-only interactive test helpers for license system.
-'   IniImportManager.vb             - INI import from URL/file: sample download, preview/edit, placeholder
-'                                     handling, trust enforcement, rollback support.
+'   ConfigWizardEngine.vb            - Engine for declarative configuration-wizard flows.
+'   ConfigWizardForm.vb              - WinForms UI for the declarative configuration wizard.
+'   IniImportManager.vb              - Imports INI configuration from file/URL with preview, trust checks, and rollback.
+'   SharedMethods.License.Admin.vb   - Administrative license-management helpers and support flows.
+'   SharedMethods.License.Core.vb    - Core license validation, activation, and mode-management logic.
+'   SharedMethods.License.Counter.vb - Counters, usage/accounting helpers, and related license-state support logic.
+'   SharedMethods.License.Domain.vb  - Domain and license-scope helper models and validation rules.
+'   SharedMethods.License.Private.vb - Private-license workflow, detection, validation, and reconfirmation logic.
+'   SharedMethods.License.Pro.vb     - Professional-license UI and API integration.
+'   SharedMethods.License.RegistryBackup.vb - Registry backup/restore of license credentials across VSTO updates.
+'   SharedMethods.License.Testing.vb - DEBUG/test-oriented interactive helpers for the license system.
+'   SharedMethods.License.vb         - Shared license helpers and runtime dispatch entry point.
+'   SharedMethods.LoadConfig.vb      - INI loading, parsing, initialization, and missing-settings handling.
+'   SharedMethods.RegistryFix.vb     - Registry repair and migration helpers for configuration/licensing state.
+'   SharedMethods.Settings.vb        - Strongly-typed settings accessors, defaults, and settings UI.
+'   SharedMethods.UpdateIni.vb       - INI modification/update helpers with safe rewrites and signatures.
+'
+' [Core\Converter]
+'   MarkdownToRtfConverter.vb        - Markdown-to-RTF conversion adapted from upstream MarkdownToRTF.
 '
 ' [Core\Definitions]
-'   SharedContext.vb                - Cross-cutting context implementation (ISharedContext); 150+ properties
-'                                     for INI, prompts, paths, models, preferences, API keys with secure storage.
-'   SharedMethods.Constants.vb      - Application-wide constants: command names, triggers, paths, prompts,
-'                                     licensing info, OAuth/API endpoints, default settings.
-'   SharedMethods.Constants.OwnBuild.Security.vb - Security-related constants and cryptographic values
-'                                     (partial class extension for sensitive data).
-
-' ' [Core\Clipboard]
-'   NativeClipboard.vb              - P/Invoke wrappers for Win32 clipboard operations.
-'   ClipboardHelper.vb              - High-level clipboard helpers: safe open/close, format detection/handling,
-'                                     multi-format reading, and exception wrapping.
-'   SharedMethods.ClipboardSnapshot.vb - Serializes current clipboard state into a snapshot object.
-'   SharedMethods.PutInClipboard.vb - Writes text/RTF to the clipboard on an STA thread.
-'   SharedMethods.StoreAndRestoreClipboard.vb - RAII-style clipboard state preservation utility.
+'   SharedContext.vb                 - Cross-cutting shared context implementation and configuration bridge.
+'   SharedMethods.Constants.OwnBuild.Security.vb - Security-related constants and own-build-sensitive values.
+'   SharedMethods.Constants.vb       - Application-wide constants, triggers, paths, prompts, and defaults.
 '
-' [Core\Config]
-'   ConfigWizardEngine.vb           - Engine for driving declarative configuration-wizard flows.
-'   IniImportManager.vb             - INI import from URL/file with preview, trust checks, and rollback support.
-'   SharedMethods.License.vb        - Runtime license validation dispatch and state-management entry point.
-'   SharedMethods.License.Core.vb   - Core license validation and activation plumbing.
-'   SharedMethods.License.Domain.vb - Domain/license-scope helper models and validation rules.
-'   SharedMethods.License.Private.vb - Private-license workflow and reconfirmation logic.
-'   SharedMethods.License.Pro.vb    - Professional-license UI and API integration.
-'   SharedMethods.License.RegistryBackup.vb - Registry-based backup/restore of Pro-license credentials.
-'   SharedMethods.License.Testing.vb - Debug-only interactive test helpers for the license system.
-'   SharedMethods.LoadConfig.vb     - INI file reading, parsing, initialization, and missing-settings handling.
-'   SharedMethods.RegistryFix.vb    - Registry repair/migration helpers for configuration/licensing state.
-'   SharedMethods.Settings.vb       - Strongly-typed config accessors, defaults, and settings UI.
-'   SharedMethods.UpdateIni.vb      - INI file modification/update with safe rewrites.
-
 ' [Core\LLM]
-'   ModelConfig.vb                  - Model metadata and configuration container.
-'   ModelSelectorForm.vb            - WinForms UI for single model selection.
-'   MultiModelSelectorForm.vb       - WinForms UI for multi-model selection strategy configuration.
-'   SharedMethods.AlternateModels.vb - Alternate-model loading, filtering, selection, and switching logic.
+'   ImageDecoder.vb                  - Image decoding and embedded-image conversion helpers.
+'   JsonTemplateFormatter.vb         - Mustache-like template engine for structured JSON output.
+'   MimeHelper.vb                    - MIME detection and content-classification helpers.
+'   SharedMethods.GoogleOAuthHelper.vb - OAuth2 token and JWT-bearer helpers for Google APIs.
+'   SharedMethods.Http.vb            - Shared HTTP request, retry, timeout, and transport helpers.
+'   SharedMethods.MainLLM.vb         - Primary LLM invocation pipeline and response handling.
+'   SharedMethods.MCP.vb             - MCP transport runtime helpers for handshake, SSE, and tool calls.
+'   SharedMethods.MCPOAuth.vb        - OAuth helpers for MCP-protected services.
+'   SharedMethods.Signing.vb         - Cryptographic signing helpers using BouncyCastle.
+'
+' [Core\LLM\ModelSelection]
+'   ModelConfig.vb                   - Shared model metadata and configuration container.
+'   ModelSelectorForm.vb             - WinForms UI for single-model selection.
+'   MultiModelSelectorForm.vb        - WinForms UI for multi-model selection strategy.
 '   SharedMethods.AlternateModels.Tooling.vb - Tooling-capability helpers for model selection.
-'   SharedMethods.PrimaryModelManager.vb - Primary-model loading/selection helpers and active-model state management.
-'   SharedMethods.GoogleOAuthHelper.vb - OAuth2 JWT bearer assertion generation and token exchange for Google APIs.
-'   SharedMethods.Http.vb           - Shared HTTP request/response helpers with retry/timeout handling.
-'   SharedMethods.MainLLM.vb        - Central LLM invocation pipeline.
-'   SharedMethods.MCP.vb            - MCP transport helpers: endpoint discovery, handshake, and tool-call dispatch.
-'   SharedMethods.MCPOAuth.vb       - OAuth helpers for MCP-protected resources.
-'   SharedMethods.Signing.vb        - RSA/JWT signing helpers using BouncyCastle.
-'   ImageDecoder.vb                 - Base64 image extraction and MIME/extension resolution.
-'   JsonTemplateFormatter.vb        - Mustache-like template engine for structured JSON output.
-'   MimeHelper.vb                   - MIME type detection and Base64 helpers.
+'   SharedMethods.AlternateModels.vb - Alternate-model loading, filtering, selection, and switching logic.
+'   SharedMethods.PrimaryModelManager.vb - Primary-model selection and active-model state management.
+'
+' [Core\Texthandling]
+'   SharedMethods.Diff.vb            - Text diff helpers built atop DiffPlex.
+'   SharedMethods.SemanticSearch.CoreAndGenerator.vb - Core semantic-index generation and shared non-interactive APIs.
+'   SharedMethods.SemanticSearch.Interactive.vb - Optional WinForms profile selection and interactive semantic-index entry points.
+'   SharedMethods.SemanticSearch.Retriever.vb - Retrieval, continuation, validation, and answer-verification logic for semantic search.
+'   SharedMethods.TextHandling.vb    - General text normalization, segmentation, cleaning, and counting helpers.
+'   SharedMethods.TextHandlingExcel.vb - Excel-specific range and worksheet text-extraction helpers.
 '
 ' [Core\UI]
-'   DPIProgressForm.vb              - DPI-aware alternative progress form with custom scaling.
-'   KnowledgeStoreForm.vb           - WinForms administration dialog for Knowledge Store management.
-'   LogWindow.vb                    - Persistent non-activating log window with thread-safe append API.
-'   MCPOAuthBrowserForm.vb          - Browser form used for MCP OAuth/device/auth flows.
-'   ProgressBarModule.vb            - Module-level progress state and UI marshaling; cancellation support.
-'   ProgressForm.vb                 - Standard DPI-aware progress indicator window.
-'   SessionMemoryViewerForm.vb      - WinForms UI for inspecting/managing persistent session memory entries.
-'   SharedMethods.DialogOwner.vb    - Dialog-owner/window-parenting helpers for shared UI flows.
-'   SharedMethods.Infobox.vb        - User message display via shared custom message boxes.
-'   SharedMethods.Pane.vb           - Office task pane logic: show/hide, content updates, HTML rendering.
-'   SharedMethods.SelectionFormSmall.vb - Lightweight selection dialog for small choice sets.
-'   SharedMethods.SplashScreen.vb   - Startup splash screen with progress visuals.
-'   ShowMethods.CustomForms.vb      - Dynamic form generation: input/yes-no/window/variable forms.
-'   SplashScreenCountDown.vb        - Splash screen with countdown timer.
-'   SplashScreenWorks.vb            - Alternative splash screen implementation.
+'   DPIProgressForm.vb               - DPI-aware progress form with custom scaling behavior.
+'   LogWindow.vb                     - Shared persistent non-activating log window with thread-safe append API.
+'   MCPOAuthBrowserForm.vb           - Browser form used for MCP OAuth and interactive auth flows.
+'   ProgressBarModule.vb             - Module-level progress state, marshaling, and cancellation helpers.
+'   ProgressForm.vb                  - Standard shared progress indicator window.
+'   SharedMethods.DialogOwner.vb     - Dialog-owner and window-parenting helpers.
+'   SharedMethods.Infobox.vb         - Shared message-box and user-notification helpers.
+'   SharedMethods.Pane.vb            - Shared task-pane display and update logic.
+'   SharedMethods.SelectionFormSmall.vb - Lightweight shared selection dialog.
+'   SharedMethods.SplashScreen.vb    - Shared startup splash screen.
+'   ShowMethods.CustomForms.vb       - Dynamic custom form generation helpers.
+'   SplashScreenCountDown.vb         - Splash screen variant with countdown timer.
+'   SplashScreenWorks.vb             - Alternative splash-screen implementation.
 '
 ' [Core\Various]
-'   SharedLogger.vb                 - Lightweight privacy-preserving async file logger.
-'   SharedMethods.FileImporter.vb   - File ingestion pipeline: PDF/DOCX/TXT extraction with optional OCR.
-'   SharedMethods.InkyMemory.vb     - Legacy/general in-memory state helpers shared across workflows.
-'   SharedMethods.ProcessParameterPlaceholders.vb - Placeholder expansion in user prompts.
+'   Crashlogger.vb                   - Crash logging and emergency diagnostic capture.
+'   OfficeWindowWatchdog.vb          - Office window tracking and recovery/watchdog helpers.
+'   SharedLogger.vb                  - Lightweight privacy-preserving async file logger.
+'   SharedMethods.FileImporter.vb    - File-ingestion pipeline for PDF, DOCX, TXT, and related formats.
+'   SharedMethods.InkyMemory.vb      - Legacy/general persisted memory helpers shared across workflows.
+'   SharedMethods.PdfMarkdownExtractor.vb - Heuristic PDF-to-Markdown extraction using PdfPig without OCR or interop.
+'   SharedMethods.ProcessParameterPlaceholders.vb - Placeholder expansion in prompts and request text.
+'   SharedMethods.SandboxedReaders.Docx.vb - Dependency-free DOCX text extraction by parsing OpenXML packages.
 '   SharedMethods.SandboxedReaders.vb - COM-free readers for DOCX/XLSX/PPTX/MSG/EML and related formats.
-'   SharedMethods.VarHelpers.vb     - Generic variable utilities: expansion, conversion, and validation.
-'   SharedMethods.WebImporter.vb    - URL import helpers and website rendering/text extraction support.
-
-' [Converter]
-'   MarkdownToRtfConverter.vb       - Markdown to RTF conversion (adapted from upstream MarkdownToRTF):
-'                                     Markdig parsing, RTF emission, inline/block rendering, table/code support,
-'                                     footnote handling, HTML tag/emoji/link support, preprocessing for edge cases.
+'   SharedMethods.VarHelpers.vb      - Generic variable utilities: expansion, conversion, and validation.
+'   SharedMethods.WebImporter.vb     - URL import, website rendering, and page-text extraction helpers.
+'
+' [Interop]
+'   NativeMethods.vb                 - Low-level native declarations and constants.
+'   WinAPI.vb                        - P/Invoke declarations and managed Windows API wrappers.
+'   WindowsWrapper.vb                - Higher-level Windows API helper functions.
 '
 ' =============================================================================
-' ADD-IN SPECIFIC COMPONENTS (Not in SharedLibrary)
+' HOST PROJECTS
 ' =============================================================================
 '
 ' [Red Ink for Word]
-'   ThisAddIn.vb                    - VSTO entry point: startup sequencing, event wiring, config bridge,
-'                                     update checks, HTTP listener startup/shutdown, constants/triggers,
-'                                     COM automation exposure (RequestComAddInAutomationService → BridgeSubs).
-'   ThisAddIn.AgentHost.vb          - Implements `ISubAgentHost` for isolated sub-agent tooling runs.
-'   ThisAddIn.Properties.vb         - Context holder (SharedContext) + configuration property bridge.
-'   ThisAddIn.Commands.vb           - Command handlers for ribbon/context menu operations with format preservation.
-'   ThisAddIn.Commands.Freestyle.vb - Freeform/ad-hoc prompt execution and content generation.
-'   ThisAddIn.Menu.vb               - Context menu creation & teardown; keyboard shortcut assignment.
-'   Form1.vb (frmAIChat)            - Interactive chat UI with markdown rendering, model switching, and tooling.
-'   DiscussInky.vb                  - Multi-persona discussion UI with knowledge loading and tooling integration.
-'   DrawioEditorForm.vb             - WebView2-hosted diagrams.net editor; loads/saves `.drawio` XML.
-'   LogWindow.vb                    - Host-local logging/review window for Word workflows.
-'   WordWorkspaceForm.vb            - Agent workspace folder management and permission configuration.
-'   DragDropForm.vb                 - File/folder drag & drop selector (FileOnly/DirectoryOnly/Both modes).
-'   ThisAddIn.AssembleDocuments.vb  - Multi-document assembly/composition helpers.
-'   ThisAddIn.CompleteTables.vb     - LLM-assisted table completion and structured table-filling helpers.
-'   ThisAddIn.ContextSearch.vb      - Context-aware search with LLM, embedding, and bag-of-words modes.
-'   ThisAddIn.DocCheck.vb           - DocCheck workflow: rule-set management, LLM invocations, and output handling.
-'   ThisAddIn.DocStyle.vb           - Style template extraction/application using JSON + LLM mapping.
-'   ThisAddIn.FileHelpers.vb        - File ingestion and content extraction (txt/rtf/doc/docx/pdf/pptx + OCR).
-'   ThisAddIn.FindClause.vb         - Clause library parsing, retrieval, maintenance, and duplicate checks.
-'   ThisAddIn.FindHiddenPrompt.vb   - Hidden/obfuscated text detection with heuristic + LLM analysis.
-'   ThisAddIn.Helpers.vb            - Undo, escaping, document gathering, interpolation, progress, VBA, and Win32 helpers.
-'   ThisAddIn.JustifyMarkup.vb      - Markup justification via snapshot comparison and inserted comments.
-'   ThisAddIn.KnowledgeStoreWiring.vb - Word-side lifecycle wiring for shared Knowledge Store services.
-'   ThisAddIn.MarkupReview.vb       - Constraint-based tracked-changes review and undermining detection.
-'   ThisAddIn.MCPImporter.vb        - Imports MCP tool metadata and generates Special Service INI sections.
-'   ThisAddIn.PaneAndMerge.vb       - Task pane display and intelligent text merging with markdown support.
-'   ThisAddIn.Processing.vb         - Main selection processing pipeline and batch file processing.
-'   ThisAddIn.Processing.Comments.vb - Word comment bubble creation/reply/extraction with Markdown/HTML rendering.
-'   ThisAddIn.Processing.FileRAG.vb - File-based RAG retrieval, validation, and user feedback.
-'   ThisAddIn.Processing.FormatSaveAndRestore.vb - Paragraph/field/highlight serialization and restoration.
-'   ThisAddIn.Processing.HTMLToWord.vb - HtmlAgilityPack nodes → Word content conversion.
-'   ThisAddIn.Processing.KnowledgeRAG.vb - Knowledge Store-backed retrieval grounding for Word processing flows.
-'   ThisAddIn.Processing.SearchGrounding.vb - LLM-driven search term generation and web-grounding aggregation.
-'   ThisAddIn.Processing.Tooling.vb - Top-level orchestration for the Word tooling loop.
-'   ThisAddIn.Processing.Tooling.Logging.vb - File-based session logging with nested-session tracking.
-'   ThisAddIn.Processing.Tooling.M365.vb - Word host adapter for `M365ToolService`.
-'   ThisAddIn.Processing.Tooling.Memory.vb - Memory grounding mode resolution and validation.
-'   ThisAddIn.Processing.Tooling.Parameterhandling.vb - Tool argument normalization, extraction, and coercion helpers.
-'   ThisAddIn.Processing.Tooling.PromptBuilding.vb - Prompt assembly, system-prompt injection, and request shaping.
+'   BridgeSubs.vb                    - COM-visible automation bridge exposing selected Word add-in commands.
+'   DiscussInky.vb                   - Multi-persona discussion UI with knowledge loading and tool integration.
+'   DragDropForm.vb                  - File/folder drag-and-drop selector for Word workflows.
+'   DrawioEditorForm.vb              - WebView2-hosted diagrams.net editor for `.drawio` content.
+'   Form1.vb                         - Main Word chat UI (`frmAIChat`) with markdown rendering and tooling support.
+'   LogWindow.vb                     - Word-local logging/review window.
+'   ThisAddIn.vb                     - Word VSTO entry point, startup/shutdown sequencing, listeners, and COM exposure.
+'   ThisAddIn.AgentHost.vb           - Word implementation of `ISubAgentHost`.
+'   ThisAddIn.AssembleDocuments.vb   - Multi-document assembly and composition helpers.
+'   ThisAddIn.Commands.vb            - Ribbon and context-menu command handlers for Word workflows.
+'   ThisAddIn.Commands.Freestyle.vb  - Freeform prompt execution and content-generation flows.
+'   ThisAddIn.CompleteTables.vb      - LLM-assisted table completion helpers.
+'   ThisAddIn.ContextSearch.vb       - Context-aware search with LLM, embedding, and bag-of-words modes.
+'   ThisAddIn.DocCheck.vb            - DocCheck workflow, rule management, and output handling.
+'   ThisAddIn.DocStyle.vb            - Style-template extraction and application using JSON plus LLM mapping.
+'   ThisAddIn.FileHelpers.vb         - File ingestion and text extraction for Word-side workflows.
+'   ThisAddIn.FindClause.vb          - Clause library parsing, retrieval, maintenance, and duplicate checks.
+'   ThisAddIn.FindHiddenPrompt.vb    - Hidden or obfuscated prompt/text detection helpers.
+'   ThisAddIn.Helpers.vb             - Shared Word helpers for undo, escaping, progress, VBA, and Win32 interop.
+'   ThisAddIn.JustifyMarkup.vb       - Markup justification using document snapshots and comments.
+'   ThisAddIn.KnowledgeStoreWiring.vb - Word lifecycle wiring for shared Knowledge Store services.
+'   ThisAddIn.MarkupReview.vb        - Constraint-based tracked-changes review and undermining detection.
+'   ThisAddIn.MCPImporter.vb         - Imports MCP metadata and generates Special Service INI sections.
+'   ThisAddIn.Menu.vb                - Word context-menu creation, teardown, and shortcut assignment.
+'   ThisAddIn.PaneAndMerge.vb        - Task-pane display and intelligent merge logic with markdown support.
+'   ThisAddIn.Processing.Comments.vb - Word comment creation, reply, extraction, and HTML/Markdown rendering.
+'   ThisAddIn.Processing.FileRAG.vb  - File-based retrieval-augmented grounding and validation.
+'   ThisAddIn.Processing.FormatSaveAndRestore.vb - Paragraph, field, and highlight serialization/restoration.
+'   ThisAddIn.Processing.HTMLToWord.vb - HtmlAgilityPack-node to Word-content conversion.
+'   ThisAddIn.Processing.KnowledgeRAG.vb - Knowledge Store-backed grounding for Word processing flows.
+'   ThisAddIn.Processing.SearchGrounding.vb - Search-term generation and web-grounding aggregation.
+'   ThisAddIn.Processing.SurgicalInsert.vb - Precise insertion and anchoring helpers for generated Word edits.
+'   ThisAddIn.Processing.Tooling.Logging.vb - File-based tooling-session logging with nested-session tracking.
+'   ThisAddIn.Processing.Tooling.M365.vb - Word host adapter for shared Microsoft 365 tools.
+'   ThisAddIn.Processing.Tooling.Memory.vb - Memory-grounding mode resolution and validation.
+'   ThisAddIn.Processing.Tooling.Parameterhandling.vb - Tool argument normalization and coercion helpers.
+'   ThisAddIn.Processing.Tooling.PromptBuilding.vb - Prompt assembly and request-shaping helpers.
+'   ThisAddIn.Processing.Tooling.PythonExecute.vb - Word host adapter for the shared `python_execute` tool.
 '   ThisAddIn.Processing.Tooling.Selection.vb - Selection/document context capture for tooling requests.
 '   ThisAddIn.Processing.Tooling.Sources.vb - Source formatting, provenance packaging, and grounding helpers.
-'   ThisAddIn.Processing.Tooling.ToolExecution.vb - Internal/external tool dispatch and execution orchestration.
-'   ThisAddIn.Processing.Tooling.ToolExecutionContext.vb - Per-session execution state, continuation guards,
-'                                     duplicate detection, and sequencing state.
-'   ThisAddIn.Processing.Tooling.ToolResponse.vb - Tool response shaping, post-processing, and continuation helpers.
-'   ThisAddIn.Processing.Tooling.Tools.vb - Host-specific tool catalog construction and registration helpers.
+'   ThisAddIn.Processing.Tooling.ToolExecution.vb - Internal and external tool dispatch orchestration.
+'   ThisAddIn.Processing.Tooling.ToolExecutionContext.vb - Per-session tooling state, sequencing, and guards.
+'   ThisAddIn.Processing.Tooling.ToolResponse.vb - Tool-response shaping, post-processing, and continuation helpers.
+'   ThisAddIn.Processing.Tooling.Tools.vb - Word-specific tool catalog construction and registration helpers.
 '   ThisAddIn.Processing.Tooling.UserRequestResolution.vb - User-intent resolution and request classification.
-'   ThisAddIn.Redactions.vb         - LLM-powered PDF redaction with annotation creation and finalization.
-'   ThisAddIn.Slides.vb             - PPTX manipulation via OpenXML: extraction, creation, and modification.
-'   ThisAddIn.Slides.Retemplate.vb  - Re-templates an existing `.pptx` with the design of another deck.
-'   ThisAddIn.SpecialServices.vb    - Special service execution, prompt building, and result presentation.
-'   ThisAddIn.TabularOverview.vb    - Fact extraction from one or multiple documents into a Word table.
-'   ThisAddIn.TalkToMe.vb           - Word-side "Talk to Me" transcription orchestration and text insertion.
-'   ThisAddIn.TextToSpeech.vb       - TTS engine management, podcast generation, and audio merging.
-'   ThisAddIn.TextToSpeech.Form.vb  - TTS settings/voice picker UI (`TTSSelectionForm`).
-'   ThisAddIn.TextToSpeech.Commands.vb - Ribbon/context command handlers for TTS operations.
-'   ThisAddIn.Transcriptor.vb       - Real-time transcription with OpenAI/Google/Vosk/Whisper engines.
-'   ThisAddIn.TranslateDocuments.vb - Batch translation/correction via OpenXML with compare output.
+'   ThisAddIn.Processing.Tooling.vb   - Top-level orchestration for the Word tooling loop.
+'   ThisAddIn.Processing.vb           - Main selection-processing pipeline and batch file processing.
+'   ThisAddIn.Properties.vb           - SharedContext bridge and Word-side configuration properties.
+'   ThisAddIn.Redactions.vb           - LLM-powered PDF redaction preparation and finalization.
+'   ThisAddIn.Slides.Retemplate.vb    - Re-templates one `.pptx` with another deck's design.
+'   ThisAddIn.Slides.vb               - PPTX extraction, creation, and modification helpers via OpenXML.
+'   ThisAddIn.SpecialServices.vb      - Special service execution, prompt building, and result presentation.
+'   ThisAddIn.TabularOverview.vb      - Extracts facts from documents into Word tables.
+'   ThisAddIn.TalkToMe.vb             - Word-side "Talk to Me" transcription orchestration and insertion.
+'   ThisAddIn.TextToSpeech.Commands.vb - Ribbon and context handlers for text-to-speech operations.
+'   ThisAddIn.TextToSpeech.Form.vb    - TTS settings and voice-picker UI.
+'   ThisAddIn.TextToSpeech.vb         - TTS orchestration, podcast generation, and audio merging.
+'   ThisAddIn.Transcriptor.vb         - Real-time transcription using OpenAI, Google, Vosk, and Whisper engines.
+'   ThisAddIn.TranslateDocuments.vb   - Batch translation/correction of document files.
 '   ThisAddIn.TranslatePresentations.vb - Batch translation/correction of PPTX slides and notes.
-'   ThisAddIn.WebAgent.vb           - WebAgent JSON script discovery, execution, and authoring.
-'   ThisAddIn.WebExtension.vb       - Word-side WebExtension/browser integration helpers.
-'   ThisAddIn.WordDocHost.vb        - `IWordDocumentHost` bridge for active-document tool operations.
+'   ThisAddIn.Watermark.vb            - Watermark, source-profile, and document-marking helpers.
+'   ThisAddIn.WebAgent.vb             - WebAgent discovery, execution, and authoring support for Word.
+'   ThisAddIn.WebExtension.vb         - Word-side local web-extension/browser integration helpers.
+'   ThisAddIn.WordDocHost.vb          - Word implementation of `IWordDocumentHost`.
 '   ThisAddIn.WordHelpers,ImageGeneration.vb - Image-generation helpers for Word asset insertion workflows.
-'   ThisAddIn.WordHelpers.DrawioConverter.vb - `.drawio`/diagram conversion helpers for Word workflows.
-'   ThisAddIn.WordHelpers.Snapshotter.vb - Snapshot/capture helpers for Word comparison and review flows.
-'   ThisAddIn.WordHelpers.Stamper.vb - PDF/document stamping helpers used by Word workflows.
-'   ThisAddIn.WordHelpers.vb        - Document/selection manipulation, comparison, markup analytics, and PDF operations.
-'   ThisAddIn.WordSearchHelper.vb   - Advanced text search with canonicalization and revision handling.
-'   Transcription\TranscriptionOptionsDialog.vb - Dialog for transcription session/options selection.
-'   BridgeSubs.vb                   - COM-visible bridge exposing ThisAddIn methods to external callers (VBA/UI).
-'   Ribbon1.vb                      - Ribbon callbacks and theme-aware icon management.
-'   VBA Helper\RI_Helper_Code_Word.bas - VBA macro helper for keyboard shortcuts (calls add-in via COM bridge).
-'   VBA Helper\redink_cleanempty.dotm - Empty template for building `redink_helper.dotm`.
-'   VBA Helper\readme.txt           - Build instructions for Word macro helper.
+'   ThisAddIn.WordHelpers.DrawioConverter.vb - `.drawio` and diagram conversion helpers for Word workflows.
+'   ThisAddIn.WordHelpers.Snapshotter.vb - Snapshot/capture helpers for comparison and review workflows.
+'   ThisAddIn.WordHelpers.Stamper.vb  - PDF and document stamping helpers.
+'   ThisAddIn.WordHelpers.vb          - Document manipulation, comparison, markup analytics, and PDF helpers.
+'   ThisAddIn.WordSearchHelper.vb     - Advanced text search with canonicalization and revision handling.
+'   Transcription\TranscriptionOptionsDialog.vb - Dialog for transcription-session and option selection.
+'   WordWorkspaceForm.vb              - Workspace-folder management and permission configuration UI.
+'   Ribbon1.vb                        - Word ribbon callbacks and command wiring.
+'   VBA Helper\RI_Helper_Code_Word.bas - VBA macro helper for Word keyboard shortcuts via COM bridge.
+'   VBA Helper\redink_cleanempty.dotm - Empty template used to build the Word VBA helper.
+'   VBA Helper\readme.txt             - Build instructions for the Word VBA helper.
 '
 ' [Red Ink for Excel]
-'   ThisAddIn.vb                    - VSTO entry point: startup/shutdown, config bridge, undo tracking,
-'                                     automation bridge (RequestComAddInAutomationService → BridgeSubs).
-'   ThisAddIn.Properties.vb         - Context holder (SharedContext) and shared-property bridge.
-'   ThisAddIn.Commands.vb           - Command handlers: Translate, Correct, Improve, Anonymize, Shorten,
-'                                     SwitchParty, Freestyle variants, file triggers, HelpMeInky, settings.
-'   Form1.vb (frmAIChat)            - Excel chat UI: include worksheet/selection, optional write access,
-'                                     model switch, and inline command execution against the sheet.
-'   ThisAddIn.Pane.vb               - Task pane workflow + IntelligentMerge callback; applies parsed instructions to sheet.
-'   ThisAddIn.ExcelHelpers.vb       - Row height adjustment, comment shape sizing, and multi-pattern range search/replace.
-'   ThisAddIn.Helpers.vb            - Cell protection detection, text extraction, undo helpers, interpolation,
-'                                     and VBA module validation.
-'   ThisAddIn.MenuContext.vb        - Context menu creation, submenu population, shortcut assignment, and VBA integration.
-'   ThisAddIn.Processing.vb         - Cell/range LLM processing pipeline, batch file processing, and worksheet extraction.
-'   ThisAddIn.Processing.InsertIntoWorksheet.vb - Applies parsed cell/formula/value/comment directives to the worksheet.
-'   ThisAddIn.FileHelpers.vb        - Excel file ingestion helpers (txt/rtf/doc/docx/pdf + OCR) and GetFileName().
-'   DragDropForm.vb                 - File/folder drag & drop selector (FileOnly/DirectoryOnly/Both modes).
-'   ThisAddIn.FactExtractor.vb      - Fact extraction UI wired to `SharedLibrary.FactExtractionService`.
-'   ThisAddIn.CSVAnalyzer.vb        - CSV/TXT analysis via LLM with chunking, progress reporting, and Excel output.
-'   ThisAddIn.DirectoryAnalyzer.vb  - Directory-of-TXT-files analysis via LLM; writes structured worksheet output.
-'   ThisAddIn.FileRenamer.vb        - AI-assisted file renaming with instruction libraries and uniqueness enforcement.
-'   BridgeSubs.vb                   - COM-visible automation surface for external scripts/macros.
-'   Ribbon1.vb                      - Ribbon callbacks (buttons → Commands layer).
-'   VBA Helper\RI_Helper_Code_Excel.bas - VBA macro helper for keyboard shortcuts (calls VSTO add-in methods).
+'   BridgeSubs.vb                    - COM-visible bridge exposing selected Excel add-in functionality.
+'   DragDropForm.vb                  - File/folder drag-and-drop selector for Excel workflows.
+'   Form1.vb                         - Main Excel chat UI (`frmAIChat`) with worksheet-aware tooling support.
+'   ThisAddIn.vb                     - Excel VSTO entry point, startup/shutdown, and COM automation bridge.
+'   ThisAddIn.Commands.vb            - Ribbon/context-menu command handlers for worksheet and file workflows.
+'   ThisAddIn.CSVAnalyzer.vb         - CSV/TXT analysis with chunking, LLM processing, and worksheet output.
+'   ThisAddIn.DirectoryAnalyzer.vb   - Directory-of-text-files analysis with structured worksheet output.
+'   ThisAddIn.ExcelHelpers.vb        - Row-height, comment-shape, and range search/replace helpers.
+'   ThisAddIn.FactExtractor.vb       - Fact-extraction UI wired to `FactExtractionService`.
+'   ThisAddIn.FileHelpers.vb         - File ingestion and text extraction helpers for Excel-side workflows.
+'   ThisAddIn.FileRenamer.vb         - AI-assisted file renaming with instruction libraries and uniqueness checks.
+'   ThisAddIn.Helpers.vb             - Worksheet text, protection, interpolation, undo, and VBA helpers.
+'   ThisAddIn.MenuContext.vb         - Context-menu creation, submenu population, and shortcut/VBA integration.
+'   ThisAddIn.Pane.vb                - Task-pane workflow and IntelligentMerge callback for worksheet updates.
+'   ThisAddIn.Processing.InsertIntoWorksheet.vb - Applies parsed directives back into the worksheet.
+'   ThisAddIn.Processing.vb          - Cell/range processing pipeline, batch file processing, and worksheet extraction.
+'   ThisAddIn.Properties.vb          - SharedContext bridge and Excel-side configuration properties.
+'   Ribbon1.vb                       - Excel ribbon callbacks and command wiring.
+'   VBA Helper\RI_Helper_Code_Excel.bas - VBA macro helper for Excel keyboard shortcuts via COM bridge.
 '
 ' [Red Ink for Outlook]
-'   DragDropForm.vb                 - File/folder drag & drop selector used by Outlook workflows.
-'   LogWindow.vb                    - Host-local logging/review window for Outlook operations.
-'   ReviewChangesDialog.vb          - Review UI for accepting or rejecting generated change sets.
-'   ThisAddIn.vb                    - VSTO entry point: startup sequencing (two-phase initialization),
-'                                     OLE message filter, UI-thread marshaling, config bridge, explorer/inspector
-'                                     lifecycle, power mode watcher, delayed startup, COM retry logic.
-'   ThisAddIn.AgentHost.vb          - Implements `ISubAgentHost` for isolated sub-agent tooling runs.
-'   ThisAddIn.Properties.vb         - Context holder (SharedContext) + Override() helpers + InitialConfigFailed.
-'   ThisAddIn.Commands.vb           - Email processing commands (MailReply, MailSumup, Translate, Correct,
-'                                     Improve, Shorten, Freestyle, etc.) and clipboard helpers.
-'                                     Includes email-context resolution, chain summarization, markup strategies.
-'   ThisAddIn.Commands.InboxBoard.vb - Visual Kanban-style board for categorized Inbox emails rendered in WebView2.
-'   ThisAddIn.Commands.MailMover.vb - AI-assisted mail sorting with review UI, confidence color-coding, and undo support.
-'   ThisAddIn.Commands.PSTConverter.vb - Exports Outlook/PST mail content to UTF-8 text files, including attachments.
-'   ThisAddIn.M365SearchForm.vb     - M365 mail search UI with search, sign-in/out, AI search, and open-in-Outlook.
-'   ThisAddIn.Helpers.vb            - Shared helper routines (text diff, HTML/Markdown conversion, dialogs).
-'   ThisAddIn.VarHelpers.vb         - Variable and interaction helpers for compose-editor comparisons and diff flows.
-'   ThisAddIn.Processing.vb         - Text processing helpers: Word-based document comparison, inline diff,
-'                                     Markdown conversion, formatted insertion, RTF/plain-text conversion, and word count.
-'   ThisAddIn.Processing.HyperlinkPlaceholders.vb - Hyperlink placeholder preservation/restoration during formatting flows.
-'   ThisAddIn.Processing.KnowledgeRAG.vb - Knowledge Store-backed retrieval grounding for Outlook processing workflows.
-'   ThisAddIn.Tooling.vb            - Top-level orchestration for the model-agnostic tooling loop.
-'   ThisAddIn.Tooling.PromptBuilding.vb - Prompt assembly, system-prompt injection, and request shaping.
-'   ThisAddIn.Tooling.Parameterhandling.vb - Tool argument normalization, extraction, and coercion helpers.
-'   ThisAddIn.Tooling.ToolExecution.vb - Internal/external tool dispatch and execution orchestration.
-'   ThisAddIn.Tooling.ToolExecutionContext.vb - Per-run tooling state, sequencing, retries, workflow metadata, and logging.
-'   ThisAddIn.Tooling.ToolResponse.vb - Tool response shaping, post-processing, and continuation helpers.
-'   ThisAddIn.Tooling.Tools.vb      - Host-specific tool catalog construction and registration helpers.
-'   ThisAddIn.Tooling.UserRequestResolution.vb - User-intent resolution and request classification for tooling mode.
-'   ThisAddIn.Tooling.Logging.vb    - Reduced file-based logger for tooling operations with nested session depth support.
-'   ThisAddIn.Tooling.Memory.vb     - Memory grounding mode resolution and classification for the tooling loop.
-'   ThisAddIn.Tooling.M365.vb       - Outlook host adapter for shared Microsoft 365 tools and source-link extraction.
-'   ThisAddIn.Tooling.Sources.vb    - Knowledge Store tool naming, store discovery, fuzzy matching, and trigger building.
-'   ThisAddIn.KnowledgeStoreWiring.vb - Outlook lifecycle wiring for shared Knowledge Store idle/indexing services.
-'   ThisAddIn.ChatAgentScope.vb     - RAII-style scope token for temporary chat-agent elevation during tooling runs.
-'   ThisAddIn.Autopilot.vb          - Inky AutoPilot: AI mail watcher monitoring incoming e-mails via NewMailEx.
-'   ThisAddIn.Autopilot.CompleteTables.vb - AutoPilot helpers for table-completion and structured attachment output.
-'   ThisAddIn.AutoPilot.Config.vb   - AutoPilot configuration data class and startup dialog.
-'   ThisAddIn.AutoPilot.AudioBook.vb - AutoPilot tool that generates audiobook/podcast audio from mail or attachments.
-'   ThisAddIn.AutoPilot.Cleanup.vb  - Retention cleanup for AutoPilot-processed mail threads.
+'   DragDropForm.vb                  - File/folder drag-and-drop selector used by Outlook workflows.
+'   LogWindow.vb                     - Outlook-local logging and review window.
+'   ReviewChangesDialog.vb           - Review UI for accepting or rejecting generated change sets.
+'   ThisAddIn.vb                     - Outlook VSTO entry point with phased startup, explorer/inspector lifecycle, and listeners.
+'   ThisAddIn.AgentHost.vb           - Outlook implementation of `ISubAgentHost`.
+'   ThisAddIn.AutoPilot.AudioBook.vb - AutoPilot tool for generating audiobook/podcast audio from mail or attachments.
+'   ThisAddIn.AutoPilot.Cleanup.vb   - Cleanup and retention helpers for AutoPilot-processed mail threads.
 '   ThisAddIn.AutoPilot.CommentProcessor.vb - Adds Word comment bubbles to DOCX via OpenXML.
-'   ThisAddIn.AutoPilot.DocProcessor.vb - OpenXML document-processing engine for DOCX/PPTX/XLSX attachments.
-'   ThisAddIn.AutoPilot.PDFCommentProcessor.vb - Adds PDF annotation comments (highlight + popup) using PdfPig/PdfSharp.
-'   ThisAddIn.AutoPilot.PdfRedactor.vb - Headless AutoPilot PDF redaction workflow (prepare/finalize) for attachments.
-'   ThisAddIn.AutoPilot.RegistryBackup.vb - Backup/restore helpers for AutoPilot persisted state.
-'   ThisAddIn.AutoPilot.Scheduler.vb - JSON-based scheduled task store, CRUD operations, recurrence, and due-task execution.
-'   ThisAddIn.AutoPIlot.Tools.vb    - Top-level AutoPilot tool surface and dispatch entry points.
+'   ThisAddIn.AutoPilot.CompleteTables.vb - AutoPilot helpers for table-completion and structured attachment output.
+'   ThisAddIn.AutoPilot.Config.vb    - AutoPilot configuration data class and startup dialog logic.
+'   ThisAddIn.AutoPilot.DocProcessor.vb - OpenXML attachment processor for DOCX, PPTX, and XLSX files.
+'   ThisAddIn.AutoPilot.PDFCommentProcessor.vb - Adds PDF highlight/comment annotations using PdfPig/PDFsharp.
+'   ThisAddIn.AutoPilot.PdfRedactor.vb - Headless AutoPilot PDF-redaction workflow.
+'   ThisAddIn.AutoPilot.RegistryBackup.vb - Backup and restore helpers for AutoPilot persisted state.
+'   ThisAddIn.AutoPilot.Scheduler.vb - Scheduled-task store, recurrence logic, and due-task execution.
+'   ThisAddIn.AutoPilot.SenderToolPolicy.vb - Sender-based tool-policy rules for AutoPilot execution.
 '   ThisAddIn.AutoPilot.Tools.DataCollector.vb - Structured data-collection helpers for AutoPilot tool runs.
-'   ThisAddIn.AutoPIlot.Tools.Office.vb - OpenXML/Office-document AutoPilot tool helpers.
-'   ThisAddIn.AutoPilot.Tools.Office.Interop.vb - Interop-based Office host helpers for AutoPilot tools.
-'   ThisAddIn.AutoPIlot.Tools.Other.vb - Miscellaneous file/system/media AutoPilot tool helpers.
+'   ThisAddIn.AutoPIlot.Tools.Office.Interop.vb - Interop-based Office host helpers for AutoPilot tools.
+'   ThisAddIn.AutoPIlot.Tools.Office.vb - OpenXML and Office-document AutoPilot tool helpers.
+'   ThisAddIn.AutoPIlot.Tools.Other.vb - Miscellaneous file, system, and media AutoPilot tool helpers.
 '   ThisAddIn.AutoPIlot.Tools.PDF.vb - PDF-specific AutoPilot tool helpers.
+'   ThisAddIn.AutoPIlot.Tools.vb     - Top-level AutoPilot tool surface and dispatch entry points.
 '   ThisAddIn.AutoPilot.UserStorage.vb - Per-user AutoPilot storage layout and persistence helpers.
-'   ThisAddIn.AutoPilot.UserStorageDashboard.vb - Admin dashboard for per-user AutoPilot storage (memory + files).
-'   ThisAddIn.WebExtension.vb       - "Inky" local web UI + API route handler, job scheduling, markdown→HTML rendering,
-'                                     model switching, file upload/extraction, browser sanitization, suspend/resume guards.
-'   ThisAddIn.WebExtension.Agent.vb - Chat Agent mode for browser chat, multi-file loading, tooling-loop execution,
-'                                     and output-file collection.
-'   ThisAddIn.WebExtension.FileHelpers.vb - Office/text extraction helpers for browser file uploads with sandboxed
-'                                     OpenXML readers and COM fallback for legacy formats.
-'   ThisAddIn.WebExtension.InkyPlay.vb - Four arcade-style security awareness mini games served under `/inky/play`.
-'   ThisAddIn.WebExtension.ListenerAndPower.vb - HttpListener lifecycle, suspend/resume handling, watchdog recovery,
-'                                     stuck detection, and power notifications.
-'   Ribbon1.vb                      - Ribbon callbacks (buttons → Commands layer, dynamic enable/disable).
+'   ThisAddIn.AutoPilot.UserStorageDashboard.vb - Admin dashboard for per-user AutoPilot files and memory.
+'   ThisAddIn.Autopilot.vb           - Inky AutoPilot mail watcher and top-level orchestration.
+'   ThisAddIn.ChatAgentScope.vb      - Scoped token for temporary chat-agent elevation during tooling runs.
+'   ThisAddIn.Commands.InboxBoard.vb - WebView2-based Inbox board for categorized email visualization.
+'   ThisAddIn.Commands.MailMover.vb  - AI-assisted mail sorting with review UI, confidence coloring, and undo.
+'   ThisAddIn.Commands.PSTConverter.vb - Exports Outlook/PST content and attachments to UTF-8 text files.
+'   ThisAddIn.Commands.vb            - Mail-processing command handlers and shared compose/reply helpers.
+'   ThisAddIn.Helpers.vb             - Shared Outlook helper routines for text diff, HTML/Markdown, and dialogs.
+'   ThisAddIn.KnowledgeStoreWiring.vb - Outlook lifecycle wiring for Knowledge Store services.
+'   ThisAddIn.M365SearchForm.vb      - Microsoft 365 mail/file search UI with sign-in and open-in-Outlook support.
+'   ThisAddIn.Processing.HyperlinkPlaceholders.vb - Preserves/restores hyperlinks during formatting flows.
+'   ThisAddIn.Processing.KnowledgeRAG.vb - Knowledge Store-backed grounding for Outlook processing flows.
+'   ThisAddIn.Processing.vb          - Text-processing helpers for Markdown, formatted insertion, RTF/plain text, and diffs.
+'   ThisAddIn.Properties.vb          - SharedContext bridge, `Override()` helpers, and startup-state flags.
+'   ThisAddIn.Tooling.Logging.vb     - File-based tooling logger with nested-session depth support.
+'   ThisAddIn.Tooling.M365.vb        - Outlook host adapter for shared Microsoft 365 tools.
+'   ThisAddIn.Tooling.Memory.vb      - Memory-grounding mode resolution and classification.
+'   ThisAddIn.Tooling.Parameterhandling.vb - Tool argument normalization and coercion helpers.
+'   ThisAddIn.Tooling.PromptBuilding.vb - Prompt assembly and request-shaping helpers.
+'   ThisAddIn.Tooling.Sources.vb     - Source naming, discovery, fuzzy matching, and trigger-building helpers.
+'   ThisAddIn.Tooling.ToolExecution.vb - Internal and external tool dispatch orchestration.
+'   ThisAddIn.Tooling.ToolExecutionContext.vb - Per-run tooling state, sequencing, retries, and workflow metadata.
+'   ThisAddIn.Tooling.ToolResponse.vb - Tool-response shaping, post-processing, and continuation helpers.
+'   ThisAddIn.Tooling.Tools.vb       - Outlook-specific tool catalog construction and registration helpers.
+'   ThisAddIn.Tooling.UserRequestResolution.vb - User-intent resolution and tooling-mode classification.
+'   ThisAddIn.Tooling.vb             - Top-level orchestration for the Outlook tooling loop.
+'   ThisAddIn.VarHelpers.vb          - Variable and interaction helpers for compose-editor comparison and diff flows.
+'   ThisAddIn.WebExtension.Agent.vb  - Chat Agent mode for the local web UI with tooling-loop execution.
+'   ThisAddIn.WebExtension.FileHelpers.vb - Browser-upload extraction helpers for Office/text files.
+'   ThisAddIn.WebExtension.InkyPlay.vb - Security-awareness mini games served by the local web UI.
+'   ThisAddIn.WebExtension.ListenerAndPower.vb - HttpListener lifecycle, suspend/resume, watchdog, and power handling.
+'   ThisAddIn.WebExtension.vb        - Local web UI, API route handling, file upload/extraction, and browser integration.
+'   Ribbon1.vb                       - Outlook ribbon callbacks, commands, and dynamic enable/disable logic.
 '
 ' =============================================================================
 ' NOTES
 ' =============================================================================
 '
-' - Knowledge Store modules are shared by Word and Outlook for indexing, wiki maintenance, and prompt-triggered retrieval.
-' - Agent modules provide discovered skills, agents, memory, and lazy tool loading for the model-agnostic tooling loops.
-' - M365 modules centralize Microsoft 365 Graph integration and are wrapped separately by Word and Outlook hosts.
-' - Tooling loops are now split into smaller host-specific files for execution state, logging, memory grounding, and source handling.
-' - Excel remains the lightest host, primarily focused on worksheet document workflows and file-based AI processing.
-' - Outlook now includes the most extensive automation surface because it combines mail, AutoPilot, web extension, M365, and Knowledge Store wiring.
+' - Knowledge Store components are shared primarily by Word and Outlook.
+' - The agent/tooling layer is shared and then adapted separately by Word and Outlook hosts.
+' - Excel remains the lightest host and focuses mainly on worksheet and file-processing workflows.
+' - Outlook currently has the broadest automation surface because it combines mail processing, AutoPilot, web UI, M365, and Knowledge Store wiring.
+' - Several filenames intentionally retain legacy casing or punctuation, including
+'   `ThisAddIn.AutoPIlot.*`, `ThisAddIn.WordHelpers,ImageGeneration.vb`, and
+'   some headers whose internal `' File:` banner differs slightly from the actual filename.
+'

@@ -1907,7 +1907,18 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
             _settings.UseSpeakerSpecificVoices,
             _settings.SpeechOutputSpeed)
 
-            If dlg.ShowDialog(ownerWindow) <> DialogResult.OK Then
+            ' Inspect and same-thread filter the caller-supplied owner before using it as a
+            ' modal owner. A foreign (cross-thread/cross-process) owner would be disabled by
+            ' ShowDialog and never re-enabled, deadlocking that host. InspectDialogOwner logs
+            ' the attempt; IfOwnerOnCurrentThread rejects a cross-thread owner so we fall back
+            ' to an ownerless dialog instead of deadlocking.
+            Dim effectiveOwner As IWin32Window = ownerWindow
+            If effectiveOwner IsNot Nothing Then
+                SharedLibrary.SharedLibrary.OfficeWindowWatchdog.InspectDialogOwner(effectiveOwner, "TalkToMeConfigForm", "Configure")
+                effectiveOwner = SharedLibrary.SharedLibrary.SharedMethods.IfOwnerOnCurrentThread(effectiveOwner)
+            End If
+
+            If dlg.ShowDialog(effectiveOwner) <> DialogResult.OK Then
                 Return New SharedLibrary.SharedLibrary.TalkToMeSpeechConfigurationResult With {
                     .Applied = False,
                     .IncludeFullDocument = currentIncludeFullDocument,
@@ -2153,7 +2164,18 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
             useSpeakerSpecificVoices,
             True)
 
-            If dlg.ShowDialog(owner) = DialogResult.OK Then
+            ' Inspect and same-thread filter the caller-supplied owner before using it as a
+            ' modal owner. A foreign (cross-thread/cross-process) owner would be disabled by
+            ' ShowDialog and never re-enabled, deadlocking that host. InspectDialogOwner logs
+            ' the attempt; IfOwnerOnCurrentThread rejects a cross-thread owner so we fall back
+            ' to an ownerless dialog instead of deadlocking.
+            Dim effectiveOwner As IWin32Window = owner
+            If effectiveOwner IsNot Nothing Then
+                SharedLibrary.SharedLibrary.OfficeWindowWatchdog.InspectDialogOwner(effectiveOwner, "TTSSelectionForm", "ConfigureSpeechOutput")
+                effectiveOwner = SharedLibrary.SharedLibrary.SharedMethods.IfOwnerOnCurrentThread(effectiveOwner)
+            End If
+
+            If dlg.ShowDialog(effectiveOwner) = DialogResult.OK Then
                 PersistSettings()
             End If
         End Using

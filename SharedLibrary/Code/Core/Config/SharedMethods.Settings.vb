@@ -1109,9 +1109,20 @@ Namespace SharedLibrary
                 passwordForm.CancelButton = cancelButton
                 passwordForm.Controls.Add(mainLayout)
 
+                ' Inspect and same-thread filter the caller-supplied owner before using it as a
+                ' modal owner. A foreign (cross-thread/cross-process) owner would be disabled by
+                ' ShowDialog and never re-enabled, deadlocking that host. InspectDialogOwner logs
+                ' the attempt; IfOwnerOnCurrentThread rejects a cross-thread owner so we fall back
+                ' to an ownerless dialog instead of deadlocking.
+                Dim effectiveOwner As System.Windows.Forms.IWin32Window = ownerForm
+                If effectiveOwner IsNot Nothing Then
+                    OfficeWindowWatchdog.InspectDialogOwner(effectiveOwner, "ShowPasswordPrompt", "ShowPasswordPrompt")
+                    effectiveOwner = IfOwnerOnCurrentThread(effectiveOwner)
+                End If
+
                 Dim result As System.Windows.Forms.DialogResult
-                If ownerForm IsNot Nothing Then
-                    result = passwordForm.ShowDialog(ownerForm)
+                If effectiveOwner IsNot Nothing Then
+                    result = passwordForm.ShowDialog(effectiveOwner)
                 Else
                     result = passwordForm.ShowDialog()
                 End If
@@ -4151,8 +4162,19 @@ Namespace SharedLibrary
             form.Close()
         End Sub
 
-            If ownerForm IsNot Nothing Then
-                form.ShowDialog(ownerForm)
+            ' Inspect and same-thread filter the caller-supplied owner before using it as a
+            ' modal owner. A foreign (cross-thread/cross-process) owner would be disabled by
+            ' ShowDialog and never re-enabled, deadlocking that host. InspectDialogOwner logs
+            ' the attempt; IfOwnerOnCurrentThread rejects a cross-thread owner so we fall back
+            ' to an ownerless dialog instead of deadlocking.
+            Dim effectiveOwner As System.Windows.Forms.IWin32Window = ownerForm
+            If effectiveOwner IsNot Nothing Then
+                OfficeWindowWatchdog.InspectDialogOwner(effectiveOwner, "ShowVariableConfigurationWindow", "ShowVariableConfigurationWindow")
+                effectiveOwner = IfOwnerOnCurrentThread(effectiveOwner)
+            End If
+
+            If effectiveOwner IsNot Nothing Then
+                form.ShowDialog(effectiveOwner)
             Else
                 form.ShowDialog()
             End If
@@ -4990,8 +5012,23 @@ Namespace SharedLibrary
                 aboutForm.ClientSize = New System.Drawing.Size(formWidth, Math.Min(finalHeight, maxHeight))
             End If
 
-            ' Show the form
-            aboutForm.ShowDialog(owner)
+            ' Show the form.
+            ' Inspect and same-thread filter the caller-supplied owner before using it as a
+            ' modal owner. A foreign (cross-thread/cross-process) owner would be disabled by
+            ' ShowDialog and never re-enabled, deadlocking that host. InspectDialogOwner logs
+            ' the attempt; IfOwnerOnCurrentThread rejects a cross-thread owner so we fall back
+            ' to an ownerless dialog instead of deadlocking.
+            Dim effectiveOwner As System.Windows.Forms.IWin32Window = owner
+            If effectiveOwner IsNot Nothing Then
+                OfficeWindowWatchdog.InspectDialogOwner(effectiveOwner, "ShowAboutWindow", "ShowAboutWindow")
+                effectiveOwner = IfOwnerOnCurrentThread(effectiveOwner)
+            End If
+
+            If effectiveOwner IsNot Nothing Then
+                aboutForm.ShowDialog(effectiveOwner)
+            Else
+                aboutForm.ShowDialog()
+            End If
         End Sub
 
 

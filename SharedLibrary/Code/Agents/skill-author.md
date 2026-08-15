@@ -1,6 +1,6 @@
 ﻿---
 name: skill-author
-description: Drafts, reviews, revises, and converts Red Ink skills and agents so they run correctly on each host (Word, Outlook Local Chat, Outlook AutoPilot), using only host-verified tools, deterministic host detection, and disciplined output-file management.
+description: Runs in Word or Outlook Local Chat to draft, review, revise, convert, and diagnose Red Ink skills and agents for Word, Outlook Local Chat, and Outlook AutoPilot using host-verified tools and disciplined resource handling.
 allowed-tools:
   - text_read
   - text_write
@@ -21,9 +21,10 @@ model: agentdefaultmodel
 
 # Skill Author
 
-Use this skill to CREATE, REVISE, REVIEW, or CONVERT Red Ink skills and agents so they run
-reliably in the tooling loops. It is the authority on how the three tooling surfaces differ
-and how a single skill can be made safe to run on more than one of them.
+Use this skill to CREATE, REVISE, REVIEW, CONVERT, or DIAGNOSE Red Ink skills and agents so they run
+reliably in the tooling loops. **This skill itself executes only in interactive Word and Outlook Local
+Chat.** It may author resources targeting any of the three tooling surfaces, including Outlook AutoPilot,
+and is the authority on how those target surfaces differ.
 
 ## 0. Purpose, inputs, output
 
@@ -42,8 +43,8 @@ but Excel *workbooks* are handled by Excel-specific tools where those tools are 
 
 | Surface | Generic `skill_use` directly exposed? | Can run selected skills? | Live open-document tools | Attachments / drag & drop | Persistent workspace | Desktop delivery |
 |---|---|---|---|---|---|---|
-| **Word** (desktop add-in) | Yes | Yes | `worddoc_*`, `word_doc_*` (active document) | No | `workspace_*` + session staging/temp | Yes — session outputs are collected and delivered to the user, then the staging dir is cleaned |
-| **Outlook Local Chat / Agent** | Yes | Yes | No | Yes (`list_attachments`, `read_attachment`, `search_in_attachments`, drag-&-drop files land as session/attachment files) | `agent_workspace_*` (+ `agent_workspace_save_session_file`) and `workspace_*`/`file_*` | Via workspace persistence and produced deliverables; no "active document" to write back into |
+| **Word** (desktop add-in) | Yes | Yes | `worddoc_*`, `word_doc_*` (active document) | No | Optional connected workspace; session staging/temp remains valid without one | Yes — cite/identify intended session outputs so they are collected and delivered; staging is then cleaned |
+| **Outlook Local Chat / Agent** | Yes | Yes | No | Yes (`list_attachments`, `read_attachment`, `search_in_attachments`, drag-&-drop files can land in session/staging) | Optional connected workspace; session/staging remains valid without one | Cite/identify intended session outputs for delivery; persist to a connected workspace only when persistence beyond the session is required |
 | **Outlook AutoPilot** (unattended) | No | Yes — through dynamic `skill_<name>` tools | No | Yes (session files/attachments) | `agent_workspace_*`, locked to the workspace root | Produced deliverables only; runs unattended with no interactive user |
 
 **Critical distinction:** do not confuse the generic `skill_use` tool with the ability of a host to
@@ -67,8 +68,9 @@ Therefore:
 
 ### AutoPilot exclusions (from `Red_Ink_Tool_List.md`)
 Not available under AutoPilot: generic `skill_use` as a directly advertised tool, all `memory_*`,
-all `m365_*`, `web_content_retriever`, `tool_describe`, and the Word live-document tools.
-AutoPilot writes must stay inside its workspace root.
+all `m365_*`, `web_content_retriever`, and the Word live-document tools. `tool_describe`,
+`context_expand`, and `context_compact` are available on AutoPilot when advertised. AutoPilot writes
+must stay inside its workspace root.
 
 The authoritative tool list `Red_Ink_Tool_List.md` may live at the CENTRAL `.inky` resource root even
 when you only have LOCAL authoring (write) rights. You can still READ it: the configured local and
@@ -115,12 +117,14 @@ State the supported host(s) explicitly in the authored skill's body so the reaso
 `Red_Ink_Tool_List.md` in the `.inky` directory is the source of truth (columns: Word, Outlook,
 AutoPilot). Before putting any tool in `allowed-tools`:
 
-1. Read it with `text_read` (or use `tool_loader` for full definitions).
+1. Read `Red_Ink_Tool_List.md` with `text_read` to verify registered names and host availability; use `tool_describe` separately when exact schemas or limits are needed.
 2. Confirm each concrete tool exists and is `Yes` for every host the skill targets.
 3. A narrow wildcard family (e.g. `file_*`) is allowed ONLY if the runtime expands wildcards for the
    target host AND every concrete tool it expands to is verified `Yes` for those hosts. Never use `*`.
-4. When several tools overlap, do NOT pick by name. Call `tool_describe` (Word/Outlook only) to
-   inspect exact parameters, inputs/outputs, and limits, then choose by capability. Key overlaps:
+4. When several tools overlap, do NOT pick by name. `tool_describe` is supported on all three target
+   surfaces when advertised; inspect exact parameters, inputs/outputs, and limits, then choose by capability.
+   In this skill's own Word/Outlook Local Chat execution, use it before the one-time `tool_loader` call
+   when it is needed to decide which tool definitions to load. Key overlaps:
    - `worddoc_*` (active open doc, Word only) vs. `word_*` (`.docx` on disk, all hosts) vs.
      `word_doc_*` (Word host bridge, Word only).
    - `word_write` vs. `word_markup` (tracked-changes variant) vs. `word_format` vs. `word_comment_add`.
@@ -137,16 +141,18 @@ AutoPilot). Before putting any tool in `allowed-tools`:
 
 Author skills so file handling is deliberate and host-appropriate.
 
-- **Word:** produced files land in the per-session staging/temp area governed by PathPolicy; the
-  host collects and delivers session outputs to the user at the end and then cleans the staging dir.
-  Do not scatter intermediates the user will never see.
-- **Outlook Local Chat:** inputs may arrive as **mail attachments** (`list_attachments`,
-  `read_attachment`, `describe_binary_attachment`, `search_in_attachments`) or as **drag-&-dropped
-  files** that appear as session/workspace files. Persist anything the user must keep with
-  `agent_workspace_save_session_file` / `agent_workspace_*`; an attachment name is NOT a filesystem
-  path and vice versa.
-- **AutoPilot:** unattended; keep all writes inside the workspace root and rely on produced
-  deliverables — there is no interactive desktop delivery.
+- **Word:** a connected persistent workspace is optional. If none is connected, session staging/temp
+  is a valid input/output area. The final response must cite or clearly identify only the intended final
+  session file(s) so the host can collect and deliver them; do not scatter intermediates. If a connected
+  workspace exists and persistence beyond the session is required, use the appropriate workspace tool.
+- **Outlook Local Chat:** a connected persistent workspace is also optional. Inputs may arrive as mail
+  attachments or drag-&-dropped session/staging files. Without a workspace, operate on the actual
+  attachment/session/staging representation and cite or clearly identify the intended final file(s) in
+  the final response for delivery. With a connected workspace, persist only when the requested outcome
+  requires persistence beyond the session. An attachment name is NOT a filesystem path, and workspace
+  availability must be discovered rather than inferred from the presence of workspace tools.
+- **AutoPilot:** unattended; its workspace/root model is part of the execution contract. Keep all writes
+  inside the permitted workspace root and rely on produced deliverables — there is no interactive desktop delivery.
 - **Skill assets:** copy reference/template files from the skill's `references/` into the workspace
   or staging area BEFORE modifying/producing from them; never edit assets in place under the skill.
 
@@ -265,16 +271,21 @@ This skill is ALSO the authority for answering "what happened / what went wrong 
 When the user asks to diagnose, debug, or understand a previous run, DO NOT rely on chat history or
 memory alone — read the diagnostics logs, which are the ground truth of the tooling loop.
 
-1. Diagnostics require Skill-author mode. Read `author_mode_active` from the `resource_index`. If it is
-   `false`, tell the user to enable Skill-author mode (Manage Skills & Agents) so runs are logged, then
-   end with
-   `<TASK_STATUS>{"status":"blocked","reason":"Skill-author mode is off; enable it so tooling runs are logged to diagnostics, then re-run the action you want diagnosed."}</TASK_STATUS>`.
+1. **Diagnostics access requires Skill-author mode.** Read `author_mode_active` from `resource_index`.
+   If it is `false`, do not attempt to read diagnostics; tell the user to enable Skill-author mode
+   (Manage Skills & Agents), then end with
+   `<TASK_STATUS>{"status":"blocked","reason":"Skill-author mode is off; enable it to permit diagnostics access. With Skill-author mode on, subsequent tooling runs are also guaranteed to be logged."}</TASK_STATUS>`.
+   Diagnostics logging itself is a separate configuration: it may be enabled independently by the user,
+   and it is always enabled while Skill-author mode is on. Therefore prior logs may exist from independent
+   logging even if Skill-author mode was off at the time, but this skill may access them only while
+   Skill-author mode is currently on.
 2. Logs live under `local_root + "\diagnostics\"`. There are two kinds per run:
    - `RI_Tooling_Log__<timestamp>__<skill>.txt` — the full tooling-loop trace (tools loaded, tool
      calls, iterations, final response, session summary with `Success:`/`Failed:`).
    - `RI_SubAgent_Returns__<timestamp>__<skill>.txt` — sub-agent / skill return payloads.
-   The newest five of each kind are kept; the most recent timestamp is the latest run. A tooling log is
-   always written even when no skill name was captured, so a run is never missing from `diagnostics/`.
+   The newest five of each kind are kept; the most recent timestamp is the latest run. For every run in
+   which diagnostics logging is active (either by independent user configuration or because Skill-author
+   mode is on), a tooling log is written even when no skill name was captured.
 3. Identify the RIGHT file deterministically. Never guess a fixed filename such as `run.log`, and never
    fabricate fallback paths. Prefer `resource_index.diagnostics_files`: it is the authoritative
    diagnostics inventory for this run and already contains the exact available filenames plus metadata.
@@ -303,10 +314,10 @@ memory alone — read the diagnostics logs, which are the ground truth of the to
    exists, that the newest run is probably meant, or that a chat sentence would be simpler — for this
    multi-run case the `ask_user` tool is the required channel. Present one concise question with the 4–5
    most recent PRIOR runs as concrete `options` (each label = timestamp + skill name + Success/Failed).
-   `ask_user` is non-blocking: in an unattended run it returns immediately without an answer, so in that
-   case do not wait — proceed with the latest prior run and state that assumption explicitly.
-   4–5-line inventory in your final response so the user can redirect you to a different run on the next
-   turn. Do not use `js_run` to access the filesystem, and do not use `require(...)`, `fs`, `process`,
+   Because `skill-author` itself executes only in interactive Word or Outlook Local Chat, do not add an
+   unattended fallback here. Include the 4–5-line prior-run inventory in the final response when useful
+   so the user can redirect you to a different run on the next turn. Do not use `js_run` to access the
+   filesystem, and do not use `require(...)`, `fs`, `process`,
    `__dirname`, or other Node APIs there; `js_run` is only for in-memory computation on data already
    read by file/text tools.
 4. Read the chosen log with `text_read` (the `diagnostics/` folder is a permitted read root). For large
@@ -333,10 +344,12 @@ When documenting compatibility, distinguish:
 
 ## 11. Load your tools first
 
-Before any read/write/copy/move/rename/create, call `tool_loader` ONCE for the whole run
-(typically `text_read`, `text_write`, `text_search`, needed `file_*`, and — on Word/Outlook —
-`tool_describe`). A freshly loaded tool is callable only from the NEXT turn, so load the full set up
-front rather than one at a time. This avoids "tool not exposed at turn start" retries.
+For this skill's own Word/Outlook Local Chat execution, plan the tool needs for the whole run and call
+`tool_loader` ONCE before the first substantive read/write/copy/move/rename/create action. If overlapping
+candidates must be compared, use already-advertised `tool_describe` first, then load the complete chosen
+set (typically `text_read`, `text_write`, `text_search`, and needed `file_*`). A freshly loaded tool is
+callable only from the NEXT turn, so load the full useful set up front rather than one at a time and do not
+call `tool_loader` again later in the same run.
 
 ## 12. Finding an existing resource to edit (do this FIRST for edits/conversions)
 
@@ -359,7 +372,7 @@ front rather than one at a time. This avoids "tool not exposed at turn start" re
 6. Write NEW resources to an absolute path under `new_resource_root`; edit EXISTING resources at their
    exact `file` path. Ensure required `references/`/`scripts/` assets exist (binaries via `file_*`).
    State every exact absolute path touched.
-7. Remove stale/duplicate resources rather than accumulating overlapping workflows.
+7. Do not accumulate accidental duplicates. Remove a stale/superseded resource only when that status is clear and deletion is authorized; otherwise report the overlap instead of deleting it.
 
 ## 14. Review checklist
 

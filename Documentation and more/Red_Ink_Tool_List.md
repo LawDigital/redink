@@ -5,6 +5,8 @@ This file lists the built-in internal tools that can be advertised by Word, Outl
 Notes:
 
 - Availability can still depend on configuration, feature flags, model support, and current execution mode.
+- `js_run` may be disabled by the user by setting the `JsRunDisable` parameter in the configuration file.
+- `python_execute` requires the `redink-pythonagent` helper to be installed and configured; Python execution is unavailable without it.
 - The `Outlook` column refers to Outlook tooling outside AutoPilot, primarily Local Chat / Agent mode.
 - `AutoPilot` is listed separately because it does not expose the full Outlook tool surface.
 
@@ -20,10 +22,10 @@ Notes:
 | `knowledge_search` | Searches the user's local knowledge store for relevant internal content. | Yes | Yes | Yes |
 | `tool_loader` | Lazily loads full tool definitions only when a specific tool is needed. | Yes | Yes | Yes |
 | `report_progress` | Announces a short user-facing major-step progress update. Use it before the first substantive tool action and again whenever a new major phase begins. | Yes | Yes | No |
-| `tool_describe` | Returns the full parameter schema and usage instructions for one or more tools (by name or name prefix) without making them callable, so overlapping tools can be compared before loading. | Yes | Yes | No |
-| `context_expand` | Retrieves a character window from a large tool result that was stored by reference. Large results are replaced in context by a short `result_ref` plus a preview; this tool reads more of that stored content on demand. | Yes | Yes | No |
+| `tool_describe` | Returns the full parameter schema and usage instructions for one or more tools (by name or name prefix) without making them callable, so overlapping tools can be compared before loading. | Yes | Yes | Yes |
+| `context_expand` | Retrieves a character window from a large tool result that was stored by reference. Large results are replaced in context by a short `result_ref` plus a preview; this tool reads more of that stored content on demand. | Yes | Yes | Yes |
 | `ask_user` | Asks the user one concise clarifying question (with optional concrete choices, single- or multi-select, or a requested text/number value) when required information is missing, several materially different interpretations exist, or a skill/workflow needs an explicit decision. The user may always answer freely. Interactive contexts only (Word chat and Outlook Local Chat); non-blocking no-op in unattended e-mail Scheduler / AutoPilot runs. | Yes | Yes | No |
-| `context_compact` | Voluntarily compacts older tool results out of the active context to free space when they are no longer needed in full. The full text stays retrievable via `context_expand`; an optional `keep_recent` controls how many recent results stay fully visible. | Yes | Yes | No |
+| `context_compact` | Voluntarily compacts older tool results out of the active context to free space when they are no longer needed in full. The full text stays retrievable via `context_expand`; an optional `keep_recent` controls how many recent results stay fully visible. | Yes | Yes | Yes |
 | `memory_put` | Stores a key/value memory entry with summary, tags, and metadata. | Yes | Yes | No |
 | `memory_get` | Retrieves a stored memory entry by key. | Yes | Yes | No |
 | `memory_list` | Lists stored memory entries and their summaries. | Yes | Yes | No |
@@ -42,7 +44,7 @@ Notes:
 | `semantic_index_retrieve_after_verification` | Retrieves additional semantic-index evidence after verification reports that more sources are needed. | Yes | Yes | Yes |
 | `semantic_index_reset_conversation` | Resets and removes a stored semantic-search conversation handle. | Yes | Yes | Yes |
 | `semantic_index_invalidate_cache` | Invalidates one indexed-file cache entry or the full semantic-search cache. | Yes | Yes | Yes |
-| `js_run` | Executes sandboxed JavaScript in a hidden WebView2 environment. | Yes | Yes | Yes |
+| `js_run` | Executes sandboxed JavaScript in a hidden WebView2 environment. Availability is subject to the user's `JsRunDisable` configuration setting. | Yes | Yes | Yes |
 | `python_execute` | Executes sandboxed Python code through the configured secure Python agent and may return structured results or published output files.1) | Yes | Yes | Yes |
 | `skill_use` | Loads a skill's instructions and file inventory for guided execution. Word and Outlook Local Chat expose this generic loader directly. AutoPilot does not advertise the generic `skill_use` tool, but it can still run selected skills through dynamic `skill_<name>` tools that route internally to the same skill loader. | Yes | Yes | No |
 | `m365_search` | Searches Microsoft 365 content such as mail, files, chats, events, and notes. | Yes | Yes | No |
@@ -63,7 +65,7 @@ Notes:
 | `word_apply_template` | Creates a document from a template with substitutions. | Yes | Yes | Yes |
 | `word_save_as` | Saves a `.docx` file to a new path. | Yes | Yes | Yes |
 
-1) Only available when the secure Python agent helper is configured and available.
+1) Only available when the `redink-pythonagent` helper is installed, configured, and available.
 
 ## Shared file tools
 

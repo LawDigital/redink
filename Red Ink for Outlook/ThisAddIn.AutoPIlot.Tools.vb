@@ -246,6 +246,11 @@ Partial Public Class ThisAddIn
             tools.Add(pythonExecuteTool)
         End If
 
+        ' Shared helper tools used by the tooling runtime.
+        tools.Add(SharedLibrary.Agents.ToolDescribeTool.Build())
+        tools.Add(SharedLibrary.Agents.ContextExpandTool.Build())
+        tools.Add(SharedLibrary.Agents.ContextCompactTool.Build())
+
         ' ── process_word_document ──
         tools.Add(New ModelConfig() With {
         .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ProcessWordDoc,
@@ -738,39 +743,38 @@ Partial Public Class ThisAddIn
         ' ── create_word_document ──
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_CreateWordDoc,
-            .ModelDescription = "Create Word Document from Markdown (built-in)",
-                   .ToolInstructionsPrompt =
-            AP_Tool_CreateWordDoc & ": Creates a new formatted Word document (.docx) from Markdown content. " &
-            "Use this when the user asks you to create, generate, or produce a new Word document from any content " &
-            "(e.g., from a PDF extract, from research results, from your own generated text, from a summary, etc.). " &
-            "Provide the content as Markdown and it will be converted to a properly formatted .docx file. " &
-            "The tool supports richer document presentation options including document title metadata, base font, page orientation, " &
-            "professional table styling, vertical cell alignment, and a preferred Word table style name. " &
-            "When the content contains tables, you SHOULD use professional_layout=true unless the user explicitly asks for plain output. " &
-            "If the user asks for a specific look, pass base_font_name, base_font_size, table_style_name, and page_orientation when appropriate. " &
-            "The resulting file will be attached to the reply.",
-        .ToolDefinition =
-            "{""name"":""" & AP_Tool_CreateWordDoc & """," &
-            """description"":""Creates a new formatted Word document (.docx) from Markdown content. " &
-            "Supports headings, bold, italic, lists, and improved table rendering with consistent document font, " &
-            "professional table styling, vertical cell alignment, optional page orientation, and optional document metadata. " &
-            "Use when the user asks to create, generate, or produce a Word document from any content.""," &
-            """parameters"":{""type"":""object"",""properties"":{" &
-            """markdown_content"":{""type"":""string"",""description"":""The full document content in Markdown format. " &
-            "Use headings (#, ##, ###), bold (**text**), italic (*text*), lists (- or 1.), and Markdown tables when needed.""}," &
-            """file_name"":{""type"":""string"",""description"":""The desired filename for the output Word document " &
-            "(without .docx extension). Defaults to 'Document' if not specified.""}," &
-            """document_title"":{""type"":""string"",""description"":""Optional document title metadata stored in the Word file.""}," &
-            """base_font_name"":{""type"":""string"",""description"":""Optional base font for the document and generated tables, " &
-            "for example 'Calibri', 'Arial', 'Aptos', or 'Times New Roman'.""}," &
-            """base_font_size"":{""type"":""number"",""description"":""Optional base font size in points, for example 10, 11, or 12.""}," &
-            """page_orientation"":{""type"":""string"",""enum"":[""portrait"",""landscape""],""description"":""Optional page orientation. " &
-            "Use 'landscape' for wide tables or explicitly requested layouts.""}," &
-            """professional_layout"":{""type"":""boolean"",""description"":""Optional. Default true. " &
-            "When true, applies improved table formatting such as full-width layout, header styling, row banding, padding, and vertical centering.""}," &
-            """table_style_name"":{""type"":""string"",""description"":""Optional preferred Word table style name, for example 'Table Grid'. " &
-            "If omitted, the tool applies a safe built-in fallback style when available.""}" &
-            "},""required"":[""markdown_content""]}}"
+            .ModelDescription = "Create Executive Word Document (built-in)",
+            .ToolInstructionsPrompt =
+                AP_Tool_CreateWordDoc & ": Creates a polished executive Word document (.docx) from Markdown. " &
+                "Default to style_preset='consulting' and professional_layout=true unless the user explicitly requests a plain document. " &
+                "Write lean, decision-oriented content with strong section hierarchy, short paragraphs, informative headings, concise bullets, and tables where comparison is useful. " &
+                "The renderer applies consulting-style typography, page margins, heading hierarchy, restrained accent color, professional table formatting, optional cover page, headers/footers, and page numbers. " &
+                "Use include_cover=true plus cover_title/cover_subtitle for reports, proposals, board papers, investment memos, and other substantial documents. " &
+                "Use page_orientation='landscape' for wide tables. Use accent_color only when the user/brand requires a specific color. " &
+                "Do not simulate design using ASCII art or excessive Markdown decoration; let the renderer create the visual hierarchy. The resulting file is attached to the reply.",
+            .ToolDefinition =
+                "{""name"":""" & AP_Tool_CreateWordDoc & """," &
+                """description"":""Creates a polished executive Word document (.docx) from Markdown with consulting-style typography, heading hierarchy, professional tables, optional cover page, headers/footers, page numbers, and configurable brand accent.""," &
+                """parameters"":{""type"":""object"",""properties"":{" &
+                """markdown_content"":{""type"":""string"",""description"":""Full document content in Markdown. Use headings, concise bullets, emphasis, and Markdown tables where useful.""}," &
+                """file_name"":{""type"":""string"",""description"":""Desired output filename without .docx. Defaults to Document.""}," &
+                """document_title"":{""type"":""string"",""description"":""Document title metadata.""}," &
+                """document_author"":{""type"":""string"",""description"":""Optional author metadata.""}," &
+                """base_font_name"":{""type"":""string"",""description"":""Base font. Default Aptos.""}," &
+                """base_font_size"":{""type"":""number"",""description"":""Base body size in points. Default 10.5.""}," &
+                """page_orientation"":{""type"":""string"",""enum"":[""portrait"",""landscape""],""description"":""Page orientation.""}," &
+                """professional_layout"":{""type"":""boolean"",""description"":""Default true. Applies executive typography, spacing, margins and professional tables.""}," &
+                """style_preset"":{""type"":""string"",""enum"":[""consulting"",""executive"",""minimal"",""plain""],""description"":""Visual preset. Default consulting.""}," &
+                """accent_color"":{""type"":""string"",""description"":""Primary accent as hex RGB, e.g. #17365D.""}," &
+                """include_cover"":{""type"":""boolean"",""description"":""Add an executive cover page. Default false unless a substantive report/memo benefits from one.""}," &
+                """cover_title"":{""type"":""string"",""description"":""Cover page title. If omitted and include_cover=true, document_title is used.""}," &
+                """cover_subtitle"":{""type"":""string"",""description"":""Optional cover subtitle.""}," &
+                """cover_kicker"":{""type"":""string"",""description"":""Optional small uppercase cover label such as CONFIDENTIAL or STRATEGY REVIEW.""}," &
+                """header_text"":{""type"":""string"",""description"":""Optional running header text.""}," &
+                """footer_text"":{""type"":""string"",""description"":""Optional running footer text.""}," &
+                """show_page_numbers"":{""type"":""boolean"",""description"":""Show page numbers in the footer. Default true.""}," &
+                """table_style_name"":{""type"":""string"",""description"":""Optional Word table style name. Renderer still applies professional header/banding treatment.""}" &
+                "},""required"":[""markdown_content""]}}"
         })
 
         tools.Add(New ModelConfig() With {
@@ -797,151 +801,95 @@ Partial Public Class ThisAddIn
         ' ── create_excel_spreadsheet ──
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_CreateExcel,
-            .ModelDescription = "Create Excel Spreadsheet (built-in)",
+            .ModelDescription = "Create Professional Excel Workbook (built-in)",
             .ToolInstructionsPrompt =
-                AP_Tool_CreateExcel & ": Creates a professionally formatted Excel spreadsheet (.xlsx/.xlsm). " &
-                "Use for any spreadsheet, table, budget, tracker, dashboard, or tabular data request. " &
-                "ALWAYS call this tool immediately — do NOT describe what you plan to create; just create it. " &
-                "MANDATORY: include column_widths for every column, freeze_pane='A2', auto_filter on headers, " &
-                "bold headers with bg_color/font_color/borders, alternating row colors, wrap_text on long text, " &
-                "number_format on numeric/date columns, and data_validations (dropdowns) for any column with finite valid values.",
+                AP_Tool_CreateExcel & ": Creates a product-quality Excel workbook (.xlsx/.xlsm). Use this for tables, trackers, budgets, models, dashboards, analyses, schedules, and structured datasets. " &
+                "Default to professional_layout=true, style_preset='consulting', smart_format=true. The renderer itself supplies clean typography, dark executive headers, subtle banding, sensible column sizing, hidden gridlines, frozen headers, filters, and semantic Status/Priority highlighting when applicable. " &
+                "Do NOT waste tokens manually styling every cell unless a special exception is needed. Focus the tool call on workbook structure, data, formulas and useful interactive features. " &
+                "For non-trivial workbooks, prefer multiple purpose-built worksheets (e.g. Executive Summary/Dashboard, Data, Assumptions, Calculations, Instructions). " &
+                "Use native tables for datasets, charts for decision-relevant trends/comparisons, data_validations for controlled inputs/dropdowns, conditional_formats for thresholds/alerts, named_ranges for model clarity, and vba_modules only when automation is requested. " &
+                "Keep dashboards lean: a few KPIs, 2-4 useful charts, clear labels, no decorative clutter. Use English formula syntax with comma separators. The file is attached to the reply.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_CreateExcel & """," &
-                """description"":""Creates a new Excel spreadsheet (.xlsx or .xlsm) with MANDATORY professional formatting. " &
-                "EVERY spreadsheet MUST include: column_widths sized for content, freeze_pane='A2', auto_filter on headers, " &
-                "header row with bold + bg_color '#4472C4' + font_color '#FFFFFF' + border 'all-thin' + h_align 'center', " &
-                "data cells with border 'all-thin' + alternating bg_color '#D9E2F3', wrap_text on long text columns, " &
-                "number_format on all numeric/date/percentage columns, and data_validations with type 'list' on any column " &
-                "with a finite set of valid values (Status, Priority, Yes/No, categories, etc.). " &
-                "Also supports formulas, multiple sheets, conditional formatting, charts, VBA macros, and more. " &
-                "STYLING RULES (apply to EVERY spreadsheet unless user explicitly asks for plain output): " &
-                "1. HEADER ROW: bg_color '#4472C4', font_color '#FFFFFF', bold, font_size 12, h_align 'center', border 'all-thin'. " &
-                                "2. DATA ROWS: border 'all-thin' on ALL cells, alternating bg_color '#D9E2F3' on even rows, font_color '#000000' (black) — NEVER use '#FFFFFF' on data rows. " &
-                "3. COLUMN WIDTHS: MUST set for every column. Short labels 12-15, names/descriptions 25-35, numbers/dates 12-18. " &
-                "4. ROW HEIGHTS: header row 28. " &
-                "5. NUMBER FORMATS: '#,##0.00' for currency, '0%' for percent, 'dd/mm/yyyy' for dates, '#,##0' for integers. " &
-                "6. ALIGNMENT: left for text, center for short labels/status, right for numbers. " &
-                "7. WRAP TEXT: true for descriptions, notes, addresses, any long content. " &
-                "8. FREEZE PANE: ALWAYS 'A2'. " &
-                "9. AUTO FILTER: ALWAYS on header range (e.g. 'A1:F1'). " &
-                "10. DROPDOWNS: ALWAYS add data_validation type 'list' for columns with finite values (Status, Priority, Yes/No, Rating, Category). " &
-                "11. CONDITIONAL FORMATTING: red bg for negative/overdue/failed, green for completed/positive, yellow for pending. " &
-                "12. TOTALS ROW: SUM/AVERAGE formulas with bold + border 'bottom-medium'. " &
-                "13. TITLE ROW: For dashboards, merge + font_size 16 + bold + distinct bg_color. " &
-                "Use English formula syntax with comma separators.""," &
+                """description"":""Creates a professional multi-sheet Excel workbook (.xlsx/.xlsm) with formulas, native tables, charts, dropdowns/data validation, conditional formatting, named ranges, optional VBA automation, print setup and opinionated consulting-style formatting.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """cells"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
-                """cell"":{""type"":""string"",""description"":""Cell address in A1 notation""}," &
-                """value"":{""description"":""Cell value (string or number)""}," &
-                """formula"":{""type"":""string"",""description"":""Excel formula starting with =""}," &
-                """bold"":{""type"":""boolean""}," &
-                """italic"":{""type"":""boolean""}," &
-                """underline"":{""type"":""boolean""}," &
-                """strikethrough"":{""type"":""boolean""}," &
-                """font_name"":{""type"":""string""}," &
-                """font_size"":{""type"":""number""}," &
-                """font_color"":{""type"":""string"",""description"":""Hex RGB e.g. #FF0000. Use #FFFFFF for headers""}," &
-                """bg_color"":{""type"":""string"",""description"":""Hex RGB. Use #4472C4 for headers, #D9E2F3 for alternating rows""}," &
-                """number_format"":{""type"":""string"",""description"":""REQUIRED for numbers/dates. #,##0.00 currency, 0% percent, dd/mm/yyyy dates, #,##0 integers""}," &
-                """h_align"":{""type"":""string"",""enum"":[""left"",""center"",""right""],""description"":""REQUIRED: left=text, center=headers/labels, right=numbers""}," &
-                """v_align"":{""type"":""string"",""enum"":[""top"",""center"",""bottom""]}," &
-                """wrap_text"":{""type"":""boolean"",""description"":""REQUIRED true for long text cells""}," &
-                                """border"":{""type"":""string"",""description"":""REQUIRED: 'all-thin' for all cells. Also: medium, thick, all-medium, bottom-thin, bottom-medium""}," &
-                """border_color"":{""type"":""string"",""description"":""Border color hex RGB""}," &
-                """text_rotation"":{""type"":""integer"",""description"":""Text rotation in degrees (-90 to 90). Use 255 for vertical stacked text.""}," &
-                """indent"":{""type"":""integer"",""description"":""Indent level (0 or more).""}," &
-                """comment"":{""type"":""string"",""description"":""Cell note/comment text.""}," &
-                """hyperlink"":{""type"":""string"",""description"":""Hyperlink URL or target for the cell.""}," &
-                """hyperlink_display"":{""type"":""string"",""description"":""Optional display text for the hyperlink.""}" &
-                "}},""description"":""Cells for default/first sheet""}," &
-                """sheets"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
-                """name"":{""type"":""string""},""cells"":{""type"":""array"",""items"":{""type"":""object""}}" &
-                "}},""description"":""Multiple sheets. Each entry has name + cells array. In addition, ANY of the following top-level settings may be specified per sheet to override the workbook default for that sheet: column_widths, row_heights, auto_fit_columns, auto_fit_rows, merge_ranges, freeze_pane, auto_filter, data_validations, conditional_formats, print_setup, tab_color, show_gridlines, zoom, right_to_left.""}," &
-                """file_name"":{""type"":""string"",""description"":""Filename without extension""}," &
-                """sheet_name"":{""type"":""string"",""description"":""Tab name for single-sheet mode""}," &
-                """column_widths"":{""type"":""object"",""description"":""REQUIRED: {col_letter: width} for EVERY column. 12-15 short, 25-35 descriptions, 12-18 numbers""}," &
-                """row_heights"":{""type"":""object"",""description"":""Row heights. Set header row to 28""}," &
-                """auto_fit_columns"":{""description"":""Auto-fit column widths. Use true or 'all' to fit all columns, a single column letter, or an array of column letters. Explicit column_widths override auto-fit.""}," &
-                """auto_fit_rows"":{""description"":""Auto-fit row heights. Use true or 'all' to fit all rows, a single row number, or an array of row numbers.""}," &
-                """tab_color"":{""type"":""string"",""description"":""Worksheet tab color as hex RGB e.g. #4472C4.""}," &
-                """show_gridlines"":{""type"":""boolean"",""description"":""Show or hide worksheet gridlines.""}," &
-                """zoom"":{""type"":""integer"",""description"":""Worksheet zoom level percent (10-400).""}," &
-                """right_to_left"":{""type"":""boolean"",""description"":""Display the worksheet right-to-left.""}," &
-                """merge_ranges"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Ranges to merge""}," &
-                """freeze_pane"":{""type"":""string"",""description"":""REQUIRED: Always 'A2'""}," &
-                """auto_filter"":{""type"":""string"",""description"":""REQUIRED: Header range e.g. 'A1:F1'""}," &
+                """cell"":{""type"":""string"",""description"":""Cell/range address in A1 notation.""}," &
+                """value"":{""description"":""Cell value (string or number).""}," &
+                """formula"":{""type"":""string"",""description"":""Excel formula starting with =.""}," &
+                """bold"":{""type"":""boolean""},""italic"":{""type"":""boolean""},""underline"":{""type"":""boolean""},""strikethrough"":{""type"":""boolean""}," &
+                """font_name"":{""type"":""string""},""font_size"":{""type"":""number""},""font_color"":{""type"":""string""},""bg_color"":{""type"":""string""}," &
+                """number_format"":{""type"":""string"",""description"":""Excel number format such as #,##0.00, 0.0%, yyyy-mm-dd.""}," &
+                """h_align"":{""type"":""string"",""enum"":[""left"",""center"",""right""]},""v_align"":{""type"":""string"",""enum"":[""top"",""center"",""bottom""]}," &
+                """wrap_text"":{""type"":""boolean""},""border"":{""type"":""string""},""border_color"":{""type"":""string""}," &
+                """text_rotation"":{""type"":""integer""},""indent"":{""type"":""integer""},""comment"":{""type"":""string""}," &
+                """hyperlink"":{""type"":""string""},""hyperlink_display"":{""type"":""string""}" &
+                "}},""description"":""Cells for default/first sheet. Low-level formatting is optional because professional_layout provides a strong baseline.""}," &
+                """sheets"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{""name"":{""type"":""string""},""cells"":{""type"":""array"",""items"":{""type"":""object""}}}},""description"":""Multiple sheets. Each sheet may also override column_widths, row_heights, auto_fit_columns, auto_fit_rows, merge_ranges, freeze_pane, auto_filter, data_validations, conditional_formats, print_setup, tab_color, show_gridlines, zoom, right_to_left, professional_layout, style_preset, accent_color, font_name, smart_format, header_row.""}," &
+                """file_name"":{""type"":""string"",""description"":""Filename without extension.""}," &
+                """sheet_name"":{""type"":""string"",""description"":""Tab name for single-sheet mode.""}," &
+                """professional_layout"":{""type"":""boolean"",""description"":""Default true. Enables opinionated professional workbook styling.""}," &
+                """style_preset"":{""type"":""string"",""enum"":[""consulting"",""executive"",""minimal"",""plain""],""description"":""Default consulting.""}," &
+                """accent_color"":{""type"":""string"",""description"":""Primary workbook accent as hex RGB. Default #17365D.""}," &
+                """font_name"":{""type"":""string"",""description"":""Workbook font. Default Aptos.""}," &
+                """smart_format"":{""type"":""boolean"",""description"":""Default true. Adds semantic formatting for common Status/Priority columns.""}," &
+                """header_row"":{""type"":""integer"",""description"":""Header row for automatic styling/filter/freeze behavior. Default is the first used row. Set 0 for dashboard sheets without a tabular header.""}," &
+                """column_widths"":{""type"":""object"",""description"":""Optional explicit {column_letter: width}. If omitted, professional mode auto-fits and caps widths.""}," &
+                """row_heights"":{""type"":""object"",""description"":""Optional explicit row heights.""}," &
+                """auto_fit_columns"":{""description"":""true/'all', a column letter, or an array of letters.""}," &
+                """auto_fit_rows"":{""description"":""true/'all', a row number, or an array of row numbers.""}," &
+                """tab_color"":{""type"":""string""},""show_gridlines"":{""type"":""boolean""},""zoom"":{""type"":""integer""},""right_to_left"":{""type"":""boolean""}," &
+                """merge_ranges"":{""type"":""array"",""items"":{""type"":""string""}},""freeze_pane"":{""type"":""string""},""auto_filter"":{""type"":""string""}," &
                 """data_validations"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
-                """range"":{""type"":""string""},""type"":{""type"":""string""},""formula1"":{""type"":""string""}," &
-                """formula2"":{""type"":""string""},""operator"":{""type"":""string""}," &
-                """show_dropdown"":{""type"":""boolean""},""input_title"":{""type"":""string""}," &
-                """input_message"":{""type"":""string""},""error_title"":{""type"":""string""}," &
-                """error_message"":{""type"":""string""}" &
-                "}},""description"":""REQUIRED for finite-value columns: type 'list', formula1='Val1,Val2,Val3'""}," &
+                """range"":{""type"":""string""},""type"":{""type"":""string""},""formula1"":{""type"":""string""},""formula2"":{""type"":""string""},""operator"":{""type"":""string""}," &
+                """show_dropdown"":{""type"":""boolean""},""input_title"":{""type"":""string""},""input_message"":{""type"":""string""},""error_title"":{""type"":""string""},""error_message"":{""type"":""string""}" &
+                "}},""description"":""Data validation rules, including list dropdowns.""}," &
                 """conditional_formats"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
-                """range"":{""type"":""string""},""type"":{""type"":""string""},""operator"":{""type"":""string""}," &
-                """formula1"":{""type"":""string""},""formula2"":{""type"":""string""}," &
-                """format_font_color"":{""type"":""string""},""format_bg_color"":{""type"":""string""}," &
-                """format_bold"":{""type"":""boolean""}" &
-                "}},""description"":""Conditional formatting rules""}," &
+                """range"":{""type"":""string""},""type"":{""type"":""string"",""description"":""cell_value, text_contains, duplicate, unique, color_scale, data_bar, icon_set, top_10""},""operator"":{""type"":""string""}," &
+                """formula1"":{""type"":""string""},""formula2"":{""type"":""string""},""format_font_color"":{""type"":""string""},""format_bg_color"":{""type"":""string""},""format_bold"":{""type"":""boolean""}" &
+                "}},""description"":""Conditional formatting rules.""}," &
+                """tables"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
+                """sheet_name"":{""type"":""string""},""range"":{""type"":""string"",""description"":""Data range including headers, e.g. A1:H50.""},""name"":{""type"":""string""},""style"":{""type"":""string"",""description"":""Native Excel table style, default TableStyleMedium2.""}," &
+                """show_totals"":{""type"":""boolean""},""show_row_stripes"":{""type"":""boolean""},""show_first_column"":{""type"":""boolean""},""show_last_column"":{""type"":""boolean""}" &
+                "}},""description"":""Native Excel ListObjects for structured datasets. Prefer these for tables users will filter/sort/extend.""}," &
                 """charts"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
-                """type"":{""type"":""string"",""enum"":[""column"",""bar"",""line"",""pie"",""area"",""scatter"",""doughnut""]}," &
-                """data_range"":{""type"":""string"",""description"":""Worksheet range used as the chart source data""}," &
-                """title"":{""type"":""string"",""description"":""Optional chart title""}," &
-                """position"":{""type"":""string"",""description"":""Top-left anchor cell for the embedded chart, e.g. 'E2'""}," &
-                """width"":{""type"":""number"",""description"":""Chart width in Excel points. If omitted, defaults to 480. IMPORTANT: Use Excel points, not inches, centimeters, or cell counts. Example: 480 points is about 6.67 inches.""}," &
-                """height"":{""type"":""number"",""description"":""Chart height in Excel points. If omitted, defaults to 300. IMPORTANT: Use Excel points, not inches, centimeters, or cell counts. Example: 300 points is about 4.17 inches.""}," &
-                                """sheet_name"":{""type"":""string"",""description"":""Optional worksheet name on which to place the chart. Defaults to the first sheet.""}," &
-                """color"":{""type"":""string"",""description"":""Optional single series color as hex RGB e.g. #4472C4. Applied to all series if series_colors is omitted.""}," &
-                """series_colors"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Optional per-series colors as hex RGB. Cycles if fewer than the number of series.""}," &
-                """show_legend"":{""type"":""boolean"",""description"":""Show or hide the chart legend.""}," &
-                """legend_position"":{""type"":""string"",""enum"":[""top"",""bottom"",""left"",""right"",""corner""],""description"":""Legend placement.""}," &
-                """show_data_labels"":{""type"":""boolean"",""description"":""Show data labels on the series.""}," &
-                """x_axis_title"":{""type"":""string"",""description"":""Optional category (x) axis title.""}," &
-                """y_axis_title"":{""type"":""string"",""description"":""Optional value (y) axis title.""}" &
-                "}},""description"":""Charts to create. Width and height are specified in Excel points; if omitted, the default size is 480 x 300 points.""}," &
-                """named_ranges"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
-                """name"":{""type"":""string""},""range"":{""type"":""string""}" &
-                "}},""description"":""Named ranges""}," &
-                """vba_modules"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
-                """name"":{""type"":""string""},""code"":{""type"":""string""},""type"":{""type"":""string""}" &
-                "}},""description"":""VBA modules (saves as .xlsm)""}," &
-                """print_setup"":{""type"":""object"",""properties"":{" &
-                """orientation"":{""type"":""string"",""enum"":[""portrait"",""landscape""]}," &
-                """fit_to_pages_wide"":{""type"":""integer""},""fit_to_pages_tall"":{""type"":""integer""}," &
-                """header_text"":{""type"":""string""},""footer_text"":{""type"":""string""}" &
-                "},""description"":""Print setup options""}" &
+                """type"":{""type"":""string"",""enum"":[""column"",""bar"",""line"",""pie"",""area"",""scatter"",""doughnut""]},""data_range"":{""type"":""string""},""title"":{""type"":""string""},""position"":{""type"":""string""}," &
+                """width"":{""type"":""number""},""height"":{""type"":""number""},""sheet_name"":{""type"":""string""},""color"":{""type"":""string""},""series_colors"":{""type"":""array"",""items"":{""type"":""string""}}," &
+                """show_legend"":{""type"":""boolean""},""legend_position"":{""type"":""string"",""enum"":[""top"",""bottom"",""left"",""right"",""corner""]},""show_data_labels"":{""type"":""boolean""},""x_axis_title"":{""type"":""string""},""y_axis_title"":{""type"":""string""}" &
+                "}},""description"":""Charts. The renderer applies a clean executive chart style and a restrained default palette.""}," &
+                """named_ranges"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{""name"":{""type"":""string""},""range"":{""type"":""string""}}}}," &
+                """vba_modules"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{""name"":{""type"":""string""},""code"":{""type"":""string""},""type"":{""type"":""string""}}},""description"":""Optional VBA modules; presence saves as .xlsm. Use when the user requests workbook automation. Requires Excel Trust Center permission for programmatic VBProject access.""}," &
+                """print_setup"":{""type"":""object"",""properties"":{""orientation"":{""type"":""string"",""enum"":[""portrait"",""landscape""]},""fit_to_pages_wide"":{""type"":""integer""},""fit_to_pages_tall"":{""type"":""integer""},""header_text"":{""type"":""string""},""footer_text"":{""type"":""string""}}}" &
                 "},""required"":[]}}"
         })
 
         ' ── create_powerpoint ──
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_CreatePowerPoint,
-            .ModelDescription = "Create PowerPoint Presentation (built-in)",
+            .ModelDescription = "Create Executive PowerPoint (built-in)",
             .ToolInstructionsPrompt =
-                AP_Tool_CreatePowerPoint & ": Creates a new PowerPoint presentation (.pptx) with slides containing titles, body text, and speaker notes. " &
-                "Use this when the user asks you to create, generate, or produce a presentation, slide deck, or pitch deck. " &
-                "Provide slide data as a JSON array of slide objects. Each slide object has: " &
-                "'title' (string, the slide title), 'body' (string, the main content — use newlines for bullet points), " &
-                "and optionally 'notes' (string, speaker notes for that slide). " &
-                "The first slide is typically used as a title slide with a short subtitle in 'body'. " &
-                "TEMPLATE SUPPORT: If the user provides a .pptx attachment to use as a template (or references an existing presentation), " &
-                "pass its filename as 'template_attachment_name'. New slides will be appended to the template using its slide master/layouts. " &
-                "When using a template, the existing slides are preserved and new slides are added at the end.",
+                AP_Tool_CreatePowerPoint & ": Creates a polished executive PowerPoint deck. Keep one clear message per slide, use concise action-oriented titles, and keep narrative content short enough for presentation-sized typography. " &
+                "Supported layouts: title, section, bullets, two_column, kpi, table, chart, cards, process, structure, timeline, comparison, matrix, quote, closing. " &
+                "Choose visuals by meaning: quantitative series/trends/comparisons -> chart; process/sequence -> process; corporate or ownership hierarchy -> structure; qualitative themes/benefits/risks -> cards; alternatives -> comparison; dated milestones -> timeline; two-dimensional strategic positioning -> matrix. " &
+                "Do NOT invent numbers merely to create a chart. When real quantitative data exists, prefer a chart over repeating the numbers as prose. Avoid more than two consecutive text-heavy slides when a visual layout can represent the same content. " &
+                "For kpi, table, chart, cards, process, structure, timeline, comparison, or matrix, put structured data in data_json as a JSON object string; the application parses and renders it locally. " &
+                "Payload shapes: chart={chart:{type,categories,series:[{name,values}]}}; cards={cards:[{title,body,badge,tone}]}; process={steps:[{title,body}]}; structure={structure:{top:{title,body},children:[{title,body}]}}; timeline={events:[{label,title,body}]}; comparison={comparison:{columns:[{title,items,verdict,tone}]}}; matrix={matrix:{x_left,x_right,y_top,y_bottom,quadrants:[{title,body}]}}. " &
+                "Keep tables concise: preferably <= 6 data rows per slide; split long tables across slides rather than forcing tiny text. template_attachment_name may reference an existing .pptx whose slides are preserved.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_CreatePowerPoint & """," &
-                """description"":""Creates a new PowerPoint presentation (.pptx) with slides. Each slide has a title, body text (use newlines for bullets), and optional speaker notes. " &
-                "Supports using an existing .pptx as template via template_attachment_name — existing slides are kept, new slides appended. " &
-                "Use when the user asks to create a presentation, slide deck, or pitch deck.""," &
+                """description"":""Creates a professionally formatted PowerPoint presentation with executive typography, visual business layouts, charts, and optional template support.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """slides"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
-                """title"":{""type"":""string"",""description"":""Slide title text""}," &
-                """body"":{""type"":""string"",""description"":""Slide body content. Use newline characters for separate bullet points.""}," &
-                """notes"":{""type"":""string"",""description"":""Optional speaker notes for this slide""}" &
-                "}},""description"":""Array of slide objects defining the presentation""}," &
-                """file_name"":{""type"":""string"",""description"":""Desired filename without extension (default: 'Presentation')""}," &
-                """title"":{""type"":""string"",""description"":""Presentation title metadata (default: derived from first slide title)""}," &
-                """template_attachment_name"":{""type"":""string"",""description"":""Filename of an existing .pptx attachment to use as template. " &
-                "Existing slides are preserved, new slides are appended using the template's slide masters and layouts.""}" &
+                """layout"":{""type"":""string"",""description"":""Optional layout: title, section, bullets, two_column, kpi, table, chart, cards, process, structure, timeline, comparison, matrix, quote, or closing.""}," &
+                """title"":{""type"":""string""},""subtitle"":{""type"":""string""},""body"":{""type"":""string"",""description"":""Main text; use newline-separated points for bullet slides and keep it concise enough for large presentation text.""}," &
+                """notes"":{""type"":""string""},""source"":{""type"":""string""},""callout"":{""type"":""string""}," &
+                """section_number"":{""type"":""string""},""left_title"":{""type"":""string""},""left_body"":{""type"":""string""},""right_title"":{""type"":""string""},""right_body"":{""type"":""string""}," &
+                """quote"":{""type"":""string""},""attribution"":{""type"":""string""}," &
+                """data_json"":{""type"":""string"",""description"":""Optional JSON object encoded as a string for structured visual data (kpis, table, chart, cards, steps, structure, events/timeline, comparison, or matrix). The application parses this locally.""}" &
+                "}},""description"":""Slides defining the presentation.""}," &
+                """file_name"":{""type"":""string""},""title"":{""type"":""string""},""template_attachment_name"":{""type"":""string""}," &
+                """style_preset"":{""type"":""string""},""accent_color"":{""type"":""string""},""secondary_color"":{""type"":""string""},""font_name"":{""type"":""string""}," &
+                """aspect_ratio"":{""type"":""string"",""description"":""16:9 or 4:3.""},""footer_text"":{""type"":""string""},""show_slide_numbers"":{""type"":""boolean""}" &
                 "},""required"":[""slides""]}}"
         })
 
@@ -1419,7 +1367,7 @@ Partial Public Class ThisAddIn
     Friend Async Function TryExecuteAutoPilotTool(
             toolCall As ToolCall,
             context As ToolExecutionContext,
-            Optional cancellationToken As CancellationToken = Nothing) As Task(Of ToolResponse)
+            Optional cancellationToken As CancellationToken = Nothing) As System.Threading.Tasks.Task(Of ToolResponse)
 
         Dim outputSnapshot As Dictionary(Of String, Long) = SnapshotAutoPilotOutputFiles()
         Dim response As ToolResponse = Nothing
@@ -1900,7 +1848,7 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Async Function ReadSingleAttachmentText(att As AutoPilotAttachmentInfo,
                                                     context As ToolExecutionContext,
-                                                    Optional returnMarkdown As Boolean = False) As Task(Of String)
+                                                    Optional returnMarkdown As Boolean = False) As System.Threading.Tasks.Task(Of String)
         If att Is Nothing Then Return Nothing
         If att.TempFilePath Is Nothing OrElse Not File.Exists(att.TempFilePath) Then Return Nothing
 
@@ -1991,7 +1939,7 @@ Partial Public Class ThisAddIn
     End Function
 
 
-    Private Async Function oldReadSingleAttachmentText(att As AutoPilotAttachmentInfo, context As ToolExecutionContext) As Task(Of String)
+    Private Async Function oldReadSingleAttachmentText(att As AutoPilotAttachmentInfo, context As ToolExecutionContext) As System.Threading.Tasks.Task(Of String)
         ' Return cache if available
         If att.CachedText IsNot Nothing Then Return att.CachedText
 
