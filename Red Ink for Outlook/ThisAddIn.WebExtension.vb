@@ -3534,31 +3534,24 @@ Partial Public Class ThisAddIn
                                                 snapshotTaken = False
                                             End If
                                         ElseIf useAgentMode AndAlso agentToolsForJob IsNot Nothing AndAlso agentToolsForJob.Count > 0 Then
-                                            ' Match AutoPilot's iteration limit for agent/tool mode
-                                            Dim previousMaxIterations = INI_ToolingMaximumIterations
-                                            INI_ToolingMaximumIterations = AP_MaxToolIterations
-                                            Try
-                                                localOutput = ExecuteToolingLoop(
-                                                    sysPromptBase,
-                                                    "",
-                                                    agentToolsForJob,
-                                                    useSecondApiLocal,
-                                                    finalFileObject,
-                                                    False, "",
-                                                    False, False, "",
-                                                    False, "",
-                                                    False, "", "", "",
-                                                    sbDialog.ToString(),
-                                                    True,
-                                                    Not INI_ToolingLogWindow,
-                                                    False,
-                                                    jobCts.Token,
-                                                    _chatAgentTempDir,
-                                                    progressSink:=Sub(s) job.StatusMessage = s
-                                                ).GetAwaiter().GetResult()
-                                            Finally
-                                                INI_ToolingMaximumIterations = previousMaxIterations
-                                            End Try
+                                            localOutput = ExecuteToolingLoop(
+                                                sysPromptBase,
+                                                "",
+                                                agentToolsForJob,
+                                                useSecondApiLocal,
+                                                finalFileObject,
+                                                False, "",
+                                                False, False, "",
+                                                False, "",
+                                                False, "", "", "",
+                                                sbDialog.ToString(),
+                                                True,
+                                                Not INI_ToolingLogWindow,
+                                                False,
+                                                jobCts.Token,
+                                                _chatAgentTempDir,
+                                                progressSink:=Sub(s) job.StatusMessage = s
+                                            ).GetAwaiter().GetResult()
 
                                             ' Restore config AFTER tooling completes
                                             If snapshotTaken Then

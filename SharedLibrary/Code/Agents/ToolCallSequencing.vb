@@ -227,6 +227,18 @@ Namespace Agents
 
         End Class
 
+        ''' <summary>
+        ''' A single host-agnostic deliverable artifact that was verified to exist on
+        ''' disk when it was registered. Used as the source of truth for the completion
+        ''' gate and for host-side delivery (Outlook attachment / Word output copy).
+        ''' </summary>
+        Public NotInheritable Class DeliverableArtifact
+            Public Property SessionPath As String
+            Public Property SourceTool As String
+            Public Property IsFinalDeliverable As Boolean
+            Public Property RegisteredUtc As DateTime
+        End Class
+
         Public NotInheritable Class ToolingRunState
             Public Property HasUnresolvedToolFailure As Boolean
             Public Property LastToolName As String
@@ -269,6 +281,98 @@ Namespace Agents
             Public Property LastToolOutputMimeType As String
             Public Property LastToolOutputKind As String
             Public Property AnyUserDeliverableProducedThisRun As Boolean
+
+            ''' <summary>
+            ''' Per-run allow-list of tool names that are capable of producing a user
+            ''' deliverable (host-provided from HostToolRegistration.GetDeliverableCapableToolNames).
+            ''' Used to prevent read-only tools (e.g. text extract/search) from registering or
+            ''' promoting a deliverable just because their result echoes a generic 'path' field.
+            ''' When empty/unpopulated, deliverable inference falls back to the prior behavior so
+            ''' hosts that do not set this cannot regress.
+            ''' </summary>
+            Public Property DeliverableCapableToolNames As HashSet(Of String) =
+                New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+            ''' <summary>
+            ''' True when the given tool name is allowed to produce a deliverable. Fails open
+            ''' (returns True) when the capability set is empty so unpopulated hosts keep prior behavior.
+            ''' </summary>
+            Public Function IsDeliverableCapableTool(toolName As String) As Boolean
+                If DeliverableCapableToolNames Is Nothing OrElse DeliverableCapableToolNames.Count = 0 Then
+                    Return True
+                End If
+                Dim name As String = If(toolName, "").Trim()
+                Return name <> "" AndAlso DeliverableCapableToolNames.Contains(name)
+            End Function
+
+            ''' <summary>
+            ''' Authoritative per-run registry of deliverable artifacts that were verified
+            ''' to exist on disk at registration time. Shared by all tooling hosts
+            ''' (Outlook AutoPilot, Outlook Local Agent, Word) as the single source of
+            ''' truth for the completion gate and for host-side delivery.
+            ''' </summary>
+            Public Property RegisteredDeliverableArtifacts As List(Of DeliverableArtifact) =
+                New List(Of DeliverableArtifact)()
+
+            ''' <summary>
+            ''' Registers a produced artifact path, but ONLY if the file actually exists on
+            ''' disk. Paths that cannot be verified are ignored so a model can never satisfy
+            ''' the completion gate with an unbacked path string. Duplicate paths are merged.
+            ''' </summary>
+            Public Sub RegisterExistingDeliverableArtifact(candidatePath As String,
+                                                           sourceTool As String,
+                                                           isFinalDeliverable As Boolean)
+                Dim normalized As String = If(candidatePath, "").Trim()
+                If normalized = "" Then Return
+
+                Dim fullPath As String
+                Try
+                    If Not System.IO.File.Exists(normalized) Then Return
+                    fullPath = System.IO.Path.GetFullPath(normalized)
+                Catch
+                    Return
+                End Try
+
+                If RegisteredDeliverableArtifacts Is Nothing Then
+                    RegisteredDeliverableArtifacts = New List(Of DeliverableArtifact)()
+                End If
+
+                For Each existing As DeliverableArtifact In RegisteredDeliverableArtifacts
+                    If existing IsNot Nothing AndAlso
+                       String.Equals(existing.SessionPath, fullPath, StringComparison.OrdinalIgnoreCase) Then
+                        existing.IsFinalDeliverable = existing.IsFinalDeliverable OrElse isFinalDeliverable
+                        Return
+                    End If
+                Next
+
+                RegisteredDeliverableArtifacts.Add(New DeliverableArtifact With {
+                    .SessionPath = fullPath,
+                    .SourceTool = If(sourceTool, ""),
+                    .IsFinalDeliverable = isFinalDeliverable,
+                    .RegisteredUtc = DateTime.UtcNow
+                })
+            End Sub
+
+            ''' <summary>
+            ''' Returns True only if at least one registered deliverable artifact still
+            ''' exists on disk. This is the authoritative completion condition for
+            ''' file-required tasks and must not rely on unverified metadata strings.
+            ''' </summary>
+            Public ReadOnly Property HasValidatedFinalDeliverable As Boolean
+                Get
+                    If RegisteredDeliverableArtifacts Is Nothing Then Return False
+                    For Each artifact As DeliverableArtifact In RegisteredDeliverableArtifacts
+                        If artifact Is Nothing Then Continue For
+                        If Not artifact.IsFinalDeliverable Then Continue For
+                        If String.IsNullOrWhiteSpace(artifact.SessionPath) Then Continue For
+                        Try
+                            If System.IO.File.Exists(artifact.SessionPath) Then Return True
+                        Catch
+                        End Try
+                    Next
+                    Return False
+                End Get
+            End Property
 
             Public Property ConsolidatableToolSuccessCounts As Dictionary(Of String, Integer)
             Public Property LastConsolidatableToolName As String
@@ -658,6 +762,46 @@ Namespace Agents
             End If
 
             Return True
+        End Function
+
+
+        ''' <summary>
+        ''' Host-agnostic detector for provider/tool envelopes that must NEVER be surfaced as a
+        ''' user-facing final answer. Returns True when the text is (in whole) a raw JSON payload,
+        ''' or contains an embedded provider tool-call / function-call / function-response envelope.
+        ''' Used by the forced-final and max-iteration acceptance gates so an envelope forces a
+        ''' host-generated blocked result instead of being accepted as final text.
+        ''' </summary>
+        Public Shared Function ContainsProviderToolEnvelope(text As String) As Boolean
+            Dim raw As String = If(text, "").Trim()
+            If raw = "" Then
+                Return False
+            End If
+
+            If raw.StartsWith("```", StringComparison.Ordinal) Then
+                Dim firstBreak As Integer = raw.IndexOf(vbLf, StringComparison.Ordinal)
+                If firstBreak >= 0 Then
+                    raw = raw.Substring(firstBreak + 1)
+                End If
+                If raw.EndsWith("```", StringComparison.Ordinal) Then
+                    raw = raw.Substring(0, raw.Length - 3)
+                End If
+                raw = raw.Trim()
+                If raw = "" Then
+                    Return False
+                End If
+            End If
+
+            ' A whole-payload JSON object/array is a provider envelope, never user-facing.
+            If LooksLikeRawStructuredPayload(raw) Then
+                Return True
+            End If
+
+            ' Embedded provider tool-call / function-call / function-response markers.
+            Return Regex.IsMatch(
+                raw,
+                "(""functionCall""|""function_call""|""functionResponse""|""function_response""|""tool_calls""|""tool_call""|""toolUse""|""tool_use"")",
+                RegexOptions.IgnoreCase Or RegexOptions.CultureInvariant)
         End Function
 
 
@@ -1911,11 +2055,32 @@ Namespace Agents
                 outputKind = If(normalizedKind, "").Trim()
             End If
 
-            Dim inferredDeliverable As Boolean =
-                explicitDeliverable.GetValueOrDefault(False) OrElse
+            ' A transport-successful mutation that applied zero changes is NOT a deliverable:
+            ' it must neither flag deliverable production nor register an artifact, otherwise the
+            ' completion gate (HasValidatedFinalDeliverable) would be falsely satisfied without a
+            ' real file having been produced.
+            Dim isZeroChangeResult As Boolean = IsZeroChangeOperationToken(rootObject, resultObject)
+
+            ' Explicit producesUserDeliverable is authoritative and always honored. All other
+            ' signals are "weak" (a generic created/saved/exported flag, an artifact reference, or
+            ' an output path that may just echo a source 'path'). A weak signal may only infer a
+            ' deliverable when the producing tool is actually capable of producing one. This stops
+            ' read-only tools (e.g. text extract/search) from registering or being promoted to a
+            ' forced deliverable merely because their result echoed the input file path.
+            Dim hasExplicitDeliverableSignal As Boolean = explicitDeliverable.GetValueOrDefault(False)
+
+            Dim hasWeakDeliverableSignal As Boolean =
                 createdStatus.GetValueOrDefault(False) OrElse
                 Not String.IsNullOrWhiteSpace(artifactRef) OrElse
                 Not String.IsNullOrWhiteSpace(outputFilePath)
+
+            Dim producingToolIsDeliverableCapable As Boolean =
+                runState.IsDeliverableCapableTool(runState.LastStructuredToolName)
+
+            Dim inferredDeliverable As Boolean =
+                Not isZeroChangeResult AndAlso
+                (hasExplicitDeliverableSignal OrElse
+                 (hasWeakDeliverableSignal AndAlso producingToolIsDeliverableCapable))
 
             Dim inferredIntermediate As Boolean =
                 explicitIntermediate.GetValueOrDefault(False) OrElse
@@ -1930,6 +2095,16 @@ Namespace Agents
 
             If inferredDeliverable Then
                 runState.AnyUserDeliverableProducedThisRun = True
+            End If
+
+            ' Host-agnostic deliverable registry: record only artifacts that actually exist on disk
+            ' AND resulted from a real change. A zero-change mutation is skipped entirely so it can
+            ' never satisfy the completion gate or be promoted for delivery.
+            If Not isZeroChangeResult Then
+                runState.RegisterExistingDeliverableArtifact(outputFilePath, runState.LastStructuredToolName, inferredDeliverable)
+                For Each producedPath As String In outputFiles
+                    runState.RegisterExistingDeliverableArtifact(producedPath, runState.LastStructuredToolName, inferredDeliverable)
+                Next
             End If
 
             If Not String.IsNullOrWhiteSpace(outputFilePath) Then
@@ -2131,6 +2306,105 @@ Namespace Agents
             Dim references As List(Of String) = ExtractCreatedDeliverableReferences(responseText)
 
             Return (producesUserDeliverable AndAlso created) OrElse references.Count > 0
+        End Function
+
+        ''' <summary>
+        ''' Classifies a transport-successful tool result as an operation no-op when it
+        ''' reports that zero changes were applied. Mutation tools (Word write/markup/comment)
+        ''' return status='none'/'no_match' and/or applied_count=0 while still returning valid
+        ''' (non-error) JSON, i.e. transport success. Such a result must NOT count as workflow
+        ''' progress. Returns False for results without these fields (non-mutation tools are
+        ''' unaffected) and for any result that applied at least one change.
+        ''' </summary>
+        Public Shared Function IsZeroChangeOperationResult(responseText As String) As Boolean
+            Dim raw As String = If(responseText, "").Trim()
+            If raw = "" Then Return False
+
+            Dim obj As JObject
+            Try
+                obj = TryCast(JToken.Parse(raw), JObject)
+            Catch
+                Return False
+            End Try
+            If obj Is Nothing Then Return False
+
+            ' applied_count is the authoritative signal when present.
+            Dim appliedToken As JToken = obj("applied_count")
+            If appliedToken IsNot Nothing AndAlso appliedToken.Type <> JTokenType.Null Then
+                Dim appliedCount As Integer
+                If Integer.TryParse(appliedToken.ToString().Trim(), appliedCount) Then
+                    Return appliedCount <= 0
+                End If
+            End If
+
+            ' Fall back to an explicit no-op status only when applied_count is absent.
+            Dim statusValue As String = If(obj.Value(Of String)("status"), "").Trim().ToLowerInvariant()
+            Return statusValue = "none" OrElse statusValue = "no_match"
+        End Function
+
+        ''' <summary>
+        ''' Builds a stable per-anchor breaker key from the tool name and the file it targets,
+        ''' independent of the exact 'find' text. This makes reworded retries against the same
+        ''' file collapse onto one counter so a repeated no-op edit can be bounded.
+        ''' </summary>
+        Public Shared Function BuildOperationTargetKey(toolName As String, responseText As String) As String
+            Dim name As String = If(toolName, "").Trim().ToLowerInvariant()
+            Dim path As String = ""
+            Try
+                Dim obj As JObject = TryCast(JToken.Parse(If(responseText, "").Trim()), JObject)
+                If obj IsNot Nothing Then
+                    path = If(obj.Value(Of String)("path"), "").Trim().ToLowerInvariant()
+                End If
+            Catch
+            End Try
+            Return name & "|" & path
+        End Function
+
+        ''' <summary>
+        ''' Builds the same per-target breaker key as <see cref="BuildOperationTargetKey"/> but from a
+        ''' known tool name and file path (e.g. the tool call arguments), so the key can be computed
+        ''' BEFORE the tool executes. Used by the pre-execution no-op circuit breaker.
+        ''' </summary>
+        Public Shared Function BuildOperationTargetKeyFromPath(toolName As String, path As String) As String
+            Return If(toolName, "").Trim().ToLowerInvariant() & "|" & If(path, "").Trim().ToLowerInvariant()
+        End Function
+
+        ''' <summary>
+        ''' Builds a stable per-run key for a read/expansion request (e.g. context_expand) from the
+        ''' stored reference plus the requested window, so a repeated expansion of an already-read
+        ''' (ref + range) can be detected as no-progress and suppressed. Generalizes the no-op circuit
+        ''' breaker beyond Word mutations to any repeated no-progress call.
+        ''' </summary>
+        Public Shared Function BuildExpandedRefRangeKey(refId As String, rangeStart As String, rangeEnd As String) As String
+            Return If(refId, "").Trim().ToLowerInvariant() & "|" &
+                   If(rangeStart, "").Trim() & "|" &
+                   If(rangeEnd, "").Trim()
+        End Function
+
+        ''' <summary>
+        ''' Token overload of the zero-change classifier for callers that already parsed the result.
+        ''' Checks applied_count (authoritative) first on the root and result objects, then falls back
+        ''' to an explicit no-op status. Returns False when neither signal is present.
+        ''' </summary>
+        Private Shared Function IsZeroChangeOperationToken(root As JObject, result As JObject) As Boolean
+            For Each obj As JObject In New JObject() {root, result}
+                If obj Is Nothing Then Continue For
+                Dim ac As JToken = obj("applied_count")
+                If ac IsNot Nothing AndAlso ac.Type <> JTokenType.Null Then
+                    Dim n As Integer
+                    If Integer.TryParse(ac.ToString().Trim(), n) Then
+                        Return n <= 0
+                    End If
+                End If
+            Next
+
+            For Each obj As JObject In New JObject() {root, result}
+                If obj Is Nothing Then Continue For
+                Dim st As String = If(obj.Value(Of String)("status"), "").Trim().ToLowerInvariant()
+                If st = "none" OrElse st = "no_match" Then Return True
+            Next
+
+            Return False
         End Function
 
         Public Shared Sub NoteToolResultForRepair(runState As ToolingRunState,

@@ -29,6 +29,20 @@
 '         1. The top of the thread-local stack (the form that pushed itself).
 '         2. The Office host window hwnd (Word/Excel/Outlook) via GetOfficeApplicationHwnd.
 '         3. Nothing (caller falls back to ShowDialog() with no owner).
+'
+'   IMPORTANT (cross-host modal deadlock prevention):
+'     Never pass a foreign or unverified owner directly to ShowDialog(owner)
+'     (e.g. New WindowWrapper(ownerHandle), Form.ActiveForm, or a caller-supplied
+'     owner/ownerForm/ownerHandle). Such an owner may belong to another UI thread
+'     or Office host process; ShowDialog disables it and may never re-enable it,
+'     freezing that host. Before using any such owner, call
+'     OfficeWindowWatchdog.InspectDialogOwner(...) to log the attempt and
+'     SharedMethods.IfOwnerOnCurrentThread(...) to reject a cross-thread owner
+'     (falling back to an ownerless dialog). For ambient owners, prefer
+'     SharedMethods.ResolveSameThreadDialogOwner(); do NOT call the internal
+'     ResolveDialogOwner() directly for ShowDialog. See the "Modal Dialog
+'     Ownership (Cross-Host Deadlock Prevention)" section in CONTRIBUTING.md.
+' =============================================================================
 ' =============================================================================
 
 Option Strict On

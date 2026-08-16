@@ -799,6 +799,54 @@ Partial Public Class ThisAddIn
     End Sub
 
     ''' <summary>
+    ''' Bridges the host-agnostic deliverable registry (ToolingRunState) into the
+    ''' Outlook collection path. Every registered final-deliverable artifact that lives
+    ''' inside the active session staging directory is promoted into
+    ''' _chatAgentForcedDeliverables, the set CollectResultAttachments already consults
+    ''' to bypass the "already surfaced" filter. This guarantees a validated deliverable
+    ''' that satisfied the completion gate is actually attached, even if it pre-existed
+    ''' the turn (e.g. word_save_as overwriting a prior file). The directory scan itself
+    ''' is intentionally left unchanged to minimize regression risk.
+    ''' </summary>
+    Friend Sub PromoteRegisteredDeliverablesToForcedDelivery(runState As SharedLibrary.Agents.ToolCallSequencing.ToolingRunState)
+        Try
+            If runState Is Nothing OrElse runState.RegisteredDeliverableArtifacts Is Nothing Then Return
+            If _chatAgentForcedDeliverables Is Nothing Then
+                _chatAgentForcedDeliverables = New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+            End If
+
+            Dim stagingDir As String =
+                If(_apActive AndAlso Not String.IsNullOrWhiteSpace(_apCurrentTempDir),
+                   _apCurrentTempDir, _chatAgentTempDir)
+            If String.IsNullOrWhiteSpace(stagingDir) Then Return
+            Dim stagingFull As String = Path.GetFullPath(stagingDir)
+            Dim promotedCount As Integer = 0
+
+            For Each artifact In runState.RegisteredDeliverableArtifacts
+                If artifact Is Nothing OrElse Not artifact.IsFinalDeliverable Then Continue For
+                If String.IsNullOrWhiteSpace(artifact.SessionPath) Then Continue For
+                If Not File.Exists(artifact.SessionPath) Then Continue For
+
+                Dim full As String = Path.GetFullPath(artifact.SessionPath)
+                ' Security: only files inside the active session staging dir are eligible.
+                If Not full.StartsWith(stagingFull, StringComparison.OrdinalIgnoreCase) Then Continue For
+
+                If _chatAgentForcedDeliverables.Add(full) Then
+                    promotedCount += 1
+                    ToolingFileLogger.LogStep(
+                        $"Deliverable registry: promoted artifact to forced delivery. tool={If(artifact.SourceTool, "")}; file={Path.GetFileName(full)}")
+                End If
+            Next
+
+            ToolingFileLogger.LogStep(
+                $"Deliverable registry summary. registered={runState.RegisteredDeliverableArtifacts.Count}; promotedThisCall={promotedCount}; validatedFinal={runState.HasValidatedFinalDeliverable}")
+        Catch ex As Exception
+            ' Never throw from delivery promotion. Worst case the scan behaves exactly as before.
+            ToolingFileLogger.LogWarn("PromoteRegisteredDeliverablesToForcedDelivery failed.", ex:=ex)
+        End Try
+    End Sub
+
+    ''' <summary>
     ''' Deletes the chat agent temp directory (recursively, including subdirectories)
     ''' and resets the file tracking list. Safe to call multiple times.
     ''' </summary>

@@ -69,8 +69,12 @@ Namespace Agents
                 Return WordDocTools.Execute(toolName, arguments)
             End If
 
+            If BrowserTools.IsBrowserTool(toolName) Then
+                Return Await BrowserTools.ExecuteAsync(toolName, arguments, cancellationToken, sharedContext).ConfigureAwait(False)
+            End If
+
             If JsRunTool.IsJsTool(toolName) Then
-                Return Await JsRunTool.ExecuteAsync(arguments, cancellationToken).ConfigureAwait(False)
+                Return Await JsRunTool.ExecuteAsync(arguments, sharedContext, cancellationToken).ConfigureAwait(False)
             End If
 
             If String.Equals(toolName, SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) Then
@@ -99,7 +103,9 @@ Namespace Agents
             If WorkspaceTools.IsWorkspaceTool(toolName) Then Return True
             If WordTools.IsWordTool(toolName) Then Return True
             If WordDocTools.IsWordDocTool(toolName) Then Return True
+            If BrowserTools.IsBrowserTool(toolName) Then Return True
             If JsRunTool.IsJsTool(toolName) Then Return True
+            If String.Equals(toolName, SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) Then Return True
             If String.Equals(toolName, SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) Then Return True
             If toolName.StartsWith(AgentToolPrefix, StringComparison.OrdinalIgnoreCase) Then Return True
             Return False

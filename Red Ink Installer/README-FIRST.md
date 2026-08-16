@@ -23,16 +23,25 @@ This produces six MSI packages per channel:
 
 ## Public release ZIP files
 
-The publishing workflow creates stable download filenames:
+The publishing workflow creates one stable public ZIP per Office application. Preview uses:
 
-- `D:\Clickonce\redink\apps\preview\redink-preview-msi.zip`
-- `D:\Clickonce\redink\apps\ga\redink-ga-msi.zip`
+- `D:\Clickonce\redink\apps\preview\redink-word-preview-msi.zip`
+- `D:\Clickonce\redink\apps\preview\redink-excel-preview-msi.zip`
+- `D:\Clickonce\redink\apps\preview\redink-outlook-preview-msi.zip`
+
+GA uses:
+
+- `D:\Clickonce\redink\apps\ga\redink-word-msi.zip`
+- `D:\Clickonce\redink\apps\ga\redink-excel-msi.zip`
+- `D:\Clickonce\redink\apps\ga\redink-outlook-msi.zip`
 
 These filenames remain unchanged from release to release, so download links can stay stable.
 
-Each ZIP contains:
+The build still produces and validates all six x86/x64 MSI packages per channel. Public ZIP files contain the x64 package only, and each application is packaged separately to keep the download size small.
 
-- all six signed MSI packages for the channel
+Each application ZIP contains:
+
+- exactly one signed x64 MSI package for Word, Excel, or Outlook
 - `VERSION.txt`
 - `RELEASE-INFO.txt`
 - `INSTALL.txt`
@@ -43,7 +52,7 @@ Each ZIP contains:
 - `Detect-RedInk-Prerequisites.ps1`
 - `SHA256SUMS.txt`
 
-The ZIP itself also has a `.sha256` file beside it.
+Each ZIP also has its own `.sha256` file beside it.
 
 ## Digital signatures
 
@@ -163,14 +172,14 @@ See `CUSTOMER-DEPLOYMENT-GUIDE.md` and `CUSTOMER-SILENT-COMMANDS.md` for deploym
 
 ## Release archive
 
-When a new public ZIP differs from the current live ZIP, the previous ZIP is archived under:
+When a new application ZIP differs from its current live ZIP, the previous application ZIP is archived under:
 
 ```text
 D:\Clickonce\redink\msi-backup\preview
 D:\Clickonce\redink\msi-backup\ga
 ```
 
-Identical historical ZIP files are not archived more than once.
+Identical historical ZIP files for the same application are not archived more than once.
 
 ## Further information
 

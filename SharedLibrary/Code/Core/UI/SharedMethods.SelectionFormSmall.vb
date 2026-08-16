@@ -306,8 +306,18 @@ Namespace SharedLibrary
                 Return 0
             End If
 
-            Dim effectiveOwner As System.Windows.Forms.IWin32Window =
-        If(owner, SharedMethods.ResolveSameThreadDialogOwner())
+            Dim effectiveOwner As System.Windows.Forms.IWin32Window
+            If owner IsNot Nothing Then
+                ' Caller-supplied owners must be inspected and same-thread filtered too.
+                ' Otherwise a foreign (cross-thread/cross-process) owner would be disabled by
+                ' ShowDialog and never re-enabled, deadlocking that host window. InspectDialogOwner
+                ' also records the attempt in the crash log; IfOwnerOnCurrentThread rejects a
+                ' cross-thread owner and falls back to an ownerless dialog.
+                OfficeWindowWatchdog.InspectDialogOwner(owner, "SelectValue", "SelectValue")
+                effectiveOwner = SharedMethods.IfOwnerOnCurrentThread(owner)
+            Else
+                effectiveOwner = SharedMethods.ResolveSameThreadDialogOwner()
+            End If
 
             Using frm As New SelectionFormSmall(items.ToList(), defaultValue, prompt, header, actionButtonText, actionButtonValue)
                 If effectiveOwner IsNot Nothing Then

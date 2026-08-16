@@ -7,7 +7,7 @@
 '          theme / fonts / colors / custom assets) of a second .pptx, without
 '          losing any content of the source deck.
 '
-' Strategy (Hybrid C, see design proposal):
+' Strategy:
 '   1. Copy the template .pptx to the output path and strip its sample slides.
 '   2. For each source slide pick the best matching template layout
 '      (heuristic, optional LLM, optional user review dialog).

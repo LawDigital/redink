@@ -71,7 +71,10 @@ Namespace Agents
             WordTools.ToolCommentRemove,
             WordTools.ToolFormat,
             WordTools.ToolApplyTemplate,
-            WordTools.ToolSaveAs
+            WordTools.ToolSaveAs,
+            BrowserTools.BrowserOpenToolName,
+            BrowserTools.BrowserSnapshotToolName,
+            BrowserTools.BrowserInteractToolName
         }
 
         Private ReadOnly OutlookOnlyInternalToolNames As String() = New String() {

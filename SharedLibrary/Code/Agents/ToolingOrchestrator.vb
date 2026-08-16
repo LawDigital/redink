@@ -85,7 +85,8 @@ Namespace Agents
         Public Function EvaluateFinalTurn(finalText As String,
                                           requestRequiresCreatedDeliverable As Boolean,
                                           hasProducedUserDeliverable As Boolean,
-                                          availableUntriedFallbackToolNames As IReadOnlyList(Of String)) As FinalTurnEvaluation
+                                          availableUntriedFallbackToolNames As IReadOnlyList(Of String),
+                                          Optional hasValidatedFinalDeliverable As Boolean = True) As FinalTurnEvaluation
 
             Dim result As New FinalTurnEvaluation()
 
@@ -131,9 +132,42 @@ Namespace Agents
                 Return result
             End If
 
+            ' (d) Deliverable-existence gate. Applies to COMPLETE finals:
+            '     if the request requires a created deliverable, the host must possess a
+            '     validated (on-disk) final artifact. A 'complete' claim without a real,
+            '     existing file is rejected and repaired. This is bounded by the host's
+            '     continuation-retry budget, so a genuinely un-registerable deliverable
+            '     still finalizes after the budget is exhausted (no hard deadlock).
+            If parsed.Kind = TaskStatusKind.Complete _
+               AndAlso requestRequiresCreatedDeliverable _
+               AndAlso Not hasValidatedFinalDeliverable Then
+
+                result.Decision = FinalTurnDecision.RejectDeliverableFallbackRequired
+                result.GuardTitle = "complete_without_validated_deliverable"
+                result.Reason = "complete_claimed_without_validated_file_deliverable"
+                result.GuardPrompt = BuildMissingDeliverableGuardPrompt(availableUntriedFallbackToolNames)
+                Return result
+            End If
+
             ' All gates passed.
             result.Decision = FinalTurnDecision.Accept
             Return result
+        End Function
+
+        Private Function BuildMissingDeliverableGuardPrompt(untriedFallbackToolNames As IReadOnlyList(Of String)) As String
+            Dim sb As New StringBuilder()
+            sb.AppendLine("HOST DELIVERABLE GUARD: You reported the task as 'complete', but the user's request requires a created file and NO validated output file exists yet.")
+            sb.AppendLine("A path mentioned in prose or tool metadata does NOT count. The file must actually be written to the working location by a tool.")
+            sb.AppendLine("Before you may report 'complete', invoke a tool that actually creates or saves the requested file (for example a write/export/save-as tool).")
+            If untriedFallbackToolNames IsNot Nothing AndAlso untriedFallbackToolNames.Count > 0 Then
+                sb.AppendLine("Candidate tools that can produce the deliverable and have not yet been used this run:")
+                For Each toolName As String In untriedFallbackToolNames
+                    If String.IsNullOrWhiteSpace(toolName) Then Continue For
+                    sb.AppendLine("  - " & toolName.Trim())
+                Next
+            End If
+            sb.AppendLine("If the deliverable genuinely cannot be created, declare 'blocked' with a short reason instead of 'complete', and do not announce future work.")
+            Return sb.ToString().TrimEnd()
         End Function
 
         Private Function BuildMalformedFooterGuardPrompt(parsed As TaskStatusFooter) As String

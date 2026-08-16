@@ -1,6 +1,6 @@
 # Red Ink silent deployment examples
 
-Use the filenames contained in the release ZIP. `<version>` means the version in `VERSION.txt`.
+Use the MSI filename contained in the corresponding Word, Excel or Outlook release ZIP. Each public x64 ZIP contains one application MSI. `<version>` means the version in `VERSION.txt`.
 
 ## Preview example — Excel x64
 

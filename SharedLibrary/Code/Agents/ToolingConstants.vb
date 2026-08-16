@@ -7,7 +7,7 @@
 '          and Excel. These replace the per-host scattered defaults.
 '
 ' Constants:
-'  - DefaultMaxToolIterations = 50 (unified across all hosts).
+'  - DefaultMaxToolIterations = 100 (unified across all hosts).
 '  - LlmTimeoutBufferSeconds = 60 (added per iteration).
 '  - MaxContinuationRetries = 5 (repair attempts for recovery).
 '  - SubAgentLargeToolResponseThresholdChars = 30000 (compaction trigger).
@@ -30,7 +30,7 @@ Namespace Agents
     Public Module ToolingConstants
 
         ''' <summary>Unified default for INI_ToolingMaximumIterations across all hosts.</summary>
-        Public Const DefaultMaxToolIterations As Integer = 50
+        Public Const DefaultMaxToolIterations As Integer = 100
 
         ''' <summary>Additional seconds added to the configured LLM timeout per iteration.</summary>
         Public Const LlmTimeoutBufferSeconds As Integer = 60

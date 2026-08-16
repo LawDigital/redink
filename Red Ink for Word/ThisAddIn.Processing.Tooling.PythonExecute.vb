@@ -80,9 +80,27 @@ Partial Public Class ThisAddIn
         If String.IsNullOrWhiteSpace(System.IO.Path.GetFileName(subPath)) Then Return
 
         Try
-            ' PathPolicy.Resolve enforces workspace/Desktop containment; the subpath preserves
-            ' output subdirectories so distinct outputs sharing a filename do not collide.
-            Dim targetPath As String = SharedLibrary.Agents.PathPolicy.Resolve(subPath, SharedLibrary.Agents.PathAccess.Write)
+            Dim ws As String = SharedLibrary.Agents.PathPolicy.WorkspaceRoot
+            Dim targetPath As String
+            If Not String.IsNullOrWhiteSpace(ws) AndAlso System.IO.Directory.Exists(ws) Then
+                ' Workspace connected: preserve existing behavior. PathPolicy.Resolve enforces
+                ' workspace/Desktop containment; the subpath preserves output subdirectories so
+                ' distinct outputs sharing a filename do not collide.
+                targetPath = SharedLibrary.Agents.PathPolicy.Resolve(subPath, SharedLibrary.Agents.PathAccess.Write)
+            Else
+                ' No workspace connected: publish to the Desktop explicitly. The default writable
+                ' root is NOT used here, because with no workspace it resolves to the per-session
+                ' staging directory (set via WordEnsureAgentTempDir), which is deleted on session
+                ' cleanup and would silently discard the deliverable. The subpath is preserved and
+                ' contained under the Desktop; a subpath that would escape is flattened to its file name.
+                Dim baseRoot As String = System.IO.Path.GetFullPath(Environment.GetFolderPath(Environment.SpecialFolder.Desktop))
+                targetPath = System.IO.Path.GetFullPath(System.IO.Path.Combine(baseRoot, subPath))
+                Dim containmentPrefix As String = baseRoot.TrimEnd(System.IO.Path.DirectorySeparatorChar) & System.IO.Path.DirectorySeparatorChar
+                If Not targetPath.StartsWith(containmentPrefix, StringComparison.OrdinalIgnoreCase) Then
+                    targetPath = System.IO.Path.Combine(baseRoot, System.IO.Path.GetFileName(subPath))
+                End If
+            End If
+
             Dim targetDir As String = System.IO.Path.GetDirectoryName(targetPath)
             If Not String.IsNullOrWhiteSpace(targetDir) AndAlso Not System.IO.Directory.Exists(targetDir) Then
                 System.IO.Directory.CreateDirectory(targetDir)

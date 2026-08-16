@@ -561,6 +561,17 @@ Namespace SharedLibrary
                     owner = System.Windows.Forms.Form.ActiveForm
                 End If
 
+                ' Inspect and same-thread filter the resolved owner before using it as a modal
+                ' owner. A foreign owner (e.g. another Office process's main window, whether passed
+                ' in via ownerHandle or picked up as ActiveForm) would be disabled by ShowDialog and
+                ' never re-enabled, deadlocking that host. InspectDialogOwner logs cross-process
+                ' attempts; IfOwnerOnCurrentThread rejects a cross-thread owner so we fall back to
+                ' an ownerless dialog instead of deadlocking.
+                If owner IsNot Nothing Then
+                    OfficeWindowWatchdog.InspectDialogOwner(owner, "ShowTextFileEditor", "ShowTextFileEditor")
+                    owner = SharedMethods.IfOwnerOnCurrentThread(owner)
+                End If
+
                 If owner IsNot Nothing Then
                     editorForm.ShowDialog(owner)
                 Else

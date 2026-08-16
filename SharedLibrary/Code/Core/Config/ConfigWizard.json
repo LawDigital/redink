@@ -1190,6 +1190,27 @@
                     "description": "Optional external agent executable used for Python execution in agentic loops. Format: FullPathToExecutable;SignerNameOrSHA. The part after ';' may contain the digital signer name to verify, a SHA to verify before execution, or be left blank. Example: C:\\Tools\\redink-python-agent.exe;CN=Contoso Code Signing. [PythonAgentPath]"
                 },
                 {
+                    "key": "JsRunDisable",
+                    "label": "Disable JavaScript Execution",
+                    "type": "boolean",
+                    "default": "False",
+                    "description": "Enable this to hard-disable the js_run JavaScript sandbox tool across the application. When True, JavaScript execution is not exposed to tooling and any direct js_run call is rejected. Example: False. [JsRunDisable]"
+                },
+                {
+                    "key": "JsRunDisable",
+                    "label": "Disable JavaScript Execution",
+                    "type": "boolean",
+                    "default": "False",
+                    "description": "Enable this to hard-disable the js_run JavaScript sandbox tool across the application. When True, JavaScript execution is not exposed to tooling and any direct js_run call is rejected. Example: False. [JsRunDisable]"
+                },
+                {
+                    "key": "BrowserToolsDisable",
+                    "label": "Disable Browser Tools",
+                    "type": "boolean",
+                    "default": "False",
+                    "description": "Enable this to hard-disable the browser tools (PlayWright) across the application. When True, browser tool execution is not exposed to tooling and any direct browser tool call is rejected. Example: False. [BrowserToolsDisable]"
+                },
+                {
                     "key": "InkyMemoryCap",
                     "label": "InkyMemory Item Cap",
                     "type": "integer",

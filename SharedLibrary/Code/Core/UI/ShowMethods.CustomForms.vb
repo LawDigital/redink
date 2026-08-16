@@ -3244,6 +3244,7 @@ Namespace SharedLibrary
 
             Public Property CallerId As System.String
             Public Property PersistedState As System.String
+            Public Property RestorePersistedState As System.Boolean
 
             Public Property Modes As System.Collections.Generic.List(Of FreestylePromptMode)
             Public Property QuickButtons As System.Collections.Generic.List(Of FreestylePromptQuickButton)
@@ -3263,6 +3264,7 @@ Namespace SharedLibrary
                 Me.Context = Nothing
                 Me.CallerId = System.String.Empty
                 Me.PersistedState = System.String.Empty
+                Me.RestorePersistedState = True
                 Me.Modes = New System.Collections.Generic.List(Of FreestylePromptMode)()
                 Me.QuickButtons = New System.Collections.Generic.List(Of FreestylePromptQuickButton)()
                 Me.InsertOptions = New System.Collections.Generic.List(Of FreestylePromptInsertOption)()
@@ -3680,6 +3682,199 @@ Namespace SharedLibrary
         End Function
 
 
+        Private Shared Function TryGetFreestyleToggleTriggerMatch(
+            ByVal text As System.String,
+            ByVal definition As FreestylePromptToggleOption,
+            ByRef matchedTrigger As System.String,
+            ByRef argument As System.String) As System.Boolean
+
+            matchedTrigger = System.String.Empty
+            argument = System.String.Empty
+
+            If definition Is Nothing Then
+                Return False
+            End If
+
+            Dim source As System.String = If(text, System.String.Empty)
+
+            If definition.HasArgument Then
+
+                Dim argumentPrefix As System.String = System.String.Empty
+                Dim argumentSuffix As System.String = System.String.Empty
+
+                If Not System.String.IsNullOrWhiteSpace(definition.ArgumentTemplate) Then
+
+                    Dim template As System.String = definition.ArgumentTemplate
+                    Dim placeholder As System.String = If(System.String.IsNullOrWhiteSpace(definition.ArgumentPlaceholder), "[value]", definition.ArgumentPlaceholder)
+                    Dim placeholderIndex As System.Int32 = template.IndexOf(placeholder, System.StringComparison.Ordinal)
+
+                    If placeholderIndex >= 0 Then
+                        argumentPrefix = template.Substring(0, placeholderIndex)
+                        argumentSuffix = template.Substring(placeholderIndex + placeholder.Length)
+                    Else
+                        argumentPrefix = template
+                    End If
+
+                Else
+
+                    argumentPrefix = If(definition.ArgumentPrefix, System.String.Empty)
+                    argumentSuffix = If(definition.ArgumentSuffix, System.String.Empty)
+
+                End If
+
+                If argumentPrefix.Length > 0 Then
+
+                    Dim searchIndex As System.Int32 = 0
+
+                    Do
+
+                        Dim prefixIndex As System.Int32 = source.IndexOf(argumentPrefix, searchIndex, System.StringComparison.OrdinalIgnoreCase)
+
+                        If prefixIndex < 0 Then
+                            Exit Do
+                        End If
+
+                        Dim valueStart As System.Int32 = prefixIndex + argumentPrefix.Length
+                        Dim valueEnd As System.Int32 = -1
+                        Dim triggerEnd As System.Int32 = -1
+
+                        If argumentSuffix.Length > 0 Then
+
+                            valueEnd = source.IndexOf(argumentSuffix, valueStart, System.StringComparison.OrdinalIgnoreCase)
+
+                            If valueEnd >= 0 Then
+                                triggerEnd = valueEnd + argumentSuffix.Length
+                            End If
+
+                        Else
+
+                            valueEnd = valueStart
+
+                            While valueEnd < source.Length AndAlso Not System.Char.IsWhiteSpace(source(valueEnd))
+                                valueEnd += 1
+                            End While
+
+                            triggerEnd = valueEnd
+
+                        End If
+
+                        If valueEnd >= valueStart AndAlso triggerEnd >= valueStart Then
+
+                            Dim extractedArgument As System.String = source.Substring(valueStart, valueEnd - valueStart)
+
+                            If extractedArgument.Length > 0 OrElse Not definition.ArgumentRequired Then
+                                matchedTrigger = source.Substring(prefixIndex, triggerEnd - prefixIndex)
+                                argument = extractedArgument
+                                Return True
+                            End If
+
+                        End If
+
+                        searchIndex = prefixIndex + System.Math.Max(1, argumentPrefix.Length)
+
+                    Loop While searchIndex < source.Length
+
+                End If
+
+            End If
+
+            Dim fixedTrigger As System.String = If(definition.Trigger, System.String.Empty).Trim()
+
+            If fixedTrigger.Length > 0 Then
+
+                Dim fixedIndex As System.Int32 = source.IndexOf(fixedTrigger, System.StringComparison.OrdinalIgnoreCase)
+
+                If fixedIndex >= 0 Then
+                    matchedTrigger = source.Substring(fixedIndex, fixedTrigger.Length)
+                    Return True
+                End If
+
+            End If
+
+            Return False
+
+        End Function
+
+
+        Private Shared Function RemoveFreestyleToggleTriggers(ByVal text As System.String, ByVal definition As FreestylePromptToggleOption) As System.String
+
+            Dim result As System.String = If(text, System.String.Empty)
+
+            If definition Is Nothing Then
+                Return result
+            End If
+
+            Do
+
+                Dim matchedTrigger As System.String = System.String.Empty
+                Dim argument As System.String = System.String.Empty
+
+                If Not SharedMethods.TryGetFreestyleToggleTriggerMatch(result, definition, matchedTrigger, argument) Then
+                    Exit Do
+                End If
+
+                If matchedTrigger.Length = 0 Then
+                    Exit Do
+                End If
+
+                Dim matchIndex As System.Int32 = result.IndexOf(matchedTrigger, System.StringComparison.OrdinalIgnoreCase)
+
+                If matchIndex < 0 Then
+                    Exit Do
+                End If
+
+                Dim removeStart As System.Int32 = matchIndex
+                Dim removeLength As System.Int32 = matchedTrigger.Length
+                Dim characterBefore As System.Int32 = removeStart - 1
+                Dim characterAfter As System.Int32 = removeStart + removeLength
+
+                If characterBefore >= 0 AndAlso characterAfter < result.Length AndAlso
+                   result(characterBefore) = " "c AndAlso result(characterAfter) = " "c Then
+
+                    removeLength += 1
+
+                ElseIf removeStart = 0 AndAlso characterAfter < result.Length AndAlso result(characterAfter) = " "c Then
+
+                    removeLength += 1
+
+                ElseIf characterAfter = result.Length AndAlso characterBefore >= 0 AndAlso result(characterBefore) = " "c Then
+
+                    removeStart -= 1
+                    removeLength += 1
+
+                End If
+
+                result = result.Remove(removeStart, removeLength)
+
+            Loop
+
+            Return result
+
+        End Function
+
+
+        Private Shared Function AppendFreestyleToggleTrigger(ByVal text As System.String, ByVal trigger As System.String) As System.String
+
+            Dim result As System.String = If(text, System.String.Empty)
+            Dim cleanedTrigger As System.String = If(trigger, System.String.Empty).Trim()
+
+            If cleanedTrigger.Length = 0 Then
+                Return result
+            End If
+
+            If result.Length = 0 Then
+                Return cleanedTrigger
+            End If
+
+            If System.Char.IsWhiteSpace(result(result.Length - 1)) Then
+                Return result & cleanedTrigger
+            End If
+
+            Return result & " " & cleanedTrigger
+
+        End Function
+
+
         Public Shared Function ShowFreestylePromptForm(ByVal options As FreestylePromptOptions) As FreestylePromptResult
 
             Dim returnValue As New FreestylePromptResult()
@@ -3939,6 +4134,10 @@ Namespace SharedLibrary
                                 ' =========================================================
 
                                 Dim synchronizingMode As System.Boolean = False
+                                Dim synchronizingToggleOptions As System.Boolean = False
+                                Dim synchronizeToggleOptionsFromPrompt As System.Action = Nothing
+                                Dim synchronizePromptFromCheckedToggleOptions As System.Action = Nothing
+                                Dim updateLayout As System.Action = Nothing
                                 Dim defaultMode As FreestylePromptMode = Nothing
                                 Dim lastAvailableMode As FreestylePromptMode = Nothing
 
@@ -3955,33 +4154,37 @@ Namespace SharedLibrary
                                 AddHandler promptTextBox.TextChanged,
                                     Sub(sender As System.Object, e As System.EventArgs)
 
-                                        If synchronizingMode Then
-                                            Return
-                                        End If
+                                        If Not synchronizingMode Then
 
-                                        Dim match As System.Tuple(Of FreestylePromptMode, System.String) = SharedMethods.FindFreestylePromptMode(promptTextBox.Text, options.Modes)
+                                            Dim match As System.Tuple(Of FreestylePromptMode, System.String) = SharedMethods.FindFreestylePromptMode(promptTextBox.Text, options.Modes)
 
-                                        synchronizingMode = True
+                                            synchronizingMode = True
 
-                                        Try
+                                            Try
 
-                                            If match IsNot Nothing Then
+                                                If match IsNot Nothing Then
 
-                                                modeCombo.SelectedItem = match.Item1
+                                                    modeCombo.SelectedItem = match.Item1
 
-                                            Else
+                                                Else
 
-                                                Dim manualPrefix As System.String = SharedMethods.GetFreestyleLeadingColonToken(promptTextBox.Text)
+                                                    Dim manualPrefix As System.String = SharedMethods.GetFreestyleLeadingColonToken(promptTextBox.Text)
 
-                                                If manualPrefix.Length > 0 AndAlso defaultMode IsNot Nothing Then
-                                                    modeCombo.SelectedItem = defaultMode
+                                                    If manualPrefix.Length > 0 AndAlso defaultMode IsNot Nothing Then
+                                                        modeCombo.SelectedItem = defaultMode
+                                                    End If
+
                                                 End If
 
-                                            End If
+                                            Finally
+                                                synchronizingMode = False
+                                            End Try
 
-                                        Finally
-                                            synchronizingMode = False
-                                        End Try
+                                        End If
+
+                                        If synchronizeToggleOptionsFromPrompt IsNot Nothing Then
+                                            synchronizeToggleOptionsFromPrompt.Invoke()
+                                        End If
 
                                     End Sub
 
@@ -4302,22 +4505,143 @@ Namespace SharedLibrary
                                             optionHost.Controls.Add(argumentTextBox, 0, 1)
                                             argumentTextBoxes.Add(optionCheckBox, argumentTextBox)
 
-                                            AddHandler optionCheckBox.CheckedChanged,
+                                        End If
+
+                                        AddHandler optionCheckBox.CheckedChanged,
+                                            Sub(sender As System.Object, e As System.EventArgs)
+
+                                                Dim changedCheckBox As System.Windows.Forms.CheckBox = TryCast(sender, System.Windows.Forms.CheckBox)
+
+                                                If changedCheckBox Is Nothing Then
+                                                    Return
+                                                End If
+
+                                                Dim changedDefinition As FreestylePromptToggleOption = TryCast(changedCheckBox.Tag, FreestylePromptToggleOption)
+
+                                                If changedDefinition Is Nothing Then
+                                                    Return
+                                                End If
+
+                                                Dim linkedTextBox As System.Windows.Forms.TextBox = Nothing
+
+                                                If argumentTextBoxes.ContainsKey(changedCheckBox) Then
+                                                    linkedTextBox = argumentTextBoxes(changedCheckBox)
+                                                    linkedTextBox.Enabled = changedCheckBox.Checked
+                                                End If
+
+                                                If synchronizingToggleOptions Then
+                                                    Return
+                                                End If
+
+                                                synchronizingToggleOptions = True
+
+                                                Try
+
+                                                    Dim updatedPrompt As System.String = promptTextBox.Text
+
+                                                    If changedCheckBox.Checked Then
+
+                                                        Dim matchedTrigger As System.String = System.String.Empty
+                                                        Dim matchedArgument As System.String = System.String.Empty
+
+                                                        If SharedMethods.TryGetFreestyleToggleTriggerMatch(updatedPrompt, changedDefinition, matchedTrigger, matchedArgument) Then
+
+                                                            If linkedTextBox IsNot Nothing AndAlso matchedArgument.Length > 0 Then
+                                                                linkedTextBox.Text = matchedArgument
+                                                            End If
+
+                                                        Else
+
+                                                            Dim argumentValue As System.String = System.String.Empty
+
+                                                            If linkedTextBox IsNot Nothing Then
+                                                                argumentValue = linkedTextBox.Text.Trim()
+                                                            End If
+
+                                                            Dim triggerToInsert As System.String = changedDefinition.BuildTrigger(argumentValue)
+
+                                                            If Not System.String.IsNullOrWhiteSpace(triggerToInsert) Then
+                                                                updatedPrompt = SharedMethods.AppendFreestyleToggleTrigger(updatedPrompt, triggerToInsert)
+                                                            End If
+
+                                                        End If
+
+                                                    Else
+
+                                                        updatedPrompt = SharedMethods.RemoveFreestyleToggleTriggers(updatedPrompt, changedDefinition)
+
+                                                    End If
+
+                                                    If Not System.String.Equals(updatedPrompt, promptTextBox.Text, System.StringComparison.Ordinal) Then
+                                                        Dim oldSelectionStart As System.Int32 = promptTextBox.SelectionStart
+                                                        promptTextBox.Text = updatedPrompt
+                                                        promptTextBox.SelectionStart = System.Math.Min(oldSelectionStart, promptTextBox.TextLength)
+                                                    End If
+
+                                                Finally
+
+                                                    synchronizingToggleOptions = False
+
+                                                End Try
+
+                                                If changedCheckBox.Checked AndAlso linkedTextBox IsNot Nothing Then
+                                                    linkedTextBox.Focus()
+                                                End If
+
+                                            End Sub
+
+                                        If definition.HasArgument Then
+
+                                            Dim argumentTextBoxForHandler As System.Windows.Forms.TextBox = argumentTextBoxes(optionCheckBox)
+                                            argumentTextBoxForHandler.Tag = optionCheckBox
+
+                                            AddHandler argumentTextBoxForHandler.TextChanged,
                                                 Sub(sender As System.Object, e As System.EventArgs)
 
-                                                    Dim changedCheckBox As System.Windows.Forms.CheckBox = TryCast(sender, System.Windows.Forms.CheckBox)
-
-                                                    If changedCheckBox Is Nothing OrElse Not argumentTextBoxes.ContainsKey(changedCheckBox) Then
+                                                    If synchronizingToggleOptions Then
                                                         Return
                                                     End If
 
-                                                    Dim linkedTextBox As System.Windows.Forms.TextBox = argumentTextBoxes(changedCheckBox)
+                                                    Dim changedTextBox As System.Windows.Forms.TextBox = TryCast(sender, System.Windows.Forms.TextBox)
 
-                                                    linkedTextBox.Enabled = changedCheckBox.Checked
-
-                                                    If changedCheckBox.Checked Then
-                                                        linkedTextBox.Focus()
+                                                    If changedTextBox Is Nothing Then
+                                                        Return
                                                     End If
+
+                                                    Dim linkedCheckBox As System.Windows.Forms.CheckBox = TryCast(changedTextBox.Tag, System.Windows.Forms.CheckBox)
+
+                                                    If linkedCheckBox Is Nothing OrElse Not linkedCheckBox.Checked Then
+                                                        Return
+                                                    End If
+
+                                                    Dim changedDefinition As FreestylePromptToggleOption = TryCast(linkedCheckBox.Tag, FreestylePromptToggleOption)
+
+                                                    If changedDefinition Is Nothing Then
+                                                        Return
+                                                    End If
+
+                                                    synchronizingToggleOptions = True
+
+                                                    Try
+
+                                                        Dim updatedPrompt As System.String = SharedMethods.RemoveFreestyleToggleTriggers(promptTextBox.Text, changedDefinition)
+                                                        Dim triggerToInsert As System.String = changedDefinition.BuildTrigger(changedTextBox.Text.Trim())
+
+                                                        If Not System.String.IsNullOrWhiteSpace(triggerToInsert) Then
+                                                            updatedPrompt = SharedMethods.AppendFreestyleToggleTrigger(updatedPrompt, triggerToInsert)
+                                                        End If
+
+                                                        If Not System.String.Equals(updatedPrompt, promptTextBox.Text, System.StringComparison.Ordinal) Then
+                                                            Dim oldSelectionStart As System.Int32 = promptTextBox.SelectionStart
+                                                            promptTextBox.Text = updatedPrompt
+                                                            promptTextBox.SelectionStart = System.Math.Min(oldSelectionStart, promptTextBox.TextLength)
+                                                        End If
+
+                                                    Finally
+
+                                                        synchronizingToggleOptions = False
+
+                                                    End Try
 
                                                 End Sub
 
@@ -4336,9 +4660,155 @@ Namespace SharedLibrary
 
                                 Next
 
+                                synchronizeToggleOptionsFromPrompt =
+                                    Sub()
+
+                                        If synchronizingToggleOptions Then
+                                            Return
+                                        End If
+
+                                        synchronizingToggleOptions = True
+
+                                        Try
+
+                                            Dim anyDetected As System.Boolean = False
+                                            Dim promptText As System.String = If(promptTextBox.Text, System.String.Empty)
+
+                                            For Each optionCheckBox As System.Windows.Forms.CheckBox In toggleCheckBoxes
+
+                                                If optionCheckBox Is Nothing Then
+                                                    Continue For
+                                                End If
+
+                                                Dim definition As FreestylePromptToggleOption = TryCast(optionCheckBox.Tag, FreestylePromptToggleOption)
+
+                                                If definition Is Nothing Then
+                                                    Continue For
+                                                End If
+
+                                                Dim canDetect As System.Boolean = definition.HasArgument OrElse Not System.String.IsNullOrWhiteSpace(definition.Trigger)
+
+                                                If Not canDetect Then
+                                                    Continue For
+                                                End If
+
+                                                Dim matchedTrigger As System.String = System.String.Empty
+                                                Dim matchedArgument As System.String = System.String.Empty
+                                                Dim detected As System.Boolean = SharedMethods.TryGetFreestyleToggleTriggerMatch(promptText, definition, matchedTrigger, matchedArgument)
+
+                                                optionCheckBox.Checked = detected
+
+                                                If argumentTextBoxes.ContainsKey(optionCheckBox) Then
+
+                                                    Dim argumentTextBox As System.Windows.Forms.TextBox = argumentTextBoxes(optionCheckBox)
+                                                    argumentTextBox.Enabled = detected
+
+                                                    If detected Then
+                                                        argumentTextBox.Text = matchedArgument
+                                                    End If
+
+                                                End If
+
+                                                If detected Then
+                                                    anyDetected = True
+                                                End If
+
+                                            Next
+
+                                            If anyDetected AndAlso Not expanded Then
+
+                                                If freestyleForm.Visible Then
+                                                    collapsedClientHeight = freestyleForm.ClientSize.Height
+                                                End If
+
+                                                expanded = True
+                                                advancedGrid.Visible = True
+                                                moreButton.Text = "More options ▾"
+
+                                                If updateLayout IsNot Nothing Then
+                                                    updateLayout.Invoke()
+                                                End If
+
+                                            End If
+
+                                        Finally
+
+                                            synchronizingToggleOptions = False
+
+                                        End Try
+
+                                    End Sub
+
+                                synchronizePromptFromCheckedToggleOptions =
+                                    Sub()
+
+                                        If synchronizingToggleOptions Then
+                                            Return
+                                        End If
+
+                                        synchronizingToggleOptions = True
+
+                                        Try
+
+                                            Dim updatedPrompt As System.String = promptTextBox.Text
+
+                                            For Each optionCheckBox As System.Windows.Forms.CheckBox In toggleCheckBoxes
+
+                                                If optionCheckBox Is Nothing OrElse Not optionCheckBox.Checked Then
+                                                    Continue For
+                                                End If
+
+                                                Dim definition As FreestylePromptToggleOption = TryCast(optionCheckBox.Tag, FreestylePromptToggleOption)
+
+                                                If definition Is Nothing Then
+                                                    Continue For
+                                                End If
+
+                                                Dim matchedTrigger As System.String = System.String.Empty
+                                                Dim matchedArgument As System.String = System.String.Empty
+
+                                                If SharedMethods.TryGetFreestyleToggleTriggerMatch(updatedPrompt, definition, matchedTrigger, matchedArgument) Then
+
+                                                    If argumentTextBoxes.ContainsKey(optionCheckBox) AndAlso matchedArgument.Length > 0 Then
+                                                        argumentTextBoxes(optionCheckBox).Text = matchedArgument
+                                                    End If
+
+                                                    Continue For
+
+                                                End If
+
+                                                Dim argumentValue As System.String = System.String.Empty
+
+                                                If argumentTextBoxes.ContainsKey(optionCheckBox) Then
+                                                    argumentValue = argumentTextBoxes(optionCheckBox).Text.Trim()
+                                                End If
+
+                                                Dim triggerToInsert As System.String = definition.BuildTrigger(argumentValue)
+
+                                                If Not System.String.IsNullOrWhiteSpace(triggerToInsert) Then
+                                                    updatedPrompt = SharedMethods.AppendFreestyleToggleTrigger(updatedPrompt, triggerToInsert)
+                                                End If
+
+                                            Next
+
+                                            If Not System.String.Equals(updatedPrompt, promptTextBox.Text, System.StringComparison.Ordinal) Then
+                                                Dim oldSelectionStart As System.Int32 = promptTextBox.SelectionStart
+                                                promptTextBox.Text = updatedPrompt
+                                                promptTextBox.SelectionStart = System.Math.Min(oldSelectionStart, promptTextBox.TextLength)
+                                            End If
+
+                                        Finally
+
+                                            synchronizingToggleOptions = False
+
+                                        End Try
+
+                                    End Sub
+
                                 moreButton.Visible = visibleSectionIndex > 0
 
-                                If Not System.String.IsNullOrWhiteSpace(options.CallerId) AndAlso
+                                If options.RestorePersistedState AndAlso
+                                   Not System.String.IsNullOrWhiteSpace(options.CallerId) AndAlso
                                    Not System.String.IsNullOrWhiteSpace(options.PersistedState) Then
 
                                     Dim persistedStateDocument As System.Xml.Linq.XDocument =
@@ -4379,26 +4849,36 @@ Namespace SharedLibrary
                                             End Try
                                         End If
 
-                                        For Each optionElement As System.Xml.Linq.XElement In persistedCallerElement.Elements("option")
+                                        synchronizingToggleOptions = True
 
-                                            Dim optionId As System.String =
+                                        Try
+
+                                            For Each optionElement As System.Xml.Linq.XElement In persistedCallerElement.Elements("option")
+
+                                                Dim optionId As System.String =
                                                 SharedMethods.GetFreestylePromptStateAttribute(optionElement, "id")
 
-                                            Dim optionCheckBox As System.Windows.Forms.CheckBox = Nothing
+                                                Dim optionCheckBox As System.Windows.Forms.CheckBox = Nothing
 
-                                            If optionId.Length = 0 OrElse Not toggleById.TryGetValue(optionId, optionCheckBox) Then
-                                                Continue For
-                                            End If
+                                                If optionId.Length = 0 OrElse Not toggleById.TryGetValue(optionId, optionCheckBox) Then
+                                                    Continue For
+                                                End If
 
-                                            optionCheckBox.Checked =
+                                                optionCheckBox.Checked =
                                                 SharedMethods.GetFreestylePromptStateAttribute(optionElement, "checked") = "1"
 
-                                            If argumentTextBoxes.ContainsKey(optionCheckBox) Then
-                                                argumentTextBoxes(optionCheckBox).Text =
+                                                If argumentTextBoxes.ContainsKey(optionCheckBox) Then
+                                                    argumentTextBoxes(optionCheckBox).Text =
                                                     SharedMethods.GetFreestylePromptStateAttribute(optionElement, "argument")
-                                            End If
+                                                End If
 
-                                        Next
+                                            Next
+
+                                        Finally
+
+                                            synchronizingToggleOptions = False
+
+                                        End Try
 
                                         expanded =
                                             SharedMethods.GetFreestylePromptStateAttribute(persistedCallerElement, "expanded") = "1"
@@ -4408,6 +4888,14 @@ Namespace SharedLibrary
 
                                     End If
 
+                                End If
+
+                                If synchronizePromptFromCheckedToggleOptions IsNot Nothing Then
+                                    synchronizePromptFromCheckedToggleOptions.Invoke()
+                                End If
+
+                                If synchronizeToggleOptionsFromPrompt IsNot Nothing Then
+                                    synchronizeToggleOptionsFromPrompt.Invoke()
                                 End If
 
                                 ' =========================================================
@@ -4626,7 +5114,7 @@ Namespace SharedLibrary
                                 ' LAYOUT ENGINE
                                 ' =========================================================
 
-                                Dim updateLayout As System.Action =
+                                updateLayout =
                                     Sub()
 
                                         If layoutBusy OrElse freestyleForm.IsDisposed Then

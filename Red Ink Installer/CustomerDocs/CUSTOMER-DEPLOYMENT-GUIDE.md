@@ -2,7 +2,7 @@
 
 ## Packages
 
-Red Ink is supplied as separate Windows Installer packages for Word, Excel and Outlook. Install only the applications your organization wants.
+Red Ink is supplied as separate Windows Installer packages for Word, Excel and Outlook. Install only the applications your organization wants. Public x64 downloads are delivered as one ZIP per Office application, and each ZIP contains that application's MSI together with the deployment documentation and prerequisite helper files.
 
 For 32-bit Microsoft Office use the x86 MSI. For 64-bit Microsoft Office use the x64 MSI. The Windows operating-system bitness is not the deciding factor; Microsoft Office bitness is.
 
