@@ -227,6 +227,18 @@ Namespace Agents
 
         End Class
 
+        ''' <summary>
+        ''' A single host-agnostic deliverable artifact that was verified to exist on
+        ''' disk when it was registered. Used as the source of truth for the completion
+        ''' gate and for host-side delivery (Outlook attachment / Word output copy).
+        ''' </summary>
+        Public NotInheritable Class DeliverableArtifact
+            Public Property SessionPath As String
+            Public Property SourceTool As String
+            Public Property IsFinalDeliverable As Boolean
+            Public Property RegisteredUtc As DateTime
+        End Class
+
         Public NotInheritable Class ToolingRunState
             Public Property HasUnresolvedToolFailure As Boolean
             Public Property LastToolName As String
@@ -269,6 +281,74 @@ Namespace Agents
             Public Property LastToolOutputMimeType As String
             Public Property LastToolOutputKind As String
             Public Property AnyUserDeliverableProducedThisRun As Boolean
+
+            ''' <summary>
+            ''' Authoritative per-run registry of deliverable artifacts that were verified
+            ''' to exist on disk at registration time. Shared by all tooling hosts
+            ''' (Outlook AutoPilot, Outlook Local Agent, Word) as the single source of
+            ''' truth for the completion gate and for host-side delivery.
+            ''' </summary>
+            Public Property RegisteredDeliverableArtifacts As List(Of DeliverableArtifact) =
+                New List(Of DeliverableArtifact)()
+
+            ''' <summary>
+            ''' Registers a produced artifact path, but ONLY if the file actually exists on
+            ''' disk. Paths that cannot be verified are ignored so a model can never satisfy
+            ''' the completion gate with an unbacked path string. Duplicate paths are merged.
+            ''' </summary>
+            Public Sub RegisterExistingDeliverableArtifact(candidatePath As String,
+                                                           sourceTool As String,
+                                                           isFinalDeliverable As Boolean)
+                Dim normalized As String = If(candidatePath, "").Trim()
+                If normalized = "" Then Return
+
+                Dim fullPath As String
+                Try
+                    If Not System.IO.File.Exists(normalized) Then Return
+                    fullPath = System.IO.Path.GetFullPath(normalized)
+                Catch
+                    Return
+                End Try
+
+                If RegisteredDeliverableArtifacts Is Nothing Then
+                    RegisteredDeliverableArtifacts = New List(Of DeliverableArtifact)()
+                End If
+
+                For Each existing As DeliverableArtifact In RegisteredDeliverableArtifacts
+                    If existing IsNot Nothing AndAlso
+                       String.Equals(existing.SessionPath, fullPath, StringComparison.OrdinalIgnoreCase) Then
+                        existing.IsFinalDeliverable = existing.IsFinalDeliverable OrElse isFinalDeliverable
+                        Return
+                    End If
+                Next
+
+                RegisteredDeliverableArtifacts.Add(New DeliverableArtifact With {
+                    .SessionPath = fullPath,
+                    .SourceTool = If(sourceTool, ""),
+                    .IsFinalDeliverable = isFinalDeliverable,
+                    .RegisteredUtc = DateTime.UtcNow
+                })
+            End Sub
+
+            ''' <summary>
+            ''' Returns True only if at least one registered deliverable artifact still
+            ''' exists on disk. This is the authoritative completion condition for
+            ''' file-required tasks and must not rely on unverified metadata strings.
+            ''' </summary>
+            Public ReadOnly Property HasValidatedFinalDeliverable As Boolean
+                Get
+                    If RegisteredDeliverableArtifacts Is Nothing Then Return False
+                    For Each artifact As DeliverableArtifact In RegisteredDeliverableArtifacts
+                        If artifact Is Nothing Then Continue For
+                        If String.IsNullOrWhiteSpace(artifact.SessionPath) Then Continue For
+                        Try
+                            If System.IO.File.Exists(artifact.SessionPath) Then Return True
+                        Catch
+                        End Try
+                    Next
+                    Return False
+                End Get
+            End Property
 
             Public Property ConsolidatableToolSuccessCounts As Dictionary(Of String, Integer)
             Public Property LastConsolidatableToolName As String
@@ -1931,6 +2011,14 @@ Namespace Agents
             If inferredDeliverable Then
                 runState.AnyUserDeliverableProducedThisRun = True
             End If
+
+            ' Host-agnostic deliverable registry: record only artifacts that actually
+            ' exist on disk. This is the authoritative source of truth for the
+            ' completion gate (HasValidatedFinalDeliverable) and for host-side delivery.
+            runState.RegisterExistingDeliverableArtifact(outputFilePath, runState.LastStructuredToolName, inferredDeliverable)
+            For Each producedPath As String In outputFiles
+                runState.RegisterExistingDeliverableArtifact(producedPath, runState.LastStructuredToolName, inferredDeliverable)
+            Next
 
             If Not String.IsNullOrWhiteSpace(outputFilePath) Then
                 runState.LastKnownOutputReference = outputFilePath

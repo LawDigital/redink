@@ -1751,13 +1751,17 @@ Partial Public Class ThisAddIn
                             Dim _ftGateHasDeliverable_C As Boolean =
                                     context.SequencingState IsNot Nothing AndAlso
                                     SharedLibrary.Agents.ToolCallSequencing.HasProducedUserDeliverable(context.SequencingState)
+                            Dim _ftGateValidatedDeliverable_C As Boolean =
+                                    context.SequencingState IsNot Nothing AndAlso
+                                    context.SequencingState.HasValidatedFinalDeliverable
 
                             Dim _ftGateEval_C As Agents.FinalTurnEvaluation =
                                     Agents.ToolingOrchestrator.EvaluateFinalTurn(
                                         currentResponse,
                                         _ftGateNeedsDeliverable_C,
                                         _ftGateHasDeliverable_C,
-                                        _ftGateUntried_C)
+                                        _ftGateUntried_C,
+                                        _ftGateValidatedDeliverable_C)
 
                             If _ftGateEval_C.Decision <> Agents.FinalTurnDecision.Accept Then
                                 If System.Convert.ToInt32(context.PrematureTextRetryCount) < ToolExecutionContext.MaxContinuationRetries Then
@@ -2045,6 +2049,18 @@ Partial Public Class ThisAddIn
                         "IMPORTANT: You have reached the maximum number of tool iterations. Do NOT call any more tools. Based on all the information gathered from the tools so far, provide your final answer now.",
                         "IMPORTANT: You have reached the maximum number of tool iterations. Do NOT call any more tools. Based on all the information gathered from the tools so far, return only the final raw text payload in the exact caller-defined format.")
 
+                ' Aggressively compact tool history before the forced-final synthesis call so a
+                ' bloated tool-response payload is not resent to the provider. Tools are disabled here.
+                Try
+                    INI_APICall_ToolResponses_2 = BuildToolResponsesForModelBudgeted(
+                        context.AllToolResponses,
+                        context.ToolingModel,
+                        compactForSubAgent:=True)
+                    context.Log($"Forced-final tool history compacted ({If(INI_APICall_ToolResponses_2, "").Length} chars)", "diag")
+                Catch exCompact As Exception
+                    context.LogWarn("Failed to compact tool history before forced-final call.", details:=exCompact.Message)
+                End Try
+
                 ToolingFileLogger.LogStep("Forcing final LLM call without tools")
                 ToolingFileLogger.LogPreMainLlmCallSnapshot()
 
@@ -2065,12 +2081,17 @@ Partial Public Class ThisAddIn
                         ToolingFileLogger.LogRawResponseStub("Main LLM() - Forced Final", currentResponse)
                     Else
                         context.EmptyMainModelResponse = True
-                        context.LogWarn("Empty response from forced final LLM call")
+                        ' Never reuse the previous raw provider/Gemini response as the final body.
+                        currentResponse = ""
+                        context.LogWarn("Empty response from forced final LLM call; discarded previous raw response to prevent reuse.")
                         ToolingFileLogger.LogWarn("Empty forced-final main-model response.",
                               details:=$"host={context.HostKind}; iteration={iteration}")
                     End If
 
                 Catch ex As Exception
+                    ' Do not fall back to the previous raw response on error; force a safe blocked message.
+                    context.EmptyMainModelResponse = True
+                    currentResponse = ""
                     context.LogError($"Error during forced final call: {ex.Message}", ex:=ex)
                 End Try
             End If
