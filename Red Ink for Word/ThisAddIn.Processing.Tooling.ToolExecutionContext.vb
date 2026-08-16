@@ -110,6 +110,17 @@ Partial Public Class ThisAddIn
 
         Public Const MaxContinuationRetries As Integer = 5
 
+        ''' <summary>Per-target counts of transport-successful but zero-change (no-op) tool results this run.</summary>
+        Public Property ZeroChangeOperationCounts As Dictionary(Of String, Integer) =
+            New Dictionary(Of String, Integer)(StringComparer.OrdinalIgnoreCase)
+
+        ''' <summary>Bounded number of no-op attempts against the same target before the edit is marked unresolved.</summary>
+        Public Const ZeroChangeOperationAbortThreshold As Integer = 3
+
+        ''' <summary>Per-run set of already-expanded (ref + range) keys used to suppress repeated no-progress reads.</summary>
+        Public Property ExpandedContextKeys As HashSet(Of String) =
+            New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
         Public Property HostKind As String
         Public Property AllowedToolNames As HashSet(Of String)
         Public Property EnforceAllowedToolScope As Boolean

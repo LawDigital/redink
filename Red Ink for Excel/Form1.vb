@@ -167,6 +167,15 @@ Public Class frmAIChat
 
     Private _loadedContextContent As String = Nothing
     Private _loadedContextPath As String = Nothing
+
+    ''' <summary>
+    ''' Individual documents currently loaded as external context. Each entry keeps its
+    ''' file name and extracted content so documents can be added or removed individually.
+    ''' The combined _loadedContextContent is rebuilt from this list and every document
+    ''' is wrapped in numbered &lt;documentN name="…"&gt; tags.
+    ''' </summary>
+    Private _loadedContextDocuments As New List(Of ContextDocument)
+
     Private _isUpdatingPersistContextCheckbox As Boolean = False
     Private _dialogOwnerScope As System.IDisposable = Nothing
     Private ReadOnly _toolTip As New System.Windows.Forms.ToolTip()
@@ -1087,7 +1096,292 @@ Public Class frmAIChat
         Me.Focus()
     End Sub
 
-    ' ---------------------- LOAD CONTEXT AND FILE HANDLING ----------------------  
+    ' ---------------------- LOAD CONTEXT AND FILE HANDLING ----------------------
+
+    ''' <summary>
+    ''' Represents a single loaded context document (its file name and extracted text).
+    ''' </summary>
+    Private Structure ContextDocument
+        Public ReadOnly FileName As String
+        Public ReadOnly Content As String
+        Public ReadOnly SourcePath As String
+
+        Public Sub New(
+            fileName As String,
+            content As String,
+            Optional sourcePath As String = Nothing)
+
+            Me.FileName = fileName
+            Me.Content = content
+            Me.SourcePath = sourcePath
+        End Sub
+    End Structure
+
+    ' ChatContextPath is retained as the single My.Settings field for source metadata.
+    ' New values are stored as a compact, versioned manifest. A value without this
+    ' header is treated as the legacy single file/folder path.
+    Private Const ContextSourceManifestHeader As String = "RICTX1"
+
+    Private Function EncodeContextManifestValue(value As String) As String
+        If value Is Nothing Then value = ""
+        Return System.Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(value))
+    End Function
+
+    Private Function DecodeContextManifestValue(value As String) As String
+        If String.IsNullOrWhiteSpace(value) Then Return ""
+
+        Try
+            Return System.Text.Encoding.UTF8.GetString(System.Convert.FromBase64String(value))
+        Catch ex As System.Exception
+            Return ""
+        End Try
+    End Function
+
+    Private Sub ReadContextSourceManifest(
+        ByRef documentPaths As System.Collections.Generic.List(Of String),
+        ByRef indexPath As String,
+        ByRef legacyPath As String)
+
+        documentPaths = New System.Collections.Generic.List(Of String)()
+        indexPath = ""
+        legacyPath = ""
+
+        Dim raw As String = ""
+
+        Try
+            raw = My.Settings.ChatContextPath
+        Catch
+            Return
+        End Try
+
+        If String.IsNullOrWhiteSpace(raw) Then Return
+
+        Dim normalized As String =
+            raw.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf)
+
+        If normalized = ContextSourceManifestHeader OrElse
+           normalized.StartsWith(ContextSourceManifestHeader & vbLf, System.StringComparison.Ordinal) Then
+
+            Dim lines As String() =
+                normalized.Split(
+                    New String() {vbLf},
+                    System.StringSplitOptions.RemoveEmptyEntries)
+
+            For i As Integer = 1 To lines.Length - 1
+                Dim line As String = lines(i)
+                Dim separatorIndex As Integer = line.IndexOf("|"c)
+
+                If separatorIndex <= 0 OrElse separatorIndex >= line.Length - 1 Then
+                    Continue For
+                End If
+
+                Dim recordType As String = line.Substring(0, separatorIndex)
+                Dim decodedPath As String =
+                    DecodeContextManifestValue(line.Substring(separatorIndex + 1))
+
+                If String.IsNullOrWhiteSpace(decodedPath) Then Continue For
+
+                If String.Equals(recordType, "D", System.StringComparison.Ordinal) Then
+                    documentPaths.Add(decodedPath)
+                ElseIf String.Equals(recordType, "I", System.StringComparison.Ordinal) Then
+                    indexPath = decodedPath
+                End If
+            Next
+
+            Return
+        End If
+
+        ' Backward compatibility: older builds stored one raw path directly.
+        legacyPath = raw
+    End Sub
+
+    Private Sub ApplySavedSourcePathsToLoadedDocuments(
+        documentPaths As System.Collections.Generic.List(Of String),
+        legacyPath As String)
+
+        If _loadedContextDocuments Is Nothing OrElse
+           _loadedContextDocuments.Count = 0 Then
+            Return
+        End If
+
+        If documentPaths IsNot Nothing AndAlso
+           documentPaths.Count = _loadedContextDocuments.Count Then
+
+            For i As Integer = 0 To _loadedContextDocuments.Count - 1
+                Dim oldDocument As ContextDocument = _loadedContextDocuments(i)
+
+                _loadedContextDocuments(i) =
+                    New ContextDocument(
+                        oldDocument.FileName,
+                        oldDocument.Content,
+                        documentPaths(i))
+            Next
+
+            Return
+        End If
+
+        ' Migrate an old single-file ChatContextPath where possible.
+        If Not String.IsNullOrWhiteSpace(legacyPath) AndAlso
+           System.IO.File.Exists(legacyPath) AndAlso
+           _loadedContextDocuments.Count = 1 Then
+
+            Dim oldDocument As ContextDocument = _loadedContextDocuments(0)
+
+            _loadedContextDocuments(0) =
+                New ContextDocument(
+                    oldDocument.FileName,
+                    oldDocument.Content,
+                    legacyPath)
+
+            Return
+        End If
+
+        ' Migrate an old directory ChatContextPath by matching the stored file names.
+        If Not String.IsNullOrWhiteSpace(legacyPath) AndAlso
+           System.IO.Directory.Exists(legacyPath) Then
+
+            For i As Integer = 0 To _loadedContextDocuments.Count - 1
+                Dim oldDocument As ContextDocument = _loadedContextDocuments(i)
+                Dim candidate As String =
+                    System.IO.Path.Combine(legacyPath, oldDocument.FileName)
+
+                If System.IO.File.Exists(candidate) Then
+                    _loadedContextDocuments(i) =
+                        New ContextDocument(
+                            oldDocument.FileName,
+                            oldDocument.Content,
+                            candidate)
+                End If
+            Next
+        End If
+    End Sub
+
+    Private Sub SaveContextSourceManifest()
+        Dim lines As New System.Collections.Generic.List(Of String) From {
+            ContextSourceManifestHeader
+        }
+
+        For Each doc As ContextDocument In _loadedContextDocuments
+            If Not String.IsNullOrWhiteSpace(doc.SourcePath) Then
+                lines.Add(
+                    "D|" &
+                    EncodeContextManifestValue(doc.SourcePath))
+            End If
+        Next
+
+        Try
+            My.Settings.ChatContextPath =
+                String.Join(vbLf, lines.ToArray())
+            My.Settings.Save()
+        Catch
+        End Try
+    End Sub
+
+    Private Sub ClearContextSourceManifest()
+        Try
+            My.Settings.ChatContextPath = ""
+            My.Settings.Save()
+        Catch
+        End Try
+    End Sub
+
+    Private Async Function RestoreLoadedDocumentsFromSourcePathsAsync(
+        documentPaths As System.Collections.Generic.List(Of String)
+    ) As System.Threading.Tasks.Task(Of Integer)
+
+        If documentPaths Is Nothing OrElse documentPaths.Count = 0 Then
+            Return 0
+        End If
+
+        Dim restoredDocuments As New System.Collections.Generic.List(Of ContextDocument)
+
+        For Each sourcePath As String In documentPaths
+            If String.IsNullOrWhiteSpace(sourcePath) OrElse
+               Not System.IO.File.Exists(sourcePath) Then
+                Continue For
+            End If
+
+            Dim result =
+                Await LoadSingleContextFileAsync(
+                    sourcePath,
+                    False)
+
+            If String.IsNullOrWhiteSpace(result.Content) OrElse
+               result.Content.StartsWith(
+                   "Error:",
+                   System.StringComparison.OrdinalIgnoreCase) Then
+                Continue For
+            End If
+
+            restoredDocuments.Add(
+                New ContextDocument(
+                    System.IO.Path.GetFileName(sourcePath),
+                    result.Content,
+                    sourcePath))
+        Next
+
+        If restoredDocuments.Count = 0 Then Return 0
+
+        _loadedContextDocuments = restoredDocuments
+        RebuildLoadedContextContent()
+        _loadedContextPath = "(Saved Context Sources)"
+        _cachedLoadedContextPath = _loadedContextPath
+
+        Return restoredDocuments.Count
+    End Function
+
+    ''' <summary>
+    ''' Rebuilds the combined loaded-context string from the individual documents,
+    ''' always wrapping each in a numbered &lt;documentN name="…"&gt; tag.
+    ''' </summary>
+    Private Sub RebuildLoadedContextContent()
+        If _loadedContextDocuments Is Nothing OrElse _loadedContextDocuments.Count = 0 Then
+            _loadedContextContent = Nothing
+            _cachedLoadedContextContent = Nothing
+            Return
+        End If
+
+        Dim sb As New System.Text.StringBuilder()
+        Dim counter As Integer = 0
+
+        For Each doc As ContextDocument In _loadedContextDocuments
+            counter += 1
+            sb.Append($"<document{counter} name=""{doc.FileName}"">")
+            sb.Append(doc.Content)
+            sb.Append($"</document{counter}>")
+        Next
+
+        _loadedContextContent = sb.ToString()
+        _cachedLoadedContextContent = _loadedContextContent
+    End Sub
+
+    ''' <summary>
+    ''' Populates _loadedContextDocuments by parsing numbered document tags from
+    ''' _loadedContextContent. Legacy untagged persisted content is treated as one document.
+    ''' </summary>
+    Private Sub ParseLoadedContextDocuments()
+        _loadedContextDocuments.Clear()
+
+        If String.IsNullOrWhiteSpace(_loadedContextContent) Then Return
+
+        Dim matches As System.Text.RegularExpressions.MatchCollection =
+            System.Text.RegularExpressions.Regex.Matches(
+                _loadedContextContent,
+                "<document(\d+) name=""(?<name>[^""]*)"">(?<body>[\s\S]*?)</document\1>")
+
+        If matches.Count = 0 Then
+            ' Backward compatibility with the previous Excel implementation, which did not
+            ' wrap a single loaded file in a document tag.
+            _loadedContextDocuments.Add(New ContextDocument("(Loaded Context)", _loadedContextContent))
+            RebuildLoadedContextContent()
+            Return
+        End If
+
+        For Each m As System.Text.RegularExpressions.Match In matches
+            _loadedContextDocuments.Add(
+                New ContextDocument(m.Groups("name").Value, m.Groups("body").Value))
+        Next
+    End Sub
 
     Private Sub AppendSystemMessage(message As String)
         Dim prefix As String = If(String.IsNullOrWhiteSpace(txtChatHistory.Text), "", Environment.NewLine)
@@ -1099,18 +1393,23 @@ Public Class frmAIChat
     ''' (same location convention used by DiscussInky).
     ''' </summary>
     Private Function GetRedInkStorageDirectoryPath() As String
-        Dim storageDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "redink")
+        Dim storageDir As String =
+            System.IO.Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "redink")
+
         Try
-            If Not Directory.Exists(storageDir) Then
-                Directory.CreateDirectory(storageDir)
+            If Not System.IO.Directory.Exists(storageDir) Then
+                System.IO.Directory.CreateDirectory(storageDir)
             End If
         Catch
         End Try
+
         Return storageDir
     End Function
 
     Private Function GetPersistedContextFilePath() As String
-        Return Path.Combine(GetRedInkStorageDirectoryPath(), PersistedContextFileName)
+        Return System.IO.Path.Combine(GetRedInkStorageDirectoryPath(), PersistedContextFileName)
     End Function
 
     Private Function GetContextDragDropFilter() As String
@@ -1121,10 +1420,11 @@ Public Class frmAIChat
         Return "Supported Context Files|*.txt;*.rtf;*.docx;*.pdf;*.pptx;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.vb;*.cs;*.js;*.ts;*.py;*.java;*.cpp;*.c;*.h;*.sql;*.yaml;*.yml|All Files (*.*)|*.*"
     End Function
 
-
     Private Sub UpdatePersistContextTooltip()
         If chkPersistContext.Checked Then
-            _toolTip.SetToolTip(chkPersistContext, "Currently stored in: " & GetPersistedContextFilePath())
+            _toolTip.SetToolTip(
+                chkPersistContext,
+                "Currently stored in: " & GetPersistedContextFilePath())
         Else
             _toolTip.SetToolTip(chkPersistContext, "")
         End If
@@ -1132,14 +1432,16 @@ Public Class frmAIChat
 
     Private Sub DeletePersistedContextFile(showMessage As Boolean)
         Try
-            Dim persistPath = GetPersistedContextFilePath()
-            If File.Exists(persistPath) Then
-                File.Delete(persistPath)
+            Dim persistPath As String = GetPersistedContextFilePath()
+
+            If System.IO.File.Exists(persistPath) Then
+                System.IO.File.Delete(persistPath)
+
                 If showMessage Then
                     AppendSystemMessage("Persisted context file deleted.")
                 End If
             End If
-        Catch ex As Exception
+        Catch ex As System.Exception
             If showMessage Then
                 AppendSystemMessage($"Failed to delete persisted context: {ex.Message}")
             End If
@@ -1148,25 +1450,36 @@ Public Class frmAIChat
 
     Private Sub PersistLoadedContextToTempFile()
         If String.IsNullOrWhiteSpace(_loadedContextContent) Then Return
-        File.WriteAllText(GetPersistedContextFilePath(), _loadedContextContent, Encoding.UTF8)
+
+        System.IO.File.WriteAllText(
+            GetPersistedContextFilePath(),
+            _loadedContextContent,
+            System.Text.Encoding.UTF8)
     End Sub
 
-    Private Async Function LoadSingleContextFileAsync(filePath As String, askUser As Boolean) As Task(Of (Content As String, PdfMayBeIncomplete As Boolean))
-        If String.IsNullOrWhiteSpace(filePath) OrElse Not File.Exists(filePath) Then
+    Private Async Function LoadSingleContextFileAsync(
+        filePath As String,
+        askUser As Boolean
+    ) As System.Threading.Tasks.Task(Of (Content As String, PdfMayBeIncomplete As Boolean))
+
+        If String.IsNullOrWhiteSpace(filePath) OrElse Not System.IO.File.Exists(filePath) Then
             Return ("", False)
         End If
 
-        ' Silent suppresses per-file error boxes; AskUser lets GetFileContentEx handle the OCR prompt itself.
         Dim result = Await Globals.ThisAddIn.GetFileContentEx(filePath, True, False, askUser)
         Return (result.Content, result.PdfMayBeIncomplete)
     End Function
 
-    Private Async Function LoadContextFromPathAsync(selectedPath As String, interactive As Boolean) As Task(Of (CombinedContent As String, DisplayPath As String, LoadedCount As Integer, Summary As String))
-        Dim isFile As Boolean = File.Exists(selectedPath)
-        Dim isDirectory As Boolean = Directory.Exists(selectedPath)
+    Private Async Function LoadContextFromPathAsync(
+        selectedPath As String,
+        interactive As Boolean
+    ) As System.Threading.Tasks.Task(Of (Documents As List(Of ContextDocument), DisplayPath As String, LoadedCount As Integer, Summary As String))
+
+        Dim isFile As Boolean = System.IO.File.Exists(selectedPath)
+        Dim isDirectory As Boolean = System.IO.Directory.Exists(selectedPath)
 
         If Not isFile AndAlso Not isDirectory Then
-            Return ("", "", 0, "Selected path does not exist.")
+            Return (New List(Of ContextDocument), "", 0, "Selected path does not exist.")
         End If
 
         Dim filesToProcess As New List(Of String)
@@ -1176,17 +1489,19 @@ Public Class frmAIChat
         Dim ignoredCount As Integer = 0
 
         If isFile Then
-            Dim ext = Path.GetExtension(selectedPath).ToLowerInvariant()
+            Dim ext As String = System.IO.Path.GetExtension(selectedPath).ToLowerInvariant()
+
             If Array.IndexOf(SupportedContextExtensions, ext) < 0 Then
-                Return ("", "", 0, $"The selected file type '{ext}' is not supported for loaded context.")
+                Return (New List(Of ContextDocument), "", 0, $"The selected file type '{ext}' is not supported for loaded context.")
             End If
 
             filesToProcess.Add(selectedPath)
         Else
-            Dim allFiles = Directory.GetFiles(selectedPath, "*.*", SearchOption.TopDirectoryOnly)
+            Dim allFiles As String() = System.IO.Directory.GetFiles(selectedPath, "*.*", System.IO.SearchOption.TopDirectoryOnly)
 
-            For Each f In allFiles
-                Dim ext = Path.GetExtension(f).ToLowerInvariant()
+            For Each f As String In allFiles
+                Dim ext As String = System.IO.Path.GetExtension(f).ToLowerInvariant()
+
                 If Array.IndexOf(SupportedContextExtensions, ext) >= 0 Then
                     filesToProcess.Add(f)
                 Else
@@ -1196,41 +1511,39 @@ Public Class frmAIChat
 
             If filesToProcess.Count > 50 Then
                 If interactive Then
-                    Dim truncateAnswer = ShowCustomYesNoBox(
+                    Dim truncateAnswer As Integer = ShowCustomYesNoBox(
                         $"The directory contains {filesToProcess.Count} supported files, but the maximum is 50." & vbCrLf & vbCrLf &
                         "Only the first 50 files will be loaded. Continue?",
                         "Yes, continue",
                         "No, abort")
 
                     If truncateAnswer <> 1 Then
-                        Return ("", "", 0, "")
+                        Return (New List(Of ContextDocument), "", 0, "")
                     End If
                 End If
 
                 filesToProcess = filesToProcess.GetRange(0, 50)
             ElseIf interactive AndAlso filesToProcess.Count > 10 Then
-                Dim confirmAnswer = ShowCustomYesNoBox(
+                Dim confirmAnswer As Integer = ShowCustomYesNoBox(
                     $"The directory contains {filesToProcess.Count} files to load. Continue?",
                     "Yes, continue",
                     "No, abort")
 
                 If confirmAnswer <> 1 Then
-                    Return ("", "", 0, "")
+                    Return (New List(Of ContextDocument), "", 0, "")
                 End If
             End If
 
             If filesToProcess.Count = 0 Then
-                Return ("", "", 0, $"No supported files found in directory '{selectedPath}'.")
+                Return (New List(Of ContextDocument), "", 0, $"No supported files found in directory '{selectedPath}'.")
             End If
         End If
 
-        Dim resultBuilder As New StringBuilder()
-        Dim useDocumentTags As Boolean = (filesToProcess.Count > 1)
-        Dim documentCounter As Integer = 0
+        Dim documents As New List(Of ContextDocument)
 
-        For Each filePath In filesToProcess
+        For Each filePath As String In filesToProcess
             Dim result = Await LoadSingleContextFileAsync(filePath, interactive)
-            Dim content = result.Content
+            Dim content As String = result.Content
 
             If result.PdfMayBeIncomplete Then
                 pdfsWithPossibleImages.Add(filePath)
@@ -1241,45 +1554,42 @@ Public Class frmAIChat
                 Continue For
             End If
 
-            documentCounter += 1
             loadedFiles.Add(Tuple.Create(filePath, content.Length))
-
-            If useDocumentTags Then
-                Dim fileName = Path.GetFileName(filePath)
-                resultBuilder.Append($"<document{documentCounter} name=""{fileName}"">")
-                resultBuilder.Append(content)
-                resultBuilder.Append($"</document{documentCounter}>")
-            Else
-                resultBuilder.Append(content)
-            End If
+            documents.Add(New ContextDocument(System.IO.Path.GetFileName(filePath), content, filePath))
         Next
 
-        Dim summary As New StringBuilder()
+        Dim summary As New System.Text.StringBuilder()
 
         If loadedFiles.Count > 0 Then
             summary.AppendLine($"Successfully loaded ({loadedFiles.Count} file(s)):")
             Dim totalChars As Integer = 0
-            For Each item In loadedFiles
-                summary.AppendLine($"  • {Path.GetFileName(item.Item1)} ({item.Item2:N0} chars)")
+
+            For Each item As Tuple(Of String, Integer) In loadedFiles
+                summary.AppendLine($"  • {System.IO.Path.GetFileName(item.Item1)} ({item.Item2:N0} chars)")
                 totalChars += item.Item2
             Next
+
             summary.AppendLine($"  Total: {totalChars:N0} characters")
             summary.AppendLine()
         End If
 
         If failedFiles.Count > 0 Then
             summary.AppendLine($"Failed to load ({failedFiles.Count} item(s)):")
-            For Each item In failedFiles
-                summary.AppendLine($"  • {Path.GetFileName(item)}")
+
+            For Each item As String In failedFiles
+                summary.AppendLine($"  • {System.IO.Path.GetFileName(item)}")
             Next
+
             summary.AppendLine()
         End If
 
         If pdfsWithPossibleImages.Count > 0 Then
             summary.AppendLine($"PDFs that may contain images/scans ({pdfsWithPossibleImages.Count} file(s)):")
-            For Each item In pdfsWithPossibleImages
-                summary.AppendLine($"  • {Path.GetFileName(item)}")
+
+            For Each item As String In pdfsWithPossibleImages
+                summary.AppendLine($"  • {System.IO.Path.GetFileName(item)}")
             Next
+
             summary.AppendLine("  (Text extraction may be incomplete because OCR was not performed)")
             summary.AppendLine()
         End If
@@ -1290,62 +1600,120 @@ Public Class frmAIChat
         End If
 
         Return (
-            resultBuilder.ToString(),
+            documents,
             If(isFile, selectedPath, selectedPath & " (directory)"),
             loadedFiles.Count,
-            summary.ToString().TrimEnd()
-        )
+            summary.ToString().TrimEnd())
     End Function
 
-    Private Async Function RestoreLoadedContextAsync() As Task
-        If Not String.IsNullOrWhiteSpace(_cachedLoadedContextContent) AndAlso Not String.IsNullOrWhiteSpace(_cachedLoadedContextPath) Then
+    Private Async Function RestoreLoadedContextAsync() As System.Threading.Tasks.Task
+        Dim savedDocumentPaths As System.Collections.Generic.List(Of String) = Nothing
+        Dim unusedIndexPath As String = ""
+        Dim legacyPath As String = ""
+
+        ReadContextSourceManifest(
+            savedDocumentPaths,
+            unusedIndexPath,
+            legacyPath)
+
+        If Not String.IsNullOrWhiteSpace(_cachedLoadedContextContent) AndAlso
+           Not String.IsNullOrWhiteSpace(_cachedLoadedContextPath) Then
+
             _loadedContextContent = _cachedLoadedContextContent
             _loadedContextPath = _cachedLoadedContextPath
+
+            ParseLoadedContextDocuments()
+            ApplySavedSourcePathsToLoadedDocuments(
+                savedDocumentPaths,
+                legacyPath)
+
+            SaveContextSourceManifest()
             AppendSystemMessage("Context restored from cache.")
             Return
         End If
 
         If chkPersistContext.Checked Then
-            Dim persistPath = GetPersistedContextFilePath()
-            If File.Exists(persistPath) Then
+            Dim persistPath As String = GetPersistedContextFilePath()
+
+            If System.IO.File.Exists(persistPath) Then
                 Try
-                    _loadedContextContent = File.ReadAllText(persistPath, Encoding.UTF8)
+                    _loadedContextContent =
+                        System.IO.File.ReadAllText(
+                            persistPath,
+                            System.Text.Encoding.UTF8)
+
                     _loadedContextPath = "(Persisted Context)"
                     _cachedLoadedContextContent = _loadedContextContent
                     _cachedLoadedContextPath = _loadedContextPath
-                    AppendSystemMessage($"Context restored from persisted storage ({_loadedContextContent.Length:N0} characters).")
+
+                    ParseLoadedContextDocuments()
+                    ApplySavedSourcePathsToLoadedDocuments(
+                        savedDocumentPaths,
+                        legacyPath)
+
+                    SaveContextSourceManifest()
+
+                    AppendSystemMessage(
+                        $"Context restored from persisted storage ({_loadedContextContent.Length:N0} characters).")
                     Return
-                Catch ex As Exception
-                    AppendSystemMessage($"Failed to restore persisted context: {ex.Message}")
+                Catch ex As System.Exception
+                    AppendSystemMessage(
+                        $"Failed to restore persisted context: {ex.Message}")
                 End Try
             End If
         End If
 
-        Dim savedPath As String = ""
-        Try
-            savedPath = My.Settings.ChatContextPath
-        Catch
-            Return
-        End Try
+        ' With no persisted content, reconstruct the current context from every saved source file.
+        If savedDocumentPaths IsNot Nothing AndAlso
+           savedDocumentPaths.Count > 0 Then
 
-        If String.IsNullOrWhiteSpace(savedPath) Then Return
+            Dim restoredCount As Integer =
+                Await RestoreLoadedDocumentsFromSourcePathsAsync(
+                    savedDocumentPaths)
 
-        If Not File.Exists(savedPath) AndAlso Not Directory.Exists(savedPath) Then
-            Try
-                My.Settings.ChatContextPath = ""
-                My.Settings.Save()
-            Catch
-            End Try
+            If restoredCount > 0 Then
+                SaveContextSourceManifest()
+
+                If chkPersistContext.Checked Then
+                    Try
+                        PersistLoadedContextToTempFile()
+                    Catch
+                    End Try
+                End If
+
+                AppendSystemMessage(
+                    $"Context restored from saved source list ({restoredCount} document(s)).")
+                Return
+            End If
+        End If
+
+        ' Backward compatibility with the old one-path setting.
+        If String.IsNullOrWhiteSpace(legacyPath) Then Return
+
+        If Not System.IO.File.Exists(legacyPath) AndAlso
+           Not System.IO.Directory.Exists(legacyPath) Then
+
+            ClearContextSourceManifest()
             Return
         End If
 
-        Dim restored = Await LoadContextFromPathAsync(savedPath, False)
-        If String.IsNullOrWhiteSpace(restored.CombinedContent) Then Return
+        Dim restored =
+            Await LoadContextFromPathAsync(
+                legacyPath,
+                False)
 
-        _loadedContextContent = restored.CombinedContent
+        If restored.Documents Is Nothing OrElse
+           restored.Documents.Count = 0 Then
+            Return
+        End If
+
+        _loadedContextDocuments = restored.Documents
+        RebuildLoadedContextContent()
         _loadedContextPath = restored.DisplayPath
-        _cachedLoadedContextContent = _loadedContextContent
         _cachedLoadedContextPath = _loadedContextPath
+
+        ' Migrates the old raw ChatContextPath value to the new manifest format.
+        SaveContextSourceManifest()
 
         If chkPersistContext.Checked Then
             Try
@@ -1354,45 +1722,121 @@ Public Class frmAIChat
             End Try
         End If
 
-        AppendSystemMessage($"Context restored from saved path: {Path.GetFileName(savedPath)}.")
+        AppendSystemMessage(
+            $"Context restored from legacy saved path: {System.IO.Path.GetFileName(legacyPath)}.")
     End Function
 
     Private Async Sub btnLoadContext_Click(sender As Object, e As EventArgs)
-        If Not String.IsNullOrWhiteSpace(_loadedContextContent) Then
-            RemoveLoadedContext()
+        If _loadedContextDocuments IsNot Nothing AndAlso _loadedContextDocuments.Count > 0 Then
+            Await ManageLoadedContextAsync()
         Else
             Await PromptForLoadedContextAsync()
         End If
     End Sub
 
     ''' <summary>
-    ''' Updates the Load Context button caption to reflect whether external context is loaded.
+    ''' Presents a management dialog for loaded context, allowing the user to add more
+    ''' documents, remove one document, or remove all loaded documents.
     ''' </summary>
-    Private Sub UpdateLoadContextButtonText()
-        btnLoadContext.Text = If(String.IsNullOrWhiteSpace(_loadedContextContent), "Load Context", "Remove Context")
-    End Sub
+    Private Async Function ManageLoadedContextAsync() As System.Threading.Tasks.Task
+        Const ActionAdd As Integer = -1
+        Const ActionRemoveAll As Integer = -2
+
+        Dim items As New List(Of SharedMethods.SelectionItem)
+        items.Add(New SharedMethods.SelectionItem("Add document(s) …", ActionAdd))
+
+        For i As Integer = 0 To _loadedContextDocuments.Count - 1
+            items.Add(New SharedMethods.SelectionItem(
+                $"Remove {i + 1} - {_loadedContextDocuments(i).FileName}", i + 1))
+        Next
+
+        If _loadedContextDocuments.Count > 1 Then
+            items.Add(New SharedMethods.SelectionItem("Remove all documents", ActionRemoveAll))
+        End If
+
+        Dim wasTopMost As Boolean = Me.TopMost
+        Dim choice As Integer
+
+        Try
+            Me.TopMost = False
+            choice = SharedMethods.SelectValue(
+                items,
+                ActionAdd,
+                "Choose what to do with the loaded context:",
+                "Manage Context",
+                Me,
+                "Close",
+                0)
+        Finally
+            Me.TopMost = wasTopMost
+        End Try
+
+        Select Case choice
+            Case 0
+                Return
+            Case ActionAdd
+                Await PromptForLoadedContextAsync(appendMode:=True)
+            Case ActionRemoveAll
+                RemoveLoadedContext()
+            Case Else
+                Dim docIndex As Integer = choice - 1
+                If docIndex >= 0 AndAlso docIndex < _loadedContextDocuments.Count Then
+                    RemoveContextDocument(docIndex)
+                End If
+        End Select
+    End Function
 
     ''' <summary>
-    ''' Removes any loaded external context (in-memory, cache, persisted file, and saved path).
+    ''' Removes one document, rebuilds the combined content, and synchronizes persistence.
     ''' </summary>
+    Private Sub RemoveContextDocument(index As Integer)
+        If index < 0 OrElse index >= _loadedContextDocuments.Count Then Return
+
+        Dim removedName As String = _loadedContextDocuments(index).FileName
+        _loadedContextDocuments.RemoveAt(index)
+
+        If _loadedContextDocuments.Count = 0 Then
+            RemoveLoadedContext()
+            Return
+        End If
+
+        RebuildLoadedContextContent()
+        SaveContextSourceManifest()
+
+        If chkPersistContext.Checked Then
+            Try
+                PersistLoadedContextToTempFile()
+            Catch ex As System.Exception
+                AppendSystemMessage($"Failed to update persisted context: {ex.Message}")
+            End Try
+        End If
+
+        AppendSystemMessage($"Removed document '{removedName}' from context. {_loadedContextDocuments.Count} document(s) remain.")
+        UpdateLoadContextButtonText()
+    End Sub
+
+    Private Sub UpdateLoadContextButtonText()
+        btnLoadContext.Text =
+            If(_loadedContextDocuments Is Nothing OrElse _loadedContextDocuments.Count = 0,
+               "Load Context",
+               "Manage Context")
+    End Sub
+
     Private Sub RemoveLoadedContext()
         _loadedContextContent = Nothing
         _loadedContextPath = Nothing
         _cachedLoadedContextContent = Nothing
         _cachedLoadedContextPath = Nothing
+        _loadedContextDocuments.Clear()
         DeletePersistedContextFile(False)
 
-        Try
-            My.Settings.ChatContextPath = ""
-            My.Settings.Save()
-        Catch
-        End Try
+        ClearContextSourceManifest()
 
         AppendSystemMessage("Loaded context removed.")
         UpdateLoadContextButtonText()
     End Sub
 
-    Private Async Function PromptForLoadedContextAsync() As Task
+    Private Async Function PromptForLoadedContextAsync(Optional appendMode As Boolean = False) As System.Threading.Tasks.Task
         Try
             Globals.ThisAddIn.DragDropFormLabel = "... a file or folder you want to use as external context, or click Browse"
             Globals.ThisAddIn.DragDropFormFilter = GetContextDragDropFilter()
@@ -1408,79 +1852,53 @@ Public Class frmAIChat
             Globals.ThisAddIn.DragDropFormLabel = ""
             Globals.ThisAddIn.DragDropFormFilter = ""
 
-            If String.IsNullOrWhiteSpace(selectedPath) Then
-                If Not String.IsNullOrWhiteSpace(_loadedContextContent) Then
-                    Dim answer = ShowCustomYesNoBox(
-                        "No file or folder was selected. Do you want to delete the currently loaded context?",
-                        "Yes, delete context",
-                        "No, keep it")
-
-                    If answer = 1 Then
-                        _loadedContextContent = Nothing
-                        _loadedContextPath = Nothing
-                        _cachedLoadedContextContent = Nothing
-                        _cachedLoadedContextPath = Nothing
-                        DeletePersistedContextFile(False)
-
-                        Try
-                            My.Settings.ChatContextPath = ""
-                            My.Settings.Save()
-                        Catch
-                        End Try
-
-                        AppendSystemMessage("Loaded context deleted.")
-                    End If
-                End If
-
-                Return
-            End If
+            If String.IsNullOrWhiteSpace(selectedPath) Then Return
 
             Dim loaded = Await LoadContextFromPathAsync(selectedPath, True)
+            Dim hasLoadedDocuments As Boolean = loaded.Documents IsNot Nothing AndAlso loaded.Documents.Count > 0
 
-            If String.IsNullOrWhiteSpace(loaded.Summary) AndAlso String.IsNullOrWhiteSpace(loaded.CombinedContent) Then
-                Return
-            End If
+            If String.IsNullOrWhiteSpace(loaded.Summary) AndAlso Not hasLoadedDocuments Then Return
 
             If Not String.IsNullOrWhiteSpace(loaded.Summary) Then
-                Dim proceedAnswer = ShowCustomYesNoBox(
+                Dim proceedAnswer As Integer = ShowCustomYesNoBox(
                     loaded.Summary & vbCrLf & vbCrLf & "Do you want to use this context?",
                     "Yes, proceed",
                     "No, retry")
 
                 If proceedAnswer <> 1 Then
-                    Await PromptForLoadedContextAsync()
+                    Await PromptForLoadedContextAsync(appendMode)
                     Return
                 End If
             End If
 
-            If String.IsNullOrWhiteSpace(loaded.CombinedContent) Then
+            If Not hasLoadedDocuments Then
                 AppendSystemMessage("Failed to load context or all files are empty.")
                 Return
             End If
 
-            _loadedContextContent = loaded.CombinedContent
+            If Not appendMode Then
+                _loadedContextDocuments.Clear()
+            End If
+
+            _loadedContextDocuments.AddRange(loaded.Documents)
+            RebuildLoadedContextContent()
             _loadedContextPath = loaded.DisplayPath
-            _cachedLoadedContextContent = _loadedContextContent
             _cachedLoadedContextPath = _loadedContextPath
 
             If chkPersistContext.Checked Then
                 Try
                     PersistLoadedContextToTempFile()
                     AppendSystemMessage($"Context loaded and persisted ({_loadedContextContent.Length:N0} characters from {loaded.LoadedCount} file(s)).")
-                Catch ex As Exception
+                Catch ex As System.Exception
                     AppendSystemMessage($"Context loaded ({_loadedContextContent.Length:N0} characters) but failed to persist: {ex.Message}")
                 End Try
             Else
                 AppendSystemMessage($"Context loaded: {loaded.LoadedCount} file(s), {_loadedContextContent.Length:N0} characters total.")
             End If
 
-            Try
-                My.Settings.ChatContextPath = selectedPath
-                My.Settings.Save()
-            Catch
-            End Try
+            SaveContextSourceManifest()
 
-        Catch ex As Exception
+        Catch ex As System.Exception
             AppendSystemMessage($"Error loading context: {ex.Message}")
         Finally
             Globals.ThisAddIn.DragDropFormLabel = ""
@@ -1493,18 +1911,24 @@ Public Class frmAIChat
         If _isUpdatingPersistContextCheckbox Then Return
 
         Try
-            Dim persistPath = GetPersistedContextFilePath()
+            Dim persistPath As String = GetPersistedContextFilePath()
 
             If chkPersistContext.Checked Then
+                RebuildLoadedContextContent()
+
                 If Not String.IsNullOrWhiteSpace(_cachedLoadedContextContent) Then
-                    File.WriteAllText(persistPath, _cachedLoadedContextContent, Encoding.UTF8)
+                    System.IO.File.WriteAllText(
+                        persistPath,
+                        _cachedLoadedContextContent,
+                        System.Text.Encoding.UTF8)
+
                     AppendSystemMessage($"Context persisted to temporary storage ({_cachedLoadedContextContent.Length:N0} characters).")
                 Else
                     AppendSystemMessage("No context loaded to persist. Load context first, then check this box.")
                 End If
             Else
-                If File.Exists(persistPath) Then
-                    Dim answer = ShowCustomYesNoBox(
+                If System.IO.File.Exists(persistPath) Then
+                    Dim answer As Integer = ShowCustomYesNoBox(
                         "Do you want to delete the persisted context file? This cannot be undone if you quit Excel.",
                         "Yes, delete",
                         "No, keep it")
@@ -1524,9 +1948,10 @@ Public Class frmAIChat
             My.Settings.Save()
             UpdatePersistContextTooltip()
 
-        Catch ex As Exception
+        Catch ex As System.Exception
             AppendSystemMessage($"Error handling persist context setting: {ex.Message}")
         End Try
     End Sub
+
 
 End Class

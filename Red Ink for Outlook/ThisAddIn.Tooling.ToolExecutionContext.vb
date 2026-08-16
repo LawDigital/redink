@@ -164,6 +164,7 @@ Partial Public Class ThisAddIn
             ConsecutiveFailedToolCount = 0
             ConsecutiveToolFailureAbortThreshold = 3
             PendingContinuationGuardPrompt = ""
+            ZeroChangeOperationCounts = New Dictionary(Of String, Integer)(StringComparer.OrdinalIgnoreCase)
             AllowedToolNames = New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
             EnforceAllowedToolScope = False
             EmptyMainModelResponse = False
@@ -182,6 +183,16 @@ Partial Public Class ThisAddIn
             ForceNoToolFinalizationRequested = False
             ForceNoToolFinalizationReason = ""
         End Sub
+
+        ''' <summary>Per-target counts of transport-successful but zero-change (no-op) tool results this run.</summary>
+        Public Property ZeroChangeOperationCounts As Dictionary(Of String, Integer)
+
+        ''' <summary>Bounded number of no-op attempts against the same target before the edit is marked unresolved.</summary>
+        Public Const ZeroChangeOperationAbortThreshold As Integer = 3
+
+        ''' <summary>Per-run set of already-expanded (ref + range) keys used to suppress repeated no-progress reads.</summary>
+        Public Property ExpandedContextKeys As HashSet(Of String) =
+            New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
 
         Public Property LogPrefix As String
         Public Property ExternalLogSink As Action(Of String, String)

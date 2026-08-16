@@ -370,6 +370,11 @@ Partial Public Class ThisAddIn
         context.AuthoritativeToolRegistry = authoritativeRegistrySource
         context.AuthoritativeToolRegistrySnapshot = authoritativeRegistrySnapshot
         context.HostKind = "Word"
+        context.SequencingState.DeliverableCapableToolNames =
+            New HashSet(Of String)(
+                SharedLibrary.Agents.HostToolRegistration.GetDeliverableCapableToolNames(
+                    SharedLibrary.Agents.ToolingHostKind.Word),
+                StringComparer.OrdinalIgnoreCase)
         context.EnforceAllowedToolScope = subAgentMode
         context.SequencingState.ActiveToolingSession = True
         context.SequencingState.HasOpenToolWorkflow = True
@@ -1339,6 +1344,116 @@ Partial Public Class ThisAddIn
                             Exit For
                         End If
 
+                        ' Pre-execution no-op circuit breaker: once a mutation target has returned zero
+                        ' changes ZeroChangeOperationAbortThreshold times, do NOT invoke the tool again.
+                        ' Return a synthetic suppressed/unresolved result so the model stops retrying.
+                        Dim opPathArg As String = ""
+                        If tc.Arguments IsNot Nothing AndAlso tc.Arguments.ContainsKey("path") AndAlso tc.Arguments("path") IsNot Nothing Then
+                            opPathArg = tc.Arguments("path").ToString()
+                        End If
+                        Dim opTargetKey As String =
+                            SharedLibrary.Agents.ToolCallSequencing.BuildOperationTargetKeyFromPath(tc.ToolName, opPathArg)
+
+                        Dim suppressedNoOpCount As Integer = 0
+                        If Not String.IsNullOrEmpty(opPathArg) AndAlso
+                           context.ZeroChangeOperationCounts.TryGetValue(opTargetKey, suppressedNoOpCount) AndAlso
+                           suppressedNoOpCount >= ToolExecutionContext.ZeroChangeOperationAbortThreshold Then
+
+                            Dim synthetic As New ToolResponse() With {
+                                .CallId = tc.CallId,
+                                .ToolName = tc.ToolName,
+                                .Success = False,
+                                .ResultKind = "error",
+                                .ErrorCode = "no_change_suppressed",
+                                .ErrorMessage = "Repeated no-op edit suppressed by host circuit breaker; this anchor is unresolved.",
+                                .Response = "{""status"":""suppressed"",""applied_count"":0,""reason"":""no_change_suppressed"",""message"":""The host stopped re-executing this edit because it repeatedly matched nothing. Do not retry this anchor. Re-read the current document text, choose a different anchor, or save/finalize what has already been applied.""}",
+                                .OriginalCallJson = tc.RawJson,
+                                .NormalizedCallSignature = normalizedToolCallSignature
+                            }
+                            context.AllToolResponses.Add(synthetic)
+
+                            If context.SequencingState IsNot Nothing Then
+                                context.SequencingState.NoteToolFailure(
+                                    tc.ToolName, "no_change_suppressed",
+                                    "Repeated no-op edit suppressed; anchor unresolved.")
+                            End If
+
+                            context.PendingContinuationGuardPrompt = BuildToolFailureReassessmentGuardPrompt(tc.ToolName)
+                            context.PendingGuardTitle = "HOST NO-OP EDIT BREAKER"
+                            context.PendingRejectedTurnExplanation =
+                                "The same edit target returned no changes repeatedly and is now suppressed. Do not retry this anchor; re-read the current document text or save/finalize what has already been applied."
+                            context.PendingRejectedAssistantTurn = ""
+                            context.PrematureTextRetryCount = 0
+                            stopCurrentBatchAfterTool = True
+
+                            context.LogWarn(
+                                "Suppressed repeated no-op mutation before execution.",
+                                details:=$"host={context.HostKind}; tool={tc.ToolName}; target={opTargetKey}; noOpCount={suppressedNoOpCount}")
+                            ToolingFileLogger.LogWarn(
+                                "No-op edit circuit breaker suppressed execution.",
+                                details:=$"host={context.HostKind}; tool={tc.ToolName}; target={opTargetKey}; noOpCount={suppressedNoOpCount}")
+
+                            Exit For
+                        End If
+
+                        ' Generalized no-progress circuit breaker: suppress a repeated context_expand of a
+                        ' (ref + range) window that was already read this run so the model stops re-reading
+                        ' the same content instead of making progress.
+                        If SharedLibrary.Agents.ContextExpandTool.IsContextExpandTool(tc.ToolName) Then
+                            Dim expandRefArg As String = ""
+                            If tc.Arguments IsNot Nothing AndAlso tc.Arguments.ContainsKey("result_ref") AndAlso tc.Arguments("result_ref") IsNot Nothing Then
+                                expandRefArg = tc.Arguments("result_ref").ToString()
+                            End If
+
+                            If Not String.IsNullOrWhiteSpace(expandRefArg) Then
+                                Dim expandStartArg As String = ""
+                                If tc.Arguments IsNot Nothing AndAlso tc.Arguments.ContainsKey("start_char") AndAlso tc.Arguments("start_char") IsNot Nothing Then
+                                    expandStartArg = tc.Arguments("start_char").ToString()
+                                End If
+                                Dim expandMaxArg As String = ""
+                                If tc.Arguments IsNot Nothing AndAlso tc.Arguments.ContainsKey("max_chars") AndAlso tc.Arguments("max_chars") IsNot Nothing Then
+                                    expandMaxArg = tc.Arguments("max_chars").ToString()
+                                End If
+
+                                Dim expandKey As String =
+                                    SharedLibrary.Agents.ToolCallSequencing.BuildExpandedRefRangeKey(expandRefArg, expandStartArg, expandMaxArg)
+
+                                If context.ExpandedContextKeys.Contains(expandKey) Then
+                                    Dim syntheticExpand As New ToolResponse() With {
+                                        .CallId = tc.CallId,
+                                        .ToolName = tc.ToolName,
+                                        .Success = False,
+                                        .ResultKind = "error",
+                                        .ErrorCode = "no_progress_suppressed",
+                                        .ErrorMessage = "Repeated context_expand of an already-read reference/range suppressed by host circuit breaker.",
+                                        .Response = "{""status"":""suppressed"",""reason"":""no_progress_suppressed"",""message"":""The host stopped re-reading this reference/range because it was already expanded this run. Do not re-expand the same window. Use the content you already retrieved, expand a different range, or proceed to finalize.""}",
+                                        .OriginalCallJson = tc.RawJson,
+                                        .NormalizedCallSignature = normalizedToolCallSignature
+                                    }
+                                    context.AllToolResponses.Add(syntheticExpand)
+
+                                    context.PendingContinuationGuardPrompt = BuildToolFailureReassessmentGuardPrompt(tc.ToolName)
+                                    context.PendingGuardTitle = "HOST NO-PROGRESS BREAKER"
+                                    context.PendingRejectedTurnExplanation =
+                                        "The same reference/range was expanded repeatedly with no new progress. Do not re-expand it; use what you already read or continue with another step."
+                                    context.PendingRejectedAssistantTurn = ""
+                                    context.PrematureTextRetryCount = 0
+                                    stopCurrentBatchAfterTool = True
+
+                                    context.LogWarn(
+                                        "Suppressed repeated context_expand of already-read reference/range.",
+                                        details:=$"host={context.HostKind}; tool={tc.ToolName}; key={expandKey}")
+                                    ToolingFileLogger.LogWarn(
+                                        "No-progress circuit breaker suppressed context_expand.",
+                                        details:=$"host={context.HostKind}; tool={tc.ToolName}; key={expandKey}")
+
+                                    Exit For
+                                End If
+
+                                context.ExpandedContextKeys.Add(expandKey)
+                            End If
+                        End If
+
                         Dim toolResponse As ToolResponse = Nothing
 
                         If TryBuildDuplicateSuccessfulToolReplay(tc, normalizedToolCallSignature, context, toolResponse) Then
@@ -1391,12 +1506,62 @@ Partial Public Class ThisAddIn
                                                     returnedToParent:=skippedStructuredAgentFailure)
                                 End If
                             Else
-                                If context.SequencingState IsNot Nothing Then
-                                    context.SequencingState.NoteSuccessfulProgress()
+                                ' Transport success is not operation success: a mutation tool that applied
+                                ' zero changes (status=none/no_match or applied_count=0) must not count as
+                                ' progress, and repeated no-ops against the same target are circuit-broken.
+                                Dim isZeroChangeOp As Boolean =
+                                    SharedLibrary.Agents.ToolCallSequencing.IsZeroChangeOperationResult(toolResponse.Response)
 
-                                    If toolConfig IsNot Nothing AndAlso toolConfig.PrefersSingleInvocation Then
-                                        context.SequencingState.NoteConsolidatableToolSuccess(tc.ToolName)
+                                If isZeroChangeOp Then
+                                    Dim targetKey As String = opTargetKey
+                                    If String.IsNullOrEmpty(opPathArg) Then
+                                        targetKey = SharedLibrary.Agents.ToolCallSequencing.BuildOperationTargetKey(tc.ToolName, toolResponse.Response)
                                     End If
+                                    Dim noOpCount As Integer = 0
+                                    context.ZeroChangeOperationCounts.TryGetValue(targetKey, noOpCount)
+                                    noOpCount += 1
+                                    context.ZeroChangeOperationCounts(targetKey) = noOpCount
+
+                                    If context.SequencingState IsNot Nothing Then
+                                        context.SequencingState.NoteToolFailure(
+                                            tc.ToolName,
+                                            "no_change_applied",
+                                            "Tool executed but applied no changes (no matching anchor).")
+                                    End If
+
+                                    context.LogWarn(
+                                        "Tool executed with zero changes applied; not counted as progress.",
+                                        details:=$"host={context.HostKind}; tool={tc.ToolName}; target={targetKey}; noOpCount={noOpCount}")
+
+                                    If noOpCount >= ToolExecutionContext.ZeroChangeOperationAbortThreshold Then
+                                        If context.SequencingState IsNot Nothing Then
+                                            context.SequencingState.NoteFailureFatal()
+                                        End If
+                                        context.PendingContinuationGuardPrompt = BuildToolFailureReassessmentGuardPrompt(tc.ToolName)
+                                        context.PendingGuardTitle = "HOST NO-OP EDIT BREAKER"
+                                        context.PendingRejectedTurnExplanation =
+                                            "The same edit target returned no changes repeatedly. Stop retrying this anchor; re-read the current document text or proceed to save/finalize what has already been applied."
+                                        context.PendingRejectedAssistantTurn = ""
+                                        context.PrematureTextRetryCount = 0
+                                        stopCurrentBatchAfterTool = True
+
+                                        ToolingFileLogger.LogWarn(
+                                            "No-op edit circuit breaker tripped; marking edit unresolved.",
+                                            details:=$"host={context.HostKind}; tool={tc.ToolName}; target={targetKey}; noOpCount={noOpCount}")
+                                    End If
+                                Else
+                                    If context.SequencingState IsNot Nothing Then
+                                        context.SequencingState.NoteSuccessfulProgress()
+
+                                        If toolConfig IsNot Nothing AndAlso toolConfig.PrefersSingleInvocation Then
+                                            context.SequencingState.NoteConsolidatableToolSuccess(tc.ToolName)
+                                        End If
+                                    End If
+                                End If
+
+                                If isZeroChangeOp AndAlso stopCurrentBatchAfterTool Then
+                                    UpdateWorkflowContinuityAfterToolExecution(context, tc, toolResponse)
+                                    Exit For
                                 End If
                             End If
 
@@ -1751,13 +1916,17 @@ Partial Public Class ThisAddIn
                             Dim _ftGateHasDeliverable_C As Boolean =
                                     context.SequencingState IsNot Nothing AndAlso
                                     SharedLibrary.Agents.ToolCallSequencing.HasProducedUserDeliverable(context.SequencingState)
+                            Dim _ftGateValidatedDeliverable_C As Boolean =
+                                    context.SequencingState IsNot Nothing AndAlso
+                                    context.SequencingState.HasValidatedFinalDeliverable
 
                             Dim _ftGateEval_C As Agents.FinalTurnEvaluation =
                                     Agents.ToolingOrchestrator.EvaluateFinalTurn(
                                         currentResponse,
                                         _ftGateNeedsDeliverable_C,
                                         _ftGateHasDeliverable_C,
-                                        _ftGateUntried_C)
+                                        _ftGateUntried_C,
+                                        _ftGateValidatedDeliverable_C)
 
                             If _ftGateEval_C.Decision <> Agents.FinalTurnDecision.Accept Then
                                 If System.Convert.ToInt32(context.PrematureTextRetryCount) < ToolExecutionContext.MaxContinuationRetries Then
@@ -1969,55 +2138,94 @@ Partial Public Class ThisAddIn
                         hasUnresolvedToolFailure:=context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure,
                         runState:=context.SequencingState)
 
-                    Select Case forcedValidation.TurnKind
-                        Case SharedLibrary.Agents.ToolCallSequencing.ActiveToolingTurnKind.FinalCompleteTurn
-                            acceptedFinalStatus = "complete"
+                    ' Single-gate enforcement on the forced-final path:
+                    ' (Bug 1) an envelope/tool-call/provider-JSON payload is never user-facing;
+                    ' (Bug 2) a 'complete' claim requires a validated deliverable when the request needs one.
+                    Dim forcedFinalIsEnvelope As Boolean =
+                        ContainsToolCalls(currentResponse, context.ToolingModel.ToolCallDetectionPattern) OrElse
+                        SharedLibrary.Agents.ToolCallSequencing.ContainsProviderToolEnvelope(currentResponse)
 
-                            If context.SequencingState IsNot Nothing Then
-                                context.SequencingState.FinalResponseOrigin = "model_provided"
-                                context.SequencingState.HasOpenToolWorkflow = False
-                            End If
+                    Dim forcedFinalDeliverableMissing As Boolean =
+                        forcedValidation.TurnKind = SharedLibrary.Agents.ToolCallSequencing.ActiveToolingTurnKind.FinalCompleteTurn AndAlso
+                        context.SequencingState IsNot Nothing AndAlso
+                        context.SequencingState.RequestRequiresCreatedDeliverable AndAlso
+                        Not context.SequencingState.HasValidatedFinalDeliverable
 
-                            SharedLibrary.Agents.ToolCallSequencing.ClearNonBlockingUnresolvedToolFailure(
-                                context.SequencingState,
-                                "host_exposure_recovery")
+                    If forcedFinalIsEnvelope OrElse forcedFinalDeliverableMissing Then
+                        context.FinalizationBlocked = True
+                        context.FinalizationBlockedReason =
+                            If(forcedFinalIsEnvelope, "forced_final_tool_envelope", "forced_final_missing_validated_deliverable")
 
-                            context.Log("Forced no-tool final response accepted as complete.")
+                        currentResponse = Await BuildBlockedToolingResultAsync(
+                            context,
+                            SharedLibrary.Agents.ToolCallSequencing.InvalidTextOnlyFinalizationCode,
+                            If(forcedFinalIsEnvelope,
+                               "The tooling run ended because the forced finalization response was a tool-call/provider envelope, not a user-facing answer.",
+                               "The tooling run ended because completion was claimed without a validated final deliverable."),
+                            useSecondAPI,
+                            hideSplash,
+                            cancellationToken)
 
-                        Case SharedLibrary.Agents.ToolCallSequencing.ActiveToolingTurnKind.FinalBlockedTurn
-                            acceptedFinalStatus = "blocked"
+                        If context.SequencingState IsNot Nothing Then
+                            context.SequencingState.FinalResponseOrigin = "host_generated"
+                            context.SequencingState.HasOpenToolWorkflow = False
+                        End If
 
-                            If context.SequencingState IsNot Nothing Then
-                                context.SequencingState.FinalResponseOrigin = "model_provided"
-                                context.SequencingState.HasOpenToolWorkflow = False
-                            End If
+                        context.LogWarn(
+                            $"Forced no-tool finalization blocked at single gate; envelope={forcedFinalIsEnvelope}; deliverableMissing={forcedFinalDeliverableMissing}; host={context.HostKind}")
 
-                            SharedLibrary.Agents.ToolCallSequencing.ClearNonBlockingUnresolvedToolFailure(
-                                context.SequencingState,
-                                "host_exposure_recovery")
+                    Else
 
-                            context.Log("Forced no-tool final response accepted as blocked.")
+                        Select Case forcedValidation.TurnKind
+                            Case SharedLibrary.Agents.ToolCallSequencing.ActiveToolingTurnKind.FinalCompleteTurn
+                                acceptedFinalStatus = "complete"
 
-                        Case Else
-                            context.FinalizationBlocked = True
-                            context.FinalizationBlockedReason = If(forcedValidation.InvalidReason, "invalid_forced_final")
+                                If context.SequencingState IsNot Nothing Then
+                                    context.SequencingState.FinalResponseOrigin = "model_provided"
+                                    context.SequencingState.HasOpenToolWorkflow = False
+                                End If
 
-                            currentResponse = Await BuildBlockedToolingResultAsync(
-                                context,
-                                SharedLibrary.Agents.ToolCallSequencing.InvalidTextOnlyFinalizationCode,
-                                "The tooling run ended because the forced finalization response was still not valid.",
-                                useSecondAPI,
-                                hideSplash,
-                                cancellationToken)
+                                SharedLibrary.Agents.ToolCallSequencing.ClearNonBlockingUnresolvedToolFailure(
+                                    context.SequencingState,
+                                    "host_exposure_recovery")
 
-                            If context.SequencingState IsNot Nothing Then
-                                context.SequencingState.FinalResponseOrigin = "host_generated"
-                                context.SequencingState.HasOpenToolWorkflow = False
-                            End If
+                                context.Log("Forced no-tool final response accepted as complete.")
 
-                            context.LogWarn(
+                            Case SharedLibrary.Agents.ToolCallSequencing.ActiveToolingTurnKind.FinalBlockedTurn
+                                acceptedFinalStatus = "blocked"
+
+                                If context.SequencingState IsNot Nothing Then
+                                    context.SequencingState.FinalResponseOrigin = "model_provided"
+                                    context.SequencingState.HasOpenToolWorkflow = False
+                                End If
+
+                                SharedLibrary.Agents.ToolCallSequencing.ClearNonBlockingUnresolvedToolFailure(
+                                    context.SequencingState,
+                                    "host_exposure_recovery")
+
+                                context.Log("Forced no-tool final response accepted as blocked.")
+
+                            Case Else
+                                context.FinalizationBlocked = True
+                                context.FinalizationBlockedReason = If(forcedValidation.InvalidReason, "invalid_forced_final")
+
+                                currentResponse = Await BuildBlockedToolingResultAsync(
+                                    context,
+                                    SharedLibrary.Agents.ToolCallSequencing.InvalidTextOnlyFinalizationCode,
+                                    "The tooling run ended because the forced finalization response was still not valid.",
+                                    useSecondAPI,
+                                    hideSplash,
+                                    cancellationToken)
+
+                                If context.SequencingState IsNot Nothing Then
+                                    context.SequencingState.FinalResponseOrigin = "host_generated"
+                                    context.SequencingState.HasOpenToolWorkflow = False
+                                End If
+
+                                context.LogWarn(
                                 $"Forced no-tool finalization returned an invalid turn; invalidTurnReason={If(forcedValidation.InvalidReason, "invalid_turn")}; host={context.HostKind}")
-                    End Select
+                        End Select
+                    End If
                 Else
                     context.EmptyMainModelResponse = True
                 End If
@@ -2045,6 +2253,18 @@ Partial Public Class ThisAddIn
                         "IMPORTANT: You have reached the maximum number of tool iterations. Do NOT call any more tools. Based on all the information gathered from the tools so far, provide your final answer now.",
                         "IMPORTANT: You have reached the maximum number of tool iterations. Do NOT call any more tools. Based on all the information gathered from the tools so far, return only the final raw text payload in the exact caller-defined format.")
 
+                ' Do NOT resend the full tool history on the forced-final call (observed ~202k vs 120k
+                ' budget). Replace it with a small synthesized state summary (completed steps, last known
+                ' output refs, unresolved anchors), mirroring the abort-summary pattern below.
+                Try
+                    INI_APICall_ToolResponses_2 =
+                        BuildForcedFinalStateSummary(context)
+                    context.Log($"Forced-final state summary built ({If(INI_APICall_ToolResponses_2, "").Length} chars)", "diag")
+                Catch exCompact As Exception
+                    INI_APICall_ToolResponses_2 = ""
+                    context.LogWarn("Failed to build forced-final state summary; sent empty tool-context.", details:=exCompact.Message)
+                End Try
+
                 ToolingFileLogger.LogStep("Forcing final LLM call without tools")
                 ToolingFileLogger.LogPreMainLlmCallSnapshot()
 
@@ -2059,18 +2279,29 @@ Partial Public Class ThisAddIn
                         fileObject,
                         True)
 
-                    If Not String.IsNullOrWhiteSpace(finalResponse) Then
+                    If Not String.IsNullOrWhiteSpace(finalResponse) AndAlso
+                               Not ContainsToolCalls(finalResponse, context.ToolingModel.ToolCallDetectionPattern) AndAlso
+                               Not SharedLibrary.Agents.ToolCallSequencing.ContainsProviderToolEnvelope(finalResponse) Then
                         currentResponse = finalResponse
                         context.Log($"Final response received ({currentResponse.Length} chars)")
                         ToolingFileLogger.LogRawResponseStub("Main LLM() - Forced Final", currentResponse)
+                    ElseIf Not String.IsNullOrWhiteSpace(finalResponse) Then
+                        context.EmptyMainModelResponse = True
+                        currentResponse = ""
+                        context.LogWarn("Forced-final response was a tool-call/provider envelope; discarded to force a host-generated blocked message.")
                     Else
                         context.EmptyMainModelResponse = True
-                        context.LogWarn("Empty response from forced final LLM call")
+                        ' Never reuse the previous raw provider/Gemini response as the final body.
+                        currentResponse = ""
+                        context.LogWarn("Empty response from forced final LLM call; discarded previous raw response to prevent reuse.")
                         ToolingFileLogger.LogWarn("Empty forced-final main-model response.",
                               details:=$"host={context.HostKind}; iteration={iteration}")
                     End If
 
                 Catch ex As Exception
+                    ' Do not fall back to the previous raw response on error; force a safe blocked message.
+                    context.EmptyMainModelResponse = True
+                    currentResponse = ""
                     context.LogError($"Error during forced final call: {ex.Message}", ex:=ex)
                 End Try
             End If
@@ -2690,6 +2921,68 @@ Partial Public Class ThisAddIn
             .ErrorCode = "invalid_tool_arguments",
             .OriginalCallJson = toolCall.RawJson
         }
+    End Function
+
+    ''' <summary>
+    ''' Builds a small synthesized state summary for the forced-final (max-iteration) synthesis call
+    ''' so the full tool history is NOT resent to the provider (which blew the compaction budget).
+    ''' Emits only completed steps, last known output refs, and unresolved anchors, mirroring the
+    ''' abort-summary pattern used on the tool-error abort path.
+    ''' </summary>
+    Private Function BuildForcedFinalStateSummary(context As ToolExecutionContext) As String
+        Dim completedSteps As New System.Text.StringBuilder()
+        Dim unresolvedAnchors As New System.Text.StringBuilder()
+        Dim outputRefs As New System.Collections.Generic.List(Of String)()
+
+        If context IsNot Nothing AndAlso context.AllToolResponses IsNot Nothing Then
+            For Each tr In context.AllToolResponses
+                If tr Is Nothing Then Continue For
+
+                If tr.Success Then
+                    completedSteps.AppendLine($"- Tool: {tr.ToolName}")
+                    If Not String.IsNullOrWhiteSpace(tr.Response) Then
+                        completedSteps.AppendLine($"  Result: {BuildResultExcerpt(tr.Response, 160)}")
+
+                        Try
+                            For Each reference As String In SharedLibrary.Agents.ToolCallSequencing.ExtractCreatedDeliverableReferences(tr.Response)
+                                If Not String.IsNullOrWhiteSpace(reference) AndAlso Not outputRefs.Contains(reference) Then
+                                    outputRefs.Add(reference)
+                                End If
+                            Next
+                        Catch
+                        End Try
+                    End If
+                Else
+                    unresolvedAnchors.AppendLine($"- Tool: {tr.ToolName}")
+                    If Not String.IsNullOrWhiteSpace(tr.ErrorMessage) Then
+                        unresolvedAnchors.AppendLine($"  Error: {tr.ErrorMessage}")
+                    End If
+                End If
+            Next
+        End If
+
+        If context IsNot Nothing AndAlso context.SequencingState IsNot Nothing Then
+            Dim lastRef As String = If(context.SequencingState.LastKnownOutputReference, "").Trim()
+            If lastRef <> "" AndAlso Not outputRefs.Contains(lastRef) Then
+                outputRefs.Add(lastRef)
+            End If
+        End If
+
+        Dim summary As New System.Text.StringBuilder()
+        summary.AppendLine("<FORCED_FINAL_STATE_SUMMARY>")
+        summary.AppendLine("Use ONLY the facts in this block; the full tool history is intentionally omitted.")
+        summary.AppendLine("<COMPLETED_TOOL_STEPS>")
+        summary.AppendLine(If(completedSteps.Length > 0, completedSteps.ToString().TrimEnd(), "(none)"))
+        summary.AppendLine("</COMPLETED_TOOL_STEPS>")
+        summary.AppendLine("<LAST_KNOWN_OUTPUT_REFS>")
+        summary.AppendLine(If(outputRefs.Count > 0, String.Join(Environment.NewLine, outputRefs), "(none)"))
+        summary.AppendLine("</LAST_KNOWN_OUTPUT_REFS>")
+        summary.AppendLine("<UNRESOLVED_ANCHORS>")
+        summary.AppendLine(If(unresolvedAnchors.Length > 0, unresolvedAnchors.ToString().TrimEnd(), "(none)"))
+        summary.AppendLine("</UNRESOLVED_ANCHORS>")
+        summary.Append("</FORCED_FINAL_STATE_SUMMARY>")
+
+        Return summary.ToString()
     End Function
 
     Private Function BuildTurnExposureGuardPrompt(toolName As String,
@@ -3993,8 +4286,6 @@ Partial Public Class ThisAddIn
         Optional finalResponseContract As SharedLibrary.Agents.ToolingFinalResponseContract = SharedLibrary.Agents.ToolingFinalResponseContract.UserFacingTaskStatus) As String
 
         Dim sb As New StringBuilder()
-
-        MaxToolIterations = INI_ToolingMaximumIterations
 
         If SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(finalResponseContract) Then
             sb.AppendLine(InterpolateAtRuntime(SP_Add_Tooling))

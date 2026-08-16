@@ -1109,9 +1109,20 @@ Namespace SharedLibrary
                 passwordForm.CancelButton = cancelButton
                 passwordForm.Controls.Add(mainLayout)
 
+                ' Inspect and same-thread filter the caller-supplied owner before using it as a
+                ' modal owner. A foreign (cross-thread/cross-process) owner would be disabled by
+                ' ShowDialog and never re-enabled, deadlocking that host. InspectDialogOwner logs
+                ' the attempt; IfOwnerOnCurrentThread rejects a cross-thread owner so we fall back
+                ' to an ownerless dialog instead of deadlocking.
+                Dim effectiveOwner As System.Windows.Forms.IWin32Window = ownerForm
+                If effectiveOwner IsNot Nothing Then
+                    OfficeWindowWatchdog.InspectDialogOwner(effectiveOwner, "ShowPasswordPrompt", "ShowPasswordPrompt")
+                    effectiveOwner = IfOwnerOnCurrentThread(effectiveOwner)
+                End If
+
                 Dim result As System.Windows.Forms.DialogResult
-                If ownerForm IsNot Nothing Then
-                    result = passwordForm.ShowDialog(ownerForm)
+                If effectiveOwner IsNot Nothing Then
+                    result = passwordForm.ShowDialog(effectiveOwner)
                 Else
                     result = passwordForm.ShowDialog()
                 End If
@@ -1678,7 +1689,7 @@ Namespace SharedLibrary
         "DoubleS", "NoEmDash", "Clean", "MarkdownBubbles", "KeepFormat1", "MarkdownConvert", "ReplaceText1", "SimpleMenuOverride",
         "KeepFormat2", "KeepParaFormatInline", "ReplaceText2", "DoMarkupOutlook", "DoMarkupWord", "SimpleMenuDefault", "UseHostColorOutlook",
         "APIDebug", "Crashlog", "AutoPilotAutoStart", "AutoPilotSchedulerLocalChat", "ISearch_Approve", "ISearch", "Lib", "ContextMenu", "NoLocalConfig", "SecondAPI", "APIEncrypted", "APIEncrypted_2",
-        "OAuth2", "OAuth2_2", "PromptLib", "Ignore", "ToolingLogWindow", "ToolingDryRun", "ForceDrawioLocal", "AllowLegacyDocFiles", "EnablePrivacyForSearch",
+        "OAuth2", "OAuth2_2", "PromptLib", "Ignore", "ToolingLogWindow", "ToolingDryRun", "ForceDrawioLocal", "AllowLegacyDocFiles", "JsRunDisable", "BrowserToolsDisable", "EnablePrivacyForSearch",
         "UpdateIni", "UpdateIniAllowRemote", "UpdateIniNoSignature", "UpdateIniSilentLog", "NoHelperDownload", "LicenseCounterAnon", "KnowledgeStoreUseLLMIndex", "KnowledgeStoreBackgroundIndexing"
             }
             Return booleanSettings.Contains(settingKey)
@@ -1990,6 +2001,10 @@ Namespace SharedLibrary
                     Return context.INI_ForceDrawioLocal.ToString()
                 Case "AllowLegacyDocFiles"
                     Return context.INI_AllowLegacyDocFiles.ToString()
+                Case "JsRunDisable"
+                    Return context.INI_JsRunDisable.ToString()
+                Case "BrowserToolsDisable"
+                    Return context.INI_BrowserToolsDisable.ToString()
                 Case "EnablePrivacyForSearch"
                     Return context.INI_EnablePrivacyForSearch.ToString()
                 Case "UpdateCheckInterval"
@@ -2407,6 +2422,10 @@ Namespace SharedLibrary
                     context.INI_ForceDrawioLocal = Boolean.Parse(value)
                 Case "AllowLegacyDocFiles"
                     context.INI_AllowLegacyDocFiles = Boolean.Parse(value)
+                Case "JsRunDisable"
+                    context.INI_JsRunDisable = Boolean.Parse(value)
+                Case "BrowserToolsDisable"
+                    context.INI_BrowserToolsDisable = Boolean.Parse(value)
                 Case "EnablePrivacyForSearch"
                     context.INI_EnablePrivacyForSearch = Boolean.Parse(value)
                 Case "UpdateCheckInterval"
@@ -2784,6 +2803,8 @@ Namespace SharedLibrary
                     {"CentralConfigPW", context.INI_CentralConfigPW},
                     {"ForceDrawioLocal", context.INI_ForceDrawioLocal.ToString()},
                     {"AllowLegacyDocFiles", context.INI_AllowLegacyDocFiles.ToString()},
+                    {"JsRunDisable", context.INI_JsRunDisable.ToString()},
+                    {"BrowserToolsDisable", context.INI_BrowserToolsDisable.ToString()},
                     {"EnablePrivacyForSearch", context.INI_EnablePrivacyForSearch.ToString()},
                     {"UpdateCheckInterval", context.INI_UpdateCheckInterval.ToString()},
                     {"UpdatePath", context.INI_UpdatePath},
@@ -4146,8 +4167,19 @@ Namespace SharedLibrary
             form.Close()
         End Sub
 
-            If ownerForm IsNot Nothing Then
-                form.ShowDialog(ownerForm)
+            ' Inspect and same-thread filter the caller-supplied owner before using it as a
+            ' modal owner. A foreign (cross-thread/cross-process) owner would be disabled by
+            ' ShowDialog and never re-enabled, deadlocking that host. InspectDialogOwner logs
+            ' the attempt; IfOwnerOnCurrentThread rejects a cross-thread owner so we fall back
+            ' to an ownerless dialog instead of deadlocking.
+            Dim effectiveOwner As System.Windows.Forms.IWin32Window = ownerForm
+            If effectiveOwner IsNot Nothing Then
+                OfficeWindowWatchdog.InspectDialogOwner(effectiveOwner, "ShowVariableConfigurationWindow", "ShowVariableConfigurationWindow")
+                effectiveOwner = IfOwnerOnCurrentThread(effectiveOwner)
+            End If
+
+            If effectiveOwner IsNot Nothing Then
+                form.ShowDialog(effectiveOwner)
             Else
                 form.ShowDialog()
             End If
@@ -4298,6 +4330,8 @@ Namespace SharedLibrary
             variableValues.Add("CentralConfigPW", context.INI_CentralConfigPW)
             variableValues.Add("ForceDrawioLocal", context.INI_ForceDrawioLocal)
             variableValues.Add("AllowLegacyDocFiles", context.INI_AllowLegacyDocFiles)
+            variableValues.Add("JsRunDisable", context.INI_JsRunDisable)
+            variableValues.Add("BrowserToolsDisable", context.INI_BrowserToolsDisable)
             variableValues.Add("EnablePrivacyForSearch", context.INI_EnablePrivacyForSearch)
             variableValues.Add("UpdateCheckInterval", context.INI_UpdateCheckInterval)
             variableValues.Add("UpdatePath", context.INI_UpdatePath)
@@ -4706,95 +4740,97 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("CentralConfigPW") Then context.INI_CentralConfigPW = CStr(updatedValues("CentralConfigPW"))
                 If updatedValues.ContainsKey("ForceDrawioLocal") Then context.INI_ForceDrawioLocal = CBool(updatedValues("ForceDrawioLocal"))
                 If updatedValues.ContainsKey("AllowLegacyDocFiles") Then context.INI_AllowLegacyDocFiles = CBool(updatedValues("AllowLegacyDocFiles"))
+                If updatedValues.ContainsKey("JsRunDisable") Then context.INI_JsRunDisable = CBool(updatedValues("JsRunDisable"))
+                If updatedValues.ContainsKey("BrowserToolsDisable") Then context.INI_BrowserToolsDisable = CBool(updatedValues("BrowserToolsDisable"))
                 If updatedValues.ContainsKey("EnablePrivacyForSearch") Then context.INI_EnablePrivacyForSearch = CBool(updatedValues("EnablePrivacyForSearch"))
                 If updatedValues.ContainsKey("UpdateCheckInterval") Then context.INI_UpdateCheckInterval = CInt(updatedValues("UpdateCheckInterval"))
-                If updatedValues.ContainsKey("UpdatePath") Then context.INI_UpdatePath = CStr(updatedValues("UpdatePath"))
-                If updatedValues.ContainsKey("HelpMeInkyPath") Then context.INI_HelpMeInkyPath = CStr(updatedValues("HelpMeInkyPath"))
-                If updatedValues.ContainsKey("DiscussInkyPath") Then context.INI_DiscussInkyPath = CStr(updatedValues("DiscussInkyPath"))
-                If updatedValues.ContainsKey("DiscussInkyPathLocal") Then context.INI_DiscussInkyPathLocal = CStr(updatedValues("DiscussInkyPathLocal"))
-                If updatedValues.ContainsKey("RedactionInstructionsPath") Then context.INI_RedactionInstructionsPath = CStr(updatedValues("RedactionInstructionsPath"))
-                If updatedValues.ContainsKey("RedactionInstructionsPathLocal") Then context.INI_RedactionInstructionsPathLocal = CStr(updatedValues("RedactionInstructionsPathLocal"))
-                If updatedValues.ContainsKey("ExtractorPath") Then context.INI_ExtractorPath = CStr(updatedValues("ExtractorPath"))
-                If updatedValues.ContainsKey("ExtractorPathLocal") Then context.INI_ExtractorPathLocal = CStr(updatedValues("ExtractorPathLocal"))
-                If updatedValues.ContainsKey("RenameLibPath") Then context.INI_RenameLibPath = CStr(updatedValues("RenameLibPath"))
-                If updatedValues.ContainsKey("RenameLibPathLocal") Then context.INI_RenameLibPathLocal = CStr(updatedValues("RenameLibPathLocal"))
-                If updatedValues.ContainsKey("MailMoverPath") Then context.INI_MailMoverPath = CStr(updatedValues("MailMoverPath"))
-                If updatedValues.ContainsKey("MailMoverPathLocal") Then context.INI_MailMoverPathLocal = CStr(updatedValues("MailMoverPathLocal"))
-                If updatedValues.ContainsKey("DataCollectorPath") Then context.INI_DataCollectorPath = CStr(updatedValues("DataCollectorPath"))
-                If updatedValues.ContainsKey("SpeechModelPath") Then context.INI_SpeechModelPath = CStr(updatedValues("SpeechModelPath"))
-                If updatedValues.ContainsKey("LocalModelPath") Then context.INI_LocalModelPath = CStr(updatedValues("LocalModelPath"))
-                If updatedValues.ContainsKey("DictionaryPath") Then context.INI_DictionaryPath = CStr(updatedValues("DictionaryPath"))
-                If updatedValues.ContainsKey("DictionaryPathLocal") Then context.INI_DictionaryPathLocal = CStr(updatedValues("DictionaryPathLocal"))
-                If updatedValues.ContainsKey("STT_Google") Then context.INI_STT_Google = CStr(updatedValues("STT_Google"))
-                If updatedValues.ContainsKey("STT_Google_ProjectID") Then context.INI_STT_Google_ProjectID = CStr(updatedValues("STT_Google_ProjectID"))
-                If updatedValues.ContainsKey("STT_OpenAI") Then context.INI_STT_OpenAI = CStr(updatedValues("STT_OpenAI"))
-                If updatedValues.ContainsKey("STT_Azure") Then context.INI_STT_Azure = CStr(updatedValues("STT_Azure"))
-                If updatedValues.ContainsKey("STT_Azure_SpeechKey") Then context.INI_STT_Azure_SpeechKey = CStr(updatedValues("STT_Azure_SpeechKey"))
-                If updatedValues.ContainsKey("TTSEndpoint") Then context.INI_TTSEndpoint = CStr(updatedValues("TTSEndpoint"))
-                If updatedValues.ContainsKey("PromptLib") Then context.INI_PromptLibPath = CStr(updatedValues("PromptLib"))
-                If updatedValues.ContainsKey("PromptLibLocal") Then context.INI_PromptLibPathLocal = CStr(updatedValues("PromptLibLocal"))
-                If updatedValues.ContainsKey("MyStylePath") Then context.INI_MyStylePath = CStr(updatedValues("MyStylePath"))
-                If updatedValues.ContainsKey("AlternateModelPath") Then context.INI_AlternateModelPath = CStr(updatedValues("AlternateModelPath"))
-                If updatedValues.ContainsKey("SpecialServicePath") Then context.INI_SpecialServicePath = CStr(updatedValues("SpecialServicePath"))
-                If updatedValues.ContainsKey("FindClausePath") Then context.INI_FindClausePath = CStr(updatedValues("FindClausePath"))
-                If updatedValues.ContainsKey("FindClausePathLocal") Then context.INI_FindClausePathLocal = CStr(updatedValues("FindClausePathLocal"))
-                If updatedValues.ContainsKey("AgentResourcesPath") Then context.INI_AgentResourcesPath = CStr(updatedValues("AgentResourcesPath"))
-                If updatedValues.ContainsKey("AgentResourcesPathLocal") Then context.INI_AgentResourcesPathLocal = CStr(updatedValues("AgentResourcesPathLocal"))
-                If updatedValues.ContainsKey("WebAgentPath") Then context.INI_WebAgentPath = CStr(updatedValues("WebAgentPath"))
-                If updatedValues.ContainsKey("WebAgentPathLocal") Then context.INI_WebAgentPathLocal = CStr(updatedValues("WebAgentPathLocal"))
-                If updatedValues.ContainsKey("SnapshotLibPath") Then context.INI_SnapshotLibPath = CStr(updatedValues("SnapshotLibPath"))
-                If updatedValues.ContainsKey("SnapshotLibPathLocal") Then context.INI_SnapshotLibPathLocal = CStr(updatedValues("SnapshotLibPathLocal"))
-                If updatedValues.ContainsKey("DocCheckPath") Then context.INI_DocCheckPath = CStr(updatedValues("DocCheckPath"))
-                If updatedValues.ContainsKey("DocCheckPathLocal") Then context.INI_DocCheckPathLocal = CStr(updatedValues("DocCheckPathLocal"))
-                If updatedValues.ContainsKey("DocStylePath") Then context.INI_DocStylePath = CStr(updatedValues("DocStylePath"))
-                If updatedValues.ContainsKey("DocStylePathLocal") Then context.INI_DocStylePathLocal = CStr(updatedValues("DocStylePathLocal"))
-                If updatedValues.ContainsKey("PromptLib_Transcript") Then context.INI_PromptLibPath_Transcript = CStr(updatedValues("PromptLib_Transcript"))
-                If updatedValues.ContainsKey("HttpStack") Then context.INI_HttpStack = CStr(updatedValues("HttpStack"))
-                If updatedValues.ContainsKey("BrandingName") Then context.INI_BrandingName = CStr(updatedValues("BrandingName"))
-                If updatedValues.ContainsKey("LogoPath") Then context.INI_LogoPath = CStr(updatedValues("LogoPath"))
-                If updatedValues.ContainsKey("LogoPathMedium") Then context.INI_LogoPathMedium = CStr(updatedValues("LogoPathMedium"))
-                If updatedValues.ContainsKey("LogoPathLarge") Then context.INI_LogoPathLarge = CStr(updatedValues("LogoPathLarge"))
-                If updatedValues.ContainsKey("NoHelperDownload") Then context.INI_NoHelperDownload = CBool(updatedValues("NoHelperDownload"))
-                If updatedValues.ContainsKey("LicenseCounterPath") Then context.INI_LicenseCounterPath = CStr(updatedValues("LicenseCounterPath"))
-                If updatedValues.ContainsKey("LicenseCounterMethod") Then context.INI_LicenseCounterMethod = CStr(updatedValues("LicenseCounterMethod"))
-                If updatedValues.ContainsKey("LicenseCounterAnon") Then context.INI_LicenseCounterAnon = CBool(updatedValues("LicenseCounterAnon"))
-                If updatedValues.ContainsKey("InkyMemoryCap") Then context.INI_InkyMemoryCap = CInt(updatedValues("InkyMemoryCap"))
-                If updatedValues.ContainsKey("AutoPilot") Then context.INI_AutoPilot = CStr(updatedValues("AutoPilot"))
-                If updatedValues.ContainsKey("ToolingLogWindow") Then context.INI_ToolingLogWindow = CBool(updatedValues("ToolingLogWindow"))
-                If updatedValues.ContainsKey("ToolingDryRun") Then context.INI_ToolingDryRun = CBool(updatedValues("ToolingDryRun"))
-                If updatedValues.ContainsKey("ToolingMaximumIterations") Then context.INI_ToolingMaximumIterations = CInt(updatedValues("ToolingMaximumIterations"))
-                If updatedValues.ContainsKey("ToolResponsePayloadBudgetChars") Then context.INI_ToolResponsePayloadBudgetChars = CInt(updatedValues("ToolResponsePayloadBudgetChars"))
-                If updatedValues.ContainsKey("BudgetMediumCompactionThresholdChars") Then context.INI_BudgetMediumCompactionThresholdChars = CInt(updatedValues("BudgetMediumCompactionThresholdChars"))
-                If updatedValues.ContainsKey("BudgetAggressiveCompactionThresholdChars") Then context.INI_BudgetAggressiveCompactionThresholdChars = CInt(updatedValues("BudgetAggressiveCompactionThresholdChars"))
-                If updatedValues.ContainsKey("BudgetCompactionPreviewChars") Then context.INI_BudgetCompactionPreviewChars = CInt(updatedValues("BudgetCompactionPreviewChars"))
-                If updatedValues.ContainsKey("UpdateIni") Then context.INI_UpdateIni = CBool(updatedValues("UpdateIni"))
-                If updatedValues.ContainsKey("UpdateIniAllowRemote") Then context.INI_UpdateIniAllowRemote = CBool(updatedValues("UpdateIniAllowRemote"))
-                If updatedValues.ContainsKey("UpdateIniNoSignature") Then context.INI_UpdateIniNoSignature = CBool(updatedValues("UpdateIniNoSignature"))
-                If updatedValues.ContainsKey("UpdateSource") Then context.INI_UpdateSource = CStr(updatedValues("UpdateSource"))
-                If updatedValues.ContainsKey("UpdateIniClients") Then context.INI_UpdateIniClients = CStr(updatedValues("UpdateIniClients"))
-                If updatedValues.ContainsKey("UpdateIniIgnoreOverride") Then context.INI_UpdateIniIgnoreOverride = CStr(updatedValues("UpdateIniIgnoreOverride"))
-                If updatedValues.ContainsKey("UpdateIniSilentMode") Then context.INI_UpdateIniSilentMode = CInt(updatedValues("UpdateIniSilentMode"))
-                If updatedValues.ContainsKey("UpdateIniSilentLog") Then context.INI_UpdateIniSilentLog = CBool(updatedValues("UpdateIniSilentLog"))
-                If updatedValues.ContainsKey("ISearch_ResponseURLStart") Then context.INI_ISearch_ResponseURLStart = CStr(updatedValues("ISearch_ResponseURLStart"))
-                If updatedValues.ContainsKey("AssemblePath") Then context.INI_AssemblePath = CStr(updatedValues("AssemblePath"))
-                If updatedValues.ContainsKey("AssemblePathLocal") Then context.INI_AssemblePathLocal = CStr(updatedValues("AssemblePathLocal"))
-                If updatedValues.ContainsKey("KnowledgeStorePath") Then context.INI_KnowledgeStorePath = CStr(updatedValues("KnowledgeStorePath"))
-                If updatedValues.ContainsKey("KnowledgeStorePathLocal") Then context.INI_KnowledgeStorePathLocal = CStr(updatedValues("KnowledgeStorePathLocal"))
-                If updatedValues.ContainsKey("KnowledgeStoreOwner") Then context.INI_KnowledgeStoreOwner = CStr(updatedValues("KnowledgeStoreOwner"))
-                If updatedValues.ContainsKey("KnowledgeStoreUseLLMIndex") Then context.INI_KnowledgeStoreUseLLMIndex = CBool(updatedValues("KnowledgeStoreUseLLMIndex"))
-                If updatedValues.ContainsKey("AssembleExecMaxChars") Then context.INI_AssembleExecMaxChars = CInt(updatedValues("AssembleExecMaxChars"))
-                If updatedValues.ContainsKey("AssembleMaxContextSummaryChars") Then context.INI_AssembleMaxContextSummaryChars = CInt(updatedValues("AssembleMaxContextSummaryChars"))
-                If updatedValues.ContainsKey("SP_Assemble_Plan") Then context.SP_Assemble_Plan = CStr(updatedValues("SP_Assemble_Plan"))
-                If updatedValues.ContainsKey("SP_Assemble_Execute") Then context.SP_Assemble_Execute = CStr(updatedValues("SP_Assemble_Execute"))
-                If updatedValues.ContainsKey("SP_Assemble_Summarize") Then context.SP_Assemble_Summarize = CStr(updatedValues("SP_Assemble_Summarize"))
+                    If updatedValues.ContainsKey("UpdatePath") Then context.INI_UpdatePath = CStr(updatedValues("UpdatePath"))
+                    If updatedValues.ContainsKey("HelpMeInkyPath") Then context.INI_HelpMeInkyPath = CStr(updatedValues("HelpMeInkyPath"))
+                    If updatedValues.ContainsKey("DiscussInkyPath") Then context.INI_DiscussInkyPath = CStr(updatedValues("DiscussInkyPath"))
+                    If updatedValues.ContainsKey("DiscussInkyPathLocal") Then context.INI_DiscussInkyPathLocal = CStr(updatedValues("DiscussInkyPathLocal"))
+                    If updatedValues.ContainsKey("RedactionInstructionsPath") Then context.INI_RedactionInstructionsPath = CStr(updatedValues("RedactionInstructionsPath"))
+                    If updatedValues.ContainsKey("RedactionInstructionsPathLocal") Then context.INI_RedactionInstructionsPathLocal = CStr(updatedValues("RedactionInstructionsPathLocal"))
+                    If updatedValues.ContainsKey("ExtractorPath") Then context.INI_ExtractorPath = CStr(updatedValues("ExtractorPath"))
+                    If updatedValues.ContainsKey("ExtractorPathLocal") Then context.INI_ExtractorPathLocal = CStr(updatedValues("ExtractorPathLocal"))
+                    If updatedValues.ContainsKey("RenameLibPath") Then context.INI_RenameLibPath = CStr(updatedValues("RenameLibPath"))
+                    If updatedValues.ContainsKey("RenameLibPathLocal") Then context.INI_RenameLibPathLocal = CStr(updatedValues("RenameLibPathLocal"))
+                    If updatedValues.ContainsKey("MailMoverPath") Then context.INI_MailMoverPath = CStr(updatedValues("MailMoverPath"))
+                    If updatedValues.ContainsKey("MailMoverPathLocal") Then context.INI_MailMoverPathLocal = CStr(updatedValues("MailMoverPathLocal"))
+                    If updatedValues.ContainsKey("DataCollectorPath") Then context.INI_DataCollectorPath = CStr(updatedValues("DataCollectorPath"))
+                    If updatedValues.ContainsKey("SpeechModelPath") Then context.INI_SpeechModelPath = CStr(updatedValues("SpeechModelPath"))
+                    If updatedValues.ContainsKey("LocalModelPath") Then context.INI_LocalModelPath = CStr(updatedValues("LocalModelPath"))
+                    If updatedValues.ContainsKey("DictionaryPath") Then context.INI_DictionaryPath = CStr(updatedValues("DictionaryPath"))
+                    If updatedValues.ContainsKey("DictionaryPathLocal") Then context.INI_DictionaryPathLocal = CStr(updatedValues("DictionaryPathLocal"))
+                    If updatedValues.ContainsKey("STT_Google") Then context.INI_STT_Google = CStr(updatedValues("STT_Google"))
+                    If updatedValues.ContainsKey("STT_Google_ProjectID") Then context.INI_STT_Google_ProjectID = CStr(updatedValues("STT_Google_ProjectID"))
+                    If updatedValues.ContainsKey("STT_OpenAI") Then context.INI_STT_OpenAI = CStr(updatedValues("STT_OpenAI"))
+                    If updatedValues.ContainsKey("STT_Azure") Then context.INI_STT_Azure = CStr(updatedValues("STT_Azure"))
+                    If updatedValues.ContainsKey("STT_Azure_SpeechKey") Then context.INI_STT_Azure_SpeechKey = CStr(updatedValues("STT_Azure_SpeechKey"))
+                    If updatedValues.ContainsKey("TTSEndpoint") Then context.INI_TTSEndpoint = CStr(updatedValues("TTSEndpoint"))
+                    If updatedValues.ContainsKey("PromptLib") Then context.INI_PromptLibPath = CStr(updatedValues("PromptLib"))
+                    If updatedValues.ContainsKey("PromptLibLocal") Then context.INI_PromptLibPathLocal = CStr(updatedValues("PromptLibLocal"))
+                    If updatedValues.ContainsKey("MyStylePath") Then context.INI_MyStylePath = CStr(updatedValues("MyStylePath"))
+                    If updatedValues.ContainsKey("AlternateModelPath") Then context.INI_AlternateModelPath = CStr(updatedValues("AlternateModelPath"))
+                    If updatedValues.ContainsKey("SpecialServicePath") Then context.INI_SpecialServicePath = CStr(updatedValues("SpecialServicePath"))
+                    If updatedValues.ContainsKey("FindClausePath") Then context.INI_FindClausePath = CStr(updatedValues("FindClausePath"))
+                    If updatedValues.ContainsKey("FindClausePathLocal") Then context.INI_FindClausePathLocal = CStr(updatedValues("FindClausePathLocal"))
+                    If updatedValues.ContainsKey("AgentResourcesPath") Then context.INI_AgentResourcesPath = CStr(updatedValues("AgentResourcesPath"))
+                    If updatedValues.ContainsKey("AgentResourcesPathLocal") Then context.INI_AgentResourcesPathLocal = CStr(updatedValues("AgentResourcesPathLocal"))
+                    If updatedValues.ContainsKey("WebAgentPath") Then context.INI_WebAgentPath = CStr(updatedValues("WebAgentPath"))
+                    If updatedValues.ContainsKey("WebAgentPathLocal") Then context.INI_WebAgentPathLocal = CStr(updatedValues("WebAgentPathLocal"))
+                    If updatedValues.ContainsKey("SnapshotLibPath") Then context.INI_SnapshotLibPath = CStr(updatedValues("SnapshotLibPath"))
+                    If updatedValues.ContainsKey("SnapshotLibPathLocal") Then context.INI_SnapshotLibPathLocal = CStr(updatedValues("SnapshotLibPathLocal"))
+                    If updatedValues.ContainsKey("DocCheckPath") Then context.INI_DocCheckPath = CStr(updatedValues("DocCheckPath"))
+                    If updatedValues.ContainsKey("DocCheckPathLocal") Then context.INI_DocCheckPathLocal = CStr(updatedValues("DocCheckPathLocal"))
+                    If updatedValues.ContainsKey("DocStylePath") Then context.INI_DocStylePath = CStr(updatedValues("DocStylePath"))
+                    If updatedValues.ContainsKey("DocStylePathLocal") Then context.INI_DocStylePathLocal = CStr(updatedValues("DocStylePathLocal"))
+                    If updatedValues.ContainsKey("PromptLib_Transcript") Then context.INI_PromptLibPath_Transcript = CStr(updatedValues("PromptLib_Transcript"))
+                    If updatedValues.ContainsKey("HttpStack") Then context.INI_HttpStack = CStr(updatedValues("HttpStack"))
+                    If updatedValues.ContainsKey("BrandingName") Then context.INI_BrandingName = CStr(updatedValues("BrandingName"))
+                    If updatedValues.ContainsKey("LogoPath") Then context.INI_LogoPath = CStr(updatedValues("LogoPath"))
+                    If updatedValues.ContainsKey("LogoPathMedium") Then context.INI_LogoPathMedium = CStr(updatedValues("LogoPathMedium"))
+                    If updatedValues.ContainsKey("LogoPathLarge") Then context.INI_LogoPathLarge = CStr(updatedValues("LogoPathLarge"))
+                    If updatedValues.ContainsKey("NoHelperDownload") Then context.INI_NoHelperDownload = CBool(updatedValues("NoHelperDownload"))
+                    If updatedValues.ContainsKey("LicenseCounterPath") Then context.INI_LicenseCounterPath = CStr(updatedValues("LicenseCounterPath"))
+                    If updatedValues.ContainsKey("LicenseCounterMethod") Then context.INI_LicenseCounterMethod = CStr(updatedValues("LicenseCounterMethod"))
+                    If updatedValues.ContainsKey("LicenseCounterAnon") Then context.INI_LicenseCounterAnon = CBool(updatedValues("LicenseCounterAnon"))
+                    If updatedValues.ContainsKey("InkyMemoryCap") Then context.INI_InkyMemoryCap = CInt(updatedValues("InkyMemoryCap"))
+                    If updatedValues.ContainsKey("AutoPilot") Then context.INI_AutoPilot = CStr(updatedValues("AutoPilot"))
+                    If updatedValues.ContainsKey("ToolingLogWindow") Then context.INI_ToolingLogWindow = CBool(updatedValues("ToolingLogWindow"))
+                    If updatedValues.ContainsKey("ToolingDryRun") Then context.INI_ToolingDryRun = CBool(updatedValues("ToolingDryRun"))
+                    If updatedValues.ContainsKey("ToolingMaximumIterations") Then context.INI_ToolingMaximumIterations = CInt(updatedValues("ToolingMaximumIterations"))
+                    If updatedValues.ContainsKey("ToolResponsePayloadBudgetChars") Then context.INI_ToolResponsePayloadBudgetChars = CInt(updatedValues("ToolResponsePayloadBudgetChars"))
+                    If updatedValues.ContainsKey("BudgetMediumCompactionThresholdChars") Then context.INI_BudgetMediumCompactionThresholdChars = CInt(updatedValues("BudgetMediumCompactionThresholdChars"))
+                    If updatedValues.ContainsKey("BudgetAggressiveCompactionThresholdChars") Then context.INI_BudgetAggressiveCompactionThresholdChars = CInt(updatedValues("BudgetAggressiveCompactionThresholdChars"))
+                    If updatedValues.ContainsKey("BudgetCompactionPreviewChars") Then context.INI_BudgetCompactionPreviewChars = CInt(updatedValues("BudgetCompactionPreviewChars"))
+                    If updatedValues.ContainsKey("UpdateIni") Then context.INI_UpdateIni = CBool(updatedValues("UpdateIni"))
+                    If updatedValues.ContainsKey("UpdateIniAllowRemote") Then context.INI_UpdateIniAllowRemote = CBool(updatedValues("UpdateIniAllowRemote"))
+                    If updatedValues.ContainsKey("UpdateIniNoSignature") Then context.INI_UpdateIniNoSignature = CBool(updatedValues("UpdateIniNoSignature"))
+                    If updatedValues.ContainsKey("UpdateSource") Then context.INI_UpdateSource = CStr(updatedValues("UpdateSource"))
+                    If updatedValues.ContainsKey("UpdateIniClients") Then context.INI_UpdateIniClients = CStr(updatedValues("UpdateIniClients"))
+                    If updatedValues.ContainsKey("UpdateIniIgnoreOverride") Then context.INI_UpdateIniIgnoreOverride = CStr(updatedValues("UpdateIniIgnoreOverride"))
+                    If updatedValues.ContainsKey("UpdateIniSilentMode") Then context.INI_UpdateIniSilentMode = CInt(updatedValues("UpdateIniSilentMode"))
+                    If updatedValues.ContainsKey("UpdateIniSilentLog") Then context.INI_UpdateIniSilentLog = CBool(updatedValues("UpdateIniSilentLog"))
+                    If updatedValues.ContainsKey("ISearch_ResponseURLStart") Then context.INI_ISearch_ResponseURLStart = CStr(updatedValues("ISearch_ResponseURLStart"))
+                    If updatedValues.ContainsKey("AssemblePath") Then context.INI_AssemblePath = CStr(updatedValues("AssemblePath"))
+                    If updatedValues.ContainsKey("AssemblePathLocal") Then context.INI_AssemblePathLocal = CStr(updatedValues("AssemblePathLocal"))
+                    If updatedValues.ContainsKey("KnowledgeStorePath") Then context.INI_KnowledgeStorePath = CStr(updatedValues("KnowledgeStorePath"))
+                    If updatedValues.ContainsKey("KnowledgeStorePathLocal") Then context.INI_KnowledgeStorePathLocal = CStr(updatedValues("KnowledgeStorePathLocal"))
+                    If updatedValues.ContainsKey("KnowledgeStoreOwner") Then context.INI_KnowledgeStoreOwner = CStr(updatedValues("KnowledgeStoreOwner"))
+                    If updatedValues.ContainsKey("KnowledgeStoreUseLLMIndex") Then context.INI_KnowledgeStoreUseLLMIndex = CBool(updatedValues("KnowledgeStoreUseLLMIndex"))
+                    If updatedValues.ContainsKey("AssembleExecMaxChars") Then context.INI_AssembleExecMaxChars = CInt(updatedValues("AssembleExecMaxChars"))
+                    If updatedValues.ContainsKey("AssembleMaxContextSummaryChars") Then context.INI_AssembleMaxContextSummaryChars = CInt(updatedValues("AssembleMaxContextSummaryChars"))
+                    If updatedValues.ContainsKey("SP_Assemble_Plan") Then context.SP_Assemble_Plan = CStr(updatedValues("SP_Assemble_Plan"))
+                    If updatedValues.ContainsKey("SP_Assemble_Execute") Then context.SP_Assemble_Execute = CStr(updatedValues("SP_Assemble_Execute"))
+                    If updatedValues.ContainsKey("SP_Assemble_Summarize") Then context.SP_Assemble_Summarize = CStr(updatedValues("SP_Assemble_Summarize"))
 
-                If temporaryNoLocalConfigOverride Then
-                    context.INI_NoLocalConfig = originalNoLocalConfigValue
+                    If temporaryNoLocalConfigOverride Then
+                        context.INI_NoLocalConfig = originalNoLocalConfigValue
+                    End If
+
+                    ' Call UpdateAppConfig after all updates
+                    UpdateAppConfig(context)
                 End If
-
-                ' Call UpdateAppConfig after all updates
-                UpdateAppConfig(context)
-            End If
         End Sub
 
         ''' <summary>
@@ -4983,8 +5019,23 @@ Namespace SharedLibrary
                 aboutForm.ClientSize = New System.Drawing.Size(formWidth, Math.Min(finalHeight, maxHeight))
             End If
 
-            ' Show the form
-            aboutForm.ShowDialog(owner)
+            ' Show the form.
+            ' Inspect and same-thread filter the caller-supplied owner before using it as a
+            ' modal owner. A foreign (cross-thread/cross-process) owner would be disabled by
+            ' ShowDialog and never re-enabled, deadlocking that host. InspectDialogOwner logs
+            ' the attempt; IfOwnerOnCurrentThread rejects a cross-thread owner so we fall back
+            ' to an ownerless dialog instead of deadlocking.
+            Dim effectiveOwner As System.Windows.Forms.IWin32Window = owner
+            If effectiveOwner IsNot Nothing Then
+                OfficeWindowWatchdog.InspectDialogOwner(effectiveOwner, "ShowAboutWindow", "ShowAboutWindow")
+                effectiveOwner = IfOwnerOnCurrentThread(effectiveOwner)
+            End If
+
+            If effectiveOwner IsNot Nothing Then
+                aboutForm.ShowDialog(effectiveOwner)
+            Else
+                aboutForm.ShowDialog()
+            End If
         End Sub
 
 

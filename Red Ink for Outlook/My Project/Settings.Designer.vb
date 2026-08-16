@@ -1069,6 +1069,18 @@ Namespace My
                 Me("FreestylePromptUiState") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property AP_ThreadRetentionDays() As Integer
+            Get
+                Return CType(Me("AP_ThreadRetentionDays"),Integer)
+            End Get
+            Set
+                Me("AP_ThreadRetentionDays") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

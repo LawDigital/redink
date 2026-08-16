@@ -1601,7 +1601,8 @@ SkipPromptInput:
                     .ShowShortCommandsHint = True,
                     .Context = _context,
                     .CallerId = "word.freestyle",
-                    .PersistedState = freestylePromptUiState
+                    .PersistedState = freestylePromptUiState,
+                    .RestorePersistedState = False
                 }
 
                 ' =============================================================
@@ -2324,6 +2325,7 @@ SkipPromptInput:
                 AddItem("drawioconverter", "Convert a draw.io flow chart To a HTML mini-web-app.")
                 AddItem("pptxconvert", "Convert a PowerPoint presentation To a different template format.")
                 AddItem("talktome", "Start a widget that allows you to control Red Ink via speech")
+                AddItem("watermark", "Detect watermark indicators in the selected text.")
 
                 ' PRIVACY / TRANSFORMS
                 AddItem("anonymize", "Anonymize/redact the current selection (no LLM Call).")
@@ -2804,6 +2806,35 @@ SkipPromptInput:
 
             If String.Equals(OtherPrompt.Trim(), "talktome", StringComparison.OrdinalIgnoreCase) Then
                 Globals.ThisAddIn.ShowTalkToMeWidget()
+                Return
+            End If
+
+            If String.Equals(OtherPrompt.Trim(), "watermark", StringComparison.OrdinalIgnoreCase) Then
+                Dim app As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
+                If app Is Nothing Then
+                    ShowCustomMessageBox("Word is not available.")
+                    Return
+                End If
+
+                Dim doc As Microsoft.Office.Interop.Word.Document = app.ActiveDocument
+                If doc Is Nothing Then
+                    ShowCustomMessageBox("There is no active document to analyze.")
+                    Return
+                End If
+
+                Dim currentSelection As Microsoft.Office.Interop.Word.Selection = app.Selection
+                If currentSelection Is Nothing Then
+                    ShowCustomMessageBox("There is no active selection to analyze.")
+                    Return
+                End If
+
+                Dim selectedText As String = currentSelection.Text
+                If String.IsNullOrWhiteSpace(selectedText) Then
+                    ShowCustomMessageBox("Please select the text you want to analyze for watermark indicators.")
+                    Return
+                End If
+
+                ShowWatermarkAnalysisWindow(selectedText)
                 Return
             End If
 

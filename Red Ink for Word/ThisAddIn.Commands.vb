@@ -450,6 +450,8 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
+
+
     ''' <summary>
     ''' Suggests titles for the selected text using the SP_SuggestTitles prompt.
     ''' Honors formatting and markup settings from configuration.
