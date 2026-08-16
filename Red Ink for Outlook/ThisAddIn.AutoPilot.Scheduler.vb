@@ -823,7 +823,7 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Async Function ExecuteScheduledTask(task As ScheduledTask, ct As CancellationToken) As Task
         Dim tempDir As String = Nothing
-        Dim previousMaxToolIterations = MaxToolIterations
+        Dim previousMaxToolIterations = INI_ToolingMaximumIterations
         Dim executionState As InkyState = Nothing
         Dim executionModelConfig As ModelConfig = Nothing
         Dim executionSelectedTools As List(Of ModelConfig) = Nothing
@@ -918,7 +918,7 @@ Partial Public Class ThisAddIn
             SharedLibrary.Agents.PathPolicy.RestrictToWorkspaceRootOnly = True
             SharedLibrary.Agents.PathPolicy.SetStrictExtraRoots({tempDir, _apScheduledWorkspaceRoot})
 
-            MaxToolIterations = AP_MaxToolIterations
+            INI_ToolingMaximumIterations = AP_MaxToolIterations
 
             ' Build prompts — tell the LLM it is executing a scheduled task
             Dim userPrompt As StringBuilder =
@@ -1050,7 +1050,7 @@ Partial Public Class ThisAddIn
             Catch
             End Try
 
-            MaxToolIterations = previousMaxToolIterations
+            INI_ToolingMaximumIterations = previousMaxToolIterations
             ClearAttachmentCaches()
 
             Try

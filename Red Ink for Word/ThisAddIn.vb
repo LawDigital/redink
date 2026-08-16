@@ -380,7 +380,13 @@ Partial Public Class ThisAddIn
     Public OtherPromptUnfilled As String = ""
     Public Dictionary As String = ""
     Public OutputLanguage As String = ""
-    Public MaxToolIterations As Integer = SharedLibrary.Agents.ToolingConstants.DefaultMaxToolIterations
+
+    Public ReadOnly Property MaxToolIterations As Integer
+        Get
+            Return INI_ToolingMaximumIterations
+        End Get
+    End Property
+
     Public InsertDocs As String = ""
     Public MyStyleInsert As String = ""
     Public FormatInstruction As String = ""

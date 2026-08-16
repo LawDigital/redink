@@ -195,7 +195,7 @@ Partial Public Class ThisAddIn
         "If you believe this is in error or require assistance, please contact us directly. " &
         "— " & AN6
 
-    Private Const AP_MaxToolIterations As Integer = 50
+    Private Const AP_MaxToolIterations As Integer = Agents.ToolingConstants.DefaultMaxToolIterations
 
     ''' <summary>
     ''' Product IDs whose Pro license holders are permitted to use AutoPilot.
@@ -2643,8 +2643,8 @@ Partial Public Class ThisAddIn
                 Dim response As String
 
                 ' ── Set AutoPilot-specific max tool iterations ──
-                Dim previousMaxToolIterations = MaxToolIterations
-                MaxToolIterations = AP_MaxToolIterations
+                Dim previousMaxToolIterations = INI_ToolingMaximumIterations
+                INI_ToolingMaximumIterations = AP_MaxToolIterations
 
                 Try
                     ApDashboardLog("Calling AI model...", "llm")
@@ -2732,7 +2732,7 @@ Partial Public Class ThisAddIn
                     SharedLibrary.Agents.PathPolicy.RestrictToWorkspaceRootOnly = previousWorkspaceOnlyMode
                     SharedLibrary.Agents.PathPolicy.SetStrictExtraRoots(Nothing)
                     SyncWorkspaceToPathPolicy()
-                    MaxToolIterations = previousMaxToolIterations
+                    INI_ToolingMaximumIterations = previousMaxToolIterations
                     ClearAttachmentCaches()
                 End Try
 
@@ -6294,8 +6294,8 @@ Partial Public Class ThisAddIn
 
             Dim response As String
 
-            Dim previousMaxToolIterations = MaxToolIterations
-            MaxToolIterations = AP_MaxToolIterations
+            Dim previousMaxToolIterations = INI_ToolingMaximumIterations
+            INI_ToolingMaximumIterations = AP_MaxToolIterations
 
             ' Save references before Finally clears them
             Dim savedAttachments = _apCurrentAttachments
@@ -6367,7 +6367,7 @@ Partial Public Class ThisAddIn
                 _apCurrentTempDir = Nothing
                 _apCurrentAttachments = Nothing
                 _apCurrentMailInfo = Nothing
-                MaxToolIterations = previousMaxToolIterations
+                INI_ToolingMaximumIterations = previousMaxToolIterations
                 ClearAttachmentCaches()
             End Try
 

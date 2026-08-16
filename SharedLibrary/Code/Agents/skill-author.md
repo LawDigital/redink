@@ -15,6 +15,7 @@ allowed-tools:
   - tool_loader
   - tool_describe
   - ask_user
+  - agent_advisor
   - js_run
 model: agentdefaultmodel
 ---
@@ -35,6 +36,19 @@ and is the authority on how those target surfaces differ.
   skill), the target host(s), and — for edits/conversions — the exact existing file.
 - **Output:** the written resource(s) at exact absolute paths, plus a one-line confirmation and a
   short summary of what changed and why. When not writing, a concise patch plan.
+
+### Foundation design contract
+
+When this skill authors or revises a resource for this foundation, preserve these cross-cutting rules unless the user explicitly requests a different architecture:
+
+- **Context safety:** keep the parent context compact. Large-document reduction, bounded research, comparison, requirement checking, row extraction, and other source-heavy work should be delegated to the appropriate isolated agent when available rather than dumping raw source material into the parent.
+- **Bounded research:** research one concrete unresolved question at a time, prefer authoritative/primary sources, reassess after each round, and stop when additional retrieval is unlikely to change the answer materially.
+- **Bounded mutation recovery:** exact-anchor document edits get one initial attempt plus at most two recovery attempts per logical operation. Once unresolved, do not reopen the same logical edit in the parent. Host-side circuit breakers may enforce stricter limits.
+- **Real file finalization:** when the requested outcome requires a file, the workflow must invoke an actual create/save/export/finalizing tool and use the path/reference returned by that successful tool. A path mentioned in prose, planned JSON, a read/extract result, or an in-place mutation is not proof of a final deliverable.
+- **Returned Word files:** perform all required mutations/comments first, then use `word_save_as` as the normal canonical finalizer when that tool is available for the target host. If any mutation occurs after the save, finalize again.
+- **Host state boundary:** authored skills/agents produce the real final artifact; they do not invent or set `RegisteredDeliverableArtifacts`, `IsFinalDeliverable`, Outlook forced-delivery state, attachment state, or any delivery-confirmation/scheduling field. Those are host responsibilities.
+- **Completion semantics:** if a required final file cannot actually be produced, return `blocked`; never use `complete` to mean "work was attempted".
+- **Review authorship:** for newly created comments, annotations, tracked changes, markup, or comparable review metadata, use `Inky` as the default author/reviewer when the user has not specified another identity. Pass that value explicitly when the selected tool supports an author/reviewer/display-name parameter. Never rewrite existing authorship unless requested, and never claim the author was set when the tool cannot control it.
 
 ## 1. The three tooling surfaces (and how they really differ)
 
@@ -117,8 +131,8 @@ State the supported host(s) explicitly in the authored skill's body so the reaso
 `Red_Ink_Tool_List.md` in the `.inky` directory is the source of truth (columns: Word, Outlook,
 AutoPilot). Before putting any tool in `allowed-tools`:
 
-1. Read `Red_Ink_Tool_List.md` with `text_read` to verify registered names and host availability; use `tool_describe` separately when exact schemas or limits are needed.
-2. Confirm each concrete tool exists and is `Yes` for every host the skill targets.
+1. Read `Red_Ink_Tool_List.md` with `text_read` to verify registered **host tools** and host availability; use `tool_describe` separately when exact schemas or limits are needed. Dynamic selected-resource tools (`skill_<name>` / `agent_<name>`) are instead verified against `resource_index` and the advertised runtime tool surface.
+2. Confirm each concrete host tool exists and is `Yes` for every host the skill targets; confirm each dynamic skill/agent resource is actually advertised for the current run before invoking it.
 3. A narrow wildcard family (e.g. `file_*`) is allowed ONLY if the runtime expands wildcards for the
    target host AND every concrete tool it expands to is verified `Yes` for those hosts. Never use `*`.
 4. When several tools overlap, do NOT pick by name. `tool_describe` is supported on all three target
@@ -141,18 +155,9 @@ AutoPilot). Before putting any tool in `allowed-tools`:
 
 Author skills so file handling is deliberate and host-appropriate.
 
-- **Word:** a connected persistent workspace is optional. If none is connected, session staging/temp
-  is a valid input/output area. The final response must cite or clearly identify only the intended final
-  session file(s) so the host can collect and deliver them; do not scatter intermediates. If a connected
-  workspace exists and persistence beyond the session is required, use the appropriate workspace tool.
-- **Outlook Local Chat:** a connected persistent workspace is also optional. Inputs may arrive as mail
-  attachments or drag-&-dropped session/staging files. Without a workspace, operate on the actual
-  attachment/session/staging representation and cite or clearly identify the intended final file(s) in
-  the final response for delivery. With a connected workspace, persist only when the requested outcome
-  requires persistence beyond the session. An attachment name is NOT a filesystem path, and workspace
-  availability must be discovered rather than inferred from the presence of workspace tools.
-- **AutoPilot:** unattended; its workspace/root model is part of the execution contract. Keep all writes
-  inside the permitted workspace root and rely on produced deliverables — there is no interactive desktop delivery.
+- **Word:** a connected persistent workspace is optional. If none is connected, session/staging/temp is a valid input/output area. For a returned file, create/finalize the real file in the host-provided staging/output area. Word later collects outputs through its host-side staging/output collection path (currently `WordCollectAndCopyOutputs`); the skill must not simulate that host state. If persistence beyond the session is required and a connected workspace exists, persist separately without treating persistence as proof of final delivery.
+- **Outlook Local Chat:** a connected persistent workspace is optional. Inputs may arrive as mail attachments or drag-&-dropped session/staging files. Produce the real requested output in the host-provided session/staging area; the host owns any later attachment collection/delivery. A workspace copy is persistence, not a substitute for the final session artifact unless the runtime explicitly defines it that way. An attachment name is NOT a filesystem path.
+- **AutoPilot:** unattended. Produce/finalize requested files only in the host-permitted session/working/staging/workspace locations actually exposed for that run. The host may validate/register the artifact and, after accepted completion, promote eligible Outlook artifacts into its forced-delivery mechanism before attachment collection. The skill must not invent or gate on those host-internal states.
 - **Skill assets:** copy reference/template files from the skill's `references/` into the workspace
   or staging area BEFORE modifying/producing from them; never edit assets in place under the skill.
 
@@ -327,6 +332,19 @@ memory alone — read the diagnostics logs, which are the ground truth of the to
    land under an authorized resource root rather than the temporary workspace; does the claimed
    completion match the real destination? Report the root cause and the exact fix.
 
+## 9b. Independent advisor for consequential authoring decisions
+
+Use `agent_advisor` as an **optional isolated second pass**, not as a routine step for every edit. Invoke it when it is actually advertised/available and the authoring decision is materially consequential, for example:
+
+- a host-crossing architecture or delivery/finality contract is being changed;
+- two plausible tool/workflow designs have meaningful reliability, security, or compatibility trade-offs;
+- a change affects several skills/agents or the project-wide `Inky*.md` contract;
+- the requested behavior is ambiguous enough that a second-pass challenge could prevent a systemic mistake.
+
+Do not invoke the advisor for mechanical wording changes, obvious metadata edits, or routine one-resource maintenance. Give it only the compact facts, constraints, candidate design, and unresolved decision; do not send raw logs or large documents. Treat its result as advice, not authority: verify tool/host facts against `resource_index`, the advertised tool surface, `Red_Ink_Tool_List.md`, and `tool_describe` before writing.
+
+Dynamic resource tools such as `agent_advisor` are validated against the **advertised runtime/resource index**, not by assuming that every dynamic `agent_*` or `skill_*` name must appear as a static row in `Red_Ink_Tool_List.md`. If `agent_advisor` is not exposed for the current interactive run, continue without it.
+
 ## 10. Skills vs. agents
 
 - A **skill** is loaded into the SHARED conversation and guides later turns. This may happen through
@@ -377,7 +395,7 @@ call `tool_loader` again later in the same run.
 ## 14. Review checklist
 
 1. Target host(s) identified; Excel not treated as a host.
-2. Every tool exists in `Red_Ink_Tool_List.md` and is `Yes` for each target host.
+2. Every static host tool is verified in `Red_Ink_Tool_List.md` for each target host; every dynamic `skill_*` / `agent_*` dependency is verified against `resource_index` and the advertised runtime surface.
 3. Host resolution present (uses `resource_index.host`, falls back to capability probe).
 4. Host-specific tools are gated with a clean `blocked` path; supported hosts stated truthfully.
 5. Generic `skill_use` versus dynamic `skill_<name>` usage distinguished correctly; `memory_*` and `m365_*` dependencies flagged; AutoPilot compatibility considered where relevant.
@@ -391,6 +409,10 @@ call `tool_loader` again later in the same run.
 11. Frontmatter valid; `name` unique/kebab-case; `description` one sentence; `enabled:false` only on
     explicit request.
 12. Task-status footer contract and safe-failure behavior included; completion reflects the user task.
+13. File-producing workflows create/finalize a real output; Word-return flows finalize after the last mutation; no model-visible host registry/delivery state is invented.
+14. Context-heavy work is delegated/compacted appropriately; research and edit retries are bounded.
+15. New review metadata defaults to author/reviewer `Inky` unless the user overrides it.
+16. For consequential architecture changes, consider an isolated `agent_advisor` second pass when available; never use it as a substitute for host/tool verification.
 
 ## 15. Output format
 
