@@ -156,6 +156,14 @@ Partial Public Class ThisAddIn
         ''' </summary>
         Public Property SenderToolPolicyPath As String = ""
 
+        ''' <summary>
+        ''' Number of days that a sender's incoming attachments are retained so that
+        ''' follow-up mails from the SAME sender in the SAME conversation can continue
+        ''' the discussion with the earlier files still available. 0 = disabled.
+        ''' Retention is applied only for whitelisted senders (AutoPilot session only).
+        ''' </summary>
+        Public Property ThreadRetentionDays As Integer = 0
+
 
     End Class
 
@@ -386,6 +394,10 @@ Partial Public Class ThisAddIn
             .Name = "Enable privacy protection for web/search queries (restrict personal data in queries)",
             .Value = saved.EnablePrivacyProtection
         }
+        Dim pThreadRetentionDays As New InputParameter() With {
+            .Name = "Retain a sender's attachments for follow-up discussion for N days (0 = disabled; whitelisted senders only)",
+            .Value = saved.ThreadRetentionDays.ToString()
+        }
 
         Dim paramsList As New List(Of InputParameter) From {
             pCooldown,
@@ -397,7 +409,8 @@ Partial Public Class ThisAddIn
             pEnableScheduler,
             pEnableUserMemory,
             pEnableUserFiles,
-            pEnablePrivacyProtection
+            pEnablePrivacyProtection,
+            pThreadRetentionDays
         }
 
         ' ── Voicemail processing (only if audio transcription is available) ──
@@ -462,6 +475,11 @@ Partial Public Class ThisAddIn
         config.EnableUserMemory = CBool(If(pEnableUserMemory.Value, False))
         config.EnableUserFiles = CBool(If(pEnableUserFiles.Value, False))
         config.EnablePrivacyProtection = CBool(If(pEnablePrivacyProtection.Value, False))
+
+        Dim threadRetentionDays As Integer
+        If Integer.TryParse(pThreadRetentionDays.Value?.ToString(), threadRetentionDays) AndAlso threadRetentionDays >= 0 Then
+            config.ThreadRetentionDays = threadRetentionDays
+        End If
 
         ' Voicemail settings
         If audioTranscriptionAvailable AndAlso pVoicemail IsNot Nothing Then
@@ -652,6 +670,7 @@ Partial Public Class ThisAddIn
         My.Settings.AP_EnablePrivacyProtection = config.EnablePrivacyProtection
         My.Settings.AP_AutoDeleteAfterHours = config.AutoDeleteAfterHours
         My.Settings.AP_SenderToolPolicyPath = If(config.SenderToolPolicyPath, "")
+        My.Settings.AP_ThreadRetentionDays = config.ThreadRetentionDays
 
         ' Persist external tool selection by ToolName/ModelDescription
         If config.SelectedExternalTools IsNot Nothing AndAlso config.SelectedExternalTools.Count > 0 Then
@@ -690,6 +709,7 @@ Partial Public Class ThisAddIn
         config.EnablePrivacyProtection = My.Settings.AP_EnablePrivacyProtection
         config.AutoDeleteAfterHours = If(My.Settings.AP_AutoDeleteAfterHours >= 0, My.Settings.AP_AutoDeleteAfterHours, 0)
         config.SenderToolPolicyPath = If(My.Settings.AP_SenderToolPolicyPath, "")
+        config.ThreadRetentionDays = If(My.Settings.AP_ThreadRetentionDays >= 0, My.Settings.AP_ThreadRetentionDays, 0)
 
         ' Restore filter rules using the shared parser
         If Not String.IsNullOrWhiteSpace(My.Settings.AP_FilterRules) Then

@@ -108,7 +108,7 @@ Partial Public Class ThisAddIn
     Private Const AP_CategoryName As String = "Inky AutoPilot"
     Private Const AP_SentSubfolder As String = "Inky Replies"
     Private Const AP_MaxThreadDepth As Integer = 20
-    Private Const AP_DefaultCooldownSeconds As Integer = 60
+    Private Const AP_DefaultCooldownSeconds As Integer = 45
     Private Const AP_DefaultMaxRepliesPerSession As Integer = 200
     Private Const AP_DefaultMaxAttachmentBytes As Long = 10 * 1024 * 1024
     Private Const AP_TempPrefix As String = AN2 & "_autopilot_"
@@ -790,6 +790,16 @@ Partial Public Class ThisAddIn
             End If
         Else
             ApDashboardLog("🗑 Auto-delete disabled.", "info")
+        End If
+
+        If config.ThreadRetentionDays > 0 Then
+            ApDashboardLog($"🗂 Conversation attachment retention enabled ({config.ThreadRetentionDays} day(s), whitelisted senders only).", "info")
+            Task.Run(Sub()
+                         Try
+                             PurgeExpiredThreadRetention()
+                         Catch
+                         End Try
+                     End Sub)
         End If
 
         ' Start a periodic timer for queue holding notifications.
@@ -2581,6 +2591,20 @@ Partial Public Class ThisAddIn
                     ApDashboardLog($"Mixed attachments: {processableAttachments.Count} processable, {oversizedAttachments.Count} over limit", "info")
                 End If
 
+                ' ── Inject retained files from an earlier message in this conversation ──
+                ' Whitelisted senders only; opt-in via ThreadRetentionDays. Files are copied
+                ' into the per-mail temp dir and registered as attachments so the model can
+                ' continue the discussion. Do NOT re-filter oversized rejection on these.
+                Try
+                    Dim retainedLoaded As Integer =
+                        LoadRetainedThreadFiles(mailInfo, tempDir, attachmentPaths, isWhitelisted)
+                    If retainedLoaded > 0 Then
+                        processableAttachments = attachmentPaths.Where(Function(a) Not a.IsOverSizeLimit).ToList()
+                    End If
+                Catch exRetain As System.Exception
+                    ApDashboardLog($"⚠ Could not load retained conversation files: {exRetain.Message}", "warn")
+                End Try
+
                 ' Initialize tool call log for this e-mail
                 _apCurrentToolCallLog = New List(Of AutoPilotToolCallEntry)()
 
@@ -2897,6 +2921,16 @@ Partial Public Class ThisAddIn
                     End If
                     Await SwitchToUi(Sub() SendReplyToSender(mi, response, resultAttachments, tagAsAutoReply:=True, sourcesHtml:=sourcesHtml))
                     Await SwitchToUi(Sub() TagOriginalMailAsProcessed(mi))
+
+                    ' ── Retain this mail's inbound attachments for follow-up discussion ──
+                    ' Whitelisted senders only; opt-in via ThreadRetentionDays. Refreshes the
+                    ' retention clock so an active discussion keeps the files alive.
+                    Try
+                        PersistInboundAttachmentsToThread(mailInfo, attachmentPaths, isWhitelisted)
+                    Catch exPersist As System.Exception
+                        ApDashboardLog($"⚠ Could not retain conversation files: {exPersist.Message}", "warn")
+                    End Try
+
                     Await Task.Delay(1500)
                     Await SwitchToUi(Sub() ResendOutboxAutoPilotItemsUnconditional())
 
@@ -3235,6 +3269,11 @@ Partial Public Class ThisAddIn
                 Dim headers = mi.PropertyAccessor.GetProperty("http://schemas.microsoft.com/mapi/proptag/0x007D001F")
                 info.InternetHeaders = If(headers?.ToString(), "")
             Catch
+            End Try
+            Try
+                info.ConversationID = If(mi.ConversationID, "")
+            Catch
+                info.ConversationID = ""
             End Try
             Return info
         Catch ex As System.Exception
@@ -4273,6 +4312,9 @@ Partial Public Class ThisAddIn
                 Dim sizeStr = If(att.SizeBytes > 0, $" ({att.SizeBytes / 1024:F0} KB)", "")
                 Dim statusStr = If(att.IsOverSizeLimit,
                     $" [OVER SIZE LIMIT — max {AP_DefaultMaxAttachmentBytes / 1024 / 1024:F0} MB, cannot process]", "")
+                If att.IsRetentionLoaded Then
+                    statusStr &= " [RETAINED FROM EARLIER MESSAGE IN THIS CONVERSATION — not attached to the current e-mail]"
+                End If
                 Dim dateStr As String = ""
                 If att.LastModifiedTime.HasValue Then
                     dateStr &= $", modified: {att.LastModifiedTime.Value:yyyy-MM-dd HH:mm:ss} UTC"
@@ -6549,6 +6591,7 @@ Partial Public Class ThisAddIn
         Public Property FolderPath As String
         Public Property MessageClass As String
         Public Property InternetHeaders As String
+        Public Property ConversationID As String
     End Class
 
     ''' <summary>Describes an attachment and its per-mail processing data.</summary>
@@ -6567,6 +6610,10 @@ Partial Public Class ThisAddIn
         Property CachedMarkdownText As String
         Property CachedDocxHint As String
         Public Property IsToolOutput As Boolean = False
+
+        ''' <summary>True when this file was injected from the conversation retention store
+        ''' (as opposed to being a genuinely-inbound attachment of the current mail).</summary>
+        Public Property IsRetentionLoaded As Boolean = False
 
         ''' <summary>Number of pages (PDF only, 0 if unknown).</summary>
         Public Property PageCount As Integer = 0

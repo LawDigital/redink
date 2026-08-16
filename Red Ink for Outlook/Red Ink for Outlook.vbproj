@@ -82,7 +82,7 @@
     <DefineConstants>$(DefineConstants),HAS_WINRT</DefineConstants>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Develop'">
-    <ApplicationVersion>1.6.52.700</ApplicationVersion>
+    <ApplicationVersion>1.6.54.700</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\develop\outlook\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/develop/outlook/</InstallUrl>
     <ProductName>Red Ink for Outlook %28Develop%29</ProductName>
@@ -500,6 +500,7 @@
     <Compile Include="ThisAddIn.AutoPilot.RegistryBackup.vb" />
     <Compile Include="ThisAddIn.AutoPilot.Scheduler.vb" />
     <Compile Include="ThisAddIn.AutoPilot.SenderToolPolicy.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.ThreadRetention.vb" />
     <Compile Include="ThisAddIn.AutoPilot.Tools.DataCollector.vb" />
     <Compile Include="ThisAddIn.AutoPilot.Tools.Office.Interop.vb" />
     <Compile Include="ThisAddIn.AutoPIlot.Tools.Other.vb" />
