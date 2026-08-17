@@ -1708,24 +1708,54 @@ Partial Public Class ThisAddIn
             End If
 
             If Not newMail.Recipients.ResolveAll() Then
-                ApDashboardLog($"📅 ERROR: could not resolve scheduled task recipient(s) '{newMail.To}' — result not sent (would remain in Drafts).", "error")
-                Return
+                Dim unresolvedRecipients As String = newMail.To
+
+                Throw New System.InvalidOperationException(
+        $"Could not resolve scheduled task recipient(s) '{unresolvedRecipients}'.")
             End If
+
+            ' IMPORTANT:
+            ' Outlook may move/invalidate the MailItem COM object immediately after Send().
+            ' Therefore, capture every property that is required after Send() BEFORE calling Send().
+            Dim sentSubject As String = newMail.Subject
+            Dim sentTo As String = newMail.To
 
             newMail.Send()
 
-            If Not newMail.Sent Then
-                ApDashboardLog($"📅 ERROR: scheduled task result to '{newMail.To}' was not submitted and remains in Drafts (check Work Offline / send hooks / transport rules).", "error")
-                Return
-            End If
+            ' Do not access newMail properties after Send().
+            ' The Outlook MailItem may already have been moved from Drafts/Outbox,
+            ' which can cause: "The item has been moved or deleted."
+            Try
+                MoveLastSentToInkyReplies(
+        cleanupGroupId,
+        cleanupIsEligible,
+        cleanupAnsweredUtc,
+        cleanupDeleteAfterUtc,
+        sentSubject,
+        sentTo)
+            Catch ex As System.Exception
+                Debug.WriteLine(
+        $"[AutoPilot] Failed to move scheduled task result to Inky Replies: {ex.Message}")
+            End Try
 
-            Try : MoveLastSentToInkyReplies(cleanupGroupId, cleanupIsEligible, cleanupAnsweredUtc, cleanupDeleteAfterUtc, newMail.Subject, newMail.To) : Catch : End Try
-            ApDashboardLog($"📅 Result e-mail sent to: {String.Join(", ", task.DeliverTo)}", "info")
+            ApDashboardLog(
+    $"📅 Result e-mail submitted to: {String.Join(", ", task.DeliverTo)}",
+    "info")
 
         Catch ex As System.Exception
-            ApDashboardLog($"📅 ERROR sending scheduled task result: {ex.Message}", "error")
+            ApDashboardLog(
+        $"📅 ERROR sending scheduled task result: {ex.Message}",
+        "error")
+
+            Throw
+
         Finally
-            If newMail IsNot Nothing Then Try : Marshal.ReleaseComObject(newMail) : Catch : End Try
+            If newMail IsNot Nothing Then
+                Try
+                    System.Runtime.InteropServices.Marshal.ReleaseComObject(newMail)
+                Catch
+                End Try
+            End If
         End Try
     End Sub
 
