@@ -215,6 +215,38 @@ When asked to convert an existing (e.g. Claude) SKILL.md, or to check whether a 
 Never add `enabled: false` on your own initiative. A disabled resource stays on disk and editable in
 "Manage Skills & Agents" but is not offered to the model until re-enabled.
 
+### 7a. Dependency declaration contract — make every skill runnable on its own
+
+A skill's `allowed-tools` is an **execution dependency contract**, not documentation decoration. When
+authoring or revising a skill, derive this list from the workflow and declare every helper the skill may
+need on any supported host. This is especially important for Outlook AutoPilot sender policies using
+`ONLY skill_<name>`: the host may retain only the named skill plus helpers declared here.
+
+Binding rules:
+
+- If the skill reads any text/JSON/Markdown file under `references/` or `scripts/`, include `text_read`.
+- If the skill may ask a live user for outcome-determinative information in Word or Outlook Local Chat,
+  include `ask_user` and author an explicit unattended AutoPilot branch that does **not** call it.
+- If the skill creates or finalizes a user-facing file, include the actual create/save/export/finalizer tool
+  that proves the file exists (for example `word_apply_template`, `word_save_as`, or the relevant
+  create/export tool). Do not rely on prose or a helper agent to create the final file.
+- If the skill reads attachments, active Word content, workspace files, or performs deterministic
+  computation, include the exact corresponding tools it actually uses.
+- Dynamic `agent_*` helpers may be declared when useful, but a user-facing skill must remain capable of
+  completing its **core workflow without an optional agent** unless the user explicitly requested an
+  agent-dependent architecture. Put the fallback behavior in the skill body.
+- Never add broad unused helper families merely 'just in case'. Verify every declared static tool for each
+  target host. Host-unavailable optional tools may remain in a multi-host skill only when the skill gates
+  their use by resolved host/tool availability.
+- For a skill intended for `ONLY skill_<name>` AutoPilot use, test that the skill itself is selected for the
+  AutoPilot session and that every **required AutoPilot helper** is both declared in `allowed-tools` and
+  available on AutoPilot. The sender policy narrows an existing authorized session; it must not be treated
+  as a way to enable an otherwise unselected skill or external service.
+
+Before writing a skill, make a compact dependency table internally: `workflow step -> tool -> host ->
+required/optional`. Use it to build the smallest complete `allowed-tools` list. During review, a missing
+required helper is a blocking defect because the skill may load successfully yet be unable to execute.
+
 ## 8. Runtime contract & safe failure
 
 - Each turn is either tool calls OR final prose. During active tooling, final prose ends with exactly
@@ -386,7 +418,8 @@ call `tool_loader` again later in the same run.
 3. For edits/conversions, read the exact existing file first (Section 12 / Section 6).
 4. Draft/revise the body with: purpose, inputs, target host(s), host resolution + compatibility
    gating, workflow, tool usage, file/output management (single final output), output format,
-   limitations/safe-failure.
+   limitations/safe-failure. Build the Section 7a dependency table and make `allowed-tools` the smallest
+   complete set that lets the skill execute its own core workflow on every claimed host.
 5. Validate deterministically with `js_run` where useful.
 6. Write NEW resources to an absolute path under `new_resource_root`; edit EXISTING resources at their
    exact `file` path. Ensure required `references/`/`scripts/` assets exist (binaries via `file_*`).
@@ -408,7 +441,9 @@ call `tool_loader` again later in the same run.
    no relative `.inky` paths.
 10. Required `references/`/`scripts/` assets exist; binaries via `file_*`, not `text_write`.
 11. Frontmatter valid; `name` unique/kebab-case; `description` one sentence; `enabled:false` only on
-    explicit request.
+    explicit request. `allowed-tools` satisfies the Section 7a dependency contract: references have their
+    reader, interactive clarification has `ask_user`, real outputs have a finalizer, and optional agents are
+    not the sole implementation of the core workflow.
 12. Task-status footer contract and safe-failure behavior included; completion reflects the user task.
 13. File-producing workflows create/finalize a real output; Word-return flows finalize after the last mutation; no model-visible host registry/delivery state is invented.
 14. Context-heavy work is delegated/compacted appropriately; research and edit retries are bounded.
@@ -421,4 +456,5 @@ Return the revised Markdown resource(s) or a concise patch plan. When writing, s
 absolute path created/changed and whether it went to the local or central root. Always begin the
 final response with a one-line confirmation, e.g.
 "Applied skill-author: converted Claude skill 'deadline-calc' to run on Word + Outlook Local Chat."
+
 

@@ -152,6 +152,167 @@ Namespace SharedLibrary
             Return sText.TrimEnd()
         End Function
 
+
+        ''' <summary>
+        ''' Builds the common Markdig pipeline used for HTML display. Advanced extensions are preserved,
+        ''' but the Mathematics extension is removed because the embedded HTML viewers do not run MathJax/KaTeX.
+        ''' </summary>
+        Public Shared Function CreateMarkdownHtmlPipeline(Optional useSoftlineBreakAsHardlineBreak As Boolean = False) As Markdig.MarkdownPipeline
+            Dim builder As New Markdig.MarkdownPipelineBuilder()
+            builder.UseAdvancedExtensions()
+
+            ' UseAdvancedExtensions includes Mathematics. Remove it explicitly while preserving
+            ' every other advanced extension supported by the installed Markdig version.
+            For extensionIndex As Integer = builder.Extensions.Count - 1 To 0 Step -1
+                Dim extensionInstance As Object = builder.Extensions(extensionIndex)
+                If extensionInstance IsNot Nothing AndAlso
+                   String.Equals(extensionInstance.GetType().FullName,
+                                 "Markdig.Extensions.Mathematics.MathExtension",
+                                 StringComparison.Ordinal) Then
+                    builder.Extensions.RemoveAt(extensionIndex)
+                End If
+            Next
+
+            If useSoftlineBreakAsHardlineBreak Then
+                builder.UseSoftlineBreakAsHardlineBreak()
+            End If
+
+            Return builder.Build()
+        End Function
+
+
+        ''' <summary>
+        ''' Normalizes lightweight LaTeX-style notation emitted by LLMs before Markdown-to-HTML rendering.
+        ''' Embedded Red Ink viewers do not run MathJax, so wrappers such as \(\rightarrow\) would otherwise
+        ''' remain visible verbatim. Fenced code blocks and inline code spans are preserved unchanged.
+        ''' </summary>
+        Public Shared Function NormalizeMarkdownForHtmlDisplay(markdown As String) As String
+            If String.IsNullOrEmpty(markdown) Then Return If(markdown, String.Empty)
+
+            Dim normalized As String = markdown.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf)
+            Dim lines As String() = normalized.Split(New String() {vbLf}, StringSplitOptions.None)
+            Dim result As New System.Text.StringBuilder(markdown.Length + 32)
+            Dim inFence As Boolean = False
+            Dim fenceMarker As String = String.Empty
+
+            For lineIndex As Integer = 0 To lines.Length - 1
+                Dim line As String = lines(lineIndex)
+                Dim trimmed As String = line.TrimStart()
+
+                If trimmed.StartsWith("```", StringComparison.Ordinal) OrElse trimmed.StartsWith("~~~", StringComparison.Ordinal) Then
+                    Dim marker As String = trimmed.Substring(0, 3)
+                    If Not inFence Then
+                        inFence = True
+                        fenceMarker = marker
+                    ElseIf marker.Equals(fenceMarker, StringComparison.Ordinal) Then
+                        inFence = False
+                        fenceMarker = String.Empty
+                    End If
+                    result.Append(line)
+                ElseIf inFence Then
+                    result.Append(line)
+                Else
+                    result.Append(NormalizeMarkdownInlineLatexOutsideCode(line))
+                End If
+
+                If lineIndex < lines.Length - 1 Then result.Append(vbLf)
+            Next
+
+            Return result.ToString()
+        End Function
+
+        Private Shared Function NormalizeMarkdownInlineLatexOutsideCode(line As String) As String
+            If String.IsNullOrEmpty(line) Then Return If(line, String.Empty)
+
+            Dim output As New System.Text.StringBuilder(line.Length + 16)
+            Dim index As Integer = 0
+
+            While index < line.Length
+                If line(index) = "`"c Then
+                    Dim tickCount As Integer = 1
+                    While index + tickCount < line.Length AndAlso line(index + tickCount) = "`"c
+                        tickCount += 1
+                    End While
+
+                    Dim delimiter As String = New String("`"c, tickCount)
+                    Dim closeIndex As Integer = line.IndexOf(delimiter, index + tickCount, StringComparison.Ordinal)
+                    If closeIndex >= 0 Then
+                        output.Append(line.Substring(index, closeIndex + tickCount - index))
+                        index = closeIndex + tickCount
+                        Continue While
+                    Else
+                        ' An unmatched backtick is ordinary literal input. Preserve the
+                        ' remainder exactly rather than looping on the same character.
+                        output.Append(line.Substring(index))
+                        Exit While
+                    End If
+                End If
+
+                Dim nextTick As Integer = line.IndexOf("`"c, index)
+                Dim textEnd As Integer = If(nextTick >= 0, nextTick, line.Length)
+                output.Append(NormalizeLatexTextSegment(line.Substring(index, textEnd - index)))
+                index = textEnd
+            End While
+
+            Return output.ToString()
+        End Function
+
+        Private Shared Function NormalizeLatexTextSegment(segment As String) As String
+            If String.IsNullOrEmpty(segment) Then Return If(segment, String.Empty)
+
+            Dim value As String = segment
+
+            ' Full expression normalization is deliberately limited to explicit LaTeX math
+            ' wrappers. Applying short commands such as \in or \le to arbitrary prose can
+            ' corrupt legitimate backslash text (for example file paths).
+            value = System.Text.RegularExpressions.Regex.Replace(
+                value,
+                "\\\((.*?)\\\)",
+                Function(m As System.Text.RegularExpressions.Match) NormalizeLatexExpression(m.Groups(1).Value),
+                System.Text.RegularExpressions.RegexOptions.Singleline)
+
+            value = System.Text.RegularExpressions.Regex.Replace(
+                value,
+                "\\\[(.*?)\\\]",
+                Function(m As System.Text.RegularExpressions.Match) NormalizeLatexExpression(m.Groups(1).Value),
+                System.Text.RegularExpressions.RegexOptions.Singleline)
+
+            ' Outside explicit math wrappers no TeX command rewriting is performed.
+            ' This avoids changing legitimate backslash text such as Windows paths.
+
+            Return value
+        End Function
+
+        Private Shared Function NormalizeLatexExpression(expression As String) As String
+            If String.IsNullOrEmpty(expression) Then Return If(expression, String.Empty)
+
+            Dim value As String = expression
+            value = value.Replace("\left", String.Empty).Replace("\right", String.Empty)
+            value = value.Replace("\,", " ").Replace("\;", " ").Replace("\!", String.Empty)
+            value = System.Text.RegularExpressions.Regex.Replace(value, "\\(?:text|mathrm|mathbf|mathit)\{([^{}]*)\}", "$1")
+            value = System.Text.RegularExpressions.Regex.Replace(value, "\\frac\{([^{}]*)\}\{([^{}]*)\}", "$1/$2")
+
+            Dim replacements As New System.Collections.Generic.Dictionary(Of String, String)(StringComparer.Ordinal) From {
+                {"\leftrightarrow", "↔"}, {"\rightarrow", "→"}, {"\leftarrow", "←"},
+                {"\Rightarrow", "⇒"}, {"\Leftarrow", "⇐"}, {"\Leftrightarrow", "⇔"}, {"\mapsto", "↦"},
+                {"\leq", "≤"}, {"\le", "≤"}, {"\geq", "≥"}, {"\ge", "≥"}, {"\neq", "≠"}, {"\ne", "≠"},
+                {"\approx", "≈"}, {"\equiv", "≡"}, {"\pm", "±"}, {"\times", "×"}, {"\cdot", "·"}, {"\div", "÷"},
+                {"\infty", "∞"}, {"\notin", "∉"}, {"\in", "∈"}, {"\subseteq", "⊆"}, {"\supseteq", "⊇"},
+                {"\subset", "⊂"}, {"\supset", "⊃"}, {"\cup", "∪"}, {"\cap", "∩"}, {"\forall", "∀"}, {"\exists", "∃"},
+                {"\neg", "¬"}, {"\land", "∧"}, {"\lor", "∨"}, {"\alpha", "α"}, {"\beta", "β"}, {"\gamma", "γ"},
+                {"\delta", "δ"}, {"\epsilon", "ε"}, {"\theta", "θ"}, {"\lambda", "λ"}, {"\mu", "μ"}, {"\pi", "π"},
+                {"\rho", "ρ"}, {"\sigma", "σ"}, {"\tau", "τ"}, {"\phi", "φ"}, {"\omega", "ω"},
+                {"\Delta", "Δ"}, {"\Sigma", "Σ"}, {"\Omega", "Ω"}
+            }
+
+            For Each pair As System.Collections.Generic.KeyValuePair(Of String, String) In System.Linq.Enumerable.OrderByDescending(replacements, Function(item) item.Key.Length)
+                value = value.Replace(pair.Key, pair.Value)
+            Next
+
+            value = System.Text.RegularExpressions.Regex.Replace(value, "\\([()\[\]{}<>])", "$1")
+            Return value
+        End Function
+
         ''' <summary>
         ''' Converts the provided Markdown text to HTML and inserts it into the given Word selection.
         ''' </summary>
@@ -191,25 +352,9 @@ Namespace SharedLibrary
                                                           End Function)
 
 
-            Dim builder As New MarkdownPipelineBuilder()
+            Dim pipeline As MarkdownPipeline = CreateMarkdownHtmlPipeline(useSoftlineBreakAsHardlineBreak:=True)
 
-            builder.UsePipeTables()
-            builder.UseGridTables()
-            builder.UseSoftlineBreakAsHardlineBreak()
-            builder.UseListExtras()
-            builder.UseFootnotes()
-            builder.UseDefinitionLists()
-            builder.UseAbbreviations()
-            builder.UseAutoLinks()
-            builder.UseTaskLists()
-            builder.UseMathematics()
-            builder.UseFigures()
-            builder.UseAdvancedExtensions()
-            builder.UseGenericAttributes()
-
-            Dim pipeline As MarkdownPipeline = builder.Build()
-
-            Dim htmlresult As String = Markdown.ToHtml(gptResult, pipeline)
+            Dim htmlresult As String = Markdown.ToHtml(NormalizeMarkdownForHtmlDisplay(gptResult), pipeline)
 
 
             htmlresult = htmlresult _

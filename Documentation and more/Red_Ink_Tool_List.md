@@ -46,9 +46,9 @@ Notes:
 | `semantic_index_reset_conversation` | Resets and removes a stored semantic-search conversation handle. | Yes | Yes | Yes |
 | `semantic_index_invalidate_cache` | Invalidates one indexed-file cache entry or the full semantic-search cache. | Yes | Yes | Yes |
 | `js_run` | Executes sandboxed JavaScript in a hidden WebView2 environment. Availability is subject to the user's `JsRunDisable` configuration setting. | Yes | Yes | Yes |
-| `browser_open` | Opens or navigates the shared Playwright browser session to an absolute HTTP/HTTPS URL. After success, call `browser_snapshot` before attempting interaction. | Yes | Yes | No |
-| `browser_snapshot` | Captures the current page as an AI-optimized Playwright ARIA snapshot and returns short-lived refs such as `[ref=e7]` for later interaction. | Yes | Yes | No |
-| `browser_interact` | Performs exactly one Playwright action against one ref from the most recent `browser_snapshot`. After every attempted interaction, take a new snapshot before another interaction. | Yes | Yes | No |
+| `browser_open` | Opens or navigates the shared Playwright browser session to a rendered public website. Prefer it for site-specific exploration, dynamic/JavaScript content, menus, pagination, and finding links/pages/downloads that simple retrieval may miss. | Yes | Yes | Yes |
+| `browser_snapshot` | Captures the rendered page as an AI-optimized Playwright ARIA snapshot, exposing links, controls, headings and short-lived refs such as `[ref=e7]`; particularly useful for scanning a specific website and finding navigable links. | Yes | Yes | Yes |
+| `browser_interact` | Performs exactly one Playwright action against one ref from the most recent `browser_snapshot`, for example following a link/menu/pagination result found while exploring a site. Take a fresh snapshot after every attempted interaction. | Yes | Yes | Yes |
 | `python_execute` | Executes sandboxed Python code through the configured secure Python agent and may return structured results or published output files.1) | Yes | Yes | Yes |
 | `skill_use` | Loads a skill's instructions and file inventory for guided execution. Word and Outlook Local Chat expose this generic loader directly. AutoPilot does not advertise the generic `skill_use` tool, but it can still run selected skills through dynamic `skill_<name>` tools that route internally to the same skill loader. | Yes | Yes | No |
 | `m365_search` | Searches Microsoft 365 content such as mail, files, chats, events, and notes. | Yes | Yes | No |

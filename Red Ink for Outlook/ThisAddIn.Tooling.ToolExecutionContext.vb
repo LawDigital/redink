@@ -109,6 +109,7 @@ Partial Public Class ThisAddIn
         Public Property PrematureTextRetryCount As Integer = 0
 
         Public Const MaxContinuationRetries As Integer = 5
+        Public Const MaxEmptyResponseRetries As Integer = 1
 
         Public Property PendingRejectedAssistantTurn As String = ""
         Public Property LastInvalidAssistantTurnSignature As String = ""

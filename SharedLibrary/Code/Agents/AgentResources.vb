@@ -22,6 +22,7 @@ Option Explicit On
 Imports System.IO
 Imports System.Text
 Imports System.Text.RegularExpressions
+Imports Newtonsoft.Json.Linq
 
 Namespace Agents
 
@@ -117,7 +118,7 @@ Namespace Agents
 
 
         ''' <summary>
-        ''' Ensures the configured CENTRAL resource root and its skills/ and agents/
+        ''' Ensures the configured CENTRAL resource root and its skills/, agents/ and designs/
         ''' subdirectories exist so that new skills and agents can be created there when
         ''' central writing is explicitly permitted. Mirrors
         ''' <see cref="EnsureLocalResourceDirectories"/>. Best-effort.
@@ -135,7 +136,8 @@ Namespace Agents
                 For Each resourceDir In New String() {
                     root,
                     System.IO.Path.Combine(root, "skills"),
-                    System.IO.Path.Combine(root, "agents")}
+                    System.IO.Path.Combine(root, "agents"),
+                    System.IO.Path.Combine(root, DesignRepository.DesignsDirectoryName)}
 
                     If Not System.IO.Directory.Exists(resourceDir) Then
                         System.IO.Directory.CreateDirectory(resourceDir)
@@ -154,7 +156,7 @@ Namespace Agents
         End Function
 
         ''' <summary>
-        ''' Ensures the configured LOCAL resource root and its skills/ and agents/
+        ''' Ensures the configured LOCAL resource root and its skills/, agents/ and designs/
         ''' subdirectories exist so that new skills, agents, and Inky.md can be created
         ''' even when the .inky tree was never set up. Best-effort: returns True when the
         ''' tree is present after the call, False when no local path is configured or
@@ -173,7 +175,8 @@ Namespace Agents
                 For Each resourceDir In New String() {
                     root,
                     System.IO.Path.Combine(root, "skills"),
-                    System.IO.Path.Combine(root, "agents")}
+                    System.IO.Path.Combine(root, "agents"),
+                    System.IO.Path.Combine(root, DesignRepository.DesignsDirectoryName)}
 
                     If Not System.IO.Directory.Exists(resourceDir) Then
                         System.IO.Directory.CreateDirectory(resourceDir)
@@ -665,5 +668,251 @@ Namespace Agents
 
 
     End Class
+
+    ''' <summary>
+    ''' One named document-design profile loaded from AgentResourcesPath[/Local]\designs\designs.json.
+    ''' The JSON profile is authoritative. Optional Office template files are resolved only
+    ''' relative to the containing designs directory and can therefore never escape the
+    ''' configured agent-resource tree.
+    ''' </summary>
+    Public Class DocumentDesignDescriptor
+        Public Property Id As String
+        Public Property Name As String
+        Public Property Description As String
+        Public Property Aliases As New List(Of String)()
+        Public Property Enabled As Boolean = True
+        Public Property IsLocal As Boolean
+        Public Property CatalogPath As String
+        Public Property DirectoryPath As String
+        Public Property Raw As JObject
+
+        Public ReadOnly Property Word As JObject
+            Get
+                Return TryCast(If(Raw Is Nothing, Nothing, Raw("word")), JObject)
+            End Get
+        End Property
+
+        Public ReadOnly Property PowerPoint As JObject
+            Get
+                Return TryCast(If(Raw Is Nothing, Nothing, Raw("powerpoint")), JObject)
+            End Get
+        End Property
+
+        Public ReadOnly Property Excel As JObject
+            Get
+                Return TryCast(If(Raw Is Nothing, Nothing, Raw("excel")), JObject)
+            End Get
+        End Property
+
+        Public Function GetApplicationConfig(applicationName As String) As JObject
+            Select Case NormalizeApplicationName(applicationName)
+                Case "word" : Return Word
+                Case "powerpoint" : Return PowerPoint
+                Case "excel" : Return Excel
+                Case Else : Return Nothing
+            End Select
+        End Function
+
+        Public Function SupportsApplication(applicationName As String) As Boolean
+            Return GetApplicationConfig(applicationName) IsNot Nothing
+        End Function
+
+        Public Function ResolveRepositoryFile(relativePath As String) As String
+            If String.IsNullOrWhiteSpace(relativePath) OrElse String.IsNullOrWhiteSpace(DirectoryPath) Then Return ""
+            If System.IO.Path.IsPathRooted(relativePath) Then Return ""
+
+            Try
+                Dim root As String = System.IO.Path.GetFullPath(DirectoryPath).
+                    TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar)
+                Dim candidate As String = System.IO.Path.GetFullPath(System.IO.Path.Combine(root, relativePath.Trim())).
+                    TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar)
+
+                If Not candidate.StartsWith(root & System.IO.Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) Then
+                    Return ""
+                End If
+
+                Return candidate
+            Catch ex As System.Exception
+                Return ""
+            End Try
+        End Function
+
+        Private Shared Function NormalizeApplicationName(value As String) As String
+            Dim normalized As String = If(value, "").Trim().ToLowerInvariant()
+            Select Case normalized
+                Case "ppt", "pptx", "power point", "power-point" : Return "powerpoint"
+                Case "doc", "docx" : Return "word"
+                Case "xls", "xlsx", "xlsm" : Return "excel"
+                Case Else : Return normalized
+            End Select
+        End Function
+    End Class
+
+    ''' <summary>
+    ''' Shared, read-only resolver for named Office designs. The CENTRAL catalog is loaded
+    ''' first and the LOCAL catalog then overrides a central entry with the same design id.
+    ''' No model-side filesystem discovery is required: hosts can expose the available names
+    ''' through <see cref="BuildPromptFragment"/> and creator tools resolve the same profile
+    ''' deterministically by <c>design_name</c>.
+    ''' </summary>
+    Public NotInheritable Class DesignRepository
+        Public Const DesignsDirectoryName As String = "designs"
+        Public Const CatalogFileName As String = "designs.json"
+        Public Const SupportedSchemaVersion As Integer = 1
+
+        Private Sub New()
+        End Sub
+
+        Public Shared Function GetDesigns() As IReadOnlyList(Of DocumentDesignDescriptor)
+            Dim merged As New Dictionary(Of String, DocumentDesignDescriptor)(StringComparer.OrdinalIgnoreCase)
+
+            LoadCatalogInto(AgentResources.ConfiguredCentralPath, isLocal:=False, merged:=merged)
+            LoadCatalogInto(AgentResources.ConfiguredLocalPath, isLocal:=True, merged:=merged)
+
+            Return merged.Values.
+                Where(Function(d) d IsNot Nothing AndAlso d.Enabled).
+                OrderBy(Function(d) If(d.Name, d.Id), StringComparer.OrdinalIgnoreCase).
+                ToList()
+        End Function
+
+        Public Shared Function FindDesign(requestedName As String) As DocumentDesignDescriptor
+            If String.IsNullOrWhiteSpace(requestedName) Then Return Nothing
+            Dim wanted As String = NormalizeLookupKey(requestedName)
+            If wanted = "" Then Return Nothing
+
+            Dim designs As IReadOnlyList(Of DocumentDesignDescriptor) = GetDesigns()
+
+            For Each d As DocumentDesignDescriptor In designs
+                If d Is Nothing Then Continue For
+                If NormalizeLookupKey(d.Id) = wanted OrElse NormalizeLookupKey(d.Name) = wanted Then Return d
+            Next
+
+            For Each d As DocumentDesignDescriptor In designs
+                If d Is Nothing OrElse d.Aliases Is Nothing Then Continue For
+                For Each aliasName As String In d.Aliases
+                    If NormalizeLookupKey(aliasName) = wanted Then Return d
+                Next
+            Next
+
+            Return Nothing
+        End Function
+
+        Public Shared Function BuildPromptFragment(Optional maxDesigns As Integer = 24) As String
+            Dim designs As IReadOnlyList(Of DocumentDesignDescriptor) = GetDesigns()
+            If designs Is Nothing OrElse designs.Count = 0 Then
+                Return "DESIGN REPOSITORY: No named Office design profiles are currently configured under AgentResourcesPath/AgentResourcesPathLocal\\designs\\designs.json. Named corporate designs must therefore not be claimed from model knowledge; use neutral professional design unless another concrete authorized source is available."
+            End If
+
+            Dim items As New List(Of String)()
+            For Each d As DocumentDesignDescriptor In designs.Take(Math.Max(1, maxDesigns))
+                Dim apps As New List(Of String)()
+                If d.Word IsNot Nothing Then apps.Add("Word")
+                If d.PowerPoint IsNot Nothing Then apps.Add("PowerPoint")
+                If d.Excel IsNot Nothing Then apps.Add("Excel")
+                Dim source As String = If(d.IsLocal, "local", "central")
+                items.Add($"{d.Name} [design_name={d.Id}; {String.Join("/", apps)}; {source}]")
+            Next
+
+            Dim suffix As String = If(designs.Count > items.Count, $" (+{designs.Count - items.Count} more)", "")
+            Return "DESIGN REPOSITORY: Configured named designs: " & String.Join("; ", items) & suffix & ". " &
+                   "When the user asks for one of these designs, pass its exact design_name to create_word_document, create_powerpoint, or create_excel_spreadsheet. " &
+                   "Do not substitute a similarly named organization and do not claim any design not backed by this repository or another concrete authorized source."
+        End Function
+
+        Public Shared Function GetCatalogPaths() As IReadOnlyList(Of String)
+            Dim result As New List(Of String)()
+            AddCatalogPath(result, AgentResources.ConfiguredCentralPath)
+            AddCatalogPath(result, AgentResources.ConfiguredLocalPath)
+            Return result
+        End Function
+
+        Private Shared Sub AddCatalogPath(result As List(Of String), root As String)
+            If result Is Nothing OrElse String.IsNullOrWhiteSpace(root) Then Return
+            Try
+                result.Add(System.IO.Path.Combine(root, DesignsDirectoryName, CatalogFileName))
+            Catch ex As System.Exception
+            End Try
+        End Sub
+
+        Private Shared Sub LoadCatalogInto(root As String,
+                                           isLocal As Boolean,
+                                           merged As Dictionary(Of String, DocumentDesignDescriptor))
+            If merged Is Nothing OrElse String.IsNullOrWhiteSpace(root) Then Return
+
+            Dim designsDir As String
+            Dim catalogPath As String
+            Try
+                designsDir = System.IO.Path.GetFullPath(System.IO.Path.Combine(root, DesignsDirectoryName))
+                catalogPath = System.IO.Path.Combine(designsDir, CatalogFileName)
+            Catch ex As System.Exception
+                Return
+            End Try
+
+            If Not System.IO.File.Exists(catalogPath) Then Return
+
+            Try
+                Dim rawText As String = System.IO.File.ReadAllText(catalogPath, System.Text.Encoding.UTF8)
+                Dim catalog As JObject = JObject.Parse(rawText)
+                Dim schemaVersion As Integer = 0
+                Dim schemaToken As JToken = catalog("schema_version")
+                If schemaToken IsNot Nothing Then Integer.TryParse(schemaToken.ToString(), schemaVersion)
+                If schemaVersion <> SupportedSchemaVersion Then Return
+
+                Dim entries As JArray = TryCast(catalog("designs"), JArray)
+                If entries Is Nothing Then Return
+
+                For Each obj As JObject In entries.OfType(Of JObject)()
+                    Dim enabled As Boolean = True
+                    Dim enabledToken As JToken = obj("enabled")
+                    If enabledToken IsNot Nothing AndAlso enabledToken.Type = JTokenType.Boolean Then enabled = enabledToken.Value(Of Boolean)()
+                    If Not enabled Then Continue For
+
+                    Dim id As String = If(obj.Value(Of String)("id"), "").Trim()
+                    Dim name As String = If(obj.Value(Of String)("name"), "").Trim()
+                    If id = "" Then id = name
+                    If name = "" Then name = id
+                    Dim mergeKey As String = NormalizeLookupKey(id)
+                    If mergeKey = "" Then Continue For
+
+                    Dim descriptor As New DocumentDesignDescriptor() With {
+                        .Id = id,
+                        .Name = name,
+                        .Description = If(obj.Value(Of String)("description"), ""),
+                        .Enabled = enabled,
+                        .IsLocal = isLocal,
+                        .CatalogPath = catalogPath,
+                        .DirectoryPath = designsDir,
+                        .Raw = DirectCast(obj.DeepClone(), JObject)
+                    }
+
+                    Dim aliases As JArray = TryCast(obj("aliases"), JArray)
+                    If aliases IsNot Nothing Then
+                        For Each token As JToken In aliases
+                            If token Is Nothing OrElse token.Type <> JTokenType.String Then Continue For
+                            Dim aliasName As String = token.ToString().Trim()
+                            If aliasName <> "" Then descriptor.Aliases.Add(aliasName)
+                        Next
+                    End If
+
+                    ' Local entries intentionally replace central entries with the same stable id.
+                    merged(mergeKey) = descriptor
+                Next
+            Catch ex As System.Exception
+                ' A malformed optional design catalog must not take down the agent-resource system.
+                ' Creator tools simply fall back to neutral design and can surface that the design
+                ' could not be resolved.
+            End Try
+        End Sub
+
+        Private Shared Function NormalizeLookupKey(value As String) As String
+            If String.IsNullOrWhiteSpace(value) Then Return ""
+            Dim sb As New System.Text.StringBuilder()
+            For Each ch As Char In value.Trim().ToLowerInvariant()
+                If Char.IsLetterOrDigit(ch) Then sb.Append(ch)
+            Next
+            Return sb.ToString()
+        End Function
+    End Class
+
 
 End Namespace

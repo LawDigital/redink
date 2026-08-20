@@ -57,9 +57,19 @@ Namespace Agents
         End Function
 
         Public Shared Function BuildAll() As List(Of ModelConfig)
-            Return New List(Of ModelConfig) From {
+            Dim tools As New List(Of ModelConfig) From {
                 BuildCopy(), BuildList(), BuildMove(), BuildRename(), BuildDelete(), BuildMakeDir(), BuildRemoveDir()
             }
+
+            For Each tool As ModelConfig In tools
+                If tool Is Nothing Then Continue For
+                Select Case tool.ToolName
+                    Case ToolCopy, ToolMove, ToolRename
+                        ArtifactDelivery.EnableOptionalSingleFileArtifactProtocol(tool)
+                End Select
+            Next
+
+            Return tools
         End Function
 
         ' --------------------------------------------------------------- dispatch
@@ -83,6 +93,22 @@ Namespace Agents
             End Try
         End Function
 
+        Private Shared Function PrepareSingleFileArtifact(args As IDictionary(Of String, Object),
+                                                         sourcePath As String,
+                                                         ByRef metadata As OptionalToolArtifactMetadata) As String
+            Dim failureCode As String = ""
+            Dim failureMessage As String = ""
+            If Not ArtifactDelivery.TryPrepareOptionalToolArtifactMetadata(args, ArtifactStorageKind.Unknown, metadata, failureCode, failureMessage) Then
+                Return Err_(failureCode, failureMessage)
+            End If
+
+            If metadata IsNot Nothing AndAlso Directory.Exists(sourcePath) Then
+                Return Err_("explicit_artifact_requires_single_file", "Explicit artifact metadata is supported only when this operation produces exactly one file, not a directory tree.")
+            End If
+
+            Return Nothing
+        End Function
+
         ' --------------------------------------------------------------- operations
 
         Private Shared Function ExecuteCopy(args As IDictionary(Of String, Object)) As String
@@ -95,6 +121,10 @@ Namespace Agents
                 Return Err_("not_found", "Source not found.")
             End If
 
+            Dim artifactMetadata As OptionalToolArtifactMetadata = Nothing
+            Dim artifactError As String = PrepareSingleFileArtifact(args, src, artifactMetadata)
+            If artifactError IsNot Nothing Then Return artifactError
+
             Dim parent = Path.GetDirectoryName(dst)
             If Not String.IsNullOrWhiteSpace(parent) AndAlso Not Directory.Exists(parent) Then
                 Directory.CreateDirectory(parent)
@@ -106,7 +136,8 @@ Namespace Agents
                 FileSystem.CopyDirectory(src, dst, overwrite)
             End If
 
-            Return JsonConvert.SerializeObject(New With {Key .source = src, Key .destination = dst, Key .overwrite = overwrite})
+            Dim resultJson As String = JsonConvert.SerializeObject(New With {Key .source = src, Key .destination = dst, Key .overwrite = overwrite})
+            Return ArtifactDelivery.AttachOptionalSingleFileArtifactToResult(resultJson, artifactMetadata, dst)
         End Function
 
         Private Shared Function ExecuteMove(args As IDictionary(Of String, Object)) As String
@@ -119,6 +150,10 @@ Namespace Agents
                 Return Err_("not_found", "Source not found.")
             End If
 
+            Dim artifactMetadata As OptionalToolArtifactMetadata = Nothing
+            Dim artifactError As String = PrepareSingleFileArtifact(args, src, artifactMetadata)
+            If artifactError IsNot Nothing Then Return artifactError
+
             Dim parent = Path.GetDirectoryName(dst)
             If Not String.IsNullOrWhiteSpace(parent) AndAlso Not Directory.Exists(parent) Then
                 Directory.CreateDirectory(parent)
@@ -130,7 +165,8 @@ Namespace Agents
                 Directory.Move(src, dst)
             End If
 
-            Return JsonConvert.SerializeObject(New With {Key .source = src, Key .destination = dst, Key .moved = True})
+            Dim resultJson As String = JsonConvert.SerializeObject(New With {Key .source = src, Key .destination = dst, Key .moved = True})
+            Return ArtifactDelivery.AttachOptionalSingleFileArtifactToResult(resultJson, artifactMetadata, dst)
         End Function
 
         Private Shared Function ExecuteRename(args As IDictionary(Of String, Object)) As String
@@ -144,6 +180,10 @@ Namespace Agents
             Dim dst = PathPolicy.Resolve(Path.Combine(parent, newName), PathAccess.Write)
             RequireWorkspaceMoveCopyRename(dst)
 
+            Dim artifactMetadata As OptionalToolArtifactMetadata = Nothing
+            Dim artifactError As String = PrepareSingleFileArtifact(args, src, artifactMetadata)
+            If artifactError IsNot Nothing Then Return artifactError
+
             If File.Exists(src) Then
                 File.Move(src, dst)
             ElseIf Directory.Exists(src) Then
@@ -152,7 +192,8 @@ Namespace Agents
                 Return Err_("not_found", "Path not found.")
             End If
 
-            Return JsonConvert.SerializeObject(New With {Key .path = dst})
+            Dim resultJson As String = JsonConvert.SerializeObject(New With {Key .path = dst})
+            Return ArtifactDelivery.AttachOptionalSingleFileArtifactToResult(resultJson, artifactMetadata, dst)
         End Function
 
         Private Shared Function ExecuteDelete(args As IDictionary(Of String, Object)) As String

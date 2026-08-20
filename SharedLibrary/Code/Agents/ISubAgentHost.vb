@@ -41,6 +41,26 @@ Namespace Agents
         Public Property MaxIterations As Integer
         Public Property TimeoutSeconds As Integer
         Public Property WorkflowId As String
+
+        ''' <summary>
+        ''' Opaque caller-supplied identity of one logical sub-agent task.
+        ''' The same logical task must reuse the same id. No semantic inference is used.
+        ''' </summary>
+        Public Property SubAgentTaskId As String
+
+        ''' <summary>
+        ''' Zero-based retry index controlled exclusively by SubAgentRunner.
+        ''' 0 is the initial isolated run; 1 is the single permitted internal
+        ''' empty-response recovery run. This is runtime state, not model input.
+        ''' </summary>
+        Public Property RunnerRetryIndex As Integer
+
+        ''' <summary>
+        ''' Exact JSON array supplied by the parent agent_<name> invocation.
+        ''' [] means the delegated task is explicitly non-file-producing.
+        ''' The nested tooling run locks this contract and may not broaden it.
+        ''' </summary>
+        Public Property ExpectedArtifactsJson As String = Nothing
     End Class
 
     Public Interface ISubAgentHost

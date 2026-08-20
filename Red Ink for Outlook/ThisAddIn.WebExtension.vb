@@ -1401,23 +1401,9 @@ Partial Public Class ThisAddIn
         Try
             ' Maximum markdown functionality + soft line breaks as <br/>
             Dim pipeline As Markdig.MarkdownPipeline =
-                New Markdig.MarkdownPipelineBuilder().
-                    UseAdvancedExtensions().
-                    UseSoftlineBreakAsHardlineBreak().
-                    UsePipeTables().
-                    UseGridTables().
-                    UseListExtras().
-                    UseFootnotes().
-                    UseDefinitionLists().
-                    UseAbbreviations().
-                    UseAutoLinks().
-                    UseTaskLists().
-                    UseMathematics().
-                    UseFigures().
-                    UseGenericAttributes().
-                    Build()
+                Global.SharedLibrary.SharedLibrary.SharedMethods.CreateMarkdownHtmlPipeline(useSoftlineBreakAsHardlineBreak:=True)
 
-            Return Markdig.Markdown.ToHtml(md, pipeline)
+            Return Markdig.Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(md), pipeline)
         Catch ex As System.Exception
             ' Fallback: safely encode and preserve line breaks
             Return System.Net.WebUtility.HtmlEncode(md).Replace(vbLf, "<br>")
@@ -2178,12 +2164,22 @@ Partial Public Class ThisAddIn
 
         ' If this is a browser POST to our Inky API, j may be JSON; otherwise keep your existing flow
         If rawUrl IsNot Nothing AndAlso rawUrl.StartsWith(InkyApiRoute, System.StringComparison.OrdinalIgnoreCase) Then
+            Dim requestRunIsolationOwned As System.Boolean = False
             Try
                 Dim j As Newtonsoft.Json.Linq.JObject = If(
                     Not System.String.IsNullOrWhiteSpace(body),
                     Newtonsoft.Json.Linq.JObject.Parse(body),
                     New Newtonsoft.Json.Linq.JObject())
                 Dim cmd As System.String = j("Command")?.ToString()
+
+                If System.String.Equals(cmd, "inky_send", System.StringComparison.OrdinalIgnoreCase) Then
+                    ' Protect Local Agent request preparation as well as the background run.
+                    ' The request builds model/workspace/file context from process-global host
+                    ' fields; without this scope a concurrent AutoPilot/Scheduler run could
+                    ' temporarily expose another run's workspace state to this request.
+                    Await SharedLibrary.Agents.AgentGate.BeginOwnedScopeAsync().ConfigureAwait(False)
+                    requestRunIsolationOwned = True
+                End If
 
                 If INI_APIDebug Then
                     AppendInkyServerLog(
@@ -3296,6 +3292,18 @@ Partial Public Class ThisAddIn
                                 End If
                             End If
                         End If
+
+                        Dim scheduledTaskPreparedForJob As System.Boolean = False
+                        If Not System.String.IsNullOrWhiteSpace(scheduledTaskId) Then
+                            If Not SchedulerPrepareLocalBrowserTaskForExecution(scheduledTaskId) Then
+                                Return JsonErr("Scheduled Local Agent task is not available to this browser session.")
+                            End If
+                            scheduledTaskPreparedForJob = True
+                            ' Preparation may switch the active scheduled-chat state; reload it
+                            ' before building the prompt/job snapshot.
+                            st = LoadInkyState()
+                        End If
+
                         ' ------------------ (C) Append user turn immediately ------------------
                         Dim userTurn As New ChatTurn With {
                             .Role = "user",
@@ -3417,6 +3425,9 @@ Partial Public Class ThisAddIn
                                     }
                         If Not jobMap.TryAdd(jobId, job) Then
                             jobCts.Dispose()
+                            If scheduledTaskPreparedForJob AndAlso Not System.String.IsNullOrWhiteSpace(scheduledTaskId) Then
+                                SchedulerFailLocalBrowserTask(scheduledTaskId, "Failed to register Local Agent background job.")
+                            End If
                             Return JsonErr("Failed to register job.")
                         End If
                         Threading.Interlocked.Increment(activeJobs)
@@ -3450,7 +3461,13 @@ Partial Public Class ThisAddIn
                                 Dim agentToolCallLogSnapshot As List(Of AutoPilotToolCallEntry) = Nothing
                                 Dim agentOutputFiles As List(Of String) = Nothing
                                 Dim scheduledTaskFinalized As Boolean = False
+                                Dim runIsolationOwned As Boolean = False
                                 Try
+                                    ' Serialize the complete Local Agent run because model configuration,
+                                    ' current attachments, PathPolicy and delivery state are shared host state.
+                                    SharedLibrary.Agents.AgentGate.BeginOwnedScopeAsync(jobCts.Token).GetAwaiter().GetResult()
+                                    runIsolationOwned = True
+
                                     ' (1) Alternate model application (safer pattern)
                                     If useSecondApiLocal AndAlso Not String.IsNullOrWhiteSpace(selectedModelKeyLocal) Then
                                         Try
@@ -3583,7 +3600,9 @@ Partial Public Class ThisAddIn
                                             If Not String.IsNullOrWhiteSpace(job.ScheduledTaskId) AndAlso
                                                agentOutputFiles IsNot Nothing AndAlso
                                                agentOutputFiles.Count > 0 Then
-                                                SchedulerPersistLocalBrowserOutputs(job.ScheduledTaskId, agentOutputFiles)
+                                                If Not SchedulerPersistLocalBrowserOutputs(job.ScheduledTaskId, agentOutputFiles) Then
+                                                    Throw New System.IO.IOException("One or more Local Agent scheduled-task outputs could not be persisted to the task workspace.")
+                                                End If
                                             End If
 
                                             If agentAbortDetected Then
@@ -3718,6 +3737,12 @@ Partial Public Class ThisAddIn
                                     Catch
                                         ' Ignore restore errors
                                     End Try
+
+                                    If runIsolationOwned Then
+                                        SharedLibrary.Agents.AgentGate.EndOwnedScope()
+                                        runIsolationOwned = False
+                                    End If
+
                                     Threading.Interlocked.Decrement(activeJobs)
                                 End Try
                             End Sub)
@@ -4152,6 +4177,11 @@ Partial Public Class ThisAddIn
                 End If
 
                 Return JsonErr("Bad request: " & ex.Message)
+            Finally
+                If requestRunIsolationOwned Then
+                    SharedLibrary.Agents.AgentGate.EndOwnedScope()
+                    requestRunIsolationOwned = False
+                End If
             End Try
         End If
 
@@ -4297,14 +4327,14 @@ Partial Public Class ThisAddIn
                 If Not String.IsNullOrWhiteSpace(My.Settings.LastPrompt) Then sb.Append("; ctrl-p for your last prompt")
                 sb.Append(":")
                 Dim promptMsg As String = sb.ToString()
-                Dim OptionalButtons As System.Tuple(Of String, String, String)()
+                Dim OptionalButtons As System.Tuple(Of String, String, String)() = Nothing
                 If wordInstalled Then
                     OptionalButtons = {
                         System.Tuple.Create("OK, do a new doc", $"Use this to automatically insert '{NewDocPrefix}' as a prefix.", NewDocPrefix)
                     }
                 End If
                 OtherPrompt = Await SwitchToUi(Function()
-                                                   Return SLib.ShowCustomInputBox(promptMsg, promptCaption, False, "", My.Settings.LastPrompt, If(wordInstalled, OptionalButtons, Nothing), Context:=_context)
+                                                   Return SLib.ShowCustomInputBox(promptMsg, promptCaption, False, "", My.Settings.LastPrompt, OptionalButtons, Context:=_context)
                                                End Function)
                 Dim doMarkupFlag As Boolean = False
                 Dim doInsertFlag As Boolean = False

@@ -749,25 +749,10 @@ Partial Public Class ThisAddIn
 
         'Dim markdownPipeline As MarkdownPipeline = New MarkdownPipelineBuilder().Build()
 
-        Dim builder As New MarkdownPipelineBuilder()
+        Dim markdownPipeline As MarkdownPipeline =
+            Global.SharedLibrary.SharedLibrary.SharedMethods.CreateMarkdownHtmlPipeline(useSoftlineBreakAsHardlineBreak:=True)
 
-        builder.UsePipeTables()
-        builder.UseGridTables()
-        builder.UseSoftlineBreakAsHardlineBreak()
-        builder.UseListExtras()
-        builder.UseFootnotes()
-        builder.UseDefinitionLists()
-        builder.UseAbbreviations()
-        builder.UseAutoLinks()
-        builder.UseTaskLists()
-        builder.UseMathematics()
-        builder.UseFigures()
-        builder.UseAdvancedExtensions()
-        builder.UseGenericAttributes()
-
-        Dim markdownPipeline As MarkdownPipeline = builder.Build()
-
-        Dim htmlText As String = Markdown.ToHtml(LLMResult, markdownPipeline)
+        Dim htmlText As String = Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(LLMResult), markdownPipeline)
 
         Dim fullHtml As String =
               "<!DOCTYPE html>" &
@@ -801,25 +786,10 @@ Partial Public Class ThisAddIn
 
         'Dim markdownPipeline As MarkdownPipeline = New MarkdownPipelineBuilder().Build()
 
-        Dim builder As New MarkdownPipelineBuilder()
+        Dim markdownPipeline As MarkdownPipeline =
+            Global.SharedLibrary.SharedLibrary.SharedMethods.CreateMarkdownHtmlPipeline(useSoftlineBreakAsHardlineBreak:=True)
 
-        builder.UsePipeTables()
-        builder.UseGridTables()
-        builder.UseSoftlineBreakAsHardlineBreak()
-        builder.UseListExtras()
-        builder.UseFootnotes()
-        builder.UseDefinitionLists()
-        builder.UseAbbreviations()
-        builder.UseAutoLinks()
-        builder.UseTaskLists()
-        builder.UseMathematics()
-        builder.UseFigures()
-        builder.UseAdvancedExtensions()
-        builder.UseGenericAttributes()
-
-        Dim markdownPipeline As MarkdownPipeline = builder.Build()
-
-        Dim htmlText As String = Markdown.ToHtml(LLMResult, markdownPipeline)
+        Dim htmlText As String = Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(LLMResult), markdownPipeline)
 
         ShowHTMLCustomMessageBox(htmlText, $"{AN} Translation")
 
@@ -842,25 +812,10 @@ Partial Public Class ThisAddIn
 
         ' Dim markdownPipeline As MarkdownPipeline = New MarkdownPipelineBuilder().Build()
 
-        Dim builder As New MarkdownPipelineBuilder()
+        Dim markdownPipeline As MarkdownPipeline =
+            Global.SharedLibrary.SharedLibrary.SharedMethods.CreateMarkdownHtmlPipeline(useSoftlineBreakAsHardlineBreak:=True)
 
-        builder.UsePipeTables()
-        builder.UseGridTables()
-        builder.UseSoftlineBreakAsHardlineBreak()
-        builder.UseListExtras()
-        builder.UseFootnotes()
-        builder.UseDefinitionLists()
-        builder.UseAbbreviations()
-        builder.UseAutoLinks()
-        builder.UseTaskLists()
-        builder.UseMathematics()
-        builder.UseFigures()
-        builder.UseAdvancedExtensions()
-        builder.UseGenericAttributes()
-
-        Dim markdownPipeline As MarkdownPipeline = builder.Build()
-
-        Dim htmlText As String = Markdown.ToHtml(LLMResult, markdownPipeline)
+        Dim htmlText As String = Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(LLMResult), markdownPipeline)
 
         Dim fullHtml As String =
               "<!DOCTYPE html>" &
@@ -1199,25 +1154,10 @@ Partial Public Class ThisAddIn
             ' Convert Markdown to HTML using Markdig
             ' Dim markdownPipeline As MarkdownPipeline = New MarkdownPipelineBuilder().Build()
 
-            Dim builder As New MarkdownPipelineBuilder()
+            Dim markdownPipeline As MarkdownPipeline =
+                Global.SharedLibrary.SharedLibrary.SharedMethods.CreateMarkdownHtmlPipeline(useSoftlineBreakAsHardlineBreak:=True)
 
-            builder.UsePipeTables()
-            builder.UseGridTables()
-            builder.UseSoftlineBreakAsHardlineBreak()
-            builder.UseListExtras()
-            builder.UseFootnotes()
-            builder.UseDefinitionLists()
-            builder.UseAbbreviations()
-            builder.UseAutoLinks()
-            builder.UseTaskLists()
-            builder.UseMathematics()
-            builder.UseFigures()
-            builder.UseAdvancedExtensions()
-            builder.UseGenericAttributes()
-
-            Dim markdownPipeline As MarkdownPipeline = builder.Build()
-
-            Dim convertedHtml As String = Markdown.ToHtml(LLMResult, markdownPipeline)
+            Dim convertedHtml As String = Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(LLMResult), markdownPipeline)
 
             If mailItem.BodyFormat = OlBodyFormat.olFormatHTML Then
                 ' Insert via Word editor to preserve the existing font/style and paragraph spacing

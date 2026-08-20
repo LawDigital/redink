@@ -80,11 +80,9 @@ Namespace SharedLibrary
         ''' <param name="FileObject">Optional file/clipboard object reference used for object upload features.</param>
         ''' <param name="cancellationToken">Cancellation token propagated to network calls and linked to splash cancellation.</param>
         ''' <param name="ToolExecution">If <c>True</c> then LLM expects to be in the tooling execution mode when calling an LLM (necessary for building APICall).</c>.</param>
-        ''' <returns>Extracted text from the JSON response; returns an empty string on cancellation or on handled errors.</returns>
+        ''' <returns>Extracted text from the JSON response. Caller cancellation is propagated; request timeout is surfaced as System.TimeoutException.</returns>
         Public Shared Async Function LLM(context As ISharedContext, ByVal promptSystem As String, ByVal promptUser As String, Optional ByVal Model As String = "", Optional ByVal Temperature As String = "", Optional ByVal Timeout As Long = 0, Optional ByVal UseSecondAPI As Boolean = False, Optional ByVal Hidesplash As Boolean = False, Optional ByVal AddUserPrompt As String = "", Optional FileObject As String = "", Optional cancellationToken As Threading.CancellationToken = Nothing, Optional ToolExecution As Boolean = False, Optional binaryOutputDirectory As String = Nothing) As Task(Of String)
-            If cancellationToken.IsCancellationRequested Then
-                Return ""
-            End If
+            cancellationToken.ThrowIfCancellationRequested()
 
             Await Agents.AgentGate.EnterAsync(cancellationToken).ConfigureAwait(False)
             Try
@@ -125,9 +123,7 @@ Namespace SharedLibrary
                     End If
                 End If
 
-                If cancellationToken.IsCancellationRequested Then
-                    Return ""
-                End If
+                cancellationToken.ThrowIfCancellationRequested()
 
                 Dim splash As SplashScreenCountDown = Nothing
                 Dim cts As System.Threading.CancellationTokenSource = Nothing
@@ -337,7 +333,12 @@ Namespace SharedLibrary
 
                     ' Link a local CTS with the external token so caller cancellation, timeout, and the splash cancel button apply.
                     cts = System.Threading.CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)
-                    AddHandler splash.CancelRequested, Sub() cts.Cancel()
+                    Dim splashCancelRequested As System.Int32 = 0
+                    AddHandler splash.CancelRequested,
+                        Sub()
+                            System.Threading.Interlocked.Exchange(splashCancelRequested, 1)
+                            cts.Cancel()
+                        End Sub
                     Dim ct As System.Threading.CancellationToken = cts.Token
 
                     Dim restartCountdownAndTimeout As Action(Of String) =
@@ -781,9 +782,15 @@ Namespace SharedLibrary
                                     End Try
                                 End Using
                             End Using
-                        Catch ex As OperationCanceledException
-                            If Not Hidesplash Then ShowCustomMessageBox("Request canceled.")
-                            Return ""
+                        Catch ex As System.OperationCanceledException
+                            If cancellationToken.IsCancellationRequested OrElse
+                               System.Threading.Interlocked.CompareExchange(splashCancelRequested, 0, 0) <> 0 Then
+                                Throw New System.OperationCanceledException("LLM request canceled by caller.", ex, cancellationToken)
+                            End If
+
+                            Throw New System.TimeoutException(
+                                $"LLM request timed out after {TimeoutValue} ms.",
+                                ex)
                         Finally
                             cts.Dispose()
                             If Not Hidesplash Then splash.Close()
@@ -1099,9 +1106,15 @@ Namespace SharedLibrary
                             If Not Hidesplash Then splash.Close()
                             If Not Hidesplash Then ShowCustomMessageBox($"The response from the endpoint resulted in an error: {ex.Message}")
                         End Try
-                    Catch ex As OperationCanceledException
-                        If Not Hidesplash Then ShowCustomMessageBox("Request canceled.")
-                        Return ""
+                    Catch ex As System.OperationCanceledException
+                        If cancellationToken.IsCancellationRequested OrElse
+                           System.Threading.Interlocked.CompareExchange(splashCancelRequested, 0, 0) <> 0 Then
+                            Throw New System.OperationCanceledException("LLM request canceled by caller.", ex, cancellationToken)
+                        End If
+
+                        Throw New System.TimeoutException(
+                            $"LLM request timed out after {TimeoutValue} ms.",
+                            ex)
                     Finally
                         cts.Dispose()
                         If Not Hidesplash Then splash.Close()

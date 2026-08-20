@@ -44,7 +44,9 @@ Namespace Agents
                                          Optional contextBlob As String = Nothing,
                                          Optional storeResultInMemory As Boolean = True,
                                          Optional workflowId As String = Nothing,
-                                         Optional cancellationToken As CancellationToken = Nothing) As Task(Of String)
+                                         Optional subAgentTaskId As String = Nothing,
+                                         Optional cancellationToken As CancellationToken = Nothing,
+                                         Optional expectedArtifactsJson As String = Nothing) As Task(Of String)
 
             If host Is Nothing Then
                 Return BuildInfrastructureErrorPayload(agentName, "no_host", "invoke", "No sub-agent host is available.")
@@ -65,7 +67,9 @@ Namespace Agents
         contextBlob,
         storeResultInMemory,
         effectiveWorkflowId,
-        cancellationToken).ConfigureAwait(False)
+        subAgentTaskId,
+        cancellationToken,
+        expectedArtifactsJson).ConfigureAwait(False)
         End Function
 
         Friend Shared Async Function InvokeResolvedAsync(host As ISubAgentHost,
@@ -74,8 +78,9 @@ Namespace Agents
                                                  Optional contextBlob As String = Nothing,
                                                  Optional storeResultInMemory As Boolean = True,
                                                  Optional workflowId As String = Nothing,
-                                                 Optional cancellationToken As CancellationToken = Nothing) As Task(Of String)
-
+                                                 Optional subAgentTaskId As String = Nothing,
+                                                 Optional cancellationToken As CancellationToken = Nothing,
+                                                 Optional expectedArtifactsJson As String = Nothing) As Task(Of String)
             If host Is Nothing Then
                 Return BuildInfrastructureErrorPayload(If(ag?.Name, ""), "no_host", "invoke", "No sub-agent host is available.")
             End If
@@ -83,6 +88,44 @@ Namespace Agents
             If ag Is Nothing OrElse String.IsNullOrWhiteSpace(ag.Name) Then
                 Return BuildInfrastructureErrorPayload(If(ag?.Name, ""), "agent_not_found", "invoke", "The requested sub-agent was not found.")
             End If
+
+            If String.IsNullOrWhiteSpace(task) Then
+                Return BuildInfrastructureErrorPayload(ag.Name, "missing_task", "invoke", "The delegated sub-agent task is empty.")
+            End If
+
+            Dim normalizedSubAgentTaskId As String = If(subAgentTaskId, "").Trim()
+            If normalizedSubAgentTaskId = "" Then
+                Return BuildInfrastructureErrorPayload(ag.Name, "missing_subagent_task_id", "invoke", "Every delegated sub-agent task requires an explicit opaque subagent_task_id.")
+            End If
+
+            If String.IsNullOrWhiteSpace(expectedArtifactsJson) Then
+                Return BuildInfrastructureErrorPayload(ag.Name, "missing_expected_artifacts", "invoke", "Every delegated sub-agent task requires an explicit expected_artifacts JSON array; use [] for no user-final artifacts.")
+            End If
+
+            Dim expectedArtifactsToken As Newtonsoft.Json.Linq.JToken = Nothing
+            Try
+                expectedArtifactsToken = Newtonsoft.Json.Linq.JToken.Parse(expectedArtifactsJson)
+            Catch ex As System.Exception
+                Return BuildInfrastructureErrorPayload(ag.Name, "invalid_expected_artifacts", "invoke", "expected_artifacts is not valid JSON: " & ex.Message)
+            End Try
+
+            If expectedArtifactsToken Is Nothing OrElse
+               expectedArtifactsToken.Type <> Newtonsoft.Json.Linq.JTokenType.Array Then
+                Return BuildInfrastructureErrorPayload(ag.Name, "invalid_expected_artifacts", "invoke", "expected_artifacts must be a JSON array; use [] for no user-final artifacts.")
+            End If
+
+            For Each expectedArtifactToken As Newtonsoft.Json.Linq.JToken In DirectCast(expectedArtifactsToken, Newtonsoft.Json.Linq.JArray)
+                Dim expectedArtifactObject As Newtonsoft.Json.Linq.JObject = TryCast(expectedArtifactToken, Newtonsoft.Json.Linq.JObject)
+                If expectedArtifactObject Is Nothing Then
+                    Return BuildInfrastructureErrorPayload(ag.Name, "invalid_expected_artifacts", "invoke", "Each expected_artifacts item must be an object with explicit opaque logical_deliverable_id and output_slot_id values.")
+                End If
+
+                Dim logicalDeliverableId As String = If(expectedArtifactObject.Value(Of String)("logical_deliverable_id"), "").Trim()
+                Dim outputSlotId As String = If(expectedArtifactObject.Value(Of String)("output_slot_id"), "").Trim()
+                If logicalDeliverableId = "" OrElse outputSlotId = "" Then
+                    Return BuildInfrastructureErrorPayload(ag.Name, "invalid_expected_artifacts", "invoke", "Each expected_artifacts item requires non-empty opaque logical_deliverable_id and output_slot_id values.")
+                End If
+            Next
 
             Dim effectiveWorkflowId As String =
         If(String.IsNullOrWhiteSpace(workflowId), WorkflowContinuity.CurrentWorkflowId, workflowId)
@@ -122,6 +165,14 @@ Namespace Agents
                 baseUserMessage.Append(contextBlob.Trim())
             End If
 
+            Dim lockedExpectedArtifactsJson As String =
+                expectedArtifactsToken.ToString(Newtonsoft.Json.Formatting.None)
+
+            baseUserMessage.AppendLine().AppendLine()
+            baseUserMessage.AppendLine("Locked expected-artifact contract (provided by parent/orchestrator):")
+            baseUserMessage.AppendLine(lockedExpectedArtifactsJson)
+            baseUserMessage.AppendLine("Use these opaque logical_deliverable_id/output_slot_id values unchanged for any user-facing final artifacts. Do not add, rename, derive, or substitute slots. If the array is empty, do not produce a user-facing final artifact.")
+
             Dim allowedTools As IReadOnlyList(Of String) =
         If(ag.AllowedTools Is Nothing,
            CType(Array.Empty(Of String)(), IReadOnlyList(Of String)),
@@ -143,7 +194,10 @@ Namespace Agents
                 .AllowedToolNames = allowedTools,
                 .MaxIterations = 0,
                 .TimeoutSeconds = ag.TimeoutSeconds,
-                .WorkflowId = effectiveWorkflowId
+                .WorkflowId = effectiveWorkflowId,
+                .SubAgentTaskId = normalizedSubAgentTaskId,
+                .RunnerRetryIndex = retryCount,
+                .ExpectedArtifactsJson = lockedExpectedArtifactsJson
             }
 
                     Debug.WriteLine(

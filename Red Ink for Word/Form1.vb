@@ -3215,15 +3215,18 @@ Public Class frmAIChat
             Debug.WriteLine($"Warning: Could not reset to main story: {ex.Message}")
         End Try
 
+        wordApp = Globals.ThisAddIn.Application
+
         If commands.Count() > 0 Then
             Globals.ThisAddIn.Application.Activate()
             System.Threading.Thread.Sleep(200)
 
-            wordApp = Globals.ThisAddIn.Application
-            With wordApp.ActiveWindow.View
-                .RevisionsView = Microsoft.Office.Interop.Word.WdRevisionsView.wdRevisionsViewFinal
-                .ShowRevisionsAndComments = False
-            End With
+            If wordApp IsNot Nothing AndAlso wordApp.ActiveWindow IsNot Nothing Then
+                With wordApp.ActiveWindow.View
+                    .RevisionsView = Microsoft.Office.Interop.Word.WdRevisionsView.wdRevisionsViewFinal
+                    .ShowRevisionsAndComments = False
+                End With
+            End If
         End If
 
         For Each pc In commands

@@ -3187,23 +3187,9 @@ Public Class M365SearchTestForm
     Private Function MarkdownToHtml(md As String) As String
         Try
             Dim pipeline As Markdig.MarkdownPipeline =
-                New Markdig.MarkdownPipelineBuilder().
-                    UseAdvancedExtensions().
-                    UseSoftlineBreakAsHardlineBreak().
-                    UsePipeTables().
-                    UseGridTables().
-                    UseListExtras().
-                    UseFootnotes().
-                    UseDefinitionLists().
-                    UseAbbreviations().
-                    UseAutoLinks().
-                    UseTaskLists().
-                    UseMathematics().
-                    UseFigures().
-                    UseGenericAttributes().
-                    Build()
+                Global.SharedLibrary.SharedLibrary.SharedMethods.CreateMarkdownHtmlPipeline(useSoftlineBreakAsHardlineBreak:=True)
 
-            Return Markdig.Markdown.ToHtml(If(md, ""), pipeline)
+            Return Markdig.Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(If(md, "")), pipeline)
         Catch
             Return System.Net.WebUtility.HtmlEncode(If(md, "")).Replace(vbCrLf, "<br>").Replace(vbLf, "<br>")
         End Try

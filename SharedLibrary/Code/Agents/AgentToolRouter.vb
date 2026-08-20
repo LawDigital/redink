@@ -82,13 +82,110 @@ Namespace Agents
             End If
 
             If toolName.StartsWith(AgentToolPrefix, StringComparison.OrdinalIgnoreCase) Then
-                Dim agentName = toolName.Substring(AgentToolPrefix.Length)
-                Dim task = GetStr(arguments, "task")
-                Dim ctxBlob = GetStr(arguments, "context")
-                Return Await SubAgentRunner.InvokeAsync(host, agentName, task, ctxBlob,
-                                                       storeResultInMemory:=True,
-                                                       cancellationToken:=cancellationToken).
-                                            ConfigureAwait(False)
+                Dim agentName As String =
+                    toolName.Substring(AgentToolPrefix.Length)
+
+                Dim task As String =
+                    GetStr(arguments, "task")
+
+                If String.IsNullOrWhiteSpace(task) Then
+                    Return "{""summary"":""Sub-agent invocation rejected.""," &
+                           """result"":null," &
+                           """resultKind"":""error""," &
+                           """error"":{""code"":""missing_task""," &
+                           """phase"":""agent_router_validation""," &
+                           """message"":""Every agent_<name> invocation requires a non-empty task.""}}"
+                End If
+
+                Dim ctxBlob As String =
+                    GetStr(arguments, "context")
+
+                Dim subAgentTaskId As String =
+                    GetStr(arguments, "subagent_task_id").Trim()
+
+                If subAgentTaskId = "" Then
+                    Return "{""summary"":""Sub-agent invocation rejected.""," &
+                           """result"":null," &
+                           """resultKind"":""error""," &
+                           """error"":{""code"":""missing_subagent_task_id""," &
+                           """phase"":""agent_router_validation""," &
+                           """message"":""Every agent_<name> invocation requires an explicit opaque subagent_task_id.""}}"
+                End If
+
+                Dim expectedArtifactsRaw As Object = Nothing
+                If arguments Is Nothing OrElse
+                   Not arguments.TryGetValue("expected_artifacts", expectedArtifactsRaw) OrElse
+                   expectedArtifactsRaw Is Nothing Then
+
+                    Return "{""summary"":""Sub-agent invocation rejected.""," &
+                           """result"":null," &
+                           """resultKind"":""error""," &
+                           """error"":{""code"":""missing_expected_artifacts""," &
+                           """phase"":""agent_router_validation""," &
+                           """message"":""Every agent_<name> invocation requires expected_artifacts. Use [] for an explicitly non-file-producing delegated task.""}}"
+                End If
+
+                Dim expectedArtifactsToken As Newtonsoft.Json.Linq.JToken = Nothing
+                Try
+                    expectedArtifactsToken = Newtonsoft.Json.Linq.JToken.FromObject(expectedArtifactsRaw)
+                Catch
+                End Try
+
+                If expectedArtifactsToken Is Nothing OrElse
+                   expectedArtifactsToken.Type <> Newtonsoft.Json.Linq.JTokenType.Array Then
+
+                    Return "{""summary"":""Sub-agent invocation rejected.""," &
+                           """result"":null," &
+                           """resultKind"":""error""," &
+                           """error"":{""code"":""invalid_expected_artifacts""," &
+                           """phase"":""agent_router_validation""," &
+                           """message"":""expected_artifacts must be a JSON array; use [] for no expected final files.""}}"
+                End If
+
+                For Each expectedArtifactToken As Newtonsoft.Json.Linq.JToken In
+                    DirectCast(expectedArtifactsToken, Newtonsoft.Json.Linq.JArray)
+
+                    Dim expectedArtifactObject As Newtonsoft.Json.Linq.JObject =
+                        TryCast(expectedArtifactToken, Newtonsoft.Json.Linq.JObject)
+
+                    If expectedArtifactObject Is Nothing Then
+                        Return "{""summary"":""Sub-agent invocation rejected.""," &
+                               """result"":null," &
+                               """resultKind"":""error""," &
+                               """error"":{""code"":""invalid_expected_artifacts""," &
+                               """phase"":""agent_router_validation""," &
+                               """message"":""Each expected_artifacts item must be an object containing explicit logical_deliverable_id and output_slot_id values.""}}"
+                    End If
+
+                    Dim logicalDeliverableId As String =
+                        If(expectedArtifactObject.Value(Of String)("logical_deliverable_id"), "").Trim()
+
+                    Dim outputSlotId As String =
+                        If(expectedArtifactObject.Value(Of String)("output_slot_id"), "").Trim()
+
+                    If logicalDeliverableId = "" OrElse outputSlotId = "" Then
+                        Return "{""summary"":""Sub-agent invocation rejected.""," &
+                               """result"":null," &
+                               """resultKind"":""error""," &
+                               """error"":{""code"":""invalid_expected_artifacts""," &
+                               """phase"":""agent_router_validation""," &
+                               """message"":""Each expected_artifacts item requires non-empty opaque logical_deliverable_id and output_slot_id values.""}}"
+                    End If
+                Next
+
+                Dim expectedArtifactsJson As String =
+                    expectedArtifactsToken.ToString(Newtonsoft.Json.Formatting.None)
+
+                Return Await SubAgentRunner.InvokeAsync(
+                    host,
+                    agentName,
+                    task,
+                    ctxBlob,
+                    storeResultInMemory:=True,
+                    subAgentTaskId:=subAgentTaskId,
+                    cancellationToken:=cancellationToken,
+                    expectedArtifactsJson:=expectedArtifactsJson).
+                    ConfigureAwait(False)
             End If
 
             Return Nothing
@@ -105,7 +202,6 @@ Namespace Agents
             If WordDocTools.IsWordDocTool(toolName) Then Return True
             If BrowserTools.IsBrowserTool(toolName) Then Return True
             If JsRunTool.IsJsTool(toolName) Then Return True
-            If String.Equals(toolName, SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) Then Return True
             If String.Equals(toolName, SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) Then Return True
             If toolName.StartsWith(AgentToolPrefix, StringComparison.OrdinalIgnoreCase) Then Return True
             Return False

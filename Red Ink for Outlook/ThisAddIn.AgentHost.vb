@@ -52,9 +52,67 @@ Partial Public Class ThisAddIn
         ct As CancellationToken) As Task(Of String) _
         Implements SharedLibrary.Agents.ISubAgentHost.RunIsolatedToolingLoopAsync
 
+        If request Is Nothing Then
+            Return Newtonsoft.Json.JsonConvert.SerializeObject(
+                New With {
+                    Key .summary = "The requested sub-agent run is invalid.",
+                    Key .result = New With {Key .status = "blocked", Key .reason = "missing_subagent_run_request"}
+                })
+        End If
+
+        If request.RunnerRetryIndex < 0 OrElse request.RunnerRetryIndex > 1 Then
+            Return Newtonsoft.Json.JsonConvert.SerializeObject(
+                New With {
+                    Key .summary = "The requested sub-agent retry index is invalid.",
+                    Key .result = New With {Key .status = "blocked", Key .reason = "invalid_subagent_retry_index", Key .retry_index = request.RunnerRetryIndex}
+                })
+        End If
+
         Dim scope = CaptureModelConfigScope(_context)
         Dim modelKey As String = If(String.IsNullOrWhiteSpace(request.SpecialModelKey), "agentdefaultmodel", request.SpecialModelKey)
         Dim swapped As Boolean = False
+
+        Dim subAgentTaskId As String =
+            If(request.SubAgentTaskId, "").Trim()
+
+        If subAgentTaskId = "" Then
+            Return Newtonsoft.Json.JsonConvert.SerializeObject(
+                New With {
+                    Key .summary = "The requested sub-agent task is missing its explicit identity.",
+                    Key .result = New With {Key .status = "blocked", Key .reason = "missing_subagent_task_id", Key .agent = request.AgentName}
+                })
+        End If
+
+        If System.String.IsNullOrWhiteSpace(request.ExpectedArtifactsJson) Then
+            Return Newtonsoft.Json.JsonConvert.SerializeObject(
+                New With {
+                    Key .summary = "The requested sub-agent task is missing its explicit expected-artifact contract.",
+                    Key .result = New With {Key .status = "blocked", Key .reason = "missing_expected_artifacts", Key .subagent_task_id = subAgentTaskId, Key .agent = request.AgentName}
+                })
+        End If
+
+        If _activeToolingContext Is Nothing OrElse
+           _activeToolingContext.SequencingState Is Nothing OrElse
+           _activeToolingContext.SequencingState.SubAgentTaskRegistry Is Nothing Then
+
+            Return Newtonsoft.Json.JsonConvert.SerializeObject(
+                New With {
+                    Key .summary = "The requested sub-agent task cannot start without the parent task registry.",
+                    Key .result = New With {Key .status = "blocked", Key .reason = "subagent_task_registry_unavailable", Key .subagent_task_id = subAgentTaskId, Key .agent = request.AgentName}
+                })
+        End If
+
+        If Not _activeToolingContext.SequencingState.SubAgentTaskRegistry.TryBegin(
+            request.AgentName,
+            subAgentTaskId,
+            allowActiveContinuation:=(request.RunnerRetryIndex = 1)) Then
+
+            Return Newtonsoft.Json.JsonConvert.SerializeObject(
+                New With {
+                    Key .summary = "The requested sub-agent task is already active or terminal.",
+                    Key .result = New With {Key .status = "unresolved", Key .reason = "subagent_task_not_startable", Key .subagent_task_id = subAgentTaskId, Key .agent = request.AgentName}
+                })
+        End If
 
         Try
             If String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
@@ -223,6 +281,17 @@ Partial Public Class ThisAddIn
         "[subagent-host] Parent tool registry snapshot missing before sub-agent model call.",
         details:=$"parentRunId={parentRunId}; invocationIndex={invocationIndex}; agent={If(request.AgentName, "")}; requested={requestedNamesText}")
 
+                If subAgentTaskId <> "" AndAlso
+                   _activeToolingContext IsNot Nothing AndAlso
+                   _activeToolingContext.SequencingState IsNot Nothing AndAlso
+                   _activeToolingContext.SequencingState.SubAgentTaskRegistry IsNot Nothing Then
+
+                    _activeToolingContext.SequencingState.SubAgentTaskRegistry.MarkBlocked(
+                        request.AgentName,
+                        subAgentTaskId,
+                        "parent_registry_snapshot_missing")
+                End If
+
                 Return payload
             End If
 
@@ -243,6 +312,17 @@ Partial Public Class ThisAddIn
         "[subagent-host] Sub-agent required tools could not be resolved before model call.",
         details:=$"parentRunId={parentRunId}; invocationIndex={invocationIndex}; agent={If(request.AgentName, "")}; requested={requestedNamesText}; resolved={resolvedNamesText}; missing={missingNamesText}; finalSelected={finalSelectedNamesText}")
 
+                If subAgentTaskId <> "" AndAlso
+                   _activeToolingContext IsNot Nothing AndAlso
+                   _activeToolingContext.SequencingState IsNot Nothing AndAlso
+                   _activeToolingContext.SequencingState.SubAgentTaskRegistry IsNot Nothing Then
+
+                    _activeToolingContext.SequencingState.SubAgentTaskRegistry.MarkBlocked(
+                        request.AgentName,
+                        subAgentTaskId,
+                        "required_subagent_tools_missing")
+                End If
+
                 Return payload
             End If
 
@@ -254,27 +334,91 @@ Partial Public Class ThisAddIn
                              String.Join(", ", allTools.Select(Function(t) t.ToolName))))
 
             Dim result = Await ExecuteToolingLoop(
-                sysCommand:=request.SystemPrompt,
-                userText:="",
-                selectedTools:=allTools,
-                useSecondAPI:=True,
-                fullPromptOverride:=request.UserMessage,
-                hideSplash:=True,
-                hideLogWindow:=True,
-                cancellationToken:=ct,
-                subAgentMode:=True,
-                subAgentAllowedToolNames:=expandedAllowedToolNames,
-                subAgentSpecialModelKey:=request.SpecialModelKey,
-                subAgentAuthoritativeRegistry:=authoritativeSnapshot,
-                subAgentRegistrySource:=registrySource,
-                subAgentParentRunId:=parentRunId,
-                subAgentInvocationIndex:=invocationIndex,
-                subAgentAgentInvocationCount:=sameAgentInvocationCount,
-                subAgentName:=request.AgentName,
-                workflowId:=request.WorkflowId,
-                finalResponseContract:=SharedLibrary.Agents.ToolingFinalResponseContract.RawCallerText).ConfigureAwait(False)
+                    sysCommand:=request.SystemPrompt,
+                    userText:="",
+                    selectedTools:=allTools,
+                    useSecondAPI:=True,
+                    fullPromptOverride:=request.UserMessage,
+                    hideSplash:=True,
+                    hideLogWindow:=True,
+                    subAgentMode:=True,
+                    subAgentAllowedToolNames:=expandedAllowedToolNames,
+                    subAgentSpecialModelKey:=request.SpecialModelKey,
+                    subAgentAuthoritativeRegistry:=authoritativeSnapshot,
+                    subAgentRegistrySource:=registrySource,
+                    subAgentParentRunId:=parentRunId,
+                    subAgentInvocationIndex:=invocationIndex,
+                    subAgentAgentInvocationCount:=sameAgentInvocationCount,
+                    subAgentName:=request.AgentName,
+                    workflowId:=request.WorkflowId,
+                    finalResponseContract:=SharedLibrary.Agents.ToolingFinalResponseContract.RawCallerText,
+                    subAgentExpectedArtifactsJson:=request.ExpectedArtifactsJson).ConfigureAwait(False)
+
+            If subAgentTaskId <> "" AndAlso
+               _activeToolingContext IsNot Nothing AndAlso
+               _activeToolingContext.SequencingState IsNot Nothing AndAlso
+               _activeToolingContext.SequencingState.SubAgentTaskRegistry IsNot Nothing Then
+
+                Dim normalized =
+                    SharedLibrary.Agents.SubAgentRuntimeHardening.NormalizeFinalOutput(
+                        result,
+                        jsonRequired:=True)
+
+                Dim errorCode As String =
+                    If(normalized Is Nothing, "", normalized.GetErrorCode())
+
+                Dim isRetryableEmptyResult As Boolean =
+                    normalized IsNot Nothing AndAlso
+                    normalized.IsError AndAlso
+                    (String.Equals(
+                        errorCode,
+                        SharedLibrary.Agents.SubAgentRuntimeHardening.EmptyResultCode,
+                        StringComparison.OrdinalIgnoreCase) OrElse
+                     String.Equals(
+                        errorCode,
+                        SharedLibrary.Agents.SubAgentRuntimeHardening.ModelEmptyResponseCode,
+                        StringComparison.OrdinalIgnoreCase))
+
+                If isRetryableEmptyResult AndAlso request.RunnerRetryIndex = 0 Then
+                    ' Deliberately leave the task Active. SubAgentRunner owns the one
+                    ' permitted internal empty-response retry and will call this host
+                    ' again with the same SubAgentTaskId and RunnerRetryIndex = 1.
+
+                ElseIf normalized IsNot Nothing AndAlso Not normalized.IsError Then
+
+                    _activeToolingContext.SequencingState.SubAgentTaskRegistry.MarkCompleted(
+                        request.AgentName,
+                        subAgentTaskId)
+
+                ElseIf isRetryableEmptyResult Then
+
+                    _activeToolingContext.SequencingState.SubAgentTaskRegistry.MarkUnresolved(
+                        request.AgentName,
+                        subAgentTaskId,
+                        If(errorCode, ""))
+
+                Else
+                    _activeToolingContext.SequencingState.SubAgentTaskRegistry.MarkBlocked(
+                        request.AgentName,
+                        subAgentTaskId,
+                        If(errorCode, "subagent_failed"))
+                End If
+            End If
 
             Return If(result, "")
+        Catch ex As Exception
+            If subAgentTaskId <> "" AndAlso
+               _activeToolingContext IsNot Nothing AndAlso
+               _activeToolingContext.SequencingState IsNot Nothing AndAlso
+               _activeToolingContext.SequencingState.SubAgentTaskRegistry IsNot Nothing Then
+
+                _activeToolingContext.SequencingState.SubAgentTaskRegistry.MarkBlocked(
+                    request.AgentName,
+                    subAgentTaskId,
+                    "subagent_host_exception")
+            End If
+
+            Throw
         Finally
             RestoreModelConfigScope(_context, scope)
         End Try

@@ -73,10 +73,272 @@ Imports System.Xml
 Imports Newtonsoft.Json
 Imports Newtonsoft.Json.Linq
 Imports SharedLibrary
+Imports SharedLibrary.Agents
 Imports SharedLibrary.SharedLibrary
 Imports SharedLibrary.SharedLibrary.SharedMethods
 
 Partial Public Class ThisAddIn
+
+
+    Private Class AutoPilotDesignResolution
+        Public Property RequestedName As String
+        Public Property ApplicationName As String
+        Public Property Descriptor As SharedLibrary.Agents.DocumentDesignDescriptor
+        Public Property ApplicationConfig As JObject
+        Public Property TemplatePath As String
+        Public Property TemplateWarning As String
+        Public Property AppliedDefaultCount As Integer
+
+        Public ReadOnly Property Found As Boolean
+            Get
+                Return Descriptor IsNot Nothing AndAlso ApplicationConfig IsNot Nothing
+            End Get
+        End Property
+
+        Public ReadOnly Property Applied As Boolean
+            Get
+                Return Found AndAlso (AppliedDefaultCount > 0 OrElse Not String.IsNullOrWhiteSpace(TemplatePath))
+            End Get
+        End Property
+
+        Public ReadOnly Property SourceLabel As String
+            Get
+                If Descriptor Is Nothing Then Return ""
+                Return If(Descriptor.IsLocal, "local design repository", "central design repository")
+            End Get
+        End Property
+    End Class
+
+    Private Shared Function BuildDesignExecutionNote(design As AutoPilotDesignResolution) As String
+        If design Is Nothing OrElse String.IsNullOrWhiteSpace(design.RequestedName) Then Return ""
+        If design.Descriptor Is Nothing Then
+            Return $" Requested design '{design.RequestedName}' was not found; neutral professional design was used."
+        End If
+        If design.ApplicationConfig Is Nothing Then
+            Return $" Configured design '{design.Descriptor.Name}' has no {design.ApplicationName} profile; neutral professional design was used."
+        End If
+        If design.Applied Then
+            Return $" Configured design used: '{design.Descriptor.Name}' ({design.SourceLabel})."
+        End If
+        Return $" Configured design '{design.Descriptor.Name}' contained no applicable {design.ApplicationName} settings or usable template; neutral professional design was used."
+    End Function
+
+    ''' <summary>
+    ''' Resolves a named design from AgentResourcesPath[/Local]\designs\designs.json,
+    ''' applies only missing creator arguments as defaults, and resolves an optional
+    ''' repository-relative Office template. Explicit tool-call parameters always win.
+    ''' </summary>
+    Private Function ResolveAutoPilotDocumentDesign(args As Dictionary(Of String, Object),
+                                                     applicationName As String,
+                                                     allowedDefaultKeys As IEnumerable(Of String),
+                                                     allowedTemplateExtensions As IEnumerable(Of String),
+                                                     context As ToolExecutionContext) As AutoPilotDesignResolution
+        Dim result As New AutoPilotDesignResolution() With {
+            .RequestedName = If(GetArgString(args, "design_name"), "").Trim(),
+            .ApplicationName = If(applicationName, "").Trim()
+        }
+        If result.RequestedName = "" Then Return result
+
+        result.Descriptor = SharedLibrary.Agents.DesignRepository.FindDesign(result.RequestedName)
+        If result.Descriptor Is Nothing Then
+            result.TemplateWarning = $"Configured design '{result.RequestedName}' was not found; neutral professional design was used."
+            If context IsNot Nothing Then context.Log(result.TemplateWarning)
+            ApDashboardLog("⚠ " & result.TemplateWarning, "warn")
+            Return result
+        End If
+
+        result.ApplicationConfig = result.Descriptor.GetApplicationConfig(applicationName)
+        If result.ApplicationConfig Is Nothing Then
+            result.TemplateWarning = $"Configured design '{result.Descriptor.Name}' has no {applicationName} profile; neutral professional design was used."
+            If context IsNot Nothing Then context.Log(result.TemplateWarning)
+            ApDashboardLog("⚠ " & result.TemplateWarning, "warn")
+            Return result
+        End If
+
+        If allowedDefaultKeys IsNot Nothing Then
+            For Each key As String In allowedDefaultKeys
+                If String.IsNullOrWhiteSpace(key) OrElse HasMeaningfulToolArgument(args, key) Then Continue For
+                Dim token As JToken = result.ApplicationConfig(key)
+                If token Is Nothing OrElse token.Type = JTokenType.Null Then Continue For
+                args(key) = token.DeepClone()
+                result.AppliedDefaultCount += 1
+            Next
+        End If
+
+        Dim themeSourceRelative As String = If(result.ApplicationConfig.Value(Of String)("theme_source_file"), "").Trim()
+        If themeSourceRelative <> "" Then
+            Dim themeSourcePath As String = result.Descriptor.ResolveRepositoryFile(themeSourceRelative)
+            If themeSourcePath = "" OrElse Not System.IO.File.Exists(themeSourcePath) Then
+                result.TemplateWarning = $"Design '{result.Descriptor.Name}' theme_source_file was not found or invalid: {themeSourceRelative}."
+            ElseIf HasAllowedDesignThemeSourceExtension(themeSourcePath, applicationName) Then
+                result.AppliedDefaultCount += ApplyOfficeThemeDefaultsFromTemplate(args, themeSourcePath, applicationName)
+            Else
+                result.TemplateWarning = $"Design '{result.Descriptor.Name}' theme_source_file type is not supported for {applicationName}: {System.IO.Path.GetExtension(themeSourcePath)}."
+            End If
+        End If
+
+        Dim templateRelative As String = If(result.ApplicationConfig.Value(Of String)("template_file"), "").Trim()
+        If templateRelative <> "" Then
+            Dim resolvedPath As String = result.Descriptor.ResolveRepositoryFile(templateRelative)
+            If resolvedPath = "" Then
+                result.TemplateWarning = $"Design '{result.Descriptor.Name}' has an invalid template_file path; JSON design settings were used without the template."
+            ElseIf Not System.IO.File.Exists(resolvedPath) Then
+                result.TemplateWarning = $"Design '{result.Descriptor.Name}' template was not found: {templateRelative}; JSON design settings were used without the template."
+            ElseIf Not HasAllowedDesignTemplateExtension(resolvedPath, allowedTemplateExtensions) Then
+                result.TemplateWarning = $"Design '{result.Descriptor.Name}' template type is not allowed for {applicationName}: {System.IO.Path.GetExtension(resolvedPath)}; JSON design settings were used without the template."
+            Else
+                result.TemplatePath = resolvedPath
+                result.AppliedDefaultCount += ApplyOfficeThemeDefaultsFromTemplate(args, resolvedPath, applicationName)
+                If String.Equals(applicationName, "Word", StringComparison.OrdinalIgnoreCase) AndAlso
+                   Not HasMeaningfulToolArgument(args, "use_template_styles") Then
+                    args("use_template_styles") = True
+                End If
+            End If
+        End If
+
+        If result.TemplateWarning <> "" Then
+            If context IsNot Nothing Then context.Log(result.TemplateWarning)
+            ApDashboardLog("⚠ " & result.TemplateWarning, "warn")
+        Else
+            Dim templateNote As String = If(result.TemplatePath <> "", $" + template '{System.IO.Path.GetFileName(result.TemplatePath)}'", "")
+            Dim msg As String = $"Using configured design '{result.Descriptor.Name}' from {result.SourceLabel}{templateNote}."
+            If context IsNot Nothing Then context.Log(msg)
+            ApDashboardLog("🎨 " & msg, "step")
+        End If
+
+        Return result
+    End Function
+
+    Private Shared Function HasMeaningfulToolArgument(args As Dictionary(Of String, Object), key As String) As Boolean
+        If args Is Nothing OrElse String.IsNullOrWhiteSpace(key) OrElse Not args.ContainsKey(key) Then Return False
+        Dim value As Object = args(key)
+        If value Is Nothing Then Return False
+        Dim token As JToken = TryCast(value, JToken)
+        If token IsNot Nothing AndAlso (token.Type = JTokenType.Null OrElse token.Type = JTokenType.Undefined) Then Return False
+        If TypeOf value Is String Then Return Not String.IsNullOrWhiteSpace(CStr(value))
+        Return True
+    End Function
+
+    Private Shared Function HasAllowedDesignTemplateExtension(path As String,
+                                                              allowedExtensions As IEnumerable(Of String)) As Boolean
+        If String.IsNullOrWhiteSpace(path) OrElse allowedExtensions Is Nothing Then Return False
+        Dim ext As String = System.IO.Path.GetExtension(path)
+        For Each allowed As String In allowedExtensions
+            If String.Equals(ext, allowed, StringComparison.OrdinalIgnoreCase) Then Return True
+        Next
+        Return False
+    End Function
+
+    Private Shared Function HasAllowedDesignThemeSourceExtension(path As String, applicationName As String) As Boolean
+        Dim ext As String = If(System.IO.Path.GetExtension(path), "").ToLowerInvariant()
+        Select Case If(applicationName, "").Trim().ToLowerInvariant()
+            Case "word"
+                Return ext = ".docx" OrElse ext = ".dotx" OrElse ext = ".dotm"
+            Case "powerpoint"
+                Return ext = ".pptx" OrElse ext = ".potx"
+            Case "excel"
+                Return ext = ".xlsx" OrElse ext = ".xltx"
+            Case Else
+                Return False
+        End Select
+    End Function
+
+    ''' <summary>
+    ''' Extracts stable Office Open XML theme primitives that the existing renderers
+    ''' can actually consume. The template remains the richer source of masters/styles;
+    ''' this prevents custom renderer shapes from falling back to unrelated neutral colors/fonts.
+    ''' </summary>
+    Private Shared Function ApplyOfficeThemeDefaultsFromTemplate(args As Dictionary(Of String, Object),
+                                                                 templatePath As String,
+                                                                 applicationName As String) As Integer
+        If args Is Nothing OrElse String.IsNullOrWhiteSpace(templatePath) OrElse Not System.IO.File.Exists(templatePath) Then Return 0
+        Dim appliedCount As Integer = 0
+        Try
+            Using archive As System.IO.Compression.ZipArchive = System.IO.Compression.ZipFile.OpenRead(templatePath)
+                Dim themeEntry As System.IO.Compression.ZipArchiveEntry = Nothing
+                Dim normalizedApp As String = If(applicationName, "").Trim().ToLowerInvariant()
+                Dim preferredSuffix As String
+                Select Case normalizedApp
+                    Case "powerpoint" : preferredSuffix = "ppt/theme/theme1.xml"
+                    Case "excel" : preferredSuffix = "xl/theme/theme1.xml"
+                    Case "word" : preferredSuffix = "word/theme/theme1.xml"
+                    Case Else : preferredSuffix = "/theme/theme1.xml"
+                End Select
+
+                themeEntry = archive.Entries.FirstOrDefault(
+                    Function(e) e.FullName.Replace("\\", "/").EndsWith(preferredSuffix, StringComparison.OrdinalIgnoreCase))
+                If themeEntry Is Nothing Then Return appliedCount
+
+                Dim xml As New System.Xml.XmlDocument()
+                Using stream As System.IO.Stream = themeEntry.Open()
+                    xml.Load(stream)
+                End Using
+
+                Dim ns As New System.Xml.XmlNamespaceManager(xml.NameTable)
+                ns.AddNamespace("a", "http://schemas.openxmlformats.org/drawingml/2006/main")
+
+                Dim accent1 As String = ReadOfficeThemeColor(xml, ns, "accent1")
+                Dim accent2 As String = ReadOfficeThemeColor(xml, ns, "accent2")
+                Dim dk1 As String = ReadOfficeThemeColor(xml, ns, "dk1")
+                Dim lt1 As String = ReadOfficeThemeColor(xml, ns, "lt1")
+                Dim fontName As String = ReadOfficeThemeFont(xml, ns)
+
+                If SetToolArgumentDefault(args, "accent_color", accent1) Then appliedCount += 1
+                If SetToolArgumentDefault(args, "secondary_color", accent2) Then appliedCount += 1
+                If SetToolArgumentDefault(args, "text_color", dk1) Then appliedCount += 1
+                If SetToolArgumentDefault(args, "light_color", lt1) Then appliedCount += 1
+                If normalizedApp = "word" Then
+                    If SetToolArgumentDefault(args, "base_font_name", fontName) Then appliedCount += 1
+                Else
+                    If SetToolArgumentDefault(args, "font_name", fontName) Then appliedCount += 1
+                End If
+            End Using
+        Catch ex As System.Exception
+            Debug.WriteLine($"Design theme extraction failed for '{templatePath}': {ex.Message}")
+        End Try
+        Return appliedCount
+    End Function
+
+    Private Shared Function ReadOfficeThemeColor(xml As System.Xml.XmlDocument,
+                                                 ns As System.Xml.XmlNamespaceManager,
+                                                 schemeName As String) As String
+        If xml Is Nothing OrElse ns Is Nothing OrElse String.IsNullOrWhiteSpace(schemeName) Then Return ""
+        Dim node As System.Xml.XmlNode = xml.SelectSingleNode($"//a:themeElements/a:clrScheme/a:{schemeName}/*[1]", ns)
+        If node Is Nothing OrElse node.Attributes Is Nothing Then Return ""
+        Dim raw As String = ""
+        Dim attr As System.Xml.XmlAttribute = node.Attributes("val")
+        If attr IsNot Nothing Then raw = If(attr.Value, "").Trim()
+        If raw.Length = 6 AndAlso raw.All(Function(ch) Uri.IsHexDigit(ch)) Then Return "#" & raw.ToUpperInvariant()
+
+        attr = node.Attributes("lastClr")
+        If attr Is Nothing Then Return ""
+        raw = If(attr.Value, "").Trim()
+        If raw.Length = 6 AndAlso raw.All(Function(ch) Uri.IsHexDigit(ch)) Then Return "#" & raw.ToUpperInvariant()
+        Return ""
+    End Function
+
+    Private Shared Function ReadOfficeThemeFont(xml As System.Xml.XmlDocument,
+                                                ns As System.Xml.XmlNamespaceManager) As String
+        If xml Is Nothing OrElse ns Is Nothing Then Return ""
+        For Each xpath As String In New String() {
+            "//a:themeElements/a:fontScheme/a:minorFont/a:latin",
+            "//a:themeElements/a:fontScheme/a:majorFont/a:latin"}
+
+            Dim node As System.Xml.XmlNode = xml.SelectSingleNode(xpath, ns)
+            If node Is Nothing OrElse node.Attributes Is Nothing Then Continue For
+            Dim attr As System.Xml.XmlAttribute = node.Attributes("typeface")
+            If attr IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(attr.Value) Then Return attr.Value.Trim()
+        Next
+        Return ""
+    End Function
+
+    Private Shared Function SetToolArgumentDefault(args As Dictionary(Of String, Object), key As String, value As String) As Boolean
+        If args Is Nothing OrElse String.IsNullOrWhiteSpace(key) OrElse String.IsNullOrWhiteSpace(value) Then Return False
+        If HasMeaningfulToolArgument(args, key) Then Return False
+        args(key) = value
+        Return True
+    End Function
+
 
 
 
@@ -104,6 +366,13 @@ Partial Public Class ThisAddIn
                 Return response
             End If
 
+            Dim design As AutoPilotDesignResolution = ResolveAutoPilotDocumentDesign(
+                toolCall.Arguments,
+                "PowerPoint",
+                New String() {"style_preset", "accent_color", "secondary_color", "font_name", "aspect_ratio", "footer_text", "show_slide_numbers", "text_color", "muted_color", "light_color", "line_color", "green_color", "red_color", "amber_color", "preserve_template_slides"},
+                New String() {".pptx", ".potx"},
+                context)
+
             Dim fileName As String = GetArgString(toolCall.Arguments, "file_name")
             If String.IsNullOrWhiteSpace(fileName) Then fileName = "Presentation"
             For Each c As Char In Path.GetInvalidFileNameChars()
@@ -128,14 +397,20 @@ Partial Public Class ThisAddIn
 
             Dim templateName As String = GetArgString(toolCall.Arguments, "template_attachment_name")
             Dim templatePath As String = Nothing
+            Dim templateFromDesign As Boolean = False
             If Not String.IsNullOrWhiteSpace(templateName) Then
                 Dim templateAtt = FindAttachment(templateName)
                 If templateAtt IsNot Nothing AndAlso templateAtt.TempFilePath IsNot Nothing AndAlso File.Exists(templateAtt.TempFilePath) Then
                     templatePath = templateAtt.TempFilePath
-                    ApDashboardLog($"📊 Using template: {templateName}", "step")
+                    Dim ignoredThemeDefaults As Integer = ApplyOfficeThemeDefaultsFromTemplate(toolCall.Arguments, templatePath, "PowerPoint")
+                    ApDashboardLog($"📊 Using attached template: {templateName}", "step")
                 Else
                     ApDashboardLog($"⚠ Template '{templateName}' not found, creating from scratch", "warn")
                 End If
+            ElseIf design IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(design.TemplatePath) Then
+                templatePath = design.TemplatePath
+                templateName = Path.GetFileName(templatePath)
+                templateFromDesign = True
             End If
 
             context.Log($"Creating PowerPoint presentation: {fileName} ({slidesArray.Count} slides)" &
@@ -159,6 +434,11 @@ Partial Public Class ThisAddIn
 
                                                               If templatePath IsNot Nothing Then
                                                                   pres = app.Presentations.Open(templatePath, ReadOnly:=0, Untitled:=-1, WithWindow:=0)
+                                                                  If templateFromDesign AndAlso Not GetArgBool(toolCall.Arguments, "preserve_template_slides", False) Then
+                                                                      For templateSlideIndex As Integer = CInt(pres.Slides.Count) To 1 Step -1
+                                                                          Try : pres.Slides(templateSlideIndex).Delete() : Catch ex As System.Exception : End Try
+                                                                      Next
+                                                                  End If
                                                               Else
                                                                   pres = app.Presentations.Add(0)
                                                                   ApplyAutoPilotPowerPointPageSetup(pres, toolCall.Arguments)
@@ -209,12 +489,11 @@ Partial Public Class ThisAddIn
                                                       End Function)
 
             If success AndAlso File.Exists(outputPath) Then
-                If _apCurrentAttachments IsNot Nothing AndAlso _apCurrentAttachments.Count > 0 Then
-                    _apCurrentAttachments(0).OutputFiles.Add(outputPath)
-                End If
+                RegisterAutoPilotGeneratedOutputFile(outputPath)
                 Dim templateNote As String = If(templatePath IsNot Nothing, $", based on template '{templateName}'", "")
+                Dim designNote As String = BuildDesignExecutionNote(design)
                 response.Success = True
-                response.Response = $"PowerPoint presentation created: {fileName} ({slidesArray.Count} new slides{templateNote}, {New FileInfo(outputPath).Length / 1024:F0} KB). The file will be attached to the reply."
+                response.Response = $"PowerPoint presentation created: {fileName} ({slidesArray.Count} new slides{templateNote}, {New FileInfo(outputPath).Length / 1024:F0} KB). The file will be attached to the reply.{designNote}"
                 ApDashboardLog($"✓ PowerPoint created: {fileName}", "info")
             Else
                 response.Success = False
@@ -311,13 +590,27 @@ Partial Public Class ThisAddIn
         Dim accent As String = GetArgString(args, "accent_color")
         Dim secondary As String = GetArgString(args, "secondary_color")
         Dim fontName As String = GetArgString(args, "font_name")
+        Dim textColor As String = GetArgString(args, "text_color")
+        Dim mutedColor As String = GetArgString(args, "muted_color")
+        Dim lightColor As String = GetArgString(args, "light_color")
+        Dim lineColor As String = GetArgString(args, "line_color")
+        Dim greenColor As String = GetArgString(args, "green_color")
+        Dim redColor As String = GetArgString(args, "red_color")
+        Dim amberColor As String = GetArgString(args, "amber_color")
         If String.IsNullOrWhiteSpace(accent) Then accent = "#17365D"
         If String.IsNullOrWhiteSpace(secondary) Then secondary = "#2F75B5"
         If String.IsNullOrWhiteSpace(fontName) Then fontName = "Aptos"
+        If String.IsNullOrWhiteSpace(textColor) Then textColor = "#202124"
+        If String.IsNullOrWhiteSpace(mutedColor) Then mutedColor = "#667085"
+        If String.IsNullOrWhiteSpace(lightColor) Then lightColor = "#F3F6F9"
+        If String.IsNullOrWhiteSpace(lineColor) Then lineColor = "#D9E2EC"
+        If String.IsNullOrWhiteSpace(greenColor) Then greenColor = "#2E7D32"
+        If String.IsNullOrWhiteSpace(redColor) Then redColor = "#C62828"
+        If String.IsNullOrWhiteSpace(amberColor) Then amberColor = "#B7791F"
         Return New JObject From {
             {"accent", accent}, {"secondary", secondary}, {"font", fontName},
-            {"text", "#202124"}, {"muted", "#667085"}, {"light", "#F3F6F9"},
-            {"line", "#D9E2EC"}, {"green", "#2E7D32"}, {"red", "#C62828"}, {"amber", "#B7791F"}
+            {"text", textColor}, {"muted", mutedColor}, {"light", lightColor},
+            {"line", lineColor}, {"green", greenColor}, {"red", redColor}, {"amber", amberColor}
         }
     End Function
 
@@ -1291,6 +1584,13 @@ Partial Public Class ThisAddIn
                 sheetObjs.Add(Nothing)
             End If
 
+            Dim design As AutoPilotDesignResolution = ResolveAutoPilotDocumentDesign(
+                toolCall.Arguments,
+                "Excel",
+                New String() {"professional_layout", "style_preset", "accent_color", "secondary_color", "font_name", "smart_format", "header_row", "show_gridlines", "zoom", "text_color", "light_color", "line_color", "band_color"},
+                New String() {".xltx"},
+                context)
+
             ' ── Determine file name and extension ──
             Dim fileName = GetArgString(toolCall.Arguments, "file_name")
             If String.IsNullOrWhiteSpace(fileName) Then fileName = "Spreadsheet"
@@ -1364,17 +1664,42 @@ Partial Public Class ThisAddIn
                                                    excelApp.DisplayAlerts = False
                                                    excelApp.ScreenUpdating = False
 
-                                                   wb = excelApp.Workbooks.Add()
+                                                   If design IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(design.TemplatePath) Then
+                                                       wb = excelApp.Workbooks.Add(design.TemplatePath)
+
+                                                       ' A repository workbook is a design carrier, not a content source.
+                                                       ' Add fresh requested sheets first, then remove every original template
+                                                       ' sheet so sample cells/charts/shapes can never leak into generated output.
+                                                       Dim originalTemplateSheetCount As Integer = CInt(wb.Sheets.Count)
+                                                       For addIndex As Integer = 1 To sheetDefs.Count
+                                                           Dim lastTemplateOrNewSheet As Object = wb.Sheets(wb.Sheets.Count)
+                                                           Try
+                                                               wb.Sheets.Add(After:=lastTemplateOrNewSheet)
+                                                           Finally
+                                                               Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(lastTemplateOrNewSheet) : Catch ex As System.Exception : End Try
+                                                           End Try
+                                                       Next
+                                                       For deleteIndex As Integer = 1 To originalTemplateSheetCount
+                                                           Dim templateSheet As Microsoft.Office.Interop.Excel.Worksheet = Nothing
+                                                           Try
+                                                               templateSheet = CType(wb.Sheets(1), Microsoft.Office.Interop.Excel.Worksheet)
+                                                               templateSheet.Delete()
+                                                           Finally
+                                                               If templateSheet IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(templateSheet) : Catch ex As System.Exception : End Try
+                                                           End Try
+                                                       Next
+                                                   Else
+                                                       wb = excelApp.Workbooks.Add()
+                                                   End If
 
                                                    ' ── Create worksheets ──
-                                                   ' Excel starts with 1 sheet by default; add more as needed
+                                                   ' Ensure exactly the requested number of fresh sheets.
                                                    While wb.Sheets.Count < sheetDefs.Count
                                                        Dim lastSheet As Object = wb.Sheets(wb.Sheets.Count)
                                                        wb.Sheets.Add(After:=lastSheet)
                                                        Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(lastSheet) : Catch : End Try
                                                    End While
 
-                                                   ' Remove extra default sheets
                                                    While wb.Sheets.Count > sheetDefs.Count
                                                        Dim delSheet As Microsoft.Office.Interop.Excel.Worksheet =
                                                            CType(wb.Sheets(wb.Sheets.Count), Microsoft.Office.Interop.Excel.Worksheet)
@@ -1523,7 +1848,7 @@ Partial Public Class ThisAddIn
                                                                If Not String.IsNullOrWhiteSpace(nrName) AndAlso Not String.IsNullOrWhiteSpace(nrRange) Then
                                                                    wb.Names.Add(Name:=nrName, RefersTo:="=" & nrRange)
                                                                End If
-                                                           Catch
+                                                           Catch ex As System.Exception
                                                            End Try
                                                        Next
                                                    End If
@@ -1547,9 +1872,7 @@ Partial Public Class ThisAddIn
                                            End Function)
 
             If success AndAlso File.Exists(outputPath) Then
-                If _apCurrentAttachments IsNot Nothing AndAlso _apCurrentAttachments.Count > 0 Then
-                    _apCurrentAttachments(0).OutputFiles.Add(outputPath)
-                End If
+                RegisterAutoPilotGeneratedOutputFile(outputPath)
 
                 Dim featureList As New List(Of String)()
                 If sheetDefs.Count > 1 Then featureList.Add($"{sheetDefs.Count} sheets")
@@ -1561,8 +1884,9 @@ Partial Public Class ThisAddIn
                 If charts IsNot Nothing AndAlso charts.Count > 0 Then featureList.Add($"{charts.Count} chart(s)")
                 If hasVba Then featureList.Add("VBA macros")
 
+                Dim designNote As String = BuildDesignExecutionNote(design)
                 response.Success = True
-                response.Response = $"Excel spreadsheet created: {fileName} ({String.Join(", ", featureList)}, {New FileInfo(outputPath).Length / 1024:F0} KB). The file will be attached to the reply."
+                response.Response = $"Excel spreadsheet created: {fileName} ({String.Join(", ", featureList)}, {New FileInfo(outputPath).Length / 1024:F0} KB). The file will be attached to the reply.{designNote}"
                 ApDashboardLog($"✓ Excel created: {fileName}", "info")
             Else
                 response.Success = False
@@ -2195,10 +2519,14 @@ Partial Public Class ThisAddIn
 
         Dim accentHex As String = GetEffectiveExcelString(sheetArgs, workbookArgs, "accent_color", "#17365D")
         Dim accent As Integer = PptHexColor(accentHex, "#17365D")
-        Dim textColor As Integer = PptHexColor("#202124", "#202124")
-        Dim mutedLine As Integer = PptHexColor("#D9E2EC", "#D9E2EC")
-        Dim bandColor As Integer = PptHexColor("#F6F8FA", "#F6F8FA")
-        Dim white As Integer = PptHexColor("#FFFFFF", "#FFFFFF")
+        Dim textHex As String = GetEffectiveExcelString(sheetArgs, workbookArgs, "text_color", "#202124")
+        Dim lineHex As String = GetEffectiveExcelString(sheetArgs, workbookArgs, "line_color", "#D9E2EC")
+        Dim bandHex As String = GetEffectiveExcelString(sheetArgs, workbookArgs, "band_color", "#F6F8FA")
+        Dim lightHex As String = GetEffectiveExcelString(sheetArgs, workbookArgs, "light_color", "#FFFFFF")
+        Dim textColor As Integer = PptHexColor(textHex, "#202124")
+        Dim mutedLine As Integer = PptHexColor(lineHex, "#D9E2EC")
+        Dim bandColor As Integer = PptHexColor(bandHex, "#F6F8FA")
+        Dim white As Integer = PptHexColor(lightHex, "#FFFFFF")
         Dim fontName As String = GetEffectiveExcelString(sheetArgs, workbookArgs, "font_name", "Aptos")
         Dim smartFormat As Boolean = GetEffectiveExcelBool(sheetArgs, workbookArgs, "smart_format", True)
 
@@ -2818,8 +3146,10 @@ Partial Public Class ThisAddIn
                 Dim singleSeriesColor = ParseHexColor(chartObj.Value(Of String)("color"))
                 If (seriesColorsArr Is Nothing OrElse seriesColorsArr.Count = 0) AndAlso Not singleSeriesColor.HasValue Then
                     Dim accentHex As String = GetArgString(workbookArgs, "accent_color")
+                    Dim secondaryHex As String = GetArgString(workbookArgs, "secondary_color")
                     If String.IsNullOrWhiteSpace(accentHex) Then accentHex = "#17365D"
-                    seriesColorsArr = New JArray(accentHex, "#2F75B5", "#7F8C8D", "#D98E04", "#70AD47")
+                    If String.IsNullOrWhiteSpace(secondaryHex) Then secondaryHex = "#2F75B5"
+                    seriesColorsArr = New JArray(accentHex, secondaryHex, "#7F8C8D", "#D98E04", "#70AD47")
                 End If
                 ' Pie and doughnut charts have a single series whose slices are POINTS,
                 ' so per-slice colors must be applied point-by-point rather than per series.
@@ -3208,6 +3538,8 @@ Partial Public Class ThisAddIn
                                                      subtitle As String,
                                                      kicker As String,
                                                      accentColor As Integer,
+                                                     textColor As Integer,
+                                                     mutedColor As Integer,
                                                      fontName As String)
         If sel Is Nothing OrElse String.IsNullOrWhiteSpace(title) Then Exit Sub
         Try
@@ -3232,14 +3564,14 @@ Partial Public Class ThisAddIn
 
             sel.Font.Size = 30.0F
             sel.Font.Bold = True
-            sel.Font.Color = PptHexColor("#202124", "#202124")
+            sel.Font.Color = textColor
             sel.TypeText(title.Trim())
             sel.TypeParagraph()
 
             If Not String.IsNullOrWhiteSpace(subtitle) Then
                 sel.Font.Size = 13.0F
                 sel.Font.Bold = False
-                sel.Font.Color = PptHexColor("#667085", "#667085")
+                sel.Font.Color = mutedColor
                 sel.TypeText(subtitle.Trim())
                 sel.TypeParagraph()
             End If
@@ -3269,14 +3601,25 @@ Partial Public Class ThisAddIn
         Dim pageOrientation As String = If(GetArgString(args, "page_orientation"), "").Trim().ToLowerInvariant()
         Dim professionalLayout As Boolean = GetArgBool(args, "professional_layout", True)
         Dim stylePreset As String = If(GetArgString(args, "style_preset"), "consulting").Trim().ToLowerInvariant()
+        Dim useTemplateStyles As Boolean = GetArgBool(args, "use_template_styles", False)
         Dim accentHex As String = GetArgString(args, "accent_color")
+        Dim secondaryHex As String = GetArgString(args, "secondary_color")
+        Dim textHex As String = GetArgString(args, "text_color")
+        Dim mutedHex As String = GetArgString(args, "muted_color")
+        Dim lightHex As String = GetArgString(args, "light_color")
+        Dim lineHex As String = GetArgString(args, "line_color")
         If String.IsNullOrWhiteSpace(accentHex) Then accentHex = "#17365D"
+        If String.IsNullOrWhiteSpace(secondaryHex) Then secondaryHex = "#2F75B5"
+        If String.IsNullOrWhiteSpace(textHex) Then textHex = "#202124"
+        If String.IsNullOrWhiteSpace(mutedHex) Then mutedHex = "#667085"
+        If String.IsNullOrWhiteSpace(lightHex) Then lightHex = "#F3F6F9"
+        If String.IsNullOrWhiteSpace(lineHex) Then lineHex = "#D9E2EC"
         Dim accentColor As Integer = PptHexColor(accentHex, "#17365D")
-        Dim secondaryColor As Integer = PptHexColor("#2F75B5", "#2F75B5")
-        Dim textColor As Integer = PptHexColor("#202124", "#202124")
-        Dim mutedColor As Integer = PptHexColor("#667085", "#667085")
-        Dim lightColor As Integer = PptHexColor("#F3F6F9", "#F3F6F9")
-        Dim lineColor As Integer = PptHexColor("#D9E2EC", "#D9E2EC")
+        Dim secondaryColor As Integer = PptHexColor(secondaryHex, "#2F75B5")
+        Dim textColor As Integer = PptHexColor(textHex, "#202124")
+        Dim mutedColor As Integer = PptHexColor(mutedHex, "#667085")
+        Dim lightColor As Integer = PptHexColor(lightHex, "#F3F6F9")
+        Dim lineColor As Integer = PptHexColor(lineHex, "#D9E2EC")
 
         If String.IsNullOrWhiteSpace(baseFontName) Then baseFontName = "Aptos"
         Dim effectiveFontSize As Single = GetArgSingleInvariant(args, "base_font_size", 10.5F)
@@ -3303,14 +3646,15 @@ Partial Public Class ThisAddIn
                     Try : doc.PageSetup.Orientation = Microsoft.Office.Interop.Word.WdOrientation.wdOrientPortrait : Catch : End Try
             End Select
 
-            If professionalLayout AndAlso stylePreset <> "plain" Then
+            If Not useTemplateStyles AndAlso professionalLayout AndAlso stylePreset <> "plain" Then
                 Try : doc.PageSetup.TopMargin = 50.0F : Catch : End Try
                 Try : doc.PageSetup.BottomMargin = 46.0F : Catch : End Try
                 Try : doc.PageSetup.LeftMargin = 54.0F : Catch : End Try
                 Try : doc.PageSetup.RightMargin = 54.0F : Catch : End Try
             End If
 
-            normalStyle = doc.Styles(Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleNormal)
+            If Not useTemplateStyles Then
+                normalStyle = doc.Styles(Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleNormal)
             Try : normalStyle.Font.Name = baseFontName : Catch : End Try
             Try : normalStyle.Font.Size = effectiveFontSize : Catch : End Try
             Try : normalStyle.Font.Color = textColor : Catch : End Try
@@ -3429,7 +3773,17 @@ Partial Public Class ThisAddIn
                 End Try
             Next
 
-            ApplyAutoPilotWordHeaderFooter(doc, args, baseFontName, mutedColor, lineColor)
+            Else
+                ' A configured Office template is the design authority. Do not overwrite its
+                ' Normal/Title/Heading/Table definitions with the generic renderer.
+            End If
+
+            If Not useTemplateStyles OrElse
+               HasMeaningfulToolArgument(args, "header_text") OrElse
+               HasMeaningfulToolArgument(args, "footer_text") OrElse
+               HasMeaningfulToolArgument(args, "show_page_numbers") Then
+                ApplyAutoPilotWordHeaderFooter(doc, args, baseFontName, mutedColor, lineColor)
+            End If
             Try : doc.Repaginate() : Catch : End Try
 
         Finally
@@ -3491,6 +3845,1097 @@ Partial Public Class ThisAddIn
         Next
     End Sub
 
+    Private Shared Function GetAutoPilotWordVisuals(args As Dictionary(Of String, Object)) As Newtonsoft.Json.Linq.JArray
+        If args Is Nothing OrElse Not args.ContainsKey("visuals") OrElse args("visuals") Is Nothing Then
+            Return New Newtonsoft.Json.Linq.JArray()
+        End If
+
+        Try
+            Dim token As Newtonsoft.Json.Linq.JToken = TryCast(args("visuals"), Newtonsoft.Json.Linq.JToken)
+            If token Is Nothing Then
+                token = Newtonsoft.Json.Linq.JToken.FromObject(args("visuals"))
+            End If
+            If token IsNot Nothing AndAlso token.Type = Newtonsoft.Json.Linq.JTokenType.Array Then
+                Return DirectCast(token, Newtonsoft.Json.Linq.JArray)
+            End If
+        Catch
+        End Try
+
+        Return New Newtonsoft.Json.Linq.JArray()
+    End Function
+
+    Private Shared Function ContainsLikelyWordPseudoGraphic(markdownContent As String) As Boolean
+        If String.IsNullOrWhiteSpace(markdownContent) Then Return False
+
+        Dim normalized As String = markdownContent.Replace(vbCrLf, vbLf)
+        If System.Text.RegularExpressions.Regex.IsMatch(normalized,
+                                                        "```\\s*(mermaid|graphviz|dot)\\b",
+                                                        System.Text.RegularExpressions.RegexOptions.IgnoreCase) Then
+            Return True
+        End If
+
+        ' ASCII box diagrams frequently contain border fragments on the same line as
+        ' labels after Markdown normalization. Detect repeated +-----+ fragments anywhere
+        ' in the content, not only lines made exclusively from borders. Markdown tables do
+        ' not use plus-corner borders, so this does not reject normal pipe tables.
+        Dim asciiBoxFragments As Integer = System.Text.RegularExpressions.Regex.Matches(
+            normalized,
+            "\+(?:[-=]{4,})\+",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase).Count
+        If asciiBoxFragments >= 2 Then Return True
+
+        Dim lines() As String = normalized.Split({vbLf}, StringSplitOptions.None)
+        Dim suspiciousLines As Integer = 0
+        For Each rawLine As String In lines
+            Dim line As String = If(rawLine, String.Empty)
+            If line.IndexOfAny(New Char() {"┌"c, "┐"c, "└"c, "┘"c, "├"c, "┤"c, "┬"c, "┴"c, "┼"c, "─"c, "│"c, "╔"c, "╗"c, "╚"c, "╝"c, "═"c, "║"c}) >= 0 Then
+                suspiciousLines += 1
+            ElseIf System.Text.RegularExpressions.Regex.IsMatch(line, "^\\s*\\+(?:[-=]{3,}\\+)+\\s*$") Then
+                suspiciousLines += 1
+            ElseIf System.Text.RegularExpressions.Regex.IsMatch(line, "^\\s*(?:[-=]{3,}>|<[-=]{3,}|\\|\\s*\\^\\s*\\||\\|\\s*[vV]\\s*\\|)\\s*$") Then
+                suspiciousLines += 1
+            ElseIf System.Text.RegularExpressions.Regex.IsMatch(line, "^\\s*\\|.*(?:-->|==>|<--|<==).*\\|\\s*$") Then
+                suspiciousLines += 1
+            End If
+
+            If suspiciousLines >= 2 Then Return True
+        Next
+
+        Return False
+    End Function
+
+    Private Shared Function WordVisualColor(hexColor As String, fallbackHex As String) As System.Drawing.Color
+        Dim value As String = If(String.IsNullOrWhiteSpace(hexColor), fallbackHex, hexColor.Trim())
+        If Not value.StartsWith("#", StringComparison.Ordinal) Then value = "#" & value
+        Try
+            Return System.Drawing.ColorTranslator.FromHtml(value)
+        Catch
+            Return System.Drawing.ColorTranslator.FromHtml(fallbackHex)
+        End Try
+    End Function
+
+    Private Shared Function CreateWordVisualFont(fontName As String,
+                                                 size As Single,
+                                                 style As System.Drawing.FontStyle) As System.Drawing.Font
+        Dim requested As String = If(String.IsNullOrWhiteSpace(fontName), "Aptos", fontName.Trim())
+        Dim normalized As String = requested.ToLowerInvariant()
+
+        ' Never render business/document visuals in a code-oriented monospace face.
+        ' If the surrounding request accidentally selected one (often a side effect of
+        ' pseudo-diagram markdown), use a professional Office sans-serif instead.
+        If normalized.Contains("courier") OrElse
+           normalized.Contains("consolas") OrElse
+           normalized.Contains("cascadia mono") OrElse
+           normalized.Contains("lucida console") OrElse
+           normalized.Contains("source code") OrElse
+           normalized.Contains("mono") Then
+
+            requested = "Aptos"
+        End If
+
+        Try
+            Return New System.Drawing.Font(requested, size, style, System.Drawing.GraphicsUnit.Point)
+        Catch
+            Return New System.Drawing.Font("Arial", size, style, System.Drawing.GraphicsUnit.Point)
+        End Try
+    End Function
+
+    Private Shared Function GetVisualText(obj As Newtonsoft.Json.Linq.JObject,
+                                         key As String,
+                                         Optional fallback As String = "") As String
+        If obj Is Nothing Then Return fallback
+        Dim token As Newtonsoft.Json.Linq.JToken = obj(key)
+        If token Is Nothing OrElse token.Type = Newtonsoft.Json.Linq.JTokenType.Null Then Return fallback
+        Return token.ToString().Trim()
+    End Function
+
+    Private Shared Function GetVisualNumber(obj As Newtonsoft.Json.Linq.JObject,
+                                           key As String,
+                                           fallback As Double,
+                                           minimum As Double,
+                                           maximum As Double) As Double
+        If obj Is Nothing Then Return fallback
+        Try
+            Dim token As Newtonsoft.Json.Linq.JToken = obj(key)
+            If token Is Nothing OrElse token.Type = Newtonsoft.Json.Linq.JTokenType.Null Then Return fallback
+            Dim value As Double = token.Value(Of Double)()
+            Return Math.Max(minimum, Math.Min(maximum, value))
+        Catch
+            Return fallback
+        End Try
+    End Function
+
+    Private Shared Function GetWordVisualItems(visual As Newtonsoft.Json.Linq.JObject) As List(Of System.Tuple(Of String, String))
+        Dim result As New List(Of System.Tuple(Of String, String))()
+        If visual Is Nothing Then Return result
+
+        Dim token As Newtonsoft.Json.Linq.JToken = visual("items")
+        If token Is Nothing OrElse token.Type <> Newtonsoft.Json.Linq.JTokenType.Array Then Return result
+
+        For Each item As Newtonsoft.Json.Linq.JToken In DirectCast(token, Newtonsoft.Json.Linq.JArray)
+            If item Is Nothing OrElse item.Type = Newtonsoft.Json.Linq.JTokenType.Null Then Continue For
+            If item.Type = Newtonsoft.Json.Linq.JTokenType.Object Then
+                Dim obj As Newtonsoft.Json.Linq.JObject = DirectCast(item, Newtonsoft.Json.Linq.JObject)
+                Dim label As String = GetVisualText(obj, "label")
+                If String.IsNullOrWhiteSpace(label) Then label = GetVisualText(obj, "title")
+                Dim detail As String = GetVisualText(obj, "detail")
+                If String.IsNullOrWhiteSpace(detail) Then detail = GetVisualText(obj, "description")
+                If Not String.IsNullOrWhiteSpace(label) Then result.Add(System.Tuple.Create(label, detail))
+            Else
+                Dim label As String = item.ToString().Trim()
+                If Not String.IsNullOrWhiteSpace(label) Then result.Add(System.Tuple.Create(label, String.Empty))
+            End If
+        Next
+
+        Return result
+    End Function
+
+    Private Shared Function GetWordVisualCategories(visual As Newtonsoft.Json.Linq.JObject) As List(Of String)
+        Dim result As New List(Of String)()
+        If visual Is Nothing Then Return result
+        Dim token As Newtonsoft.Json.Linq.JToken = visual("categories")
+        If token Is Nothing OrElse token.Type <> Newtonsoft.Json.Linq.JTokenType.Array Then Return result
+        For Each item As Newtonsoft.Json.Linq.JToken In DirectCast(token, Newtonsoft.Json.Linq.JArray)
+            Dim value As String = If(item Is Nothing, String.Empty, item.ToString().Trim())
+            If Not String.IsNullOrWhiteSpace(value) Then result.Add(value)
+        Next
+        Return result
+    End Function
+
+    Private Shared Function GetWordVisualSeries(visual As Newtonsoft.Json.Linq.JObject) As List(Of System.Tuple(Of String, List(Of Double)))
+        Dim result As New List(Of System.Tuple(Of String, List(Of Double)))()
+        If visual Is Nothing Then Return result
+        Dim token As Newtonsoft.Json.Linq.JToken = visual("series")
+        If token Is Nothing OrElse token.Type <> Newtonsoft.Json.Linq.JTokenType.Array Then Return result
+
+        For Each item As Newtonsoft.Json.Linq.JToken In DirectCast(token, Newtonsoft.Json.Linq.JArray)
+            If item Is Nothing OrElse item.Type <> Newtonsoft.Json.Linq.JTokenType.Object Then Continue For
+            Dim obj As Newtonsoft.Json.Linq.JObject = DirectCast(item, Newtonsoft.Json.Linq.JObject)
+            Dim name As String = GetVisualText(obj, "name", "Series")
+            Dim values As New List(Of Double)()
+            Dim valuesToken As Newtonsoft.Json.Linq.JToken = obj("values")
+            If valuesToken IsNot Nothing AndAlso valuesToken.Type = Newtonsoft.Json.Linq.JTokenType.Array Then
+                For Each valueToken As Newtonsoft.Json.Linq.JToken In DirectCast(valuesToken, Newtonsoft.Json.Linq.JArray)
+                    Try
+                        values.Add(valueToken.Value(Of Double)())
+                    Catch
+                        values.Add(0.0R)
+                    End Try
+                Next
+            End If
+            If values.Count > 0 Then result.Add(System.Tuple.Create(name, values))
+        Next
+        Return result
+    End Function
+
+    Private Shared Sub DrawWordVisualTitle(g As System.Drawing.Graphics,
+                                           title As String,
+                                           caption As String,
+                                           fontName As String,
+                                           canvasWidth As Integer)
+        Using titleFont As System.Drawing.Font = CreateWordVisualFont(fontName, 28.0F, System.Drawing.FontStyle.Bold),
+              captionFont As System.Drawing.Font = CreateWordVisualFont(fontName, 14.0F, System.Drawing.FontStyle.Regular),
+              textBrush As New System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(30, 35, 42)),
+              captionBrush As New System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(90, 98, 108))
+            Dim titleRect As New System.Drawing.RectangleF(70.0F, 45.0F, CSng(canvasWidth - 140), 55.0F)
+            g.DrawString(If(String.IsNullOrWhiteSpace(title), "Visual", title), titleFont, textBrush, titleRect)
+            If Not String.IsNullOrWhiteSpace(caption) Then
+                Dim captionRect As New System.Drawing.RectangleF(70.0F, 100.0F, CSng(canvasWidth - 140), 48.0F)
+                g.DrawString(caption, captionFont, captionBrush, captionRect)
+            End If
+        End Using
+    End Sub
+
+    Private Shared Function WordVisualSeriesColor(index As Integer, accent As System.Drawing.Color) As System.Drawing.Color
+        If index <= 0 Then Return accent
+        Dim palette() As System.Drawing.Color = {
+            System.Drawing.Color.FromArgb(68, 114, 196),
+            System.Drawing.Color.FromArgb(112, 173, 71),
+            System.Drawing.Color.FromArgb(237, 125, 49),
+            System.Drawing.Color.FromArgb(165, 165, 165),
+            System.Drawing.Color.FromArgb(91, 155, 213)
+        }
+        Return palette((index - 1) Mod palette.Length)
+    End Function
+
+    Private Shared Sub DrawProcessWordVisual(g As System.Drawing.Graphics,
+                                             visual As Newtonsoft.Json.Linq.JObject,
+                                             fontName As String,
+                                             accent As System.Drawing.Color,
+                                             canvasWidth As Integer,
+                                             canvasHeight As Integer)
+        Dim items As List(Of System.Tuple(Of String, String)) = GetWordVisualItems(visual)
+        If items.Count = 0 Then items.Add(System.Tuple.Create("Process", String.Empty))
+        If items.Count > 7 Then items = items.GetRange(0, 7)
+
+        Dim left As Single = 80.0F
+        Dim right As Single = 80.0F
+        Dim gap As Single = 34.0F
+        Dim usable As Single = CSng(canvasWidth) - left - right
+        Dim boxWidth As Single = Math.Max(135.0F, (usable - gap * (items.Count - 1)) / Math.Max(1, items.Count))
+        Dim totalWidth As Single = boxWidth * items.Count + gap * (items.Count - 1)
+        If totalWidth > usable Then
+            gap = 20.0F
+            boxWidth = (usable - gap * (items.Count - 1)) / Math.Max(1, items.Count)
+        End If
+        Dim boxHeight As Single = 170.0F
+        Dim y As Single = CSng(canvasHeight) / 2.0F - boxHeight / 2.0F + 35.0F
+
+        Using borderPen As New System.Drawing.Pen(accent, 3.0F),
+              arrowPen As New System.Drawing.Pen(accent, 4.0F),
+              fillBrush As New System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(18, accent)),
+              titleFont As System.Drawing.Font = CreateWordVisualFont(fontName, 17.0F, System.Drawing.FontStyle.Bold),
+              detailFont As System.Drawing.Font = CreateWordVisualFont(fontName, 12.0F, System.Drawing.FontStyle.Regular),
+              textBrush As New System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(30, 35, 42)),
+              detailBrush As New System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(85, 92, 102))
+
+            For i As Integer = 0 To items.Count - 1
+                Dim x As Single = left + i * (boxWidth + gap)
+                Dim rect As New System.Drawing.RectangleF(x, y, boxWidth, boxHeight)
+                g.FillRectangle(fillBrush, rect)
+                g.DrawRectangle(borderPen, x, y, boxWidth, boxHeight)
+
+                Dim sf As New System.Drawing.StringFormat() With {
+                    .Alignment = System.Drawing.StringAlignment.Center,
+                    .LineAlignment = System.Drawing.StringAlignment.Near,
+                    .Trimming = System.Drawing.StringTrimming.EllipsisWord
+                }
+                Dim titleRect As New System.Drawing.RectangleF(x + 14.0F, y + 26.0F, boxWidth - 28.0F, 58.0F)
+                g.DrawString(items(i).Item1, titleFont, textBrush, titleRect, sf)
+                If Not String.IsNullOrWhiteSpace(items(i).Item2) Then
+                    Dim detailRect As New System.Drawing.RectangleF(x + 14.0F, y + 88.0F, boxWidth - 28.0F, 60.0F)
+                    g.DrawString(items(i).Item2, detailFont, detailBrush, detailRect, sf)
+                End If
+                sf.Dispose()
+
+                If i < items.Count - 1 Then
+                    Dim x1 As Single = x + boxWidth + 5.0F
+                    Dim x2 As Single = x + boxWidth + gap - 5.0F
+                    Dim midY As Single = y + boxHeight / 2.0F
+                    g.DrawLine(arrowPen, x1, midY, x2, midY)
+                    Dim arrow() As System.Drawing.PointF = {
+                        New System.Drawing.PointF(x2, midY),
+                        New System.Drawing.PointF(x2 - 13.0F, midY - 8.0F),
+                        New System.Drawing.PointF(x2 - 13.0F, midY + 8.0F)
+                    }
+                    Using arrowBrush As New System.Drawing.SolidBrush(accent)
+                        g.FillPolygon(arrowBrush, arrow)
+                    End Using
+                End If
+            Next
+        End Using
+    End Sub
+
+    Private Shared Function GetWordOrgChartNodes(visual As Newtonsoft.Json.Linq.JObject) As List(Of Newtonsoft.Json.Linq.JObject)
+        Dim result As New List(Of Newtonsoft.Json.Linq.JObject)()
+        If visual Is Nothing Then Return result
+        Dim token As Newtonsoft.Json.Linq.JToken = visual("nodes")
+        If token Is Nothing OrElse token.Type <> Newtonsoft.Json.Linq.JTokenType.Array Then Return result
+
+        Dim seen As New HashSet(Of String)(StringComparer.Ordinal)
+        For Each item As Newtonsoft.Json.Linq.JToken In DirectCast(token, Newtonsoft.Json.Linq.JArray)
+            If item Is Nothing OrElse item.Type <> Newtonsoft.Json.Linq.JTokenType.Object Then Continue For
+            Dim node As Newtonsoft.Json.Linq.JObject = DirectCast(item, Newtonsoft.Json.Linq.JObject)
+            Dim id As String = GetVisualText(node, "id")
+            Dim label As String = GetVisualText(node, "label")
+            If String.IsNullOrWhiteSpace(id) OrElse String.IsNullOrWhiteSpace(label) Then Continue For
+            If seen.Add(id) Then result.Add(node)
+            If result.Count >= 24 Then Exit For
+        Next
+        Return result
+    End Function
+
+    Private Shared Function GetWordOrgChartDepth(node As Newtonsoft.Json.Linq.JObject,
+                                                  byId As Dictionary(Of String, Newtonsoft.Json.Linq.JObject)) As Integer
+        If node Is Nothing Then Return 0
+        Dim depth As Integer = 0
+        Dim current As Newtonsoft.Json.Linq.JObject = node
+        Dim visited As New HashSet(Of String)(StringComparer.Ordinal)
+        While current IsNot Nothing AndAlso depth < 6
+            Dim parentId As String = GetVisualText(current, "parent_id")
+            If String.IsNullOrWhiteSpace(parentId) Then Exit While
+            If Not visited.Add(parentId) Then Exit While
+            Dim parent As Newtonsoft.Json.Linq.JObject = Nothing
+            If Not byId.TryGetValue(parentId, parent) Then Exit While
+            depth += 1
+            current = parent
+        End While
+        Return depth
+    End Function
+
+    Private Shared Sub DrawOrgChartWordVisual(g As System.Drawing.Graphics,
+                                               visual As Newtonsoft.Json.Linq.JObject,
+                                               fontName As String,
+                                               accent As System.Drawing.Color,
+                                               canvasWidth As Integer,
+                                               canvasHeight As Integer)
+        Dim nodes As List(Of Newtonsoft.Json.Linq.JObject) = GetWordOrgChartNodes(visual)
+        If nodes.Count = 0 Then
+            DrawProcessWordVisual(g, visual, fontName, accent, canvasWidth, canvasHeight)
+            Return
+        End If
+
+        Dim byId As New Dictionary(Of String, Newtonsoft.Json.Linq.JObject)(StringComparer.Ordinal)
+        For Each node As Newtonsoft.Json.Linq.JObject In nodes
+            byId(GetVisualText(node, "id")) = node
+        Next
+
+        Dim levels As New SortedDictionary(Of Integer, List(Of Newtonsoft.Json.Linq.JObject))()
+        Dim maxDepth As Integer = 0
+        For Each node As Newtonsoft.Json.Linq.JObject In nodes
+            Dim depth As Integer = GetWordOrgChartDepth(node, byId)
+            maxDepth = Math.Max(maxDepth, depth)
+            If Not levels.ContainsKey(depth) Then levels(depth) = New List(Of Newtonsoft.Json.Linq.JObject)()
+            levels(depth).Add(node)
+        Next
+
+        Dim left As Single = 70.0F
+        Dim right As Single = 70.0F
+        Dim top As Single = 170.0F
+        Dim bottom As Single = 55.0F
+        Dim usableWidth As Single = Math.Max(300.0F, CSng(canvasWidth) - left - right)
+        Dim usableHeight As Single = Math.Max(260.0F, CSng(canvasHeight) - top - bottom)
+        Dim levelCount As Integer = Math.Max(1, maxDepth + 1)
+        Dim levelGap As Single = If(levelCount <= 1, 0.0F, usableHeight / levelCount)
+        Dim boxHeight As Single = Math.Max(66.0F, Math.Min(104.0F, levelGap - 25.0F))
+        If levelCount = 1 Then boxHeight = Math.Min(104.0F, usableHeight)
+
+        Dim rects As New Dictionary(Of String, System.Drawing.RectangleF)(StringComparer.Ordinal)
+        For Each kvp As KeyValuePair(Of Integer, List(Of Newtonsoft.Json.Linq.JObject)) In levels
+            Dim levelNodes As List(Of Newtonsoft.Json.Linq.JObject) = kvp.Value
+            Dim count As Integer = Math.Max(1, levelNodes.Count)
+            Dim gap As Single = Math.Max(12.0F, Math.Min(30.0F, usableWidth * 0.025F))
+            Dim boxWidth As Single = (usableWidth - gap * (count - 1)) / count
+            boxWidth = Math.Max(78.0F, Math.Min(245.0F, boxWidth))
+            Dim rowWidth As Single = boxWidth * count + gap * (count - 1)
+            Dim rowLeft As Single = left + Math.Max(0.0F, (usableWidth - rowWidth) / 2.0F)
+            Dim y As Single = top + kvp.Key * levelGap
+            For i As Integer = 0 To levelNodes.Count - 1
+                Dim id As String = GetVisualText(levelNodes(i), "id")
+                rects(id) = New System.Drawing.RectangleF(rowLeft + i * (boxWidth + gap), y, boxWidth, boxHeight)
+            Next
+        Next
+
+        Using connectorPen As New System.Drawing.Pen(System.Drawing.Color.FromArgb(145, 154, 165), 2.5F),
+              borderPen As New System.Drawing.Pen(accent, 2.8F),
+              rootBrush As New System.Drawing.SolidBrush(accent),
+              childBrush As New System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(18, accent)),
+              titleFont As System.Drawing.Font = CreateWordVisualFont(fontName, 13.5F, System.Drawing.FontStyle.Bold),
+              detailFont As System.Drawing.Font = CreateWordVisualFont(fontName, 10.5F, System.Drawing.FontStyle.Regular),
+              rootTextBrush As New System.Drawing.SolidBrush(System.Drawing.Color.White),
+              textBrush As New System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(30, 35, 42)),
+              detailBrush As New System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(80, 88, 98))
+
+            ' Draw reporting lines first so node boxes remain visually dominant.
+            For Each node As Newtonsoft.Json.Linq.JObject In nodes
+                Dim id As String = GetVisualText(node, "id")
+                Dim parentId As String = GetVisualText(node, "parent_id")
+                If String.IsNullOrWhiteSpace(parentId) OrElse Not rects.ContainsKey(id) OrElse Not rects.ContainsKey(parentId) Then Continue For
+                Dim childRect As System.Drawing.RectangleF = rects(id)
+                Dim parentRect As System.Drawing.RectangleF = rects(parentId)
+                Dim px As Single = parentRect.Left + parentRect.Width / 2.0F
+                Dim py As Single = parentRect.Bottom
+                Dim cx As Single = childRect.Left + childRect.Width / 2.0F
+                Dim cy As Single = childRect.Top
+                Dim midY As Single = py + Math.Max(12.0F, (cy - py) / 2.0F)
+                g.DrawLine(connectorPen, px, py, px, midY)
+                g.DrawLine(connectorPen, px, midY, cx, midY)
+                g.DrawLine(connectorPen, cx, midY, cx, cy)
+            Next
+
+            For Each node As Newtonsoft.Json.Linq.JObject In nodes
+                Dim id As String = GetVisualText(node, "id")
+                If Not rects.ContainsKey(id) Then Continue For
+                Dim rect As System.Drawing.RectangleF = rects(id)
+                Dim isRoot As Boolean = String.IsNullOrWhiteSpace(GetVisualText(node, "parent_id"))
+                If isRoot Then
+                    g.FillRectangle(rootBrush, rect)
+                Else
+                    g.FillRectangle(childBrush, rect)
+                    g.DrawRectangle(borderPen, rect.X, rect.Y, rect.Width, rect.Height)
+                End If
+
+                Dim sf As New System.Drawing.StringFormat() With {
+                    .Alignment = System.Drawing.StringAlignment.Center,
+                    .LineAlignment = System.Drawing.StringAlignment.Near,
+                    .Trimming = System.Drawing.StringTrimming.EllipsisWord
+                }
+                Dim label As String = GetVisualText(node, "label")
+                Dim detail As String = GetVisualText(node, "detail")
+                Dim labelRect As New System.Drawing.RectangleF(rect.X + 8.0F, rect.Y + 12.0F, rect.Width - 16.0F, Math.Min(42.0F, rect.Height - 18.0F))
+                g.DrawString(label, titleFont, If(isRoot, rootTextBrush, textBrush), labelRect, sf)
+                If Not String.IsNullOrWhiteSpace(detail) AndAlso rect.Height >= 75.0F Then
+                    Dim detailRect As New System.Drawing.RectangleF(rect.X + 8.0F, rect.Y + 49.0F, rect.Width - 16.0F, rect.Height - 55.0F)
+                    g.DrawString(detail, detailFont, If(isRoot, rootTextBrush, detailBrush), detailRect, sf)
+                End If
+                sf.Dispose()
+            Next
+        End Using
+    End Sub
+
+    Private Shared Function MeasureWordVisualLegendHeight(g As System.Drawing.Graphics,
+                                                           series As List(Of System.Tuple(Of String, List(Of Double))),
+                                                           maxSeries As Integer,
+                                                           legendFont As System.Drawing.Font,
+                                                           availableWidth As Single) As Single
+        If series Is Nothing OrElse maxSeries <= 0 Then Return 0.0F
+        Dim x As Single = 0.0F
+        Dim rows As Integer = 1
+        For s As Integer = 0 To maxSeries - 1
+            Dim name As String = If(series(s).Item1, String.Empty)
+            Dim textWidth As Single = g.MeasureString(name, legendFont).Width
+            Dim entryWidth As Single = Math.Min(availableWidth, 45.0F + textWidth + 18.0F)
+            If x > 0.0F AndAlso x + entryWidth > availableWidth Then
+                rows += 1
+                x = 0.0F
+            End If
+            x += entryWidth + 18.0F
+        Next
+        Return rows * 30.0F
+    End Function
+
+    Private Shared Sub DrawWordVisualLegend(g As System.Drawing.Graphics,
+                                             series As List(Of System.Tuple(Of String, List(Of Double))),
+                                             maxSeries As Integer,
+                                             legendFont As System.Drawing.Font,
+                                             textBrush As System.Drawing.Brush,
+                                             accent As System.Drawing.Color,
+                                             left As Single,
+                                             top As Single,
+                                             availableWidth As Single)
+        If series Is Nothing OrElse maxSeries <= 0 Then Return
+        Dim x As Single = left
+        Dim y As Single = top
+        For s As Integer = 0 To maxSeries - 1
+            Dim name As String = If(series(s).Item1, String.Empty)
+            Dim textWidth As Single = g.MeasureString(name, legendFont).Width
+            Dim entryWidth As Single = Math.Min(availableWidth, 45.0F + textWidth + 18.0F)
+            If x > left AndAlso x + entryWidth > left + availableWidth Then
+                x = left
+                y += 30.0F
+            End If
+            Using b As New System.Drawing.SolidBrush(WordVisualSeriesColor(s, accent))
+                g.FillRectangle(b, x, y + 4.0F, 16.0F, 16.0F)
+            End Using
+            Dim textRect As New System.Drawing.RectangleF(x + 24.0F, y, Math.Max(35.0F, entryWidth - 24.0F), 25.0F)
+            g.DrawString(name, legendFont, textBrush, textRect)
+            x += entryWidth + 18.0F
+        Next
+    End Sub
+
+    Private Shared Sub DrawTimelineWordVisual(g As System.Drawing.Graphics,
+                                              visual As Newtonsoft.Json.Linq.JObject,
+                                              fontName As String,
+                                              accent As System.Drawing.Color,
+                                              canvasWidth As Integer,
+                                              canvasHeight As Integer)
+        Dim items As List(Of System.Tuple(Of String, String)) = GetWordVisualItems(visual)
+        If items.Count = 0 Then items.Add(System.Tuple.Create("Milestone", String.Empty))
+        If items.Count > 8 Then items = items.GetRange(0, 8)
+
+        Dim left As Single = 100.0F
+        Dim right As Single = 100.0F
+        Dim y As Single = CSng(canvasHeight) / 2.0F + 45.0F
+        Dim stepWidth As Single = If(items.Count <= 1, 0.0F, (CSng(canvasWidth) - left - right) / (items.Count - 1))
+
+        Using linePen As New System.Drawing.Pen(System.Drawing.Color.FromArgb(170, 177, 187), 4.0F),
+              nodeBrush As New System.Drawing.SolidBrush(accent),
+              titleFont As System.Drawing.Font = CreateWordVisualFont(fontName, 15.0F, System.Drawing.FontStyle.Bold),
+              detailFont As System.Drawing.Font = CreateWordVisualFont(fontName, 11.0F, System.Drawing.FontStyle.Regular),
+              textBrush As New System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(30, 35, 42)),
+              detailBrush As New System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(85, 92, 102))
+            g.DrawLine(linePen, left, y, CSng(canvasWidth) - right, y)
+
+            For i As Integer = 0 To items.Count - 1
+                Dim x As Single = If(items.Count <= 1, CSng(canvasWidth) / 2.0F, left + i * stepWidth)
+                g.FillEllipse(nodeBrush, x - 12.0F, y - 12.0F, 24.0F, 24.0F)
+                Dim above As Boolean = (i Mod 2 = 0)
+                Dim textY As Single = If(above, y - 150.0F, y + 34.0F)
+                Dim rect As New System.Drawing.RectangleF(x - 100.0F, textY, 200.0F, 110.0F)
+                Dim sf As New System.Drawing.StringFormat() With {
+                    .Alignment = System.Drawing.StringAlignment.Center,
+                    .Trimming = System.Drawing.StringTrimming.EllipsisWord
+                }
+                g.DrawString(items(i).Item1, titleFont, textBrush, rect, sf)
+                If Not String.IsNullOrWhiteSpace(items(i).Item2) Then
+                    Dim detailRect As New System.Drawing.RectangleF(rect.X, rect.Y + 42.0F, rect.Width, 62.0F)
+                    g.DrawString(items(i).Item2, detailFont, detailBrush, detailRect, sf)
+                End If
+                sf.Dispose()
+            Next
+        End Using
+    End Sub
+
+    Private Shared Sub DrawBarWordVisual(g As System.Drawing.Graphics,
+                                         visual As Newtonsoft.Json.Linq.JObject,
+                                         fontName As String,
+                                         accent As System.Drawing.Color,
+                                         canvasWidth As Integer,
+                                         canvasHeight As Integer)
+        Dim categories As List(Of String) = GetWordVisualCategories(visual)
+        Dim series As List(Of System.Tuple(Of String, List(Of Double))) = GetWordVisualSeries(visual)
+        If categories.Count = 0 OrElse series.Count = 0 Then
+            DrawProcessWordVisual(g, visual, fontName, accent, canvasWidth, canvasHeight)
+            Return
+        End If
+
+        Dim maxCategories As Integer = Math.Min(10, categories.Count)
+        Dim maxSeries As Integer = Math.Min(5, series.Count)
+        Dim maxValue As Double = 0.0R
+        For s As Integer = 0 To maxSeries - 1
+            For c As Integer = 0 To Math.Min(maxCategories, series(s).Item2.Count) - 1
+                maxValue = Math.Max(maxValue, Math.Abs(series(s).Item2(c)))
+            Next
+        Next
+        If maxValue <= 0.0R Then maxValue = 1.0R
+
+        Dim plotLeft As Single = 105.0F
+        Dim plotRight As Single = 80.0F
+        Dim plotBottom As Single = 125.0F
+        Dim plotWidth As Single = CSng(canvasWidth) - plotLeft - plotRight
+
+        Using axisPen As New System.Drawing.Pen(System.Drawing.Color.FromArgb(160, 168, 178), 2.0F),
+              labelFont As System.Drawing.Font = CreateWordVisualFont(fontName, 11.0F, System.Drawing.FontStyle.Regular),
+              legendFont As System.Drawing.Font = CreateWordVisualFont(fontName, 11.0F, System.Drawing.FontStyle.Bold),
+              textBrush As New System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(60, 66, 74))
+            Dim legendTop As Single = 148.0F
+            Dim legendHeight As Single = MeasureWordVisualLegendHeight(g, series, maxSeries, legendFont, plotWidth)
+            Dim plotTop As Single = legendTop + legendHeight + 18.0F
+            Dim plotHeight As Single = Math.Max(150.0F, CSng(canvasHeight) - plotTop - plotBottom)
+            DrawWordVisualLegend(g, series, maxSeries, legendFont, textBrush, accent, plotLeft, legendTop, plotWidth)
+            g.DrawLine(axisPen, plotLeft, plotTop, plotLeft, plotTop + plotHeight)
+            g.DrawLine(axisPen, plotLeft, plotTop + plotHeight, plotLeft + plotWidth, plotTop + plotHeight)
+
+            Dim groupWidth As Single = plotWidth / maxCategories
+            Dim innerWidth As Single = groupWidth * 0.72F
+            Dim barWidth As Single = Math.Max(7.0F, innerWidth / maxSeries)
+
+            For c As Integer = 0 To maxCategories - 1
+                Dim groupStart As Single = plotLeft + c * groupWidth + (groupWidth - innerWidth) / 2.0F
+                For s As Integer = 0 To maxSeries - 1
+                    Dim value As Double = If(c < series(s).Item2.Count, series(s).Item2(c), 0.0R)
+                    Dim h As Single = CSng(Math.Abs(value) / maxValue) * (plotHeight - 20.0F)
+                    Dim x As Single = groupStart + s * barWidth
+                    Dim y As Single = plotTop + plotHeight - h
+                    Using b As New System.Drawing.SolidBrush(WordVisualSeriesColor(s, accent))
+                        g.FillRectangle(b, x, y, Math.Max(4.0F, barWidth - 3.0F), h)
+                    End Using
+                Next
+
+                Dim sf As New System.Drawing.StringFormat() With {
+                    .Alignment = System.Drawing.StringAlignment.Center,
+                    .Trimming = System.Drawing.StringTrimming.EllipsisCharacter
+                }
+                Dim labelRect As New System.Drawing.RectangleF(plotLeft + c * groupWidth, plotTop + plotHeight + 10.0F, groupWidth, 48.0F)
+                g.DrawString(categories(c), labelFont, textBrush, labelRect, sf)
+                sf.Dispose()
+            Next
+
+        End Using
+    End Sub
+
+    Private Shared Sub DrawLineWordVisual(g As System.Drawing.Graphics,
+                                          visual As Newtonsoft.Json.Linq.JObject,
+                                          fontName As String,
+                                          accent As System.Drawing.Color,
+                                          canvasWidth As Integer,
+                                          canvasHeight As Integer)
+        Dim categories As List(Of String) = GetWordVisualCategories(visual)
+        Dim series As List(Of System.Tuple(Of String, List(Of Double))) = GetWordVisualSeries(visual)
+        If categories.Count = 0 OrElse series.Count = 0 Then
+            DrawProcessWordVisual(g, visual, fontName, accent, canvasWidth, canvasHeight)
+            Return
+        End If
+
+        Dim maxCategories As Integer = Math.Min(12, categories.Count)
+        Dim maxSeries As Integer = Math.Min(5, series.Count)
+        Dim minValue As Double = Double.MaxValue
+        Dim maxValue As Double = Double.MinValue
+        For s As Integer = 0 To maxSeries - 1
+            For c As Integer = 0 To Math.Min(maxCategories, series(s).Item2.Count) - 1
+                minValue = Math.Min(minValue, series(s).Item2(c))
+                maxValue = Math.Max(maxValue, series(s).Item2(c))
+            Next
+        Next
+        If minValue = Double.MaxValue Then minValue = 0.0R
+        If maxValue = Double.MinValue Then maxValue = 1.0R
+        If Math.Abs(maxValue - minValue) < 0.000001R Then
+            minValue -= 1.0R
+            maxValue += 1.0R
+        End If
+
+        Dim plotLeft As Single = 105.0F
+        Dim plotRight As Single = 80.0F
+        Dim plotBottom As Single = 125.0F
+        Dim plotWidth As Single = CSng(canvasWidth) - plotLeft - plotRight
+
+        Using axisPen As New System.Drawing.Pen(System.Drawing.Color.FromArgb(160, 168, 178), 2.0F),
+              labelFont As System.Drawing.Font = CreateWordVisualFont(fontName, 11.0F, System.Drawing.FontStyle.Regular),
+              legendFont As System.Drawing.Font = CreateWordVisualFont(fontName, 11.0F, System.Drawing.FontStyle.Bold),
+              textBrush As New System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(60, 66, 74))
+            Dim legendTop As Single = 148.0F
+            Dim legendHeight As Single = MeasureWordVisualLegendHeight(g, series, maxSeries, legendFont, plotWidth)
+            Dim plotTop As Single = legendTop + legendHeight + 18.0F
+            Dim plotHeight As Single = Math.Max(150.0F, CSng(canvasHeight) - plotTop - plotBottom)
+            DrawWordVisualLegend(g, series, maxSeries, legendFont, textBrush, accent, plotLeft, legendTop, plotWidth)
+            g.DrawLine(axisPen, plotLeft, plotTop, plotLeft, plotTop + plotHeight)
+            g.DrawLine(axisPen, plotLeft, plotTop + plotHeight, plotLeft + plotWidth, plotTop + plotHeight)
+
+            Dim xStep As Single = If(maxCategories <= 1, 0.0F, plotWidth / (maxCategories - 1))
+            For s As Integer = 0 To maxSeries - 1
+                Dim points As New List(Of System.Drawing.PointF)()
+                For c As Integer = 0 To Math.Min(maxCategories, series(s).Item2.Count) - 1
+                    Dim x As Single = If(maxCategories <= 1, plotLeft + plotWidth / 2.0F, plotLeft + c * xStep)
+                    Dim ratio As Double = (series(s).Item2(c) - minValue) / (maxValue - minValue)
+                    Dim y As Single = plotTop + plotHeight - CSng(ratio) * plotHeight
+                    points.Add(New System.Drawing.PointF(x, y))
+                Next
+                Dim seriesColor As System.Drawing.Color = WordVisualSeriesColor(s, accent)
+                If points.Count > 1 Then
+                    Using p As New System.Drawing.Pen(seriesColor, 4.0F)
+                        g.DrawLines(p, points.ToArray())
+                    End Using
+                End If
+                Using b As New System.Drawing.SolidBrush(seriesColor)
+                    For Each point As System.Drawing.PointF In points
+                        g.FillEllipse(b, point.X - 5.0F, point.Y - 5.0F, 10.0F, 10.0F)
+                    Next
+                End Using
+            Next
+
+            For c As Integer = 0 To maxCategories - 1
+                Dim x As Single = If(maxCategories <= 1, plotLeft + plotWidth / 2.0F, plotLeft + c * xStep)
+                Dim sf As New System.Drawing.StringFormat() With {
+                    .Alignment = System.Drawing.StringAlignment.Center,
+                    .Trimming = System.Drawing.StringTrimming.EllipsisCharacter
+                }
+                Dim labelRect As New System.Drawing.RectangleF(x - 60.0F, plotTop + plotHeight + 10.0F, 120.0F, 48.0F)
+                g.DrawString(categories(c), labelFont, textBrush, labelRect, sf)
+                sf.Dispose()
+            Next
+
+        End Using
+    End Sub
+
+    Private Shared Function RenderAutoPilotWordVisual(visual As Newtonsoft.Json.Linq.JObject,
+                                                      outputPath As String,
+                                                      fontName As String,
+                                                      accentHex As String) As Boolean
+        If visual Is Nothing Then Return False
+
+        Dim widthInches As Double = GetVisualNumber(visual, "width_inches", 8.4R, 4.0R, 10.5R)
+        Dim heightInches As Double = GetVisualNumber(visual, "height_inches", 4.7R, 2.5R, 7.0R)
+        Dim canvasWidth As Integer = CInt(Math.Round(widthInches * 150.0R))
+        Dim canvasHeight As Integer = CInt(Math.Round(heightInches * 150.0R))
+        Dim accent As System.Drawing.Color = WordVisualColor(accentHex, "#17365D")
+        Dim visualType As String = GetVisualText(visual, "type", "process").ToLowerInvariant()
+        Dim title As String = GetVisualText(visual, "title")
+        Dim caption As String = GetVisualText(visual, "caption")
+
+        Try
+            Using bitmap As New System.Drawing.Bitmap(canvasWidth, canvasHeight, System.Drawing.Imaging.PixelFormat.Format32bppArgb)
+                bitmap.SetResolution(150.0F, 150.0F)
+                Using g As System.Drawing.Graphics = System.Drawing.Graphics.FromImage(bitmap)
+                    g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias
+                    g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit
+                    g.Clear(System.Drawing.Color.White)
+                    DrawWordVisualTitle(g, title, caption, fontName, canvasWidth)
+
+                    Select Case visualType
+                        Case "timeline"
+                            DrawTimelineWordVisual(g, visual, fontName, accent, canvasWidth, canvasHeight)
+                        Case "org_chart"
+                            DrawOrgChartWordVisual(g, visual, fontName, accent, canvasWidth, canvasHeight)
+                        Case "bar_chart"
+                            DrawBarWordVisual(g, visual, fontName, accent, canvasWidth, canvasHeight)
+                        Case "line_chart"
+                            DrawLineWordVisual(g, visual, fontName, accent, canvasWidth, canvasHeight)
+                        Case Else
+                            DrawProcessWordVisual(g, visual, fontName, accent, canvasWidth, canvasHeight)
+                    End Select
+                End Using
+                bitmap.Save(outputPath, System.Drawing.Imaging.ImageFormat.Png)
+            End Using
+            Return File.Exists(outputPath) AndAlso New FileInfo(outputPath).Length > 0
+        Catch ex As System.Exception
+            Debug.WriteLine($"Word visual render error: {ex.Message}")
+            Return False
+        End Try
+    End Function
+
+    Private Shared Function TryInsertEditableWordOrgChart(doc As Microsoft.Office.Interop.Word.Document,
+                                                               visual As Newtonsoft.Json.Linq.JObject,
+                                                               anchorRange As Microsoft.Office.Interop.Word.Range,
+                                                               fontName As String,
+                                                               accentHex As String,
+                                                               ByRef warning As String) As Boolean
+        warning = String.Empty
+        If doc Is Nothing OrElse visual Is Nothing OrElse anchorRange Is Nothing Then Return False
+
+        Dim nodes As List(Of Newtonsoft.Json.Linq.JObject) = GetWordOrgChartNodes(visual)
+        If nodes.Count = 0 Then
+            warning = "No valid org-chart nodes were supplied."
+            Return False
+        End If
+
+        Dim byId As New Dictionary(Of String, Newtonsoft.Json.Linq.JObject)(StringComparer.Ordinal)
+        For Each node As Newtonsoft.Json.Linq.JObject In nodes
+            byId(GetVisualText(node, "id")) = node
+        Next
+
+        Dim levels As New SortedDictionary(Of Integer, List(Of Newtonsoft.Json.Linq.JObject))()
+        Dim maxDepth As Integer = 0
+        For Each node As Newtonsoft.Json.Linq.JObject In nodes
+            Dim depth As Integer = GetWordOrgChartDepth(node, byId)
+            maxDepth = Math.Max(maxDepth, depth)
+            If Not levels.ContainsKey(depth) Then levels(depth) = New List(Of Newtonsoft.Json.Linq.JObject)()
+            levels(depth).Add(node)
+        Next
+
+        Dim accent As System.Drawing.Color = WordVisualColor(accentHex, "#17365D")
+        Dim accentOle As Integer = System.Drawing.ColorTranslator.ToOle(accent)
+        Dim connectorOle As Integer = System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.FromArgb(145, 154, 165))
+        Dim childFillOle As Integer = System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.FromArgb(246, 249, 252))
+        Dim childTextOle As Integer = System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.FromArgb(30, 35, 42))
+        Dim detailTextOle As Integer = System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.FromArgb(80, 88, 98))
+
+        Dim availableWidth As Single = Math.Max(300.0F, doc.PageSetup.PageWidth - doc.PageSetup.LeftMargin - doc.PageSetup.RightMargin)
+        Dim availableHeight As Single = Math.Max(360.0F, doc.PageSetup.PageHeight - doc.PageSetup.TopMargin - doc.PageSetup.BottomMargin)
+        Dim requestedWidth As Single = CSng(GetVisualNumber(visual, "width_inches", 8.4R, 4.0R, 10.5R) * 72.0R)
+        Dim canvasWidth As Single = Math.Min(requestedWidth, availableWidth)
+        Dim sidePadding As Single = 10.0F
+        Dim usableWidth As Single = Math.Max(280.0F, canvasWidth - sidePadding * 2.0F)
+
+        ' Readability has priority over packing. On a normal portrait page this keeps
+        ' organization-chart boxes near 1.6-2.0 inches rather than shrinking text to fit.
+        Dim minBoxWidth As Single = 118.0F
+        Dim columnGap As Single = 12.0F
+        Dim columnsPerRow As Integer = Math.Max(1, CInt(Math.Floor((usableWidth + columnGap) / (minBoxWidth + columnGap))))
+        columnsPerRow = Math.Min(4, columnsPerRow)
+
+        Dim title As String = GetVisualText(visual, "title")
+        Dim caption As String = GetVisualText(visual, "caption")
+        Dim titleArea As Single = If(String.IsNullOrWhiteSpace(title) AndAlso String.IsNullOrWhiteSpace(caption), 8.0F, 52.0F)
+        Dim boxHeight As Single = 72.0F
+        Dim rowGap As Single = 12.0F
+        Dim levelGap As Single = 28.0F
+        Dim levelRows As New Dictionary(Of Integer, Integer)()
+        Dim contentHeight As Single = titleArea
+        For Each kvp As KeyValuePair(Of Integer, List(Of Newtonsoft.Json.Linq.JObject)) In levels
+            Dim rows As Integer = CInt(Math.Ceiling(kvp.Value.Count / CDbl(columnsPerRow)))
+            levelRows(kvp.Key) = Math.Max(1, rows)
+            contentHeight += levelRows(kvp.Key) * boxHeight
+            contentHeight += Math.Max(0, levelRows(kvp.Key) - 1) * rowGap
+            If kvp.Key < maxDepth Then contentHeight += levelGap
+        Next
+        contentHeight += 12.0F
+
+        ' Prefer a full-page readable canvas. Only reduce geometry moderately when the
+        ' hierarchy is unusually deep; never reduce body text below 9 pt.
+        Dim labelFontSize As Single = 11.0F
+        Dim detailFontSize As Single = 9.5F
+        If contentHeight > availableHeight Then
+            boxHeight = 58.0F
+            rowGap = 9.0F
+            levelGap = 20.0F
+            labelFontSize = 10.0F
+            detailFontSize = 9.0F
+            contentHeight = titleArea
+            For Each kvp As KeyValuePair(Of Integer, List(Of Newtonsoft.Json.Linq.JObject)) In levels
+                contentHeight += levelRows(kvp.Key) * boxHeight
+                contentHeight += Math.Max(0, levelRows(kvp.Key) - 1) * rowGap
+                If kvp.Key < maxDepth Then contentHeight += levelGap
+            Next
+            contentHeight += 12.0F
+        End If
+        Dim canvasHeight As Single = Math.Min(Math.Max(180.0F, contentHeight), availableHeight)
+
+        Dim canvas As Microsoft.Office.Interop.Word.Shape = Nothing
+        Dim canvasItems As Microsoft.Office.Interop.Word.CanvasShapes = Nothing
+        Dim nodeShapes As New Dictionary(Of String, Microsoft.Office.Interop.Word.Shape)(StringComparer.Ordinal)
+        Dim nodeRects As New Dictionary(Of String, System.Drawing.RectangleF)(StringComparer.Ordinal)
+        Dim createdShapes As New List(Of Microsoft.Office.Interop.Word.Shape)()
+        Dim createdConnectors As New List(Of Microsoft.Office.Interop.Word.Shape)()
+
+        Try
+            canvas = doc.Shapes.AddCanvas(0.0F, 0.0F, canvasWidth, canvasHeight, anchorRange)
+            canvas.RelativeHorizontalPosition = Microsoft.Office.Interop.Word.WdRelativeHorizontalPosition.wdRelativeHorizontalPositionMargin
+            canvas.RelativeVerticalPosition = Microsoft.Office.Interop.Word.WdRelativeVerticalPosition.wdRelativeVerticalPositionParagraph
+            canvas.Left = 0.0F
+            canvas.Top = 0.0F
+            canvas.WrapFormat.Type = Microsoft.Office.Interop.Word.WdWrapType.wdWrapTopBottom
+            canvas.LockAnchor = True
+            canvas.Fill.Visible = Microsoft.Office.Core.MsoTriState.msoFalse
+            canvas.Line.Visible = Microsoft.Office.Core.MsoTriState.msoFalse
+            canvasItems = canvas.CanvasItems
+
+            If Not String.IsNullOrWhiteSpace(title) OrElse Not String.IsNullOrWhiteSpace(caption) Then
+                Dim titleBox As Microsoft.Office.Interop.Word.Shape = canvasItems.AddTextbox(
+                    Microsoft.Office.Core.MsoTextOrientation.msoTextOrientationHorizontal,
+                    sidePadding, 4.0F, usableWidth, 42.0F)
+                createdShapes.Add(titleBox)
+                titleBox.Fill.Visible = Microsoft.Office.Core.MsoTriState.msoFalse
+                titleBox.Line.Visible = Microsoft.Office.Core.MsoTriState.msoFalse
+                Dim titleRange As Microsoft.Office.Interop.Word.Range = Nothing
+                Try
+                    titleRange = titleBox.TextFrame.TextRange
+                    titleRange.Text = If(String.IsNullOrWhiteSpace(caption), title, title & vbCrLf & caption)
+                    titleRange.Font.Name = fontName
+                    titleRange.Font.Size = 11.0F
+                    titleRange.Font.Bold = 0
+                    titleRange.ParagraphFormat.Alignment = Microsoft.Office.Interop.Word.WdParagraphAlignment.wdAlignParagraphLeft
+                    If Not String.IsNullOrWhiteSpace(title) Then
+                        Dim titleOnly As Microsoft.Office.Interop.Word.Range = titleRange.Duplicate
+                        Try
+                            titleOnly.End = Math.Min(titleOnly.End, titleOnly.Start + title.Length)
+                            titleOnly.Font.Size = 14.0F
+                            titleOnly.Font.Bold = 1
+                            titleOnly.Font.Color = accentOle
+                        Finally
+                            Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(titleOnly) : Catch ex As System.Exception : End Try
+                        End Try
+                    End If
+                Finally
+                    If titleRange IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(titleRange) : Catch ex As System.Exception : End Try
+                End Try
+            End If
+
+            Dim y As Single = titleArea
+            For Each kvp As KeyValuePair(Of Integer, List(Of Newtonsoft.Json.Linq.JObject)) In levels
+                Dim levelNodes As List(Of Newtonsoft.Json.Linq.JObject) = kvp.Value
+                Dim rows As Integer = levelRows(kvp.Key)
+                For row As Integer = 0 To rows - 1
+                    Dim startIndex As Integer = row * columnsPerRow
+                    Dim rowCount As Integer = Math.Min(columnsPerRow, levelNodes.Count - startIndex)
+                    If rowCount <= 0 Then Continue For
+
+                    Dim boxWidth As Single = Math.Min(168.0F, (usableWidth - columnGap * (rowCount - 1)) / rowCount)
+                    boxWidth = Math.Max(minBoxWidth, boxWidth)
+                    Dim rowWidth As Single = rowCount * boxWidth + Math.Max(0, rowCount - 1) * columnGap
+                    Dim xStart As Single = sidePadding + Math.Max(0.0F, (usableWidth - rowWidth) / 2.0F)
+
+                    For column As Integer = 0 To rowCount - 1
+                        Dim node As Newtonsoft.Json.Linq.JObject = levelNodes(startIndex + column)
+                        Dim id As String = GetVisualText(node, "id")
+                        Dim label As String = GetVisualText(node, "label")
+                        Dim detail As String = GetVisualText(node, "detail")
+                        Dim isRoot As Boolean = String.IsNullOrWhiteSpace(GetVisualText(node, "parent_id"))
+                        Dim x As Single = xStart + column * (boxWidth + columnGap)
+                        Dim nodeShape As Microsoft.Office.Interop.Word.Shape = canvasItems.AddShape(
+                            Microsoft.Office.Core.MsoAutoShapeType.msoShapeRoundedRectangle,
+                            x, y, boxWidth, boxHeight)
+                        createdShapes.Add(nodeShape)
+                        nodeShapes(id) = nodeShape
+                        nodeRects(id) = New System.Drawing.RectangleF(x, y, boxWidth, boxHeight)
+
+                        nodeShape.Line.ForeColor.RGB = accentOle
+                        nodeShape.Line.Weight = 1.5F
+                        nodeShape.Fill.ForeColor.RGB = If(isRoot, accentOle, childFillOle)
+                        nodeShape.TextFrame.MarginLeft = 6.0F
+                        nodeShape.TextFrame.MarginRight = 6.0F
+                        nodeShape.TextFrame.MarginTop = 4.0F
+                        nodeShape.TextFrame.MarginBottom = 4.0F
+                        nodeShape.TextFrame.VerticalAnchor = Microsoft.Office.Core.MsoVerticalAnchor.msoAnchorMiddle
+
+                        Dim textRange As Microsoft.Office.Interop.Word.Range = Nothing
+                        Try
+                            textRange = nodeShape.TextFrame.TextRange
+                            textRange.Text = If(String.IsNullOrWhiteSpace(detail), label, label & vbCrLf & detail)
+                            textRange.Font.Name = fontName
+                            textRange.Font.Size = detailFontSize
+                            textRange.Font.Bold = 0
+                            textRange.Font.Color = If(isRoot, System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.White), detailTextOle)
+                            textRange.ParagraphFormat.Alignment = Microsoft.Office.Interop.Word.WdParagraphAlignment.wdAlignParagraphCenter
+                            textRange.ParagraphFormat.SpaceAfter = 0.0F
+
+                            Dim labelRange As Microsoft.Office.Interop.Word.Range = textRange.Duplicate
+                            Try
+                                labelRange.End = Math.Min(labelRange.End, labelRange.Start + label.Length)
+                                labelRange.Font.Size = labelFontSize
+                                labelRange.Font.Bold = 1
+                                labelRange.Font.Color = If(isRoot, System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.White), childTextOle)
+                            Finally
+                                Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(labelRange) : Catch ex As System.Exception : End Try
+                            End Try
+                        Finally
+                            If textRange IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(textRange) : Catch ex As System.Exception : End Try
+                        End Try
+                    Next
+                    y += boxHeight + rowGap
+                Next
+                y += levelGap - rowGap
+            Next
+
+            ' Connect after node placement so all coordinates are stable. These are native
+            ' elbow connectors inside the drawing canvas and remain editable in Word.
+            For Each node As Newtonsoft.Json.Linq.JObject In nodes
+                Dim id As String = GetVisualText(node, "id")
+                Dim parentId As String = GetVisualText(node, "parent_id")
+                If String.IsNullOrWhiteSpace(parentId) Then Continue For
+                If Not nodeRects.ContainsKey(id) OrElse Not nodeRects.ContainsKey(parentId) Then Continue For
+                Dim childRect As System.Drawing.RectangleF = nodeRects(id)
+                Dim parentRect As System.Drawing.RectangleF = nodeRects(parentId)
+                Dim connector As Microsoft.Office.Interop.Word.Shape = canvasItems.AddConnector(
+                    Microsoft.Office.Core.MsoConnectorType.msoConnectorElbow,
+                    parentRect.Left + parentRect.Width / 2.0F,
+                    parentRect.Bottom,
+                    childRect.Left + childRect.Width / 2.0F,
+                    childRect.Top)
+                createdConnectors.Add(connector)
+                connector.Line.ForeColor.RGB = connectorOle
+                connector.Line.Weight = 1.25F
+                connector.ZOrder(Microsoft.Office.Core.MsoZOrderCmd.msoSendToBack)
+            Next
+
+            Return True
+        Catch ex As System.Exception
+            warning = "Editable Word organigram insertion failed: " & ex.Message
+            If canvas IsNot Nothing Then
+                Try : canvas.Delete() : Catch deleteEx As System.Exception : End Try
+            End If
+            Return False
+        Finally
+            For Each connector As Microsoft.Office.Interop.Word.Shape In createdConnectors
+                Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(connector) : Catch ex As System.Exception : End Try
+            Next
+            For Each shape As Microsoft.Office.Interop.Word.Shape In createdShapes
+                Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(shape) : Catch ex As System.Exception : End Try
+            Next
+            If canvasItems IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(canvasItems) : Catch ex As System.Exception : End Try
+            If canvas IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(canvas) : Catch ex As System.Exception : End Try
+        End Try
+    End Function
+
+    Private Shared Function InsertAutoPilotWordVisuals(doc As Microsoft.Office.Interop.Word.Document,
+                                                       args As Dictionary(Of String, Object),
+                                                       fontName As String,
+                                                       accentHex As String,
+                                                       tempDirectory As String,
+                                                       ByRef embeddedCount As Integer,
+                                                       ByRef warnings As List(Of String)) As Boolean
+        embeddedCount = 0
+        warnings = New List(Of String)()
+        Dim visuals As Newtonsoft.Json.Linq.JArray = GetAutoPilotWordVisuals(args)
+        If visuals.Count = 0 Then Return True
+
+        For Each token As Newtonsoft.Json.Linq.JToken In visuals
+            If token Is Nothing OrElse token.Type <> Newtonsoft.Json.Linq.JTokenType.Object Then
+                warnings.Add("Ignored a visual entry because it was not an object.")
+                Continue For
+            End If
+
+            Dim visual As Newtonsoft.Json.Linq.JObject = DirectCast(token, Newtonsoft.Json.Linq.JObject)
+            Dim id As String = GetVisualText(visual, "id")
+            If String.IsNullOrWhiteSpace(id) OrElse Not System.Text.RegularExpressions.Regex.IsMatch(id, "^[A-Za-z0-9_.-]{1,64}$") Then
+                warnings.Add("Ignored a visual with a missing or invalid id.")
+                Continue For
+            End If
+
+            Dim placeholder As String = "[[visual:" & id & "]]"
+            Dim visualType As String = GetVisualText(visual, "type", "process").ToLowerInvariant()
+
+            ' Organization charts are inserted as native Word drawing-canvas shapes and
+            ' connectors so users can edit boxes, text and reporting lines after creation.
+            ' The existing PNG renderer remains a compatibility fallback only.
+            Dim preferEditable As Boolean = True
+            Dim editableToken As Newtonsoft.Json.Linq.JToken = visual("editable")
+            If editableToken IsNot Nothing AndAlso editableToken.Type = Newtonsoft.Json.Linq.JTokenType.Boolean Then
+                preferEditable = CBool(editableToken)
+            End If
+            If visualType = "org_chart" AndAlso preferEditable Then
+                Dim nativeTarget As Microsoft.Office.Interop.Word.Range = Nothing
+                Dim nativeFinder As Microsoft.Office.Interop.Word.Find = Nothing
+                Try
+                    nativeTarget = doc.Content.Duplicate
+                    nativeFinder = nativeTarget.Find
+                    nativeFinder.ClearFormatting()
+                    nativeFinder.Text = placeholder
+                    nativeFinder.Forward = True
+                    nativeFinder.Wrap = Microsoft.Office.Interop.Word.WdFindWrap.wdFindStop
+                    If nativeFinder.Execute() Then
+                        Dim nativeWarning As String = String.Empty
+                        If TryInsertEditableWordOrgChart(doc, visual, nativeTarget, fontName, accentHex, nativeWarning) Then
+                            nativeTarget.Text = String.Empty
+                            embeddedCount += 1
+                            Continue For
+                        End If
+                        If Not String.IsNullOrWhiteSpace(nativeWarning) Then
+                            warnings.Add($"Visual '{id}' could not be inserted as editable Word shapes; using raster fallback. {nativeWarning}")
+                        Else
+                            warnings.Add($"Visual '{id}' could not be inserted as editable Word shapes; using raster fallback.")
+                        End If
+                    End If
+                Finally
+                    If nativeFinder IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(nativeFinder) : Catch ex As System.Exception : End Try
+                    If nativeTarget IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(nativeTarget) : Catch ex As System.Exception : End Try
+                End Try
+            End If
+
+            Dim imagePath As String = Path.Combine(tempDirectory, ".word_visual_" & Guid.NewGuid().ToString("N") & ".png")
+            Try
+                If Not RenderAutoPilotWordVisual(visual, imagePath, fontName, accentHex) Then
+                    warnings.Add($"Could not render visual '{id}'.")
+                    Continue For
+                End If
+
+                Dim target As Microsoft.Office.Interop.Word.Range = Nothing
+                Dim finder As Microsoft.Office.Interop.Word.Find = Nothing
+                Dim inlineShape As Microsoft.Office.Interop.Word.InlineShape = Nothing
+                Try
+                    target = doc.Content.Duplicate
+                    finder = target.Find
+                    finder.ClearFormatting()
+                    finder.Text = placeholder
+                    finder.Forward = True
+                    finder.Wrap = Microsoft.Office.Interop.Word.WdFindWrap.wdFindStop
+                    If Not finder.Execute() Then
+                        warnings.Add($"Visual placeholder '{placeholder}' was not found; the visual was not inserted.")
+                        Continue For
+                    End If
+
+                    target.Text = String.Empty
+                    inlineShape = doc.InlineShapes.AddPicture(imagePath, False, True, target)
+                    Dim requestedWidth As Single = CSng(GetVisualNumber(visual, "width_inches", 8.4R, 4.0R, 10.5R) * 72.0R)
+                    Dim requestedHeight As Single = CSng(GetVisualNumber(visual, "height_inches", 4.7R, 2.5R, 7.0R) * 72.0R)
+                    Try
+                        Dim availableWidth As Single = doc.PageSetup.PageWidth - doc.PageSetup.LeftMargin - doc.PageSetup.RightMargin
+                        Dim availableHeight As Single = doc.PageSetup.PageHeight - doc.PageSetup.TopMargin - doc.PageSetup.BottomMargin
+                        Dim displayWidth As Single = Math.Min(requestedWidth, Math.Max(72.0F, availableWidth))
+                        Dim aspectRatio As Single = If(requestedWidth > 0.0F, requestedHeight / requestedWidth, 1.0F)
+                        Dim displayHeight As Single = displayWidth * aspectRatio
+
+                        ' Keep the visual fully inside the printable page while preserving
+                        ' the renderer's aspect ratio; never stretch it merely to hit a size.
+                        If displayHeight > availableHeight AndAlso availableHeight > 72.0F Then
+                            displayHeight = availableHeight
+                            displayWidth = displayHeight / Math.Max(0.01F, aspectRatio)
+                        End If
+
+                        inlineShape.LockAspectRatio = Microsoft.Office.Core.MsoTriState.msoTrue
+                        inlineShape.Width = displayWidth
+                    Catch
+                    End Try
+
+                    Dim altText As String = GetVisualText(visual, "title")
+                    If String.IsNullOrWhiteSpace(altText) Then altText = "Document visual " & id
+                    Try : inlineShape.AlternativeText = altText : Catch : End Try
+                    embeddedCount += 1
+                Finally
+                    If inlineShape IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(inlineShape) : Catch : End Try
+                    If finder IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(finder) : Catch : End Try
+                    If target IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(target) : Catch : End Try
+                End Try
+            Finally
+                Try
+                    If File.Exists(imagePath) Then File.Delete(imagePath)
+                Catch
+                End Try
+            End Try
+        Next
+
+        Return warnings.Count = 0 AndAlso embeddedCount = visuals.Count
+    End Function
+
     Private Async Function ExecuteCreateWordDocTool(
             toolCall As ToolCall, context As ToolExecutionContext, ct As CancellationToken) As System.Threading.Tasks.Task(Of ToolResponse)
 
@@ -3503,6 +4948,21 @@ Partial Public Class ThisAddIn
             If String.IsNullOrWhiteSpace(markdownContent) Then
                 response.Success = False
                 response.Response = "Missing required parameter: markdown_content"
+                Return response
+            End If
+
+            Dim design As AutoPilotDesignResolution = ResolveAutoPilotDocumentDesign(
+                toolCall.Arguments,
+                "Word",
+                New String() {"base_font_name", "base_font_size", "page_orientation", "professional_layout", "style_preset", "accent_color", "secondary_color", "text_color", "muted_color", "light_color", "line_color", "table_style_name", "header_text", "footer_text", "show_page_numbers", "use_template_styles"},
+                New String() {".dotx", ".dotm", ".docx"},
+                context)
+
+            Dim visuals As Newtonsoft.Json.Linq.JArray = GetAutoPilotWordVisuals(toolCall.Arguments)
+            If ContainsLikelyWordPseudoGraphic(markdownContent) Then
+                response.Success = False
+                response.ErrorMessage = "Diagram-like ASCII/Unicode/Mermaid content is not allowed in create_word_document. For an organization chart use visuals type='org_chart' with nodes [{id,label,detail,parent_id}] and insert an exact [[visual:ID]] placeholder in markdown_content. For other diagrams/charts use the appropriate native visual type."
+                response.Response = response.ErrorMessage
                 Return response
             End If
 
@@ -3529,6 +4989,10 @@ Partial Public Class ThisAddIn
             context.Log($"Creating Word document: {fileName}")
             ApDashboardLog($"📝 Creating Word document: {fileName}", "step")
 
+            Dim embeddedVisualCount As Integer = 0
+            Dim visualWarnings As New List(Of String)()
+            Dim creationError As String = String.Empty
+
             Dim success = Await SwitchToUi(Function()
                                                Dim wordApp As Microsoft.Office.Interop.Word.Application = Nothing
                                                Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
@@ -3545,7 +5009,29 @@ Partial Public Class ThisAddIn
                                                    End Try
 
                                                    wordApp.ScreenUpdating = False
-                                                   doc = wordApp.Documents.Add()
+                                                   If design IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(design.TemplatePath) Then
+                                                       Dim designExt As String = System.IO.Path.GetExtension(design.TemplatePath).ToLowerInvariant()
+                                                       If designExt = ".dotx" OrElse designExt = ".dotm" Then
+                                                           doc = wordApp.Documents.Add(Template:=design.TemplatePath, NewTemplate:=False)
+                                                       Else
+                                                           ' A .docx design source is cloned before use and its body is cleared.
+                                                           ' Styles, theme, sections, headers and footers remain available, while
+                                                           ' sample document content cannot leak into the generated deliverable.
+                                                           System.IO.File.Copy(design.TemplatePath, outputPath, overwrite:=False)
+                                                           doc = wordApp.Documents.Open(outputPath, ReadOnly:=False, AddToRecentFiles:=False, Visible:=False)
+                                                           Try
+                                                               Dim bodyRange As Microsoft.Office.Interop.Word.Range = doc.Content
+                                                               Try
+                                                                   If bodyRange.End > bodyRange.Start Then bodyRange.Text = ""
+                                                               Finally
+                                                                   Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(bodyRange) : Catch ex As System.Exception : End Try
+                                                               End Try
+                                                           Catch ex As System.Exception
+                                                           End Try
+                                                       End If
+                                                   Else
+                                                       doc = wordApp.Documents.Add()
+                                                   End If
                                                    doc.Activate()
 
                                                    sel = wordApp.Selection
@@ -3557,19 +5043,42 @@ Partial Public Class ThisAddIn
                                                        Dim coverSubtitle As String = GetArgString(toolCall.Arguments, "cover_subtitle")
                                                        Dim coverKicker As String = GetArgString(toolCall.Arguments, "cover_kicker")
                                                        Dim coverAccent As Integer = PptHexColor(GetArgString(toolCall.Arguments, "accent_color"), "#17365D")
+                                                       Dim coverText As Integer = PptHexColor(GetArgString(toolCall.Arguments, "text_color"), "#202124")
+                                                       Dim coverMuted As Integer = PptHexColor(GetArgString(toolCall.Arguments, "muted_color"), "#667085")
                                                        Dim coverFont As String = GetArgString(toolCall.Arguments, "base_font_name")
                                                        If String.IsNullOrWhiteSpace(coverFont) Then coverFont = "Aptos"
-                                                       InsertAutoPilotWordCoverPage(sel, coverTitle, coverSubtitle, coverKicker, coverAccent, coverFont)
+                                                       InsertAutoPilotWordCoverPage(sel, coverTitle, coverSubtitle, coverKicker, coverAccent, coverText, coverMuted, coverFont)
                                                    End If
 
                                                    SharedMethods.InsertTextWithMarkdown(sel, markdownContent, TrailingCR:=False)
 
+                                                   Dim baseFontName As String = GetArgString(toolCall.Arguments, "base_font_name")
+                                                   If String.IsNullOrWhiteSpace(baseFontName) Then baseFontName = "Aptos"
+                                                   Dim accentHex As String = GetArgString(toolCall.Arguments, "accent_color")
+                                                   If String.IsNullOrWhiteSpace(accentHex) Then accentHex = "#17365D"
+
+                                                   ' Establish final page geometry and styles before inserting graphics so
+                                                   ' every visual can be constrained to the actual printable page area.
                                                    ApplyAutoPilotWordDocumentStyling(doc, toolCall.Arguments)
 
-                                                   doc.SaveAs2(outputPath, Microsoft.Office.Interop.Word.WdSaveFormat.wdFormatXMLDocument)
+                                                   If visuals.Count > 0 Then
+                                                       If Not InsertAutoPilotWordVisuals(doc, toolCall.Arguments, baseFontName, accentHex, _apCurrentTempDir, embeddedVisualCount, visualWarnings) Then
+                                                           Throw New System.InvalidOperationException("Not all requested Word visuals could be rendered and embedded: " & String.Join(" | ", visualWarnings))
+                                                       End If
+                                                   End If
+
+                                                   Dim currentDocPath As String = ""
+                                                   Try : currentDocPath = doc.FullName : Catch ex As System.Exception : End Try
+                                                   If Not String.IsNullOrWhiteSpace(currentDocPath) AndAlso
+                                                      String.Equals(System.IO.Path.GetFullPath(currentDocPath), System.IO.Path.GetFullPath(outputPath), StringComparison.OrdinalIgnoreCase) Then
+                                                       doc.Save()
+                                                   Else
+                                                       doc.SaveAs2(outputPath, Microsoft.Office.Interop.Word.WdSaveFormat.wdFormatXMLDocument)
+                                                   End If
                                                    Return True
 
                                                Catch ex As System.Exception
+                                                   creationError = ex.Message
                                                    Debug.WriteLine($"CreateWordDoc error: {ex.Message}")
                                                    Return False
 
@@ -3599,16 +5108,23 @@ Partial Public Class ThisAddIn
                                            End Function)
 
             If success AndAlso File.Exists(outputPath) Then
-                If _apCurrentAttachments IsNot Nothing AndAlso _apCurrentAttachments.Count > 0 Then
-                    _apCurrentAttachments(0).OutputFiles.Add(outputPath)
-                End If
+                RegisterAutoPilotGeneratedOutputFile(outputPath)
 
                 response.Success = True
-                response.Response = $"Word document created: {fileName} ({New FileInfo(outputPath).Length / 1024:F0} KB). The file will be attached to the reply."
+                Dim designSummary As String = BuildDesignExecutionNote(design)
+                Dim visualSummary As String = String.Empty
+                If visuals.Count > 0 Then
+                    visualSummary = $" Embedded {embeddedVisualCount}/{visuals.Count} requested visual(s)."
+                    If visualWarnings.Count > 0 Then
+                        visualSummary &= " Visual warnings: " & String.Join(" | ", visualWarnings)
+                    End If
+                End If
+                response.Response = $"Word document created: {fileName} ({New FileInfo(outputPath).Length / 1024:F0} KB). The file will be attached to the reply.{designSummary}{visualSummary}"
                 ApDashboardLog($"✓ Word document created: {fileName}", "info")
             Else
                 response.Success = False
-                response.Response = "Failed to create Word document."
+                response.ErrorMessage = If(String.IsNullOrWhiteSpace(creationError), "Failed to create Word document.", creationError)
+                response.Response = response.ErrorMessage
             End If
 
         Catch ex As OperationCanceledException

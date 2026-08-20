@@ -863,6 +863,7 @@ Partial Public Class ThisAddIn
         System.Windows.Forms.Application.DoEvents()
         TranslateLanguage = INI_Language1
         Dim result As Boolean = Await ProcessSelectedRange(SP_Translate, True, False, False, False, True, False)
+        Return result
     End Function
 
     ''' <summary>
@@ -873,6 +874,7 @@ Partial Public Class ThisAddIn
         System.Windows.Forms.Application.DoEvents()
         TranslateLanguage = INI_Language2
         Dim result As Boolean = Await ProcessSelectedRange(SP_Translate, True, False, False, False, True, False)
+        Return result
     End Function
 
     ''' <summary>
@@ -892,7 +894,10 @@ Partial Public Class ThisAddIn
                 selectedRange.Select()
             End If
             Dim result As Boolean = Await ProcessSelectedRange(SP_Translate, True, False, False, False, True, False)
+            Return result
         End If
+
+        Return False
     End Function
 
     ''' <summary>
@@ -908,7 +913,10 @@ Partial Public Class ThisAddIn
             _context)
         If Not String.IsNullOrEmpty(TranslateLanguage) Then
             Dim result As Boolean = Await ProcessSelectedRange(SP_Translate, True, False, True, False, True, False)
+            Return result
         End If
+
+        Return False
     End Function
 
     ''' <summary>
@@ -918,6 +926,7 @@ Partial Public Class ThisAddIn
     Public Async Function Correct() As Task(Of Boolean)
         System.Windows.Forms.Application.DoEvents()
         Dim result As Boolean = Await ProcessSelectedRange(SP_Correct, True, False, False, False, True, False)
+        Return result
     End Function
 
     ''' <summary>
@@ -940,6 +949,7 @@ Partial Public Class ThisAddIn
             selectedRange.Select()
         End If
         Dim result As Boolean = Await ProcessSelectedRange(SP_WriteNeatly, True, False, False, False, True, False)
+        Return result
     End Function
 
     ''' <summary>
@@ -949,6 +959,7 @@ Partial Public Class ThisAddIn
     Public Async Function Anonymize() As Task(Of Boolean)
         System.Windows.Forms.Application.DoEvents()
         Dim result As Boolean = Await ProcessSelectedRange(SP_Anonymize, True, False, False, False, True, False)
+        Return result
     End Function
 
     ''' <summary>
@@ -970,7 +981,7 @@ Partial Public Class ThisAddIn
             If Not CellProtected(cell) AndAlso Not CBool(cell.HasFormula) Then
                 Dim cellText As String = CStr(cell.Value)
                 If Not String.IsNullOrEmpty(cellText) Then
-                    Dim textLength As Integer = getnumberofwords(cellText)
+                    Dim textLength As Integer = GetNumberOfWords(cellText)
                     totalLength += textLength
                     If textLength > maxLength Then
                         maxLength = textLength
@@ -999,6 +1010,7 @@ Partial Public Class ThisAddIn
             selectedRange.Select()
         End If
         Dim result As Boolean = Await ProcessSelectedRange(SP_Shorten, True, False, False, False, True, False, ShortenPercentValue, False)
+        Return result
     End Function
 
     ''' <summary>
@@ -1032,6 +1044,7 @@ Partial Public Class ThisAddIn
             selectedRange.Select()
         End If
         Dim result As Boolean = Await ProcessSelectedRange(SP_SwitchParty, True, False, False, False, True, False)
+        Return result
     End Function
 
     ''' <summary>
@@ -1065,6 +1078,7 @@ Partial Public Class ThisAddIn
     Public Async Function FreestyleNM() As Task(Of Boolean)
         System.Windows.Forms.Application.DoEvents()
         Dim result As Boolean = Await Freestyle(False)
+        Return result
     End Function
 
     ''' <summary>
@@ -1077,7 +1091,7 @@ Partial Public Class ThisAddIn
         If Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
             If Not ShowModelSelection(_context, INI_AlternateModelPath) Then
                 originalConfigLoaded = False
-                Exit Function
+                Return False
             End If
         End If
         Dim result As Boolean = Await Freestyle(True)
@@ -1085,6 +1099,7 @@ Partial Public Class ThisAddIn
             RestoreDefaults(_context, originalConfig)
             originalConfigLoaded = False
         End If
+        Return result
     End Function
 
     ''' <summary>

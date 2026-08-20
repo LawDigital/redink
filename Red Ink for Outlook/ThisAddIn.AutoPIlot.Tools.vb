@@ -751,14 +751,17 @@ Partial Public Class ThisAddIn
                 "Write lean, decision-oriented content with strong section hierarchy, short paragraphs, informative headings, concise bullets, and tables where comparison is useful. " &
                 "The renderer applies consulting-style typography, page margins, heading hierarchy, restrained accent color, professional table formatting, optional cover page, headers/footers, and page numbers. " &
                 "Use include_cover=true plus cover_title/cover_subtitle for reports, proposals, board papers, investment memos, and other substantial documents. " &
-                "Use page_orientation='landscape' for wide tables. Use accent_color only when the user/brand requires a specific color. " &
-                "Do not simulate design using ASCII art or excessive Markdown decoration; let the renderer create the visual hierarchy. The resulting file is attached to the reply.",
+                "Use page_orientation='landscape' for wide tables. If the user requests a named design listed by the DESIGN REPOSITORY system context, pass its exact id as design_name; the tool applies the configured JSON profile and optional repository template automatically. Explicit tool arguments override repository defaults. Use accent_color only when supplied by the user or a concrete authorized design source. Never claim a named organization's design unless such a source is available; otherwise use a neutral professional preset and state that the specific corporate design was not available. " &
+                "NEVER simulate diagrams, process maps, timelines, or charts with ASCII/Unicode box characters, Mermaid source, fenced code blocks, monospace/Courier pseudo-graphics, or manual spacing. " &
+                "When a visual adds value, use the native 'visuals' parameter and place each image with an exact [[visual:ID]] token on its own line in markdown_content. For any organizational hierarchy, reporting-line diagram, management structure, or organigram, you MUST use type='org_chart' with structured nodes and parent_id relationships; never express the hierarchy as text art. Org charts are inserted as editable native Word shapes/connectors by default, so keep node labels concise and put names/subtitles in detail. " &
+                "The renderer creates and embeds a real professional graphic using a professional document font and will not render visuals in Courier/Consolas/other monospace code fonts; use plain prose/tables instead if no true graphic is needed. The resulting file is attached to the reply.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_CreateWordDoc & """," &
                 """description"":""Creates a polished executive Word document (.docx) from Markdown with consulting-style typography, heading hierarchy, professional tables, optional cover page, headers/footers, page numbers, and configurable brand accent.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """markdown_content"":{""type"":""string"",""description"":""Full document content in Markdown. Use headings, concise bullets, emphasis, and Markdown tables where useful.""}," &
                 """file_name"":{""type"":""string"",""description"":""Desired output filename without .docx. Defaults to Document.""}," &
+                """design_name"":{""type"":""string"",""description"":""Exact design id/name from the configured AgentResources design repository. The tool resolves it deterministically; do not invent a design name.""}," &
                 """document_title"":{""type"":""string"",""description"":""Document title metadata.""}," &
                 """document_author"":{""type"":""string"",""description"":""Optional author metadata.""}," &
                 """base_font_name"":{""type"":""string"",""description"":""Base font. Default Aptos.""}," &
@@ -774,6 +777,18 @@ Partial Public Class ThisAddIn
                 """header_text"":{""type"":""string"",""description"":""Optional running header text.""}," &
                 """footer_text"":{""type"":""string"",""description"":""Optional running footer text.""}," &
                 """show_page_numbers"":{""type"":""boolean"",""description"":""Show page numbers in the footer. Default true.""}," &
+                """visuals"":{ ""type"":""array"",""description"":""Optional real embedded graphics. Put [[visual:ID]] on its own line in markdown_content for each visual; never emulate diagrams with monospace text."",""items"":{ ""type"":""object"",""properties"":{" &
+                """id"":{ ""type"":""string"",""description"":""Stable placeholder id used by [[visual:ID]].""}," &
+                """type"":{ ""type"":""string"",""enum"":[""process"",""timeline"",""org_chart"",""bar_chart"",""line_chart""],""description"":""Graphic type. Use org_chart for organization charts/reporting hierarchies. Org charts are inserted as editable native Word shapes and connectors whenever Word Interop permits.""}," &
+                """editable"":{ ""type"":""boolean"",""description"":""For org_chart, request editable native Word shapes/connectors. Defaults to true; raster rendering is only a fallback if native insertion fails.""}," &
+                """title"":{ ""type"":""string""}," &
+                """caption"":{ ""type"":""string""}," &
+                """items"":{ ""type"":""array"",""description"":""For process/timeline: strings or objects with label and optional detail."",""items"":{}}," &
+                """nodes"":{ ""type"":""array"",""description"":""For org_chart: hierarchy nodes. Each node has a stable id, label, optional detail, and optional parent_id. Root nodes omit parent_id. Keep labels concise; use detail for role/name."",""items"":{ ""type"":""object"",""properties"":{ ""id"":{ ""type"":""string""},""label"":{ ""type"":""string""},""detail"":{ ""type"":""string""},""parent_id"":{ ""type"":""string""}},""required"":[""id"",""label""]}}," &
+                """categories"":{ ""type"":""array"",""items"":{ ""type"":""string""}}," &
+                """series"":{ ""type"":""array"",""description"":""For charts: [{name, values:[numbers]}]."",""items"":{ ""type"":""object"",""properties"":{ ""name"":{ ""type"":""string""},""values"":{ ""type"":""array"",""items"":{ ""type"":""number""}}},""required"":[""values""]}}," &
+                """width_inches"":{ ""type"":""number"",""description"":""Optional display width. Default 8.4.""}," &
+                """height_inches"":{ ""type"":""number"",""description"":""Optional display height. Default 4.7.""}},""required"":[""id"",""type""]}}," &
                 """table_style_name"":{""type"":""string"",""description"":""Optional Word table style name. Renderer still applies professional header/banding treatment.""}" &
                 "},""required"":[""markdown_content""]}}"
         })
@@ -809,7 +824,7 @@ Partial Public Class ThisAddIn
                 "Do NOT waste tokens manually styling every cell unless a special exception is needed. Focus the tool call on workbook structure, data, formulas and useful interactive features. " &
                 "For non-trivial workbooks, prefer multiple purpose-built worksheets (e.g. Executive Summary/Dashboard, Data, Assumptions, Calculations, Instructions). " &
                 "Use native tables for datasets, charts for decision-relevant trends/comparisons, data_validations for controlled inputs/dropdowns, conditional_formats for thresholds/alerts, named_ranges for model clarity, and vba_modules only when automation is requested. " &
-                "Keep dashboards lean: a few KPIs, 2-4 useful charts, clear labels, no decorative clutter. Use English formula syntax with comma separators. The file is attached to the reply.",
+                "Keep dashboards lean: a few KPIs, 2-4 useful charts, clear labels, no decorative clutter. Use English formula syntax with comma separators. If the user requests a named design listed by the DESIGN REPOSITORY system context, pass its exact id as design_name; the tool applies configured design defaults and may use a clean repository workbook template as a theme carrier. Never claim a named organization's Excel design unless concrete design specifications or an authorized workbook/template source are available; otherwise use the neutral professional preset and say the specific corporate design was not available. The file is attached to the reply.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_CreateExcel & """," &
                 """description"":""Creates a professional multi-sheet Excel workbook (.xlsx/.xlsm) with formulas, native tables, charts, dropdowns/data validation, conditional formatting, named ranges, optional VBA automation, print setup and opinionated consulting-style formatting.""," &
@@ -828,6 +843,7 @@ Partial Public Class ThisAddIn
                 "}},""description"":""Cells for default/first sheet. Low-level formatting is optional because professional_layout provides a strong baseline.""}," &
                 """sheets"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{""name"":{""type"":""string""},""cells"":{""type"":""array"",""items"":{""type"":""object""}}}},""description"":""Multiple sheets. Each sheet may also override column_widths, row_heights, auto_fit_columns, auto_fit_rows, merge_ranges, freeze_pane, auto_filter, data_validations, conditional_formats, print_setup, tab_color, show_gridlines, zoom, right_to_left, professional_layout, style_preset, accent_color, font_name, smart_format, header_row.""}," &
                 """file_name"":{""type"":""string"",""description"":""Filename without extension.""}," &
+                """design_name"":{""type"":""string"",""description"":""Exact design id/name from the configured AgentResources design repository. Explicit creator arguments override design defaults.""}," &
                 """sheet_name"":{""type"":""string"",""description"":""Tab name for single-sheet mode.""}," &
                 """professional_layout"":{""type"":""boolean"",""description"":""Default true. Enables opinionated professional workbook styling.""}," &
                 """style_preset"":{""type"":""string"",""enum"":[""consulting"",""executive"",""minimal"",""plain""],""description"":""Default consulting.""}," &
@@ -875,7 +891,7 @@ Partial Public Class ThisAddIn
                 "Do NOT invent numbers merely to create a chart. When real quantitative data exists, prefer a chart over repeating the numbers as prose. Avoid more than two consecutive text-heavy slides when a visual layout can represent the same content. " &
                 "For kpi, table, chart, cards, process, structure, timeline, comparison, or matrix, put structured data in data_json as a JSON object string; the application parses and renders it locally. " &
                 "Payload shapes: chart={chart:{type,categories,series:[{name,values}]}}; cards={cards:[{title,body,badge,tone}]}; process={steps:[{title,body}]}; structure={structure:{top:{title,body},children:[{title,body}]}}; timeline={events:[{label,title,body}]}; comparison={comparison:{columns:[{title,items,verdict,tone}]}}; matrix={matrix:{x_left,x_right,y_top,y_bottom,quadrants:[{title,body}]}}. " &
-                "Keep tables concise: preferably <= 6 data rows per slide; split long tables across slides rather than forcing tiny text. template_attachment_name may reference an existing .pptx whose slides are preserved.",
+                "Keep tables concise: preferably <= 6 data rows per slide; split long tables across slides rather than forcing tiny text. If the user requests a named design listed by the DESIGN REPOSITORY system context, pass its exact id as design_name; the repository template is treated as a master/theme carrier and its sample slides are removed by default. template_attachment_name may reference an existing .pptx whose slides are preserved. A named organization's design may be claimed only when design_name resolves, template_attachment_name resolves to an authorized template, or explicit design specifications are supplied; otherwise create a neutral professional deck and state that the specific corporate design was not available.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_CreatePowerPoint & """," &
                 """description"":""Creates a professionally formatted PowerPoint presentation with executive typography, visual business layouts, charts, and optional template support.""," &
@@ -888,8 +904,9 @@ Partial Public Class ThisAddIn
                 """quote"":{""type"":""string""},""attribution"":{""type"":""string""}," &
                 """data_json"":{""type"":""string"",""description"":""Optional JSON object encoded as a string for structured visual data (kpis, table, chart, cards, steps, structure, events/timeline, comparison, or matrix). The application parses this locally.""}" &
                 "}},""description"":""Slides defining the presentation.""}," &
-                """file_name"":{""type"":""string""},""title"":{""type"":""string""},""template_attachment_name"":{""type"":""string""}," &
+                """file_name"":{""type"":""string""},""title"":{""type"":""string""},""design_name"":{""type"":""string"",""description"":""Exact design id/name from the configured AgentResources design repository. Repository templates are used as master/theme carriers and sample slides are removed by default.""},""template_attachment_name"":{""type"":""string""}," &
                 """style_preset"":{""type"":""string""},""accent_color"":{""type"":""string""},""secondary_color"":{""type"":""string""},""font_name"":{""type"":""string""}," &
+                """text_color"":{""type"":""string""},""muted_color"":{""type"":""string""},""light_color"":{""type"":""string""},""line_color"":{""type"":""string""}," &
                 """aspect_ratio"":{""type"":""string"",""description"":""16:9 or 4:3.""},""footer_text"":{""type"":""string""},""show_slide_numbers"":{""type"":""boolean""}" &
                 "},""required"":[""slides""]}}"
         })
@@ -1345,6 +1362,9 @@ Partial Public Class ThisAddIn
         For Each tool As ModelConfig In tools
             If tool Is Nothing Then Continue For
             tool.ModelDescription = StripSelectorOwnedToolSuffixes(tool.ModelDescription)
+            If IsOptionalSingleFileAutoPilotArtifactTool(tool.ToolName) Then
+                SharedLibrary.Agents.ArtifactDelivery.EnableOptionalSingleFileArtifactProtocol(tool)
+            End If
         Next
 
         Return tools
@@ -1365,12 +1385,116 @@ Partial Public Class ThisAddIn
     ''' A <see cref="ToolResponse"/> when the tool is recognized; otherwise <c>Nothing</c>
     ''' so the caller can continue with external tool handling.
     ''' </returns>
+    Private Shared Function IsOptionalSingleFileAutoPilotArtifactTool(toolName As String) As Boolean
+        If String.IsNullOrWhiteSpace(toolName) Then Return False
+        Select Case toolName
+            Case AP_Tool_MergePdfs,
+                 AP_Tool_CompareWordDocs,
+                 AP_Tool_CreatePdfFromText,
+                 AP_Tool_ExcelCompleteLiveWorkbook,
+                 AP_Tool_AddPdfWatermark,
+                 AP_Tool_WordToPdf,
+                 AP_Tool_PdfToWord,
+                 AP_Tool_CreateWordDoc,
+                 AP_Tool_CreateExcel,
+                 AP_Tool_CreatePowerPoint,
+                 AP_Tool_CreateCodeFile,
+                 AP_Tool_RedactPdf,
+                 AP_Tool_OverlayPdf,
+                 AP_Tool_CreateAudioFile,
+                 AP_Tool_GenerateImage,
+                 AP_Tool_ManageUserFiles
+                Return True
+        End Select
+        Return False
+    End Function
+
+    Private Shared Function HasExplicitArtifactIdentityArguments(arguments As IDictionary(Of String, Object)) As Boolean
+        If arguments Is Nothing Then Return False
+        For Each key As String In New String() {
+            "artifact_id", "logical_deliverable_id", "output_slot_id", "supersedes_artifact_id",
+            "artifact_state", "artifact_delivery_intent", "storage_kind"
+        }
+            Dim value As Object = Nothing
+            If arguments.TryGetValue(key, value) AndAlso value IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(value.ToString()) Then
+                Return True
+            End If
+        Next
+        Return False
+    End Function
+
+    Private Shared Function ComputeAutoPilotOutputFingerprint(path As String) As String
+        Try
+            If String.IsNullOrWhiteSpace(path) OrElse Not File.Exists(path) Then Return "missing"
+            Using sha As System.Security.Cryptography.SHA256 = System.Security.Cryptography.SHA256.Create()
+                Using stream As FileStream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite Or FileShare.Delete)
+                    Dim hash As Byte() = sha.ComputeHash(stream)
+                    Return "sha256:" & BitConverter.ToString(hash).Replace("-", "")
+                End Using
+            End Using
+        Catch
+            Try
+                Dim info As New FileInfo(path)
+                Return "meta:" & info.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) & ":" & info.LastWriteTimeUtc.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            Catch
+                Return "unavailable"
+            End Try
+        End Try
+    End Function
+
     Friend Async Function TryExecuteAutoPilotTool(
             toolCall As ToolCall,
             context As ToolExecutionContext,
             Optional cancellationToken As CancellationToken = Nothing) As System.Threading.Tasks.Task(Of ToolResponse)
 
-        Dim outputSnapshot As Dictionary(Of String, Long) = SnapshotAutoPilotOutputFiles()
+        Dim artifactMetadata As SharedLibrary.Agents.OptionalToolArtifactMetadata = Nothing
+        If HasExplicitArtifactIdentityArguments(toolCall.Arguments) Then
+            If toolCall.ToolName.Equals(AP_Tool_ManageUserFiles, StringComparison.OrdinalIgnoreCase) Then
+                Dim manageAction As String = If(GetArgString(toolCall.Arguments, "action"), "").Trim()
+                If Not manageAction.Equals("checkout", StringComparison.OrdinalIgnoreCase) Then
+                    Return New ToolResponse() With {
+                        .CallId = toolCall.CallId,
+                        .ToolName = toolCall.ToolName,
+                        .Success = False,
+                        .ResultKind = "error",
+                        .ErrorCode = "explicit_artifact_requires_checkout_action",
+                        .ErrorMessage = "manage_user_files may use explicit artifact metadata only with action='checkout', because other actions do not produce one user-facing output file."
+                    }
+                End If
+            End If
+
+            If Not IsOptionalSingleFileAutoPilotArtifactTool(toolCall.ToolName) Then
+                Return New ToolResponse() With {
+                    .CallId = toolCall.CallId,
+                    .ToolName = toolCall.ToolName,
+                    .Success = False,
+                    .ResultKind = "error",
+                    .ErrorCode = "explicit_artifact_not_supported_for_tool_cardinality",
+                    .ErrorMessage = "This tool can produce zero, multiple, or dynamic files and cannot safely bind one explicit artifact identity to the whole call. Use its legacy/multi-output flow or a tool with an explicit per-output slot protocol."
+                }
+            End If
+
+            Dim artifactFailureCode As String = ""
+            Dim artifactFailureMessage As String = ""
+            If Not SharedLibrary.Agents.ArtifactDelivery.TryPrepareOptionalToolArtifactMetadata(
+                toolCall.Arguments,
+                SharedLibrary.Agents.ArtifactStorageKind.Unknown,
+                artifactMetadata,
+                artifactFailureCode,
+                artifactFailureMessage) Then
+
+                Return New ToolResponse() With {
+                    .CallId = toolCall.CallId,
+                    .ToolName = toolCall.ToolName,
+                    .Success = False,
+                    .ResultKind = "error",
+                    .ErrorCode = artifactFailureCode,
+                    .ErrorMessage = artifactFailureMessage
+                }
+            End If
+        End If
+
+        Dim outputSnapshot As Dictionary(Of String, String) = SnapshotAutoPilotOutputFiles()
         Dim response As ToolResponse = Nothing
         Dim enableLocalToolingMirror As Boolean = _chatAgentActive AndAlso Not _apActive
 
@@ -1464,7 +1588,7 @@ Partial Public Class ThisAddIn
                     Return Nothing
             End Select
 
-            Return NormalizeAutoPilotToolResponse(toolCall, response, outputSnapshot)
+            Return NormalizeAutoPilotToolResponse(toolCall, response, outputSnapshot, artifactMetadata)
         Finally
             If enableLocalToolingMirror Then
                 System.Threading.Interlocked.Decrement(_apMirrorDashboardLogToLocalToolingDepth)
@@ -1472,8 +1596,79 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
-    Private Function SnapshotAutoPilotOutputFiles() As Dictionary(Of String, Long)
-        Dim snapshot As New Dictionary(Of String, Long)(StringComparer.OrdinalIgnoreCase)
+    ''' <summary>
+    ''' Registers one physical file created by an AutoPilot/Local-Agent tool as an explicit
+    ''' host-side output. This also works when the current mail/session has no inbound
+    ''' attachments; in that case a tool-output carrier is added so per-call fingerprinting,
+    ''' ArtifactDelivery normalization, and bounded legacy compatibility can all observe the file.
+    ''' No artifact identity is inferred from the path.
+    ''' </summary>
+    Private Sub RegisterAutoPilotGeneratedOutputFile(outputPath As String)
+        If String.IsNullOrWhiteSpace(outputPath) Then Return
+
+        Dim normalizedPath As String
+
+        Try
+            normalizedPath = System.IO.Path.GetFullPath(outputPath)
+        Catch ex As System.Exception
+            Return
+        End Try
+
+        If Not System.IO.File.Exists(normalizedPath) Then Return
+
+        If _apCurrentAttachments Is Nothing Then
+            _apCurrentAttachments = New List(Of AutoPilotAttachmentInfo)()
+        End If
+
+        Dim registrationTarget As AutoPilotAttachmentInfo = Nothing
+
+        For Each existingAttachment As AutoPilotAttachmentInfo In _apCurrentAttachments
+            If existingAttachment Is Nothing Then Continue For
+
+            If existingAttachment.OutputFiles IsNot Nothing Then
+                For Each existingOutput As String In existingAttachment.OutputFiles
+                    If String.Equals(
+                        If(existingOutput, String.Empty).Trim(),
+                        normalizedPath,
+                        StringComparison.OrdinalIgnoreCase) Then
+
+                        Return
+                    End If
+                Next
+            End If
+
+            If registrationTarget Is Nothing Then
+                registrationTarget = existingAttachment
+            End If
+        Next
+
+        If registrationTarget Is Nothing Then
+            Dim fileInfo As New System.IO.FileInfo(normalizedPath)
+
+            registrationTarget = New AutoPilotAttachmentInfo With {
+                .OriginalFileName = System.IO.Path.GetFileName(normalizedPath),
+                .TempFilePath = normalizedPath,
+                .SourcePath = normalizedPath,
+                .Extension = System.IO.Path.GetExtension(normalizedPath),
+                .SizeBytes = fileInfo.Length,
+                .IsOverSizeLimit = False,
+                .StatusMessage = "Generated tool output",
+                .CreatedTime = fileInfo.CreationTime,
+                .LastModifiedTime = fileInfo.LastWriteTime,
+                .IsToolOutput = True,
+                .OutputFiles = New List(Of String)()
+            }
+
+            _apCurrentAttachments.Add(registrationTarget)
+        ElseIf registrationTarget.OutputFiles Is Nothing Then
+            registrationTarget.OutputFiles = New List(Of String)()
+        End If
+
+        registrationTarget.OutputFiles.Add(normalizedPath)
+    End Sub
+
+    Private Function SnapshotAutoPilotOutputFiles() As Dictionary(Of String, String)
+        Dim snapshot As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
 
         If _apCurrentAttachments Is Nothing Then
             Return snapshot
@@ -1486,24 +1681,14 @@ Partial Public Class ThisAddIn
                 Dim normalized As String = If(outputPath, "").Trim()
                 If normalized = "" Then Continue For
 
-                Dim stamp As Long = Long.MinValue
-
-                Try
-                    If File.Exists(normalized) Then
-                        Dim info As New FileInfo(normalized)
-                        stamp = File.GetLastWriteTimeUtc(normalized).Ticks Xor info.Length
-                    End If
-                Catch
-                End Try
-
-                snapshot(normalized) = stamp
+                snapshot(normalized) = ComputeAutoPilotOutputFingerprint(normalized)
             Next
         Next
 
         Return snapshot
     End Function
 
-    Private Function GetProducedAutoPilotOutputFiles(previousSnapshot As IDictionary(Of String, Long)) As List(Of String)
+    Private Function GetProducedAutoPilotOutputFiles(previousSnapshot As IDictionary(Of String, String)) As List(Of String)
         Dim produced As New List(Of String)()
         Dim seen As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
 
@@ -1519,20 +1704,13 @@ Partial Public Class ThisAddIn
                 If normalized = "" Then Continue For
                 If Not File.Exists(normalized) Then Continue For
 
-                Dim currentStamp As Long = Long.MinValue
-
-                Try
-                    Dim info As New FileInfo(normalized)
-                    currentStamp = File.GetLastWriteTimeUtc(normalized).Ticks Xor info.Length
-                Catch
-                End Try
-
-                Dim previousStamp As Long = Long.MinValue
+                Dim currentStamp As String = ComputeAutoPilotOutputFingerprint(normalized)
+                Dim previousStamp As String = Nothing
                 Dim wasKnown As Boolean =
                     previousSnapshot IsNot Nothing AndAlso
                     previousSnapshot.TryGetValue(normalized, previousStamp)
 
-                If Not wasKnown OrElse previousStamp <> currentStamp Then
+                If Not wasKnown OrElse Not String.Equals(previousStamp, currentStamp, StringComparison.Ordinal) Then
                     If seen.Add(normalized) Then
                         produced.Add(normalized)
                     End If
@@ -1624,12 +1802,36 @@ Partial Public Class ThisAddIn
 
     Private Function NormalizeAutoPilotToolResponse(toolCall As ToolCall,
                                                     toolResponse As ToolResponse,
-                                                    outputSnapshot As IDictionary(Of String, Long)) As ToolResponse
+                                                    outputSnapshot As IDictionary(Of String, String),
+                                                    Optional artifactMetadata As SharedLibrary.Agents.OptionalToolArtifactMetadata = Nothing) As ToolResponse
         If toolResponse Is Nothing OrElse Not toolResponse.Success Then
             Return toolResponse
         End If
 
         Dim parsedToken As JToken = TryParseToolResultToken(toolResponse.Response)
+        Dim producedOutputs As List(Of String) = GetProducedAutoPilotOutputFiles(outputSnapshot)
+
+        If artifactMetadata IsNot Nothing Then
+            If producedOutputs.Count = 1 Then
+                toolResponse.Response = SharedLibrary.Agents.ArtifactDelivery.AttachOptionalSingleFileArtifactToResult(
+                    toolResponse.Response,
+                    artifactMetadata,
+                    producedOutputs(0))
+                toolResponse.ResultKind = "json_object"
+                Return toolResponse
+            End If
+
+            ' A safe single-file producer may legitimately produce no file (for example
+            ' a no-op/finalize check). In that case no artifact is fabricated; a locked
+            ' expected-artifact contract remains unsatisfied and completion is rejected.
+            If producedOutputs.Count = 0 Then Return toolResponse
+
+            toolResponse.Success = False
+            toolResponse.ResultKind = "error"
+            toolResponse.ErrorCode = "single_file_artifact_cardinality_violation"
+            toolResponse.ErrorMessage = "The tool produced more than one changed output while a single explicit artifact identity was supplied."
+            Return toolResponse
+        End If
 
         If HasNormalizedToolResultMetadata(toolResponse.Response) Then
             If String.IsNullOrWhiteSpace(toolResponse.ResultKind) Then
@@ -1639,8 +1841,6 @@ Partial Public Class ThisAddIn
 
             Return toolResponse
         End If
-
-        Dim producedOutputs As List(Of String) = GetProducedAutoPilotOutputFiles(outputSnapshot)
 
         If producedOutputs.Count > 0 Then
             toolResponse.Response =

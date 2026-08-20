@@ -425,7 +425,7 @@ Namespace SharedLibrary
                                 ' Remove ALL changes for this segment from the apply list                                
                                 allChanges.RemoveAll(
                                     Function(c)
-                                        blockedScopes.Contains($"{c.IniFile}|{If(c.SegmentName, "")}")
+                                        Return blockedScopes.Contains($"{c.IniFile}|{If(c.SegmentName, "")}")
                                     End Function
                                 )
 
@@ -477,7 +477,7 @@ Namespace SharedLibrary
                             ' User cancelled - skip these changes entirely                            
                             allChanges.RemoveAll(
                                         Function(c)
-                                            blockedScopes.Contains($"{c.IniFile}|{If(c.SegmentName, "")}")
+                                            Return blockedScopes.Contains($"{c.IniFile}|{If(c.SegmentName, "")}")
                                         End Function
                                     )
                             LogIniUpdateEvent("Placeholder Input",

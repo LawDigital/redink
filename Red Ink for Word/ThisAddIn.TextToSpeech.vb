@@ -385,6 +385,7 @@ Partial Public Class ThisAddIn
         Catch ex As Exception
             MessageBox.Show($"Error in GenerateOpenAITTSAsync: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
         End Try
+        Return System.Array.Empty(Of Byte)()
     End Function
 
     ' ==================== AUDIO GENERATION - GOOGLE/OPENAI UNIFIED ====================

@@ -80,25 +80,44 @@ Partial Public Class ThisAddIn
         If String.IsNullOrWhiteSpace(System.IO.Path.GetFileName(subPath)) Then Return
 
         Try
-            Dim ws As String = SharedLibrary.Agents.PathPolicy.WorkspaceRoot
-            Dim targetPath As String
-            If Not String.IsNullOrWhiteSpace(ws) AndAlso System.IO.Directory.Exists(ws) Then
-                ' Workspace connected: preserve existing behavior. PathPolicy.Resolve enforces
-                ' workspace/Desktop containment; the subpath preserves output subdirectories so
-                ' distinct outputs sharing a filename do not collide.
-                targetPath = SharedLibrary.Agents.PathPolicy.Resolve(subPath, SharedLibrary.Agents.PathAccess.Write)
-            Else
-                ' No workspace connected: publish to the Desktop explicitly. The default writable
-                ' root is NOT used here, because with no workspace it resolves to the per-session
-                ' staging directory (set via WordEnsureAgentTempDir), which is deleted on session
-                ' cleanup and would silently discard the deliverable. The subpath is preserved and
-                ' contained under the Desktop; a subpath that would escape is flattened to its file name.
-                Dim baseRoot As String = System.IO.Path.GetFullPath(Environment.GetFolderPath(Environment.SpecialFolder.Desktop))
-                targetPath = System.IO.Path.GetFullPath(System.IO.Path.Combine(baseRoot, subPath))
-                Dim containmentPrefix As String = baseRoot.TrimEnd(System.IO.Path.DirectorySeparatorChar) & System.IO.Path.DirectorySeparatorChar
-                If Not targetPath.StartsWith(containmentPrefix, StringComparison.OrdinalIgnoreCase) Then
-                    targetPath = System.IO.Path.Combine(baseRoot, System.IO.Path.GetFileName(subPath))
+            Dim targetRoot As String = ""
+
+            Try
+                Dim workspace As SharedLibrary.Agents.WorkspaceState = SharedLibrary.Agents.WorkspaceTools.Active
+                If workspace IsNot Nothing AndAlso
+                   workspace.AllowWrite AndAlso
+                   Not String.IsNullOrWhiteSpace(workspace.RootPath) AndAlso
+                   System.IO.Directory.Exists(workspace.RootPath) Then
+
+                    targetRoot = System.IO.Path.GetFullPath(workspace.RootPath)
                 End If
+            Catch ex As System.Exception
+            End Try
+
+            If String.IsNullOrWhiteSpace(targetRoot) Then
+                Dim stagingRoot As String = SharedLibrary.Agents.PathPolicy.SessionStagingRoot
+                If Not String.IsNullOrWhiteSpace(stagingRoot) AndAlso
+                   System.IO.Directory.Exists(stagingRoot) Then
+
+                    targetRoot = System.IO.Path.GetFullPath(stagingRoot)
+                End If
+            End If
+
+            If String.IsNullOrWhiteSpace(targetRoot) Then
+                Throw New System.InvalidOperationException(
+                    "No writable Word workspace or session staging root is available for python_execute output.")
+            End If
+
+            ' Preserve output subdirectories, but contain the result strictly under the
+            ' selected writable root. Without a workspace this is the per-run staging area;
+            ' WordCollectAndCopyOutputs later publishes user deliverables atomically to
+            ' Desktop\Inky\<timestamp> before staging cleanup.
+            Dim targetPath As String = System.IO.Path.GetFullPath(System.IO.Path.Combine(targetRoot, subPath))
+            Dim containmentPrefix As String = targetRoot.TrimEnd(System.IO.Path.DirectorySeparatorChar) & System.IO.Path.DirectorySeparatorChar
+            If Not targetPath.Equals(targetRoot, StringComparison.OrdinalIgnoreCase) AndAlso
+               Not targetPath.StartsWith(containmentPrefix, StringComparison.OrdinalIgnoreCase) Then
+
+                targetPath = System.IO.Path.Combine(targetRoot, System.IO.Path.GetFileName(subPath))
             End If
 
             Dim targetDir As String = System.IO.Path.GetDirectoryName(targetPath)

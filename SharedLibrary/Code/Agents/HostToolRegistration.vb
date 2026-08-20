@@ -164,12 +164,28 @@ Namespace Agents
         Private ReadOnly OutlookDeliverableToolNames As String() = New String() {
             "download_web_files",
             WorkspaceTools.ToolWrite,
+            WorkspaceTools.ToolCopy,
+            WorkspaceTools.ToolMove,
+            WorkspaceTools.ToolRename,
             TextTools.ToolWrite,
             TextTools.ToolExportToText,
             FileTools.ToolCopy,
+            FileTools.ToolMove,
+            FileTools.ToolRename,
             PythonExecuteTool.ToolName,
+            WordTools.ToolWrite,
+            WordTools.ToolMarkup,
+            WordTools.ToolCommentAdd,
+            WordTools.ToolCommentRemove,
+            WordTools.ToolFormat,
+            WordTools.ToolApplyTemplate,
+            WordTools.ToolSaveAs,
+            "process_word_document",
+            "comment_word_document",
             "merge_pdfs",
+            "compare_word_documents",
             "create_pdf_from_text",
+            "excel_complete_live_workbook",
             "split_pdf",
             "add_pdf_watermark",
             "word_to_pdf",
@@ -179,27 +195,66 @@ Namespace Agents
             "create_excel_spreadsheet",
             "create_powerpoint",
             "create_code_file",
+            "comment_pdf_document",
             "redact_pdf",
             "overlay_pdf",
             "create_audio_file",
-            "generate_image"
+            "generate_image",
+            "manage_user_files",
+            "agent_workspace_write",
+            "agent_workspace_file_op",
+            "agent_workspace_save_session_file",
+            "agent_workspace_move_to",
+            "agent_workspace_copy_to",
+            "agent_workspace_rename",
+            "agent_workspace_bulk_rename",
+            "agent_workspace_inventory_report"
         }
 
         Private ReadOnly WordDeliverableToolNames As String() = New String() {
             "download_web_files",
             WorkspaceTools.ToolWrite,
+            WorkspaceTools.ToolCopy,
+            WorkspaceTools.ToolMove,
+            WorkspaceTools.ToolRename,
             TextTools.ToolWrite,
             TextTools.ToolExportToText,
             FileTools.ToolCopy,
+            FileTools.ToolMove,
+            FileTools.ToolRename,
             PythonExecuteTool.ToolName,
             WordTools.ToolWrite,
             WordTools.ToolMarkup,
+            WordTools.ToolCommentAdd,
+            WordTools.ToolCommentRemove,
+            WordTools.ToolFormat,
             WordTools.ToolApplyTemplate,
             WordTools.ToolSaveAs,
+            "create_word_document",
+            "create_excel_spreadsheet",
+            "create_powerpoint",
+            "create_code_file",
+            "create_pdf_from_text",
+            "merge_pdfs",
+            "add_pdf_watermark",
+            "word_to_pdf",
+            "pdf_to_word",
+            "redact_pdf",
+            "overlay_pdf",
+            "create_audio_file",
+            "generate_image",
             "word_doc_create",
             "word_doc_edit",
             "word_doc_export_pdf"
         }
+
+        ' Additional host-specific/non-shared legacy tools may be registered explicitly
+        ' by their owning source module. This keeps the compatibility boundary extensible
+        ' without inferring deliverable capability from filenames, paths, descriptions,
+        ' or tool-name patterns.
+        Private ReadOnly DynamicOutlookDeliverableToolNames As New System.Collections.Generic.HashSet(Of String)(System.StringComparer.OrdinalIgnoreCase)
+        Private ReadOnly DynamicWordDeliverableToolNames As New System.Collections.Generic.HashSet(Of String)(System.StringComparer.OrdinalIgnoreCase)
+        Private ReadOnly DeliverableCapabilitySyncRoot As New System.Object()
 
         Private ReadOnly CommonInternalToolNameSet As HashSet(Of String) =
             BuildToolNameSet(CommonInternalToolNames)
@@ -275,9 +330,53 @@ Namespace Agents
 
             For Each tool As SharedLibrary.ModelConfig In tools
                 If tool Is Nothing OrElse String.IsNullOrWhiteSpace(tool.ToolName) Then Continue For
-                ToolExecutorRegistry.RegisterInternal(host, tool.ToolName.Trim())
+
+                Dim normalizedToolName As String = tool.ToolName.Trim()
+                ToolExecutorRegistry.RegisterInternal(host, normalizedToolName)
+
+                ' artifact_generation is explicit model metadata, not a heuristic. It means
+                ' the resolved tool can physically produce user-facing artifacts even if that
+                ' tool still uses the bounded legacy delivery path rather than artifacts[].
+                If HasCapabilityTag(tool.CapabilityTags, "artifact_generation") Then
+                    RegisterDeliverableCapableToolName(host, normalizedToolName)
+                End If
             Next
         End Sub
+
+        Public Sub RegisterDeliverableCapableToolName(host As ToolingHostKind, toolName As String)
+            Dim normalizedToolName As String = If(toolName, "").Trim()
+            If normalizedToolName = "" Then Return
+
+            SyncLock DeliverableCapabilitySyncRoot
+                Select Case host
+                    Case ToolingHostKind.Outlook
+                        DynamicOutlookDeliverableToolNames.Add(normalizedToolName)
+                    Case ToolingHostKind.Word
+                        DynamicWordDeliverableToolNames.Add(normalizedToolName)
+                End Select
+            End SyncLock
+        End Sub
+
+        Public Sub RegisterDeliverableCapableToolNames(host As ToolingHostKind, toolNames As IEnumerable(Of String))
+            If toolNames Is Nothing Then Return
+
+            For Each toolName As String In toolNames
+                RegisterDeliverableCapableToolName(host, toolName)
+            Next
+        End Sub
+
+        Private Function HasCapabilityTag(capabilityTags As String, requiredTag As String) As Boolean
+            Dim wanted As String = If(requiredTag, "").Trim()
+            If wanted = "" OrElse String.IsNullOrWhiteSpace(capabilityTags) Then Return False
+
+            For Each rawTag As String In capabilityTags.Split(New Char() {","c, ";"c}, System.StringSplitOptions.RemoveEmptyEntries)
+                If System.String.Equals(rawTag.Trim(), wanted, System.StringComparison.OrdinalIgnoreCase) Then
+                    Return True
+                End If
+            Next
+
+            Return False
+        End Function
 
         Public Function IsInternalToolName(toolName As String) As Boolean
             Dim name As String = If(toolName, "").Trim()
@@ -318,18 +417,40 @@ Namespace Agents
         End Function
 
         Public Function GetDeliverableCapableToolNames(host As ToolingHostKind) As IReadOnlyCollection(Of String)
+            Return GetDeliverableCapableToolNames(host, Nothing)
+        End Function
+
+        Public Function GetDeliverableCapableToolNames(host As ToolingHostKind,
+                                                       resolvedTools As IEnumerable(Of SharedLibrary.ModelConfig)) As IReadOnlyCollection(Of String)
             Dim result As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
 
-            Select Case host
-                Case ToolingHostKind.Word
-                    For Each name As String In WordDeliverableToolNames
-                        result.Add(name)
-                    Next
-                Case ToolingHostKind.Outlook
-                    For Each name As String In OutlookDeliverableToolNames
-                        result.Add(name)
-                    Next
-            End Select
+            SyncLock DeliverableCapabilitySyncRoot
+                Select Case host
+                    Case ToolingHostKind.Word
+                        For Each name As String In WordDeliverableToolNames
+                            result.Add(name)
+                        Next
+                        result.UnionWith(DynamicWordDeliverableToolNames)
+
+                    Case ToolingHostKind.Outlook
+                        For Each name As String In OutlookDeliverableToolNames
+                            result.Add(name)
+                        Next
+                        result.UnionWith(DynamicOutlookDeliverableToolNames)
+                End Select
+            End SyncLock
+
+            ' Late-resolved/non-shared tools can declare artifact_generation directly in
+            ' ModelConfig. This is deterministic explicit metadata and therefore safe to
+            ' merge into the per-run compatibility allow-list without name heuristics.
+            If resolvedTools IsNot Nothing Then
+                For Each tool As SharedLibrary.ModelConfig In resolvedTools
+                    If tool Is Nothing OrElse String.IsNullOrWhiteSpace(tool.ToolName) Then Continue For
+                    If HasCapabilityTag(tool.CapabilityTags, "artifact_generation") Then
+                        result.Add(tool.ToolName.Trim())
+                    End If
+                Next
+            End If
 
             Return result.ToList().AsReadOnly()
         End Function

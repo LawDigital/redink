@@ -611,6 +611,10 @@ Partial Public Class ThisAddIn
     Private Sub ChatAgentTeardownToolContext()
         _chatAgentActive = False
         SyncWorkspaceToPathPolicy()
+        ' Session staging is valid only while a Local Agent tool run is active.
+        ' Leaving it globally registered would make a later AutoPilot/Scheduler
+        ' strict-path run authorize the previous Local Agent temp directory too.
+        SharedLibrary.Agents.PathPolicy.SetSessionStagingRoot(Nothing)
         ClearAttachmentCaches()
         _apCurrentTempDir = Nothing
         _apCurrentAttachments = Nothing
@@ -635,60 +639,82 @@ Partial Public Class ThisAddIn
         If Not String.IsNullOrWhiteSpace(_chatAgentTempDir) AndAlso Directory.Exists(_chatAgentTempDir) Then
             Dim resultFiles = CollectResultAttachments(_chatAgentTempDir, _chatAgentFiles)
             If resultFiles IsNot Nothing AndAlso resultFiles.Count > 0 Then
+                ' Do not path-deduplicate registry-resolved files here. Two explicit sibling
+                ' artifacts may intentionally reference the same physical source path.
                 filesToCopy.AddRange(resultFiles)
             End If
         End If
 
         If extraFilePaths IsNot Nothing Then
-            filesToCopy.AddRange(
-                extraFilePaths.
-                    Where(Function(p) Not String.IsNullOrWhiteSpace(p) AndAlso File.Exists(p)))
+            For Each extraPath As String In extraFilePaths
+                If String.IsNullOrWhiteSpace(extraPath) OrElse Not File.Exists(extraPath) Then Continue For
+                Dim normalizedExtra As String = Path.GetFullPath(extraPath)
+                If Not filesToCopy.Any(Function(existingPath)
+                                           Return Not String.IsNullOrWhiteSpace(existingPath) AndAlso
+                                                  String.Equals(Path.GetFullPath(existingPath), normalizedExtra, StringComparison.OrdinalIgnoreCase)
+                                       End Function) Then
+                    filesToCopy.Add(normalizedExtra)
+                End If
+            Next
         End If
 
         filesToCopy = filesToCopy.
+            Where(Function(p) Not String.IsNullOrWhiteSpace(p) AndAlso File.Exists(p)).
             Select(Function(p) Path.GetFullPath(p)).
-            Distinct(StringComparer.OrdinalIgnoreCase).
             ToList()
 
-        If filesToCopy.Count = 0 Then
-            Return copiedFiles
-        End If
+        If filesToCopy.Count = 0 Then Return copiedFiles
 
-        Dim desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
-        Dim timestamp = DateTime.Now.ToString("yyMMdd_HH-mm")
-        Dim outputDir = Path.Combine(desktopPath, "Inky", timestamp)
-
-        Dim counter = 1
-        While Directory.Exists(outputDir)
-            outputDir = Path.Combine(desktopPath, "Inky", timestamp & $"_{counter}")
+        Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
+        Dim timestamp As String = DateTime.Now.ToString("yyMMdd_HH-mm")
+        Dim finalOutputDir As String = Path.Combine(desktopPath, "Inky", timestamp)
+        Dim counter As Integer = 1
+        While Directory.Exists(finalOutputDir)
+            finalOutputDir = Path.Combine(desktopPath, "Inky", timestamp & $"_{counter}")
             counter += 1
         End While
 
-        Directory.CreateDirectory(outputDir)
+        Dim parentDir As String = Path.GetDirectoryName(finalOutputDir)
+        Directory.CreateDirectory(parentDir)
+        Dim partialDir As String = Path.Combine(parentDir, ".partial_" & Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory(partialDir)
 
-        For Each srcPath In filesToCopy
-            Try
-                Dim destName = Path.GetFileName(srcPath)
-                Dim destPath = Path.Combine(outputDir, destName)
+        Try
+            For Each srcPath As String In filesToCopy
+                Dim destName As String = Path.GetFileName(srcPath)
+                Dim destPath As String = Path.Combine(partialDir, destName)
 
-                Dim fileCounter = 1
+                Dim fileCounter As Integer = 1
                 While File.Exists(destPath)
-                    Dim baseName = Path.GetFileNameWithoutExtension(destName)
-                    Dim ext = Path.GetExtension(destName)
-                    destPath = Path.Combine(outputDir, baseName & $"_{fileCounter}{ext}")
+                    Dim baseName As String = Path.GetFileNameWithoutExtension(destName)
+                    Dim ext As String = Path.GetExtension(destName)
+                    destPath = Path.Combine(partialDir, baseName & $"_{fileCounter}" & ext)
                     fileCounter += 1
                 End While
 
                 File.Copy(srcPath, destPath, overwrite:=False)
-                copiedFiles.Add(destPath)
-            Catch
+            Next
+
+            Directory.Move(partialDir, finalOutputDir)
+
+            For Each publishedPath As String In Directory.GetFiles(finalOutputDir, "*", System.IO.SearchOption.TopDirectoryOnly)
+                copiedFiles.Add(publishedPath)
+            Next
+        Catch ex As System.Exception
+            Try
+                If Directory.Exists(partialDir) Then Directory.Delete(partialDir, recursive:=True)
+            Catch cleanupEx As System.Exception
+                ToolingFileLogger.LogWarn("Failed to clean partial Local Agent output directory.", ex:=cleanupEx)
             End Try
-        Next
+            ToolingFileLogger.LogWarn("Local Agent output publication failed; no partial final set was published.", ex:=ex)
+            Return New List(Of String)()
+        End Try
 
         If copiedFiles.Count > 0 Then
             Try
-                Process.Start("explorer.exe", outputDir)
-            Catch
+                Process.Start("explorer.exe", finalOutputDir)
+            Catch ex As System.Exception
+                ToolingFileLogger.LogWarn("Failed to open Local Agent output directory.", ex:=ex)
             End Try
         End If
 
@@ -838,8 +864,24 @@ Partial Public Class ThisAddIn
                 End If
             Next
 
+            ' Legacy compatibility remains deliberately separate from Registry Finality.
+            ' It may, however, force-deliver an existing file produced by an explicitly
+            ' deliverable-capable tool when no expected-artifact contract exists.
+            Dim legacyPaths As System.Collections.Generic.List(Of String) =
+                SharedLibrary.Agents.ArtifactDelivery.ResolveLegacyCompatibilityPaths(runState)
+            For Each legacyPath As String In legacyPaths
+                If String.IsNullOrWhiteSpace(legacyPath) OrElse Not File.Exists(legacyPath) Then Continue For
+                Dim full As String = Path.GetFullPath(legacyPath)
+                If Not full.StartsWith(stagingFull, StringComparison.OrdinalIgnoreCase) Then Continue For
+                If _chatAgentForcedDeliverables.Add(full) Then
+                    promotedCount += 1
+                    ToolingFileLogger.LogStep(
+                        $"Legacy compatibility: promoted bounded output to forced delivery. file={Path.GetFileName(full)}")
+                End If
+            Next
+
             ToolingFileLogger.LogStep(
-                $"Deliverable registry summary. registered={runState.RegisteredDeliverableArtifacts.Count}; promotedThisCall={promotedCount}; validatedFinal={runState.HasValidatedFinalDeliverable}")
+                $"Deliverable registry summary. registered={runState.RegisteredDeliverableArtifacts.Count}; promotedThisCall={promotedCount}; validatedFinal={runState.HasValidatedFinalDeliverable}; validatedForCompletion={runState.HasValidatedDeliverableForCompletion}")
         Catch ex As Exception
             ' Never throw from delivery promotion. Worst case the scan behaves exactly as before.
             ToolingFileLogger.LogWarn("PromoteRegisteredDeliverablesToForcedDelivery failed.", ex:=ex)
@@ -1822,24 +1864,6 @@ Partial Public Class ThisAddIn
 
 
         tools.Add(New ModelConfig() With {
-            .ToolOnly = True, .Tool = True, .ToolName = CA_Tool_WorkspaceRead,
-            .ModelDescription = "Agent Workspace: Read File",
-            .ToolPriority = 122,
-            .ToolErrorHandling = "skip",
-            .ToolInstructionsPrompt =
-                CA_Tool_WorkspaceRead & ": Read or extract text from one workspace file. " &
-                "For one local workspace PDF or Office document, prefer this tool over calling extract_pdf_text directly on a workspace path, because it stages the file and uses the existing attachment extraction stack. " &
-                "For many files, use agent_workspace_stage first and then continue processing the full staged set.",
-            .ToolDefinition =
-                "{""name"":""" & CA_Tool_WorkspaceRead & """," &
-                """description"":""Reads or extracts text from one workspace file. Prefer this for a single workspace PDF or Office file instead of calling extract_pdf_text directly on a workspace path, because the file is staged and processed through the existing attachment extraction stack.""," &
-                """parameters"":{""type"":""object"",""properties"":{" &
-                """path"":{""type"":""string"",""description"":""Relative workspace file path.""}," &
-                """max_chars"":{""type"":""integer"",""description"":""Maximum characters to return. Default 12000, capped.""}" &
-                "},""required"":[""path""]}}"
-        })
-
-        tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = CA_Tool_WorkspaceWrite,
             .ModelDescription = "Agent Workspace: Write File",
             .ToolPriority = 123,
@@ -1924,6 +1948,14 @@ Partial Public Class ThisAddIn
 
         AddWorkspaceMoreTools(tools)
 
+        For Each tool As ModelConfig In tools
+            If tool Is Nothing Then Continue For
+            Select Case tool.ToolName
+                Case CA_Tool_WorkspaceWrite, CA_Tool_WorkspaceSaveSessionFile
+                    SharedLibrary.Agents.ArtifactDelivery.EnableOptionalSingleFileArtifactProtocol(tool)
+            End Select
+        Next
+
         Return tools
 
     End Function
@@ -1988,6 +2020,27 @@ Partial Public Class ThisAddIn
         Catch
         End Try
 
+        Dim artifactMetadata As SharedLibrary.Agents.OptionalToolArtifactMetadata = Nothing
+        If toolCall.ToolName.Equals(CA_Tool_WorkspaceWrite, StringComparison.OrdinalIgnoreCase) OrElse
+           toolCall.ToolName.Equals(CA_Tool_WorkspaceSaveSessionFile, StringComparison.OrdinalIgnoreCase) Then
+
+            Dim artifactFailureCode As String = ""
+            Dim artifactFailureMessage As String = ""
+            If Not SharedLibrary.Agents.ArtifactDelivery.TryPrepareOptionalToolArtifactMetadata(
+                toolCall.Arguments,
+                SharedLibrary.Agents.ArtifactStorageKind.ConnectedWorkspace,
+                artifactMetadata,
+                artifactFailureCode,
+                artifactFailureMessage) Then
+
+                response.Success = False
+                response.ResultKind = "error"
+                response.ErrorCode = artifactFailureCode
+                response.ErrorMessage = artifactFailureMessage
+                Return response
+            End If
+        End If
+
         Try
             If Not ((_chatAgentActive AndAlso Not _apActive) OrElse _apActive OrElse HasActiveScheduledTaskWorkspace()) Then
                 response.Success = False
@@ -2008,6 +2061,11 @@ Partial Public Class ThisAddIn
                 response.Success = False
                 response.ErrorMessage = "No active workspace is available."
             Else
+                ' A connected workspace operation is successful unless the selected
+                ' executor reports an error/throws below. ToolResponse defaults Success=False,
+                ' so set the positive state before dispatch.
+                response.Success = True
+
                 Select Case toolCall.ToolName
                     Case CA_Tool_WorkspaceList
                         response.Response = ExecuteWorkspaceList(toolCall)
@@ -2064,6 +2122,21 @@ Partial Public Class ThisAddIn
                         response.Success = False
                         response.ErrorMessage = "Unknown workspace tool."
                 End Select
+
+                If response.Success AndAlso artifactMetadata IsNot Nothing Then
+                    Dim producedPath As String = ""
+                    If toolCall.ToolName.Equals(CA_Tool_WorkspaceWrite, StringComparison.OrdinalIgnoreCase) Then
+                        producedPath = ResolveWorkspacePath(GetArgString(toolCall.Arguments, "path"))
+                    ElseIf toolCall.ToolName.Equals(CA_Tool_WorkspaceSaveSessionFile, StringComparison.OrdinalIgnoreCase) Then
+                        producedPath = ResolveWorkspacePath(GetArgString(toolCall.Arguments, "target_path"))
+                    End If
+
+                    response.Response = SharedLibrary.Agents.ArtifactDelivery.AttachOptionalSingleFileArtifactToResult(
+                        response.Response,
+                        artifactMetadata,
+                        producedPath)
+                    response.ResultKind = "json_object"
+                End If
 
                 If response.Success AndAlso
                    response.Response IsNot Nothing AndAlso

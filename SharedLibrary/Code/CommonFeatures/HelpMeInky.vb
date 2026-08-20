@@ -213,10 +213,7 @@ Namespace SharedLibrary
             table.Controls.Add(pnlButtons, 0, 2)
             Me.Controls.Add(table)
 
-            _mdPipeline = New MarkdownPipelineBuilder().
-            UseAdvancedExtensions().
-            UseSoftlineBreakAsHardlineBreak().
-            Build()
+            _mdPipeline = Global.SharedLibrary.SharedLibrary.SharedMethods.CreateMarkdownHtmlPipeline(useSoftlineBreakAsHardlineBreak:=True)
 
             AddHandler Me.Load, AddressOf OnLoadForm
             AddHandler Me.FormClosing, AddressOf OnFormClosing
@@ -2162,7 +2159,7 @@ Namespace SharedLibrary
         ''' </summary>
         Private Sub AppendAssistantMarkdown(md As String)
             md = If(md, "")
-            Dim body = Markdig.Markdown.ToHtml(md, _mdPipeline)
+            Dim body = Markdig.Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(md), _mdPipeline)
             Dim t = body.Trim()
             Dim isSingle = Regex.IsMatch(t, "^\s*<p>[\s\S]*?</p>\s*$", RegexOptions.IgnoreCase) AndAlso
                        Not Regex.IsMatch(t, "<(ul|ol|pre|table|h[1-6]|blockquote|hr|div)\b", RegexOptions.IgnoreCase)

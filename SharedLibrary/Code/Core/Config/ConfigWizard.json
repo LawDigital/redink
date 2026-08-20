@@ -1397,14 +1397,14 @@
                 "label": "Agent Resources Directory",
                 "type": "path",
                 "default": "%APPDATA%\\microsoft\\word",
-                "description": "Path to the shared directory that contains agent resources such as inky.md, skills and agents. Use a central network location if the same resources should be shared across users. Example: N:\\AI\\Library. [AgentResourcesPath]"
+                "description": "Path to the shared directory that contains agent resources such as inky.md, skills, agents and the central designs\\designs.json Office design repository. Use a central network location if the same resources should be shared across users. Example: N:\\AI\\Library. [AgentResourcesPath]"
             },
             {
                 "key": "AgentResourcesPathLocal",
                 "label": "Agent Resources Directory (Local)",
                 "type": "path",
                 "default": "",
-                "description": "Path to the user's local version of the same resource directory so personal files can be kept separate from the shared central directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [AgentResourcesPathLocal]"
+                "description": "Path to the user's local version of the same resource directory, including optional local designs\\designs.json overrides, so personal resources can be kept separate from the shared central directory. Local design ids override central entries with the same id. Example: %APPDATA%\\Microsoft\\Word. [AgentResourcesPathLocal]"
             },
             {
                 "key": "ExtractorPath",

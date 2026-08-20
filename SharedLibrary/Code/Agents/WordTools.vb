@@ -66,41 +66,87 @@ Namespace Agents
         End Function
 
         Public Shared Function BuildAll() As List(Of ModelConfig)
-            Return New List(Of ModelConfig) From {
+            Dim tools As New List(Of ModelConfig) From {
                 BuildExtract(), BuildSearch(), BuildWrite(), BuildMarkup(),
                 BuildCommentAdd(), BuildCommentList(), BuildCommentRemove(),
                 BuildFormat(), BuildApplyTemplate(), BuildSaveAs()
             }
+
+            For Each tool As ModelConfig In tools
+                If tool Is Nothing Then Continue For
+                Select Case tool.ToolName
+                    Case ToolWrite, ToolMarkup, ToolCommentAdd, ToolCommentRemove, ToolFormat
+                        ArtifactDelivery.EnableOptionalSingleFileArtifactProtocol(tool)
+                End Select
+            Next
+
+            Return tools
         End Function
 
         ' --------------------------------------------------------------- dispatch
 
         Public Shared Function Execute(toolName As String, arguments As IDictionary(Of String, Object)) As String
             Try
+                Dim artifactMetadata As OptionalToolArtifactMetadata = Nothing
+                Dim isInPlaceArtifactTool As Boolean = False
+
+                Select Case toolName
+                    Case ToolWrite, ToolMarkup, ToolCommentAdd, ToolCommentRemove, ToolFormat
+                        isInPlaceArtifactTool = True
+                End Select
+
+                If isInPlaceArtifactTool Then
+                    Dim artifactFailureCode As String = ""
+                    Dim artifactFailureMessage As String = ""
+                    If Not ArtifactDelivery.TryPrepareOptionalToolArtifactMetadata(
+                        arguments,
+                        ArtifactStorageKind.Unknown,
+                        artifactMetadata,
+                        artifactFailureCode,
+                        artifactFailureMessage) Then
+
+                        Return Err_(artifactFailureCode, artifactFailureMessage)
+                    End If
+                End If
+
+                Dim resultJson As String
                 Select Case toolName
                     Case ToolExtract
-                        Return ExecuteExtract(arguments)
+                        resultJson = ExecuteExtract(arguments)
                     Case ToolSearch
-                        Return ExecuteSearch(arguments)
+                        resultJson = ExecuteSearch(arguments)
                     Case ToolWrite
-                        Return ExecuteWriteOrMarkup(arguments, asMarkup:=False)
+                        resultJson = ExecuteWriteOrMarkup(arguments, asMarkup:=False)
                     Case ToolMarkup
-                        Return ExecuteWriteOrMarkup(arguments, asMarkup:=True)
+                        resultJson = ExecuteWriteOrMarkup(arguments, asMarkup:=True)
                     Case ToolCommentAdd
-                        Return ExecuteCommentAdd(arguments)
+                        resultJson = ExecuteCommentAdd(arguments)
                     Case ToolCommentList
-                        Return ExecuteCommentList(arguments)
+                        resultJson = ExecuteCommentList(arguments)
                     Case ToolCommentRemove
-                        Return ExecuteCommentRemove(arguments)
+                        resultJson = ExecuteCommentRemove(arguments)
                     Case ToolFormat
-                        Return ExecuteFormat(arguments)
+                        resultJson = ExecuteFormat(arguments)
                     Case ToolApplyTemplate
-                        Return ExecuteApplyTemplate(arguments)
+                        resultJson = ExecuteApplyTemplate(arguments)
                     Case ToolSaveAs
-                        Return ExecuteSaveAs(arguments)
+                        resultJson = ExecuteSaveAs(arguments)
                     Case Else
                         Return Err_("unknown_word_tool", "Unknown tool '" & toolName & "'.")
                 End Select
+
+                If isInPlaceArtifactTool AndAlso artifactMetadata IsNot Nothing Then
+                    Try
+                        Dim resultObject As Newtonsoft.Json.Linq.JObject = TryCast(Newtonsoft.Json.Linq.JToken.Parse(If(resultJson, "")), Newtonsoft.Json.Linq.JObject)
+                        If resultObject IsNot Nothing AndAlso resultObject("error") Is Nothing Then
+                            Dim physicalPath As String = If(resultObject("path")?.ToString(), "")
+                            resultJson = ArtifactDelivery.AttachOptionalSingleFileArtifactToResult(resultJson, artifactMetadata, physicalPath)
+                        End If
+                    Catch
+                    End Try
+                End If
+
+                Return resultJson
             Catch uae As UnauthorizedAccessException
                 Return Err_("access_denied", uae.Message)
             Catch ex As Exception
@@ -206,52 +252,93 @@ Namespace Agents
             If Not File.Exists(p) Then Return Err_("not_found", "File not found.")
 
             Dim authorRaw As String = GetStr(args, "author")
-            Dim author As String = If(String.IsNullOrWhiteSpace(authorRaw), "Red Ink", authorRaw)
+            Dim author As String =
+                If(String.IsNullOrWhiteSpace(authorRaw), "Inky", authorRaw)
 
             Dim tasks As List(Of MarkupTask) = ParseTasks(args)
-            If tasks.Count = 0 Then Return Err_("missing_tasks", "Provide either op/find/text or a 'tasks' array.")
+            If tasks.Count = 0 Then
+                Return Err_("missing_tasks", "Provide either op/find/text or a 'tasks' array.")
+            End If
+
+            For Each task As MarkupTask In tasks
+                If String.IsNullOrWhiteSpace(task.OperationId) Then
+                    Return Err_(
+                        "missing_operation_id",
+                        "Every word_write/word_markup logical operation requires an explicit opaque operation_id. Each batched task must carry its own operation_id.")
+                End If
+            Next
 
             Dim results As New List(Of Object)()
             Dim anyApplied As Boolean = False
             Dim failedCount As Integer = 0
 
-            Using doc As WordprocessingDocument = WordprocessingDocument.Open(p, isEditable:=True)
-                Dim body As W.Body = doc.MainDocumentPart.Document.Body
+            Using doc As WordprocessingDocument =
+                WordprocessingDocument.Open(p, isEditable:=True)
+
+                Dim body As W.Body =
+                    doc.MainDocumentPart.Document.Body
 
                 For Each t As MarkupTask In tasks
-                    Dim op As String = If(String.IsNullOrWhiteSpace(t.Op), "replace", t.Op)
+                    Dim op As String =
+                        If(String.IsNullOrWhiteSpace(t.Op), "replace", t.Op)
 
                     If op = "append" Then
                         For Each ln As String In SplitLines(t.Text)
-                            body.AppendChild(MakeMarkdownParagraph(ln, body, asMarkup, author))
+                            body.AppendChild(
+                                MakeMarkdownParagraph(
+                                    ln,
+                                    body,
+                                    asMarkup,
+                                    author))
                         Next
+
                         anyApplied = True
-                        results.Add(New With {Key .op = op, Key .applied = True})
+
+                        results.Add(
+                            New With {
+                                Key .operation_id = t.OperationId,
+                                Key .op = op,
+                                Key .applied = True
+                            })
+
                         Continue For
                     End If
 
                     If String.IsNullOrWhiteSpace(t.Find) Then
-                        results.Add(New With {Key .op = op, Key .applied = False, Key .error = "missing_find"})
+                        failedCount += 1
+
+                        results.Add(
+                            New With {
+                                Key .operation_id = t.OperationId,
+                                Key .op = op,
+                                Key .applied = False,
+                                Key .reason = "missing_find",
+                                Key .error = "missing_find"
+                            })
+
                         Continue For
                     End If
 
-                    ' Matching is per-W.Paragraph. A 'find' that spans a paragraph break can never
-                    ' match. To merge two paragraphs into one, replace the first and use
-                    ' delete_paragraph on the second (its paragraph mark is marked deleted).
                     If ContainsParagraphBreak(t.Find) Then
-                        results.Add(New With {
-                            Key .op = op,
-                            Key .applied = False,
-                            Key .error = "multi_paragraph_find",
-                            Key .message = "'find' spans more than one paragraph. Split into one task per paragraph; to merge two paragraphs, replace the first and use op 'delete_paragraph' on the second."
-                        })
+                        failedCount += 1
+
+                        results.Add(
+                            New With {
+                                Key .operation_id = t.OperationId,
+                                Key .op = op,
+                                Key .find = t.Find,
+                                Key .applied = False,
+                                Key .reason = "multi_paragraph_find",
+                                Key .error = "multi_paragraph_find",
+                                Key .message =
+                                    "'find' spans more than one paragraph. Split into one task per paragraph; to merge two paragraphs, replace the first and use op 'delete_paragraph' on the second."
+                            })
+
                         Continue For
                     End If
 
                     Dim count As Integer = 0
 
-                    ' Body, footnotes and endnotes are all edited so revisions apply wherever the
-                    ' text appears. Each story carries its own change-id scope root.
                     For Each sp As StoryParagraph In EnumerateStoryParagraphs(doc)
                         Dim para As W.Paragraph = sp.Para
                         Dim done As Boolean = False
@@ -259,11 +346,33 @@ Namespace Agents
                         If op = "delete_paragraph" Then
                             Dim mStart As Integer
                             Dim mLen As Integer
-                            If Not TryFindInText(GetParagraphText(para), t.Find, mStart, mLen) Then Continue For
-                            MarkParagraphDeleted(para, asMarkup, author, sp.Scope)
+
+                            If Not TryFindInText(
+                                GetParagraphText(para),
+                                t.Find,
+                                mStart,
+                                mLen) Then
+
+                                Continue For
+                            End If
+
+                            MarkParagraphDeleted(
+                                para,
+                                asMarkup,
+                                author,
+                                sp.Scope)
+
                             done = True
                         Else
-                            done = ApplyMarkupOpToParagraphSurgical(para, t.Find, t.Text, op, asMarkup, author, sp.Scope)
+                            done =
+                                ApplyMarkupOpToParagraphSurgical(
+                                    para,
+                                    t.Find,
+                                    t.Text,
+                                    op,
+                                    asMarkup,
+                                    author,
+                                    sp.Scope)
                         End If
 
                         If done Then
@@ -274,33 +383,57 @@ Namespace Agents
 
                     If count > 0 Then
                         anyApplied = True
-                        results.Add(New With {Key .op = op, Key .find = t.Find, Key .applied = True, Key .matches = count})
+
+                        results.Add(
+                            New With {
+                                Key .operation_id = t.OperationId,
+                                Key .op = op,
+                                Key .find = t.Find,
+                                Key .applied = True,
+                                Key .matches = count
+                            })
                     Else
                         failedCount += 1
-                        results.Add(New With {
-                            Key .op = op,
-                            Key .find = t.Find,
-                            Key .applied = False,
-                            Key .matches = 0,
-                            Key .reason = "no_match",
-                            Key .suggestions = SuggestClosestParagraphsAll(doc, t.Find, 3)
-                        })
+
+                        results.Add(
+                            New With {
+                                Key .operation_id = t.OperationId,
+                                Key .op = op,
+                                Key .find = t.Find,
+                                Key .applied = False,
+                                Key .matches = 0,
+                                Key .reason = "no_match",
+                                Key .suggestions =
+                                    SuggestClosestParagraphsAll(
+                                        doc,
+                                        t.Find,
+                                        3)
+                            })
                     End If
                 Next
 
                 If anyApplied Then
                     doc.MainDocumentPart.Document.Save()
-                    If doc.MainDocumentPart.FootnotesPart IsNot Nothing AndAlso doc.MainDocumentPart.FootnotesPart.Footnotes IsNot Nothing Then
+
+                    If doc.MainDocumentPart.FootnotesPart IsNot Nothing AndAlso
+                       doc.MainDocumentPart.FootnotesPart.Footnotes IsNot Nothing Then
+
                         doc.MainDocumentPart.FootnotesPart.Footnotes.Save()
                     End If
-                    If doc.MainDocumentPart.EndnotesPart IsNot Nothing AndAlso doc.MainDocumentPart.EndnotesPart.Endnotes IsNot Nothing Then
+
+                    If doc.MainDocumentPart.EndnotesPart IsNot Nothing AndAlso
+                       doc.MainDocumentPart.EndnotesPart.Endnotes IsNot Nothing Then
+
                         doc.MainDocumentPart.EndnotesPart.Endnotes.Save()
                     End If
                 End If
             End Using
 
-            Dim appliedCount As Integer = tasks.Count - failedCount
+            Dim appliedCount As Integer =
+                tasks.Count - failedCount
+
             Dim status As String
+
             If failedCount = 0 Then
                 status = "complete"
             ElseIf anyApplied Then
@@ -309,18 +442,25 @@ Namespace Agents
                 status = "none"
             End If
 
-            Return JsonConvert.SerializeObject(New With {
-                Key .path = p,
-                Key .markup = asMarkup,
-                Key .status = status,
-                Key .applied_count = appliedCount,
-                Key .failed_count = failedCount,
-                Key .tasks = results,
-                Key .hint = If(failedCount = 0, Nothing,
-                    "Tool call succeeded. " & failedCount.ToString() &
-                    " task(s) found no matching anchor (see tasks[].reason='no_match' and tasks[].suggestions). " &
-                    "Re-read the document to get the CURRENT text, then retry only the failed 'find' values using the exact current wording. Do not treat this as blocked.")
-            })
+            Return JsonConvert.SerializeObject(
+                New With {
+                    Key .path = p,
+                    Key .markup = asMarkup,
+                    Key .status = status,
+                    Key .applied_count = appliedCount,
+                    Key .failed_count = failedCount,
+                    Key .tasks = results,
+                    Key .hint =
+                        If(
+                            failedCount = 0,
+                            Nothing,
+                            "Tool call completed with " &
+                            failedCount.ToString() &
+                            " unresolved task(s). Inspect each failed tasks[].reason/error. " &
+                            "For no_match, re-read the CURRENT text and retry only the affected operation using the same operation_id. " &
+                            "For missing_find or multi_paragraph_find, correct the task shape before retrying. " &
+                            "Do not exceed the per-operation retry cap.")
+                })
         End Function
 
         ''' <summary>
@@ -364,6 +504,7 @@ Namespace Agents
         End Class
 
         Private Structure MarkupTask
+            Public OperationId As String
             Public Op As String
             Public Find As String
             Public Text As String
@@ -897,7 +1038,10 @@ Namespace Agents
             Dim result As New List(Of MarkupTask)()
             Dim token As JToken = Nothing
 
-            If args IsNot Nothing AndAlso args.ContainsKey("tasks") AndAlso args("tasks") IsNot Nothing Then
+            If args IsNot Nothing AndAlso
+               args.ContainsKey("tasks") AndAlso
+               args("tasks") IsNot Nothing Then
+
                 Try
                     token = JToken.FromObject(args("tasks"))
                 Catch
@@ -907,6 +1051,7 @@ Namespace Agents
             If token IsNot Nothing AndAlso token.Type = JTokenType.Array Then
                 For Each it As JToken In CType(token, JArray)
                     result.Add(New MarkupTask With {
+                        .OperationId = JStr(it, "operation_id"),
                         .Op = NormOp(JStr(it, "op")),
                         .Find = JStr(it, "find"),
                         .Text = JStr(it, "text"),
@@ -915,6 +1060,7 @@ Namespace Agents
                 Next
             Else
                 result.Add(New MarkupTask With {
+                    .OperationId = GetStr(args, "operation_id"),
                     .Op = NormOp(GetStr(args, "op")),
                     .Find = GetStr(args, "find"),
                     .Text = GetStr(args, "text"),
@@ -1020,11 +1166,28 @@ Namespace Agents
             Dim p As String = PathPolicy.Resolve(GetStr(args, "path"), PathAccess.Write)
             If Not File.Exists(p) Then Return Err_("not_found", "File not found.")
 
-            Dim defAuthor As String = If(String.IsNullOrWhiteSpace(GetStr(args, "author")), "Red Ink", GetStr(args, "author"))
-            Dim defInitials As String = If(String.IsNullOrWhiteSpace(GetStr(args, "initials")), "RI", GetStr(args, "initials"))
+            Dim defAuthor As String =
+                If(String.IsNullOrWhiteSpace(GetStr(args, "author")),
+                   "Inky",
+                   GetStr(args, "author"))
+
+            Dim defInitials As String =
+                If(String.IsNullOrWhiteSpace(GetStr(args, "initials")),
+                   "I",
+                   GetStr(args, "initials"))
 
             Dim tasks As List(Of CommentTask) = ParseCommentTasks(args)
-            If tasks.Count = 0 Then Return Err_("missing_tasks", "Provide either find/text or a 'tasks' array.")
+            If tasks.Count = 0 Then
+                Return Err_("missing_tasks", "Provide either find/text or a 'tasks' array.")
+            End If
+
+            For Each task As CommentTask In tasks
+                If String.IsNullOrWhiteSpace(task.OperationId) Then
+                    Return Err_(
+                        "missing_operation_id",
+                        "Every word_comment_add logical operation requires an explicit opaque operation_id. Each batched task must carry its own operation_id.")
+                End If
+            Next
 
             Dim results As New List(Of Object)()
             Dim anyApplied As Boolean = False
@@ -1033,7 +1196,8 @@ Namespace Agents
             Using doc As WordprocessingDocument = WordprocessingDocument.Open(p, isEditable:=True)
                 Dim main As MainDocumentPart = doc.MainDocumentPart
                 Dim body As W.Body = main.Document.Body
-                Dim commentsPart As WordprocessingCommentsPart = main.WordprocessingCommentsPart
+                Dim commentsPart As WordprocessingCommentsPart =
+                    main.WordprocessingCommentsPart
 
                 If commentsPart Is Nothing Then
                     commentsPart = main.AddNewPart(Of WordprocessingCommentsPart)()
@@ -1043,17 +1207,40 @@ Namespace Agents
                 For Each t As CommentTask In tasks
                     If String.IsNullOrWhiteSpace(t.Find) Then
                         failedCount += 1
-                        results.Add(New With {Key .find = t.Find, Key .applied = False, Key .reason = "missing_find"})
+
+                        results.Add(New With {
+                            Key .operation_id = t.OperationId,
+                            Key .find = t.Find,
+                            Key .applied = False,
+                            Key .reason = "missing_find"
+                        })
+
                         Continue For
                     End If
+
                     If String.IsNullOrWhiteSpace(t.Text) Then
                         failedCount += 1
-                        results.Add(New With {Key .find = t.Find, Key .applied = False, Key .reason = "missing_text"})
+
+                        results.Add(New With {
+                            Key .operation_id = t.OperationId,
+                            Key .find = t.Find,
+                            Key .applied = False,
+                            Key .reason = "missing_text"
+                        })
+
                         Continue For
                     End If
+
                     If ContainsParagraphBreak(t.Find) Then
                         failedCount += 1
-                        results.Add(New With {Key .find = t.Find, Key .applied = False, Key .reason = "multi_paragraph_find"})
+
+                        results.Add(New With {
+                            Key .operation_id = t.OperationId,
+                            Key .find = t.Find,
+                            Key .applied = False,
+                            Key .reason = "multi_paragraph_find"
+                        })
+
                         Continue For
                     End If
 
@@ -1062,6 +1249,7 @@ Namespace Agents
 
                     For Each para As W.Paragraph In body.Descendants(Of W.Paragraph)().ToList()
                         If Not LocateFindProbe(para, t.Find) Then Continue For
+
                         If AttachCommentSurgical(para, t.Find, newId, body) Then
                             attached = True
                             Exit For
@@ -1071,18 +1259,38 @@ Namespace Agents
                     If attached Then
                         Dim cmt As New W.Comment() With {
                             .Id = newId.ToString(),
-                            .Author = If(String.IsNullOrWhiteSpace(t.Author), defAuthor, t.Author),
-                            .Initials = If(String.IsNullOrWhiteSpace(t.Initials), defInitials, t.Initials),
+                            .Author = If(
+                                String.IsNullOrWhiteSpace(t.Author),
+                                defAuthor,
+                                t.Author),
+                            .Initials = If(
+                                String.IsNullOrWhiteSpace(t.Initials),
+                                defInitials,
+                                t.Initials),
                             .Date = DateTime.UtcNow
                         }
-                        cmt.AppendChild(New W.Paragraph(New W.Run(New W.Text(t.Text) With {.Space = SpaceProcessingModeValues.Preserve})))
-                        commentsPart.Comments.AppendChild(cmt)
 
+                        cmt.AppendChild(
+                            New W.Paragraph(
+                                New W.Run(
+                                    New W.Text(t.Text) With {
+                                        .Space = SpaceProcessingModeValues.Preserve
+                                    })))
+
+                        commentsPart.Comments.AppendChild(cmt)
                         anyApplied = True
-                        results.Add(New With {Key .find = t.Find, Key .applied = True, Key .comment_id = newId})
+
+                        results.Add(New With {
+                            Key .operation_id = t.OperationId,
+                            Key .find = t.Find,
+                            Key .applied = True,
+                            Key .comment_id = newId
+                        })
                     Else
                         failedCount += 1
+
                         results.Add(New With {
+                            Key .operation_id = t.OperationId,
                             Key .find = t.Find,
                             Key .applied = False,
                             Key .reason = "no_match",
@@ -1098,6 +1306,7 @@ Namespace Agents
             End Using
 
             Dim status As String
+
             If failedCount = 0 Then
                 status = "complete"
             ElseIf anyApplied Then
@@ -1112,7 +1321,9 @@ Namespace Agents
                 Key .applied_count = tasks.Count - failedCount,
                 Key .failed_count = failedCount,
                 Key .tasks = results,
-                Key .hint = If(failedCount = 0, Nothing,
+                Key .hint = If(
+                    failedCount = 0,
+                    Nothing,
                     "Tool call succeeded. " & failedCount.ToString() &
                     " comment(s) found no matching anchor (see tasks[].reason='no_match' and tasks[].suggestions). " &
                     "Re-read the document for the CURRENT text and retry only the failed 'find' values. Do not treat this as blocked.")
@@ -1120,6 +1331,7 @@ Namespace Agents
         End Function
 
         Private Structure CommentTask
+            Public OperationId As String
             Public Find As String
             Public Text As String
             Public Author As String
@@ -1130,7 +1342,10 @@ Namespace Agents
             Dim result As New List(Of CommentTask)()
             Dim token As JToken = Nothing
 
-            If args IsNot Nothing AndAlso args.ContainsKey("tasks") AndAlso args("tasks") IsNot Nothing Then
+            If args IsNot Nothing AndAlso
+               args.ContainsKey("tasks") AndAlso
+               args("tasks") IsNot Nothing Then
+
                 Try
                     token = JToken.FromObject(args("tasks"))
                 Catch
@@ -1140,6 +1355,7 @@ Namespace Agents
             If token IsNot Nothing AndAlso token.Type = JTokenType.Array Then
                 For Each it As JToken In CType(token, JArray)
                     result.Add(New CommentTask With {
+                        .OperationId = JStr(it, "operation_id"),
                         .Find = JStr(it, "find"),
                         .Text = JStr(it, "text"),
                         .Author = JStr(it, "author"),
@@ -1148,6 +1364,7 @@ Namespace Agents
                 Next
             Else
                 result.Add(New CommentTask With {
+                    .OperationId = GetStr(args, "operation_id"),
                     .Find = GetStr(args, "find"),
                     .Text = GetStr(args, "text"),
                     .Author = GetStr(args, "author"),
@@ -1397,6 +1614,20 @@ Namespace Agents
 
             If Not File.Exists(src) Then Return Err_("not_found", "Template not found: " & src)
 
+            Dim artifactMetadata As OptionalToolArtifactMetadata = Nothing
+            Dim artifactFailureCode As String = ""
+            Dim artifactFailureMessage As String = ""
+
+            If Not ArtifactDelivery.TryPrepareOptionalToolArtifactMetadata(
+                args,
+                ArtifactStorageKind.Unknown,
+                artifactMetadata,
+                artifactFailureCode,
+                artifactFailureMessage) Then
+
+                Return Err_(artifactFailureCode, artifactFailureMessage)
+            End If
+
             Dim dst As String = PathPolicy.NewWritablePath(outName)
             File.Copy(src, dst, overwrite:=False)
 
@@ -1437,24 +1668,130 @@ Namespace Agents
                 End Using
             End If
 
+            If artifactMetadata Is Nothing Then
+                Return JsonConvert.SerializeObject(New With {
+                    Key .path = dst,
+                    Key .template = src,
+                    Key .substitutions = placeholders.Count
+                })
+            End If
+
             Return JsonConvert.SerializeObject(New With {
                 Key .path = dst,
                 Key .template = src,
-                Key .substitutions = placeholders.Count
+                Key .substitutions = placeholders.Count,
+                Key .created = True,
+                Key .produces_user_deliverable = artifactMetadata.ProducesUserDeliverable,
+                Key .produces_intermediate_data = artifactMetadata.ProducesIntermediateData,
+                Key .artifacts = New System.Object() {artifactMetadata.BuildArtifact(dst)}
             })
         End Function
 
         Private Shared Function ExecuteSaveAs(args As IDictionary(Of String, Object)) As String
+            Dim artifactId As String =
+                GetStr(args, "artifact_id").Trim()
+
+            Dim logicalDeliverableId As String =
+                GetStr(args, "logical_deliverable_id").Trim()
+
+            Dim outputSlotId As String =
+                GetStr(args, "output_slot_id").Trim()
+
+            If artifactId = "" OrElse logicalDeliverableId = "" OrElse outputSlotId = "" Then
+                Return Err_(
+                    "missing_artifact_identity",
+                    "word_save_as requires explicit artifact_id, logical_deliverable_id, and output_slot_id values.")
+            End If
+
+            Dim expectedToken As JToken = Nothing
+
+            If args IsNot Nothing AndAlso
+               args.ContainsKey("expected_artifacts") AndAlso
+               args("expected_artifacts") IsNot Nothing Then
+
+                Try
+                    expectedToken = JToken.FromObject(args("expected_artifacts"))
+                Catch
+                End Try
+            End If
+
+            If expectedToken Is Nothing OrElse
+               expectedToken.Type <> JTokenType.Array OrElse
+               DirectCast(expectedToken, JArray).Count = 0 Then
+
+                Return Err_(
+                    "missing_expected_artifacts",
+                    "word_save_as requires expected_artifacts containing the complete expected final output-slot set.")
+            End If
+
+            Dim currentSlotDeclared As Boolean = False
+
+            For Each expectedItem As JToken In DirectCast(expectedToken, JArray)
+                Dim expectedObject As JObject = TryCast(expectedItem, JObject)
+                If expectedObject Is Nothing Then
+                    Return Err_(
+                        "invalid_expected_artifacts",
+                        "Every expected_artifacts item must contain logical_deliverable_id and output_slot_id.")
+                End If
+
+                Dim expectedLogicalId As String =
+                    If(expectedObject.Value(Of String)("logical_deliverable_id"), "").Trim()
+
+                Dim expectedSlotId As String =
+                    If(expectedObject.Value(Of String)("output_slot_id"), "").Trim()
+
+                If expectedLogicalId = "" OrElse expectedSlotId = "" Then
+                    Return Err_(
+                        "invalid_expected_artifacts",
+                        "Every expected_artifacts item must contain non-empty logical_deliverable_id and output_slot_id.")
+                End If
+
+                If String.Equals(
+                    expectedLogicalId,
+                    logicalDeliverableId,
+                    StringComparison.Ordinal) AndAlso
+                   String.Equals(
+                    expectedSlotId,
+                    outputSlotId,
+                    StringComparison.Ordinal) Then
+
+                    currentSlotDeclared = True
+                End If
+            Next
+
+            If Not currentSlotDeclared Then
+                Return Err_(
+                    "current_output_slot_not_expected",
+                    "The current logical_deliverable_id/output_slot_id pair must appear in expected_artifacts.")
+            End If
+
             Dim src As String = PathPolicy.Resolve(GetStr(args, "source"), PathAccess.Read)
             If Not File.Exists(src) Then Return Err_("not_found", "Source not found.")
 
-            Dim outName As String = If(GetStr(args, "output_name"), Path.GetFileName(src))
+            Dim outName As String =
+                If(GetStr(args, "output_name"), Path.GetFileName(src))
+
             Dim dst As String = PathPolicy.NewWritablePath(outName)
             File.Copy(src, dst, overwrite:=False)
 
+            Dim artifact As New JObject From {
+                {"artifact_id", GetStr(args, "artifact_id")},
+                {"logical_deliverable_id", GetStr(args, "logical_deliverable_id")},
+                {"output_slot_id", GetStr(args, "output_slot_id")},
+                {"path", dst},
+                {"state", "final"},
+                {"delivery_intent", "deliver_to_user"},
+                {"storage_kind", GetStr(args, "storage_kind")},
+                {"supersedes_artifact_id", GetStr(args, "supersedes_artifact_id")}
+            }
+
             Return JsonConvert.SerializeObject(New With {
                 Key .source = src,
-                Key .path = dst
+                Key .path = dst,
+                Key .created = True,
+                Key .saved = True,
+                Key .produces_user_deliverable = True,
+                Key .artifacts = New Object() {artifact}
             })
         End Function
 
@@ -1869,7 +2206,7 @@ Namespace Agents
             Dim lastAtom As Integer
             If Not LocateFindInAtoms(atoms, find, firstAtom, lastAtom) Then Return False
 
-            Dim em As New MarkupEmitter(body, "Red Ink")
+            Dim em As New MarkupEmitter(body, "Inky")
 
             EmitOriginalRange(em, atoms, 0, firstAtom - 1)
             em.Flush()
@@ -2076,8 +2413,28 @@ Namespace Agents
                 .ToolErrorHandling = "skip",
                 .ModelDescription = "Word (write, no markup)",
                 .CapabilityTags = "docx_edit",
-                .ToolDefinition = "{""name"":""" & ToolWrite & """,""description"":""Modify text in a .docx WITHOUT tracked changes, in the main body AND in footnotes and endnotes, preserving fields, images, comments and run formatting. Ops: replace | insert_before | insert_after | append (append targets the main body) | delete_paragraph. 'find' must not span a paragraph break; to merge two paragraphs, replace the first and delete_paragraph the second. Pass multiple edits at once via 'tasks'."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string""},""op"":{""type"":""string"",""enum"":[""replace"",""insert_before"",""insert_after"",""append"",""delete_paragraph""]},""find"":{""type"":""string""},""text"":{""type"":""string""},""only_first"":{""type"":""boolean"",""description"":""Default true.""},""tasks"":{""type"":""array"",""description"":""Batch of edits applied in order; each may match text produced by earlier tasks."",""items"":{""type"":""object"",""properties"":{""op"":{""type"":""string"",""enum"":[""replace"",""insert_before"",""insert_after"",""append"",""delete_paragraph""]},""find"":{""type"":""string""},""text"":{""type"":""string""},""only_first"":{""type"":""boolean""}}}}},""required"":[""path""]}}",
-                .ToolInstructionsPrompt = ToolWrite & ": Edit a .docx without revision marks. Same behavior as word_markup but without tracked changes. Batch related edits in one call via 'tasks'. The result 'status' may be complete, partial, or none: partial/none is NOT a block or failure. When status is partial/none, re-read the document to get the CURRENT text and retry ONLY the failed tasks[].find values (see tasks[].suggestions); then report completion normally. " &
+                .ToolDefinition =
+                    "{""name"":""" & ToolWrite & """," &
+                    """description"":""Modify text in a .docx WITHOUT tracked changes, in the main body AND in footnotes and endnotes, preserving fields, images, comments and run formatting. Ops: replace | insert_before | insert_after | append (append targets the main body) | delete_paragraph. 'find' must not span a paragraph break; to merge two paragraphs, replace the first and delete_paragraph the second. Pass multiple edits at once via 'tasks'.""," &
+                    """parameters"":{""type"":""object"",""properties"":{" &
+                    """path"":{""type"":""string""}," &
+                    """operation_id"":{""type"":""string"",""description"":""Stable caller-supplied logical operation id. Reuse exactly for retries of the same logical operation.""}," &
+                    """op"":{""type"":""string"",""enum"":[""replace"",""insert_before"",""insert_after"",""append"",""delete_paragraph""]}," &
+                    """find"":{""type"":""string""}," &
+                    """text"":{""type"":""string""}," &
+                    """only_first"":{""type"":""boolean"",""description"":""Default true.""}," &
+                    """tasks"":{""type"":""array"",""description"":""Batch of edits applied in order; each may match text produced by earlier tasks."",""items"":{""type"":""object"",""properties"":{" &
+                    """operation_id"":{""type"":""string"",""description"":""Stable caller-supplied logical operation id for this task.""}," &
+                    """op"":{""type"":""string"",""enum"":[""replace"",""insert_before"",""insert_after"",""append"",""delete_paragraph""]}," &
+                    """find"":{""type"":""string""}," &
+                    """text"":{""type"":""string""}," &
+                    """only_first"":{""type"":""boolean""}},""required"":[""operation_id""]}}}," &
+                    """required"":[""path""]}}",
+                .ToolInstructionsPrompt =
+                    ToolWrite & ": Edit a .docx without revision marks. Same behavior as word_markup but without tracked changes. " &
+                    "Batch related edits in one call via 'tasks'. Every logical operation MUST have an explicit opaque operation_id; each batched task needs its own operation_id. Preserve it unchanged, including retries. " &
+                    "The result 'status' may be complete, partial, or none: partial/none is NOT a block or failure. " &
+                    "When status is partial/none, re-read the document to get the CURRENT text and retry ONLY the failed tasks[].find values; then report completion normally. " &
                     "Prefer the Outlook and Autopilot tools (like process_word_document) when they can accomplish the task; only fall back to word_* tools when those tools are not suitable, or when a skill or the user explicitly asks to use word_* tools."
             }
         End Function
@@ -2090,9 +2447,30 @@ Namespace Agents
                 .ToolErrorHandling = "skip",
                 .ModelDescription = "Word (markup / tracked changes)",
                 .CapabilityTags = "docx_edit",
-                .ToolDefinition = "{""name"":""" & ToolMarkup & """,""description"":""Modify text in a .docx using tracked changes (Word revision marks), in the main body AND in footnotes and endnotes, preserving fields, images, comments, existing tracked changes and run formatting. Only inserted/deleted words are marked (word-level diff; large rewrites collapse to a single change). 'find' must not span a paragraph break; to merge two paragraphs, replace the first and delete_paragraph the second. Pass multiple edits at once via 'tasks'."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string""},""op"":{""type"":""string"",""enum"":[""replace"",""insert_before"",""insert_after"",""append"",""delete_paragraph""]},""find"":{""type"":""string""},""text"":{""type"":""string""},""author"":{""type"":""string""},""only_first"":{""type"":""boolean""},""tasks"":{""type"":""array"",""description"":""Batch of edits applied in order; each may match text produced by earlier tasks."",""items"":{""type"":""object"",""properties"":{""op"":{""type"":""string"",""enum"":[""replace"",""insert_before"",""insert_after"",""append"",""delete_paragraph""]},""find"":{""type"":""string""},""text"":{""type"":""string""},""only_first"":{""type"":""boolean""}}}}},""required"":[""path""]}}",
-                .ToolInstructionsPrompt = ToolMarkup & ": Edit a .docx with revision marks (tracked changes). Batch related edits in one call via 'tasks'. The result 'status' may be complete, partial, or none: partial/none is NOT a block or failure. When status is partial/none, re-read the document to get the CURRENT text and retry ONLY the failed tasks[].find values (see tasks[].suggestions); then report completion normally. " &
-                "Prefer the Outlook and Autopilot tools when they can accomplish the task; only fall back to word_* tools when those tools are not suitable, or when a skill or the user explicitly asks to use word_* tools."
+                .ToolDefinition =
+                    "{""name"":""" & ToolMarkup & """," &
+                    """description"":""Modify text in a .docx using tracked changes (Word revision marks), in the main body AND in footnotes and endnotes, preserving fields, images, comments, existing tracked changes and run formatting. Only inserted/deleted words are marked. Pass multiple edits at once via 'tasks'.""," &
+                    """parameters"":{""type"":""object"",""properties"":{" &
+                    """path"":{""type"":""string""}," &
+                    """operation_id"":{""type"":""string"",""description"":""Stable caller-supplied logical operation id. Reuse exactly for retries of the same logical operation.""}," &
+                    """op"":{""type"":""string"",""enum"":[""replace"",""insert_before"",""insert_after"",""append"",""delete_paragraph""]}," &
+                    """find"":{""type"":""string""}," &
+                    """text"":{""type"":""string""}," &
+                    """author"":{""type"":""string""}," &
+                    """only_first"":{""type"":""boolean""}," &
+                    """tasks"":{""type"":""array"",""description"":""Batch of edits applied in order; each may match text produced by earlier tasks."",""items"":{""type"":""object"",""properties"":{" &
+                    """operation_id"":{""type"":""string"",""description"":""Stable caller-supplied logical operation id for this task.""}," &
+                    """op"":{""type"":""string"",""enum"":[""replace"",""insert_before"",""insert_after"",""append"",""delete_paragraph""]}," &
+                    """find"":{""type"":""string""}," &
+                    """text"":{""type"":""string""}," &
+                    """only_first"":{""type"":""boolean""}},""required"":[""operation_id""]}}}," &
+                    """required"":[""path""]}}",
+                .ToolInstructionsPrompt =
+                    ToolMarkup & ": Edit a .docx with revision marks (tracked changes). " &
+                    "Batch related edits in one call via 'tasks'. Every logical operation MUST have an explicit opaque operation_id; each batched task needs its own operation_id. Preserve it unchanged, including retries. " &
+                    "The result 'status' may be complete, partial, or none: partial/none is NOT a block or failure. " &
+                    "When status is partial/none, re-read the document to get the CURRENT text and retry ONLY the failed tasks[].find values; then report completion normally. " &
+                    "Prefer the Outlook and Autopilot tools when they can accomplish the task; only fall back to word_* tools when those tools are not suitable, or when a skill or the user explicitly asks to use word_* tools."
             }
         End Function
 
@@ -2104,9 +2482,29 @@ Namespace Agents
                 .ToolErrorHandling = "skip",
                 .ModelDescription = "Word (comment add)",
                 .CapabilityTags = "docx_edit",
-                .ToolDefinition = "{""name"":""" & ToolCommentAdd & """,""description"":""Attach Word comment(s) to matched text, preserving footnotes, fields, images and formatting. 'find' uses format/whitespace-insensitive matching within a single paragraph. Add many comments at once via 'tasks'. Result reports status (complete/partial/none) with per-task applied flag and suggestions for anchors that were not found."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string""},""find"":{""type"":""string""},""text"":{""type"":""string""},""author"":{""type"":""string""},""initials"":{""type"":""string""},""tasks"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{""find"":{""type"":""string""},""text"":{""type"":""string""},""author"":{""type"":""string""},""initials"":{""type"":""string""}}}}},""required"":[""path""]}}",
-                .ToolInstructionsPrompt = ToolCommentAdd & ": Add Word bubble comment(s) to matched span(s). Add many at once via 'tasks'. The result 'status' may be complete, partial, or none: partial/none is NOT a block or failure. When status is partial/none, re-read the document for the CURRENT text and retry ONLY the failed tasks[].find values (see tasks[].suggestions); then report completion normally. " &
-                                "Prefer the Outlook and Autopilot tools when they can accomplish the task; only fall back to word_* tools when those tools are not suitable, or when a skill or the user explicitly asks to use word_* tools."
+                .ToolDefinition =
+                    "{""name"":""" & ToolCommentAdd & """," &
+                    """description"":""Attach Word comment(s) to matched text, preserving footnotes, fields, images and formatting. 'find' uses format/whitespace-insensitive matching within a single paragraph. Add many comments at once via 'tasks'. Result reports status with per-task applied flag and suggestions.""," &
+                    """parameters"":{""type"":""object"",""properties"":{" &
+                    """path"":{""type"":""string""}," &
+                    """operation_id"":{""type"":""string"",""description"":""Stable caller-supplied logical operation id. Reuse exactly for retries of the same logical operation.""}," &
+                    """find"":{""type"":""string""}," &
+                    """text"":{""type"":""string""}," &
+                    """author"":{""type"":""string""}," &
+                    """initials"":{""type"":""string""}," &
+                    """tasks"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
+                    """operation_id"":{""type"":""string"",""description"":""Stable caller-supplied logical operation id for this task.""}," &
+                    """find"":{""type"":""string""}," &
+                    """text"":{""type"":""string""}," &
+                    """author"":{""type"":""string""}," &
+                    """initials"":{""type"":""string""}},""required"":[""operation_id""]}}}," &
+                    """required"":[""path""]}}",
+                .ToolInstructionsPrompt =
+                    ToolCommentAdd & ": Add Word bubble comment(s) to matched span(s). " &
+                    "Add many at once via 'tasks'. Every logical comment operation MUST have an explicit opaque operation_id; each batched task needs its own operation_id. Preserve it unchanged, including retries. " &
+                    "The result 'status' may be complete, partial, or none: partial/none is NOT a block or failure. " &
+                    "When status is partial/none, re-read the document for the CURRENT text and retry ONLY the failed tasks[].find values; then report completion normally. " &
+                    "Prefer the Outlook and Autopilot tools when they can accomplish the task; only fall back to word_* tools when those tools are not suitable, or when a skill or the user explicitly asks to use word_* tools."
             }
         End Function
 
@@ -2153,8 +2551,9 @@ Namespace Agents
                 .ToolPriority = 888,
                 .ToolErrorHandling = "skip",
                 .ModelDescription = "Word (apply template)",
-                .ToolDefinition = "{""name"":""" & ToolApplyTemplate & """,""description"":""Clone a .docx template from a skill's references/ directory to a new file in the default writable root (the connected workspace, otherwise the current session's staging/working area) and substitute {{placeholders}} from the 'substitutions' object."",""parameters"":{""type"":""object"",""properties"":{""skill"":{""type"":""string"",""description"":""Skill name.""},""template"":{""type"":""string"",""description"":""Path relative to the skill's references/ directory.""},""output_name"":{""type"":""string"",""description"":""Suggested output filename (default 'from_template.docx').""},""substitutions"":{""type"":""object"",""description"":""Object of {placeholderName: value}; each key K becomes the literal '{{K}}' in the template.""}},""required"":[""skill"",""template""]}}",
-                .ToolInstructionsPrompt = ToolApplyTemplate & ": Instantiate a Word template from a skill's references/ directory."
+                .CapabilityTags = "artifact_generation",
+                .ToolDefinition = "{""name"":""" & ToolApplyTemplate & """,""description"":""Clone a .docx template from a skill's references/ directory to a new file in the default writable root (the connected workspace, otherwise the current session's staging/working area) and substitute {{placeholders}} from the 'substitutions' object. Optional explicit artifact fields can register the resulting single file without changing legacy calls."",""parameters"":{""type"":""object"",""properties"":{""skill"":{""type"":""string"",""description"":""Skill name.""},""template"":{""type"":""string"",""description"":""Path relative to the skill's references/ directory.""},""output_name"":{""type"":""string"",""description"":""Suggested output filename (default 'from_template.docx').""},""substitutions"":{""type"":""object"",""description"":""Object of {placeholderName: value}; each key K becomes the literal '{{K}}' in the template.""},""artifact_id"":{""type"":""string""},""logical_deliverable_id"":{""type"":""string""},""output_slot_id"":{""type"":""string""},""supersedes_artifact_id"":{""type"":""string""},""artifact_state"":{""type"":""string"",""enum"":[""working"",""intermediate"",""final""]},""artifact_delivery_intent"":{""type"":""string"",""enum"":[""none"",""deliver_to_user"",""persist_only"",""deliver_and_persist""]},""storage_kind"":{""type"":""string"",""enum"":[""session_staging"",""connected_workspace"",""host_managed"",""unknown""]},""expected_artifacts"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{""logical_deliverable_id"":{""type"":""string""},""output_slot_id"":{""type"":""string""}},""required"":[""logical_deliverable_id"",""output_slot_id""]}}},""required"":[""skill"",""template""]}}",
+                .ToolInstructionsPrompt = ToolApplyTemplate & ": Instantiate a Word template from a skill's references/ directory. For an explicit artifact, preserve the caller-supplied opaque IDs and declare artifact_state/artifact_delivery_intent; a user-facing Final also requires the complete expected_artifacts set."
             }
         End Function
 
@@ -2165,8 +2564,25 @@ Namespace Agents
                 .ToolPriority = 889,
                 .ToolErrorHandling = "skip",
                 .ModelDescription = "Word (save as)",
-                .ToolDefinition = "{""name"":""" & ToolSaveAs & """,""description"":""Copy a .docx to a new path inside the default writable root (the connected workspace, otherwise the current session's staging/working area, which is delivered to the user at the end of the run)."",""parameters"":{""type"":""object"",""properties"":{""source"":{""type"":""string""},""output_name"":{""type"":""string""}},""required"":[""source""]}}",
-                .ToolInstructionsPrompt = ToolSaveAs & ": Copy a .docx to a new path in the writable root."
+                .ToolDefinition =
+                    "{""name"":""" & ToolSaveAs & """," &
+                    """description"":""Copy a .docx to a new path inside the default writable root. artifact_id, logical_deliverable_id, output_slot_id, and expected_artifacts are required explicit orchestration fields. supersedes_artifact_id and storage_kind are optional explicit metadata; no artifact identity is inferred from filenames or paths.""," &
+                    """parameters"":{""type"":""object"",""properties"":{" &
+                    """source"":{""type"":""string""}," &
+                    """output_name"":{""type"":""string""}," &
+                    """artifact_id"":{""type"":""string"",""description"":""Opaque caller-supplied id for this physical artifact.""}," &
+                    """logical_deliverable_id"":{""type"":""string"",""description"":""Opaque caller-supplied logical deliverable id. No host inference is performed.""}," &
+                    """output_slot_id"":{""type"":""string"",""description"":""Opaque caller-supplied output slot id within the logical deliverable.""}," &
+                    """supersedes_artifact_id"":{""type"":""string"",""description"":""Optional exact artifact id superseded by this output.""}," &
+                    """storage_kind"":{""type"":""string"",""enum"":[""session_staging"",""connected_workspace"",""host_managed"",""unknown""]}," &
+                    """expected_artifacts"":{""type"":""array"",""description"":""Required complete explicit list of final output slots expected for this task. Completion is blocked until every listed slot has a current final artifact."",""items"":{""type"":""object"",""properties"":{" &
+                    """logical_deliverable_id"":{""type"":""string""}," &
+                    """output_slot_id"":{""type"":""string""}},""required"":[""logical_deliverable_id"",""output_slot_id""]}}}," &
+                    """required"":[""source"",""artifact_id"",""logical_deliverable_id"",""output_slot_id"",""expected_artifacts""]}}",
+                .ToolInstructionsPrompt =
+                    ToolSaveAs & ": Copy a .docx to a new path in the writable root. " &
+                    "artifact_id, logical_deliverable_id, output_slot_id, and expected_artifacts are required. expected_artifacts MUST declare the complete expected final output-slot set for this task, including the current output slot. " &
+                    "Preserve artifact_id, logical_deliverable_id, output_slot_id, supersedes_artifact_id, storage_kind, and expected_artifacts exactly. Never derive or change artifact identity from the output filename."
             }
         End Function
 

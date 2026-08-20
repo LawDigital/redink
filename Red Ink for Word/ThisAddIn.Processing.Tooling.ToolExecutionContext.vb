@@ -109,6 +109,7 @@ Partial Public Class ThisAddIn
         Public Property PendingRejectedTurnExplanation As String = ""
 
         Public Const MaxContinuationRetries As Integer = 5
+        Public Const MaxEmptyResponseRetries As Integer = 1
 
         ''' <summary>Per-target counts of transport-successful but zero-change (no-op) tool results this run.</summary>
         Public Property ZeroChangeOperationCounts As Dictionary(Of String, Integer) =

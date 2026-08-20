@@ -621,6 +621,8 @@ Partial Public Class ThisAddIn
             Debug.WriteLine("Error in Undo: " & ex.Message)
         End Try
 
+        Return ""
+
     End Function
 
     ''' <summary>

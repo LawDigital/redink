@@ -148,6 +148,23 @@ Namespace Agents
                 target = PathPolicy.Resolve(rawPath, PathAccess.Write)
             End If
 
+            Dim artifactMetadata As OptionalToolArtifactMetadata = Nothing
+            Dim artifactFailureCode As String = ""
+            Dim artifactFailureMessage As String = ""
+
+            If Not ArtifactDelivery.TryPrepareOptionalToolArtifactMetadata(
+                args,
+                ArtifactStorageKind.Unknown,
+                artifactMetadata,
+                artifactFailureCode,
+                artifactFailureMessage) Then
+
+                Return JsonConvert.SerializeObject(New With {
+                    Key .error = artifactFailureCode,
+                    Key .message = artifactFailureMessage
+                })
+            End If
+
             Dim dir = Path.GetDirectoryName(target)
             If Not String.IsNullOrWhiteSpace(dir) AndAlso Not Directory.Exists(dir) Then Directory.CreateDirectory(dir)
 
@@ -168,10 +185,21 @@ Namespace Agents
             ' Pick up edits to SKILL.md/AGENT.md immediately when writing into a resource root.
             AgentResources.RefreshIfResourcePath(target)
 
+            If artifactMetadata Is Nothing Then
+                Return JsonConvert.SerializeObject(New With {
+                    Key .path = target,
+                    Key .size = fi.Length,
+                    Key .mode = If(String.IsNullOrWhiteSpace(mode), "overwrite", mode)
+                })
+            End If
+
             Return JsonConvert.SerializeObject(New With {
                 Key .path = target,
                 Key .size = fi.Length,
-                Key .mode = If(String.IsNullOrWhiteSpace(mode), "overwrite", mode)
+                Key .mode = If(String.IsNullOrWhiteSpace(mode), "overwrite", mode),
+                Key .produces_user_deliverable = artifactMetadata.ProducesUserDeliverable,
+                Key .produces_intermediate_data = artifactMetadata.ProducesIntermediateData,
+                Key .artifacts = New System.Object() {artifactMetadata.BuildArtifact(target)}
             })
         End Function
 
@@ -268,7 +296,15 @@ Namespace Agents
                 """path"":{""type"":""string"",""description"":""Absolute path, or a path relative to the default writable root (connected workspace, otherwise the session staging/working area). Omit to auto-name in the default writable root.""}," &
                 """filename"":{""type"":""string"",""description"":""Suggested filename when 'path' is omitted.""}," &
                 """text"":{""type"":""string"",""description"":""Content to write.""}," &
-                """mode"":{""type"":""string"",""enum"":[""overwrite"",""append"",""create_new""],""description"":""Write mode (default 'overwrite').""}}," &
+                """mode"":{""type"":""string"",""enum"":[""overwrite"",""append"",""create_new""],""description"":""Write mode (default 'overwrite').""}," &
+                """artifact_id"":{""type"":""string"",""description"":""Optional opaque artifact id. When any artifact metadata is supplied, artifact_id/logical_deliverable_id/output_slot_id/artifact_state/artifact_delivery_intent are required together.""}," &
+                """logical_deliverable_id"":{""type"":""string""}," &
+                """output_slot_id"":{""type"":""string""}," &
+                """supersedes_artifact_id"":{""type"":""string""}," &
+                """artifact_state"":{""type"":""string"",""enum"":[""working"",""intermediate"",""final""]}," &
+                """artifact_delivery_intent"":{""type"":""string"",""enum"":[""none"",""deliver_to_user"",""persist_only"",""deliver_and_persist""]}," &
+                """storage_kind"":{""type"":""string"",""enum"":[""session_staging"",""connected_workspace"",""host_managed"",""unknown""]}," &
+                """expected_artifacts"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{""logical_deliverable_id"":{""type"":""string""},""output_slot_id"":{""type"":""string""}},""required"":[""logical_deliverable_id"",""output_slot_id""]}}}," &
                 """required"":[""text""]}}"
             Return New ModelConfig() With {
                 .ToolName = ToolWrite,
@@ -277,7 +313,8 @@ Namespace Agents
                 .ModelDescription = "Text (write)",
                 .Tool = True,
                 .ToolPriority = 921,
-                .ToolErrorHandling = "skip"
+                .ToolErrorHandling = "skip",
+                .CapabilityTags = "artifact_generation"
             }
         End Function
 
