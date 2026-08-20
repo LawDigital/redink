@@ -143,6 +143,14 @@ Partial Public Class ThisAddIn
         Public Property LatestUserRequestRaw As String
         Public Property HostTaskSummary As String
 
+        ' Deterministic skill-first gate for configured assessment/checklist workflows.
+        Public Property RequiredFirstSkillToolName As System.String = ""
+        Public Property RequiredFirstSkillSatisfied As System.Boolean = False
+
+        ' Host-enforced allowed_tools boundary for the active constrained skill.
+        Public Property ActiveSkillToolScopeName As System.String = ""
+        Public Property ActiveSkillAllowedToolNames As System.Collections.Generic.HashSet(Of System.String)
+
         Public Property FinalResponseContract As SharedLibrary.Agents.ToolingFinalResponseContract =
             SharedLibrary.Agents.ToolingFinalResponseContract.UserFacingTaskStatus
 
@@ -183,6 +191,10 @@ Partial Public Class ThisAddIn
             LastInvalidTurnRepeatCount = 0
             ForceNoToolFinalizationRequested = False
             ForceNoToolFinalizationReason = ""
+            RequiredFirstSkillToolName = ""
+            RequiredFirstSkillSatisfied = False
+            ActiveSkillToolScopeName = ""
+            ActiveSkillAllowedToolNames = Nothing
         End Sub
 
         ''' <summary>Per-target counts of transport-successful but zero-change (no-op) tool results this run.</summary>

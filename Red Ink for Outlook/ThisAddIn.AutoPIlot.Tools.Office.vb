@@ -3869,10 +3869,26 @@ Partial Public Class ThisAddIn
 
         Dim normalized As String = markdownContent.Replace(vbCrLf, vbLf)
         If System.Text.RegularExpressions.Regex.IsMatch(normalized,
-                                                        "```\\s*(mermaid|graphviz|dot)\\b",
+                                                        "```\s*(mermaid|graphviz|dot)\b",
                                                         System.Text.RegularExpressions.RegexOptions.IgnoreCase) Then
             Return True
         End If
+
+        ' Reject fenced pseudo-diagrams even when they use only ordinary brackets plus
+        ' Unicode/ASCII arrows (for example: [A] -> [B] -> [C]). The previous detector
+        ' missed these one-line flow diagrams, allowing character-based graphics into Word
+        ' instead of forcing the model to use visuals type='process'.
+        If System.Text.RegularExpressions.Regex.IsMatch(normalized,
+                                                        "```[\s\S]*?(?:\[[^\]\r\n]{1,100}\]\s*(?:-{1,2}>|={1,2}>|→|➔|⇒)\s*\[[^\]\r\n]{1,100}\])(?:[\s\S]*?)```",
+                                                        System.Text.RegularExpressions.RegexOptions.IgnoreCase) Then
+            Return True
+        End If
+
+        Dim bracketArrowChains As Integer = System.Text.RegularExpressions.Regex.Matches(
+            normalized,
+            "\[[^\]\r\n]{1,100}\]\s*(?:-{1,2}>|={1,2}>|→|➔|⇒)\s*\[[^\]\r\n]{1,100}\]",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase).Count
+        If bracketArrowChains >= 1 Then Return True
 
         ' ASCII box diagrams frequently contain border fragments on the same line as
         ' labels after Markdown normalization. Detect repeated +-----+ fragments anywhere
@@ -3884,17 +3900,26 @@ Partial Public Class ThisAddIn
             System.Text.RegularExpressions.RegexOptions.IgnoreCase).Count
         If asciiBoxFragments >= 2 Then Return True
 
+        ' Reject block/square character bar charts such as ▰▰▰▰▰ or █████. These can be
+        ' hidden inside an otherwise valid Markdown table, so line-oriented box detection
+        ' alone is not sufficient. A real requested chart must use the native visuals array.
+        Dim unicodeBarRuns As Integer = System.Text.RegularExpressions.Regex.Matches(
+            normalized,
+            "(?:[\u2580-\u259F\u25A0-\u25FF]\s*){4,}",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase).Count
+        If unicodeBarRuns >= 1 Then Return True
+
         Dim lines() As String = normalized.Split({vbLf}, StringSplitOptions.None)
         Dim suspiciousLines As Integer = 0
         For Each rawLine As String In lines
             Dim line As String = If(rawLine, String.Empty)
             If line.IndexOfAny(New Char() {"┌"c, "┐"c, "└"c, "┘"c, "├"c, "┤"c, "┬"c, "┴"c, "┼"c, "─"c, "│"c, "╔"c, "╗"c, "╚"c, "╝"c, "═"c, "║"c}) >= 0 Then
                 suspiciousLines += 1
-            ElseIf System.Text.RegularExpressions.Regex.IsMatch(line, "^\\s*\\+(?:[-=]{3,}\\+)+\\s*$") Then
+            ElseIf System.Text.RegularExpressions.Regex.IsMatch(line, "^\s*\+(?:[-=]{3,}\+)+\s*$") Then
                 suspiciousLines += 1
-            ElseIf System.Text.RegularExpressions.Regex.IsMatch(line, "^\\s*(?:[-=]{3,}>|<[-=]{3,}|\\|\\s*\\^\\s*\\||\\|\\s*[vV]\\s*\\|)\\s*$") Then
+            ElseIf System.Text.RegularExpressions.Regex.IsMatch(line, "^\s*(?:[-=]{3,}>|<[-=]{3,}|\|\s*\^\s*\||\|\s*[vV]\s*\|)\s*$") Then
                 suspiciousLines += 1
-            ElseIf System.Text.RegularExpressions.Regex.IsMatch(line, "^\\s*\\|.*(?:-->|==>|<--|<==).*\\|\\s*$") Then
+            ElseIf System.Text.RegularExpressions.Regex.IsMatch(line, "^\s*\|.*(?:-->|==>|<--|<==).*\|\s*$") Then
                 suspiciousLines += 1
             End If
 
@@ -3902,6 +3927,145 @@ Partial Public Class ThisAddIn
         Next
 
         Return False
+    End Function
+
+    Private Shared Function CountAutoPilotWordVisualsOfType(visuals As Newtonsoft.Json.Linq.JArray,
+                                                                ParamArray acceptedTypes() As System.String) As Integer
+        If visuals Is Nothing OrElse acceptedTypes Is Nothing OrElse acceptedTypes.Length = 0 Then Return 0
+
+        Dim accepted As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+        For Each acceptedType As System.String In acceptedTypes
+            If Not System.String.IsNullOrWhiteSpace(acceptedType) Then accepted.Add(acceptedType.Trim())
+        Next
+
+        Dim count As Integer = 0
+        For Each token As Newtonsoft.Json.Linq.JToken In visuals
+            If token Is Nothing OrElse token.Type <> Newtonsoft.Json.Linq.JTokenType.Object Then Continue For
+            Dim visual As Newtonsoft.Json.Linq.JObject = DirectCast(token, Newtonsoft.Json.Linq.JObject)
+            Dim visualType As System.String = GetVisualText(visual, "type", "process")
+            If accepted.Contains(visualType) Then count += 1
+        Next
+        Return count
+    End Function
+
+    Private Shared Function CountOrdinalOccurrences(text As System.String, value As System.String) As Integer
+        If System.String.IsNullOrEmpty(text) OrElse System.String.IsNullOrEmpty(value) Then Return 0
+        Dim count As Integer = 0
+        Dim startIndex As Integer = 0
+        Do
+            Dim foundIndex As Integer = text.IndexOf(value, startIndex, System.StringComparison.Ordinal)
+            If foundIndex < 0 Then Exit Do
+            count += 1
+            startIndex = foundIndex + value.Length
+        Loop
+        Return count
+    End Function
+
+    Private Shared Function ValidateAutoPilotWordVisualContract(markdownContent As System.String,
+                                                                 visuals As Newtonsoft.Json.Linq.JArray,
+                                                                 context As ToolExecutionContext,
+                                                                 ByRef validationError As System.String) As Boolean
+        validationError = System.String.Empty
+        If visuals Is Nothing Then visuals = New Newtonsoft.Json.Linq.JArray()
+
+        Dim ids As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
+        For Each token As Newtonsoft.Json.Linq.JToken In visuals
+            If token Is Nothing OrElse token.Type <> Newtonsoft.Json.Linq.JTokenType.Object Then
+                validationError = "Every create_word_document visuals entry must be an object."
+                Return False
+            End If
+
+            Dim visual As Newtonsoft.Json.Linq.JObject = DirectCast(token, Newtonsoft.Json.Linq.JObject)
+            Dim id As System.String = GetVisualText(visual, "id")
+            If System.String.IsNullOrWhiteSpace(id) OrElse
+               Not System.Text.RegularExpressions.Regex.IsMatch(id, "^[A-Za-z0-9_.-]{1,64}$") Then
+                validationError = "Every create_word_document visual requires a valid id."
+                Return False
+            End If
+            If Not ids.Add(id) Then
+                validationError = "Duplicate create_word_document visual id '" & id & "' is not allowed."
+                Return False
+            End If
+
+            Dim placeholder As System.String = "[[visual:" & id & "]]"
+            Dim placeholderCount As Integer = CountOrdinalOccurrences(If(markdownContent, System.String.Empty), placeholder)
+            If placeholderCount <> 1 Then
+                validationError = "Editable visual '" & id & "' requires exactly one " & placeholder & " placeholder in markdown_content; found " & placeholderCount.ToString() & "."
+                Return False
+            End If
+        Next
+
+        ' Reject orphan placeholders as well. They otherwise survive into the document or
+        ' make a later retry appear successful after the corresponding visual was dropped.
+        Dim placeholderMatches As System.Text.RegularExpressions.MatchCollection = System.Text.RegularExpressions.Regex.Matches(
+            If(markdownContent, System.String.Empty),
+            "\[\[visual:([A-Za-z0-9_.-]{1,64})\]\]",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+        For Each placeholderMatch As System.Text.RegularExpressions.Match In placeholderMatches
+            Dim placeholderId As System.String = placeholderMatch.Groups(1).Value
+            If Not ids.Contains(placeholderId) Then
+                validationError = "markdown_content contains [[visual:" & placeholderId & "]] but no matching visuals entry."
+                Return False
+            End If
+        Next
+
+        Dim requestText As System.String = System.String.Empty
+        If context IsNot Nothing Then
+            requestText = If(context.LatestUserRequestRaw, System.String.Empty)
+            If Not System.String.IsNullOrWhiteSpace(context.HostTaskSummary) Then
+                requestText &= vbLf & context.HostTaskSummary
+            End If
+        End If
+        Dim markdown As System.String = If(markdownContent, System.String.Empty)
+
+        Dim requiresOrgChart As Boolean =
+            System.Text.RegularExpressions.Regex.IsMatch(requestText,
+                "\b(?:organigramm|org\s*chart|organi[sz]ation(?:al)?\s+chart|organi[sz]ational\s+chart)\b",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant) OrElse
+            System.Text.RegularExpressions.Regex.IsMatch(markdown,
+                "(?im)^\s{0,3}(?:#{1,6}\s*)?.*\b(?:organigramm|org\s*chart|organi[sz]ation(?:al)?\s+chart|organi[sz]ational\s+chart)\b.*$",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+
+        If requiresOrgChart AndAlso CountAutoPilotWordVisualsOfType(visuals, "org_chart", "hierarchy") = 0 Then
+            validationError = "The current request/document explicitly requires an organization chart, but create_word_document contains no editable org_chart/hierarchy visual. A table is not a substitute."
+            Return False
+        End If
+
+        Dim chartIntentPattern As System.String =
+            "(?:\b(?:umsatz|umsatzentwicklung|revenue|sales|financial|finanz(?:en|entwicklung)?|trend)\b.{0,80}\b(?:chart|diagramm|grafik|graph|visual(?:isierung|ization)?)\b|" &
+            "\b(?:chart|diagramm|grafik|graph|visual(?:isierung|ization)?)\b.{0,80}\b(?:umsatz|umsatzentwicklung|revenue|sales|financial|finanz(?:en|entwicklung)?|trend)\b)"
+        Dim requiresQuantitativeChart As Boolean =
+            System.Text.RegularExpressions.Regex.IsMatch(requestText,
+                chartIntentPattern,
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant) OrElse
+            System.Text.RegularExpressions.Regex.IsMatch(markdown,
+                "(?im)^\s{0,3}(?:#{1,6}\s*)?.*(?:grafische\s+darstellung|visualisierung|visualization|umsatzdiagramm|revenue\s+chart|sales\s+chart|financial\s+chart).*$",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+
+        If requiresQuantitativeChart AndAlso CountAutoPilotWordVisualsOfType(visuals, "bar_chart", "column_chart", "line_chart", "area_chart", "pie_chart", "doughnut_chart") = 0 Then
+            validationError = "The current request/document explicitly requires a quantitative chart, but create_word_document contains no editable native chart visual. Character bars and chart-like tables are not substitutes."
+            Return False
+        End If
+
+        Dim requiresProcess As Boolean = System.Text.RegularExpressions.Regex.IsMatch(
+            requestText,
+            "\b(?:flowchart|process\s+diagram|prozessdiagramm|workflow\s+(?:diagram|graphic|chart)|prozessgrafik)\b",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+        If requiresProcess AndAlso CountAutoPilotWordVisualsOfType(visuals, "process") = 0 Then
+            validationError = "The current request explicitly requires a process/flow diagram, but create_word_document contains no editable process visual."
+            Return False
+        End If
+
+        Dim requiresTimeline As Boolean = System.Text.RegularExpressions.Regex.IsMatch(
+            requestText,
+            "\b(?:timeline|zeitachse|zeitstrahl|chronology\s+graphic)\b",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+        If requiresTimeline AndAlso CountAutoPilotWordVisualsOfType(visuals, "timeline") = 0 Then
+            validationError = "The current request explicitly requires a timeline, but create_word_document contains no editable timeline visual."
+            Return False
+        End If
+
+        Return True
     End Function
 
     Private Shared Function WordVisualColor(hexColor As String, fallbackHex As String) As System.Drawing.Color
@@ -4132,7 +4296,7 @@ Partial Public Class ThisAddIn
         Dim token As Newtonsoft.Json.Linq.JToken = visual("nodes")
         If token Is Nothing OrElse token.Type <> Newtonsoft.Json.Linq.JTokenType.Array Then Return result
 
-        Dim seen As New HashSet(Of String)(StringComparer.Ordinal)
+        Dim seen As New HashSet(Of System.String)(StringComparer.Ordinal)
         For Each item As Newtonsoft.Json.Linq.JToken In DirectCast(token, Newtonsoft.Json.Linq.JArray)
             If item Is Nothing OrElse item.Type <> Newtonsoft.Json.Linq.JTokenType.Object Then Continue For
             Dim node As Newtonsoft.Json.Linq.JObject = DirectCast(item, Newtonsoft.Json.Linq.JObject)
@@ -4150,7 +4314,7 @@ Partial Public Class ThisAddIn
         If node Is Nothing Then Return 0
         Dim depth As Integer = 0
         Dim current As Newtonsoft.Json.Linq.JObject = node
-        Dim visited As New HashSet(Of String)(StringComparer.Ordinal)
+        Dim visited As New HashSet(Of System.String)(StringComparer.Ordinal)
         While current IsNot Nothing AndAlso depth < 6
             Dim parentId As String = GetVisualText(current, "parent_id")
             If String.IsNullOrWhiteSpace(parentId) Then Exit While
@@ -4189,39 +4353,89 @@ Partial Public Class ThisAddIn
             levels(depth).Add(node)
         Next
 
+        ' Keep raster fallback readable at the final Word display size. The former
+        ' implementation forced every hierarchy level into one row and could shrink
+        ' node boxes to only 78 px, which made labels crowded and effectively tiny
+        ' after Word scaled the image to the printable page width.
         Dim left As Single = 70.0F
         Dim right As Single = 70.0F
         Dim top As Single = 170.0F
         Dim bottom As Single = 55.0F
-        Dim usableWidth As Single = Math.Max(300.0F, CSng(canvasWidth) - left - right)
-        Dim usableHeight As Single = Math.Max(260.0F, CSng(canvasHeight) - top - bottom)
-        Dim levelCount As Integer = Math.Max(1, maxDepth + 1)
-        Dim levelGap As Single = If(levelCount <= 1, 0.0F, usableHeight / levelCount)
-        Dim boxHeight As Single = Math.Max(66.0F, Math.Min(104.0F, levelGap - 25.0F))
-        If levelCount = 1 Then boxHeight = Math.Min(104.0F, usableHeight)
+        Dim usableWidth As Single = Math.Max(420.0F, CSng(canvasWidth) - left - right)
+        Dim usableHeight As Single = Math.Max(320.0F, CSng(canvasHeight) - top - bottom)
+        Dim minBoxWidth As Single = 205.0F
+        Dim columnGap As Single = 30.0F
+        Dim rowGap As Single = 26.0F
+        Dim levelGap As Single = 48.0F
+        Dim boxHeight As Single = 112.0F
+
+        Dim columnsPerRow As Integer = Math.Max(1, CInt(Math.Floor((usableWidth + columnGap) / (minBoxWidth + columnGap))))
+        columnsPerRow = Math.Min(4, columnsPerRow)
+
+        Dim levelRows As New Dictionary(Of Integer, Integer)()
+        Dim requiredHeight As Single = 0.0F
+        For Each kvp As KeyValuePair(Of Integer, List(Of Newtonsoft.Json.Linq.JObject)) In levels
+            Dim rows As Integer = Math.Max(1, CInt(Math.Ceiling(kvp.Value.Count / CDbl(columnsPerRow))))
+            levelRows(kvp.Key) = rows
+            requiredHeight += rows * boxHeight
+            requiredHeight += Math.Max(0, rows - 1) * rowGap
+            If kvp.Key < maxDepth Then requiredHeight += levelGap
+        Next
+
+        ' If a very large hierarchy must fit into the requested image height, compact
+        ' geometry moderately but preserve readable text and meaningful white space.
+        If requiredHeight > usableHeight Then
+            boxHeight = 96.0F
+            rowGap = 20.0F
+            levelGap = 34.0F
+            requiredHeight = 0.0F
+            For Each kvp As KeyValuePair(Of Integer, List(Of Newtonsoft.Json.Linq.JObject)) In levels
+                requiredHeight += levelRows(kvp.Key) * boxHeight
+                requiredHeight += Math.Max(0, levelRows(kvp.Key) - 1) * rowGap
+                If kvp.Key < maxDepth Then requiredHeight += levelGap
+            Next
+        End If
 
         Dim rects As New Dictionary(Of String, System.Drawing.RectangleF)(StringComparer.Ordinal)
+        Dim currentY As Single = top + Math.Max(0.0F, (usableHeight - Math.Min(requiredHeight, usableHeight)) / 2.0F)
+
         For Each kvp As KeyValuePair(Of Integer, List(Of Newtonsoft.Json.Linq.JObject)) In levels
             Dim levelNodes As List(Of Newtonsoft.Json.Linq.JObject) = kvp.Value
-            Dim count As Integer = Math.Max(1, levelNodes.Count)
-            Dim gap As Single = Math.Max(12.0F, Math.Min(30.0F, usableWidth * 0.025F))
-            Dim boxWidth As Single = (usableWidth - gap * (count - 1)) / count
-            boxWidth = Math.Max(78.0F, Math.Min(245.0F, boxWidth))
-            Dim rowWidth As Single = boxWidth * count + gap * (count - 1)
-            Dim rowLeft As Single = left + Math.Max(0.0F, (usableWidth - rowWidth) / 2.0F)
-            Dim y As Single = top + kvp.Key * levelGap
-            For i As Integer = 0 To levelNodes.Count - 1
-                Dim id As String = GetVisualText(levelNodes(i), "id")
-                rects(id) = New System.Drawing.RectangleF(rowLeft + i * (boxWidth + gap), y, boxWidth, boxHeight)
+            Dim rows As Integer = levelRows(kvp.Key)
+
+            For row As Integer = 0 To rows - 1
+                Dim startIndex As Integer = row * columnsPerRow
+                Dim rowCount As Integer = Math.Min(columnsPerRow, levelNodes.Count - startIndex)
+                If rowCount <= 0 Then Continue For
+
+                Dim boxWidth As Single = Math.Min(255.0F, (usableWidth - columnGap * Math.Max(0, rowCount - 1)) / rowCount)
+                boxWidth = Math.Max(minBoxWidth, boxWidth)
+                Dim rowWidth As Single = boxWidth * rowCount + columnGap * Math.Max(0, rowCount - 1)
+                Dim rowLeft As Single = left + Math.Max(0.0F, (usableWidth - rowWidth) / 2.0F)
+
+                For column As Integer = 0 To rowCount - 1
+                    Dim node As Newtonsoft.Json.Linq.JObject = levelNodes(startIndex + column)
+                    Dim id As String = GetVisualText(node, "id")
+                    rects(id) = New System.Drawing.RectangleF(
+                        rowLeft + column * (boxWidth + columnGap),
+                        currentY,
+                        boxWidth,
+                        boxHeight)
+                Next
+
+                currentY += boxHeight
+                If row < rows - 1 Then currentY += rowGap
             Next
+
+            If kvp.Key < maxDepth Then currentY += levelGap
         Next
 
         Using connectorPen As New System.Drawing.Pen(System.Drawing.Color.FromArgb(145, 154, 165), 2.5F),
               borderPen As New System.Drawing.Pen(accent, 2.8F),
               rootBrush As New System.Drawing.SolidBrush(accent),
               childBrush As New System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(18, accent)),
-              titleFont As System.Drawing.Font = CreateWordVisualFont(fontName, 13.5F, System.Drawing.FontStyle.Bold),
-              detailFont As System.Drawing.Font = CreateWordVisualFont(fontName, 10.5F, System.Drawing.FontStyle.Regular),
+              titleFont As System.Drawing.Font = CreateWordVisualFont(fontName, 13.0F, System.Drawing.FontStyle.Bold),
+              detailFont As System.Drawing.Font = CreateWordVisualFont(fontName, 9.75F, System.Drawing.FontStyle.Regular),
               rootTextBrush As New System.Drawing.SolidBrush(System.Drawing.Color.White),
               textBrush As New System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(30, 35, 42)),
               detailBrush As New System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(80, 88, 98))
@@ -4237,7 +4451,7 @@ Partial Public Class ThisAddIn
                 Dim py As Single = parentRect.Bottom
                 Dim cx As Single = childRect.Left + childRect.Width / 2.0F
                 Dim cy As Single = childRect.Top
-                Dim midY As Single = py + Math.Max(12.0F, (cy - py) / 2.0F)
+                Dim midY As Single = py + Math.Max(15.0F, (cy - py) / 2.0F)
                 g.DrawLine(connectorPen, px, py, px, midY)
                 g.DrawLine(connectorPen, px, midY, cx, midY)
                 g.DrawLine(connectorPen, cx, midY, cx, cy)
@@ -4262,10 +4476,20 @@ Partial Public Class ThisAddIn
                 }
                 Dim label As String = GetVisualText(node, "label")
                 Dim detail As String = GetVisualText(node, "detail")
-                Dim labelRect As New System.Drawing.RectangleF(rect.X + 8.0F, rect.Y + 12.0F, rect.Width - 16.0F, Math.Min(42.0F, rect.Height - 18.0F))
+                Dim labelHeight As Single = If(String.IsNullOrWhiteSpace(detail), rect.Height - 24.0F, Math.Min(48.0F, rect.Height * 0.46F))
+                Dim labelTop As Single = If(String.IsNullOrWhiteSpace(detail),
+                                            rect.Y + Math.Max(12.0F, (rect.Height - labelHeight) / 2.0F),
+                                            rect.Y + 14.0F)
+                Dim labelRect As New System.Drawing.RectangleF(rect.X + 14.0F, labelTop, rect.Width - 28.0F, labelHeight)
                 g.DrawString(label, titleFont, If(isRoot, rootTextBrush, textBrush), labelRect, sf)
-                If Not String.IsNullOrWhiteSpace(detail) AndAlso rect.Height >= 75.0F Then
-                    Dim detailRect As New System.Drawing.RectangleF(rect.X + 8.0F, rect.Y + 49.0F, rect.Width - 16.0F, rect.Height - 55.0F)
+
+                If Not String.IsNullOrWhiteSpace(detail) Then
+                    Dim detailTop As Single = rect.Y + Math.Max(56.0F, rect.Height * 0.50F)
+                    Dim detailRect As New System.Drawing.RectangleF(
+                        rect.X + 14.0F,
+                        detailTop,
+                        rect.Width - 28.0F,
+                        Math.Max(22.0F, rect.Bottom - detailTop - 12.0F))
                     g.DrawString(detail, detailFont, If(isRoot, rootTextBrush, detailBrush), detailRect, sf)
                 End If
                 sf.Dispose()
@@ -4528,7 +4752,7 @@ Partial Public Class ThisAddIn
         Dim canvasWidth As Integer = CInt(Math.Round(widthInches * 150.0R))
         Dim canvasHeight As Integer = CInt(Math.Round(heightInches * 150.0R))
         Dim accent As System.Drawing.Color = WordVisualColor(accentHex, "#17365D")
-        Dim visualType As String = GetVisualText(visual, "type", "process").ToLowerInvariant()
+        Dim visualType As System.String = GetVisualText(visual, "type", "process").ToLowerInvariant()
         Dim title As String = GetVisualText(visual, "title")
         Dim caption As String = GetVisualText(visual, "caption")
 
@@ -4563,247 +4787,938 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
-    Private Shared Function TryInsertEditableWordOrgChart(doc As Microsoft.Office.Interop.Word.Document,
-                                                               visual As Newtonsoft.Json.Linq.JObject,
-                                                               anchorRange As Microsoft.Office.Interop.Word.Range,
-                                                               fontName As String,
-                                                               accentHex As String,
-                                                               ByRef warning As String) As Boolean
+    Private Shared Function GetAutoPilotWordVisualEditable(visual As Newtonsoft.Json.Linq.JObject) As Boolean
+        If visual Is Nothing Then Return True
+        Dim editableToken As Newtonsoft.Json.Linq.JToken = visual("editable")
+        If editableToken IsNot Nothing AndAlso editableToken.Type = Newtonsoft.Json.Linq.JTokenType.Boolean Then
+            Return CBool(editableToken)
+        End If
+        Return True
+    End Function
+
+    Private Shared Function GetAutoPilotWordVisualInsertionMode(visual As Newtonsoft.Json.Linq.JObject) As String
+        Dim mode As String = GetVisualText(visual, "insertion_mode", "auto").ToLowerInvariant()
+        Select Case mode
+            Case "inline", "floating", "auto"
+                Return mode
+            Case Else
+                Return "auto"
+        End Select
+    End Function
+
+    Private Shared Function FindAutoPilotWordSmartArtLayout(doc As Microsoft.Office.Interop.Word.Document,
+                                                             visual As Newtonsoft.Json.Linq.JObject,
+                                                             visualType As String,
+                                                             ByRef warning As String) As Microsoft.Office.Core.SmartArtLayout
         warning = String.Empty
-        If doc Is Nothing OrElse visual Is Nothing OrElse anchorRange Is Nothing Then Return False
+        If doc Is Nothing Then Return Nothing
 
-        Dim nodes As List(Of Newtonsoft.Json.Linq.JObject) = GetWordOrgChartNodes(visual)
-        If nodes.Count = 0 Then
-            warning = "No valid org-chart nodes were supplied."
-            Return False
-        End If
-
-        Dim byId As New Dictionary(Of String, Newtonsoft.Json.Linq.JObject)(StringComparer.Ordinal)
-        For Each node As Newtonsoft.Json.Linq.JObject In nodes
-            byId(GetVisualText(node, "id")) = node
-        Next
-
-        Dim levels As New SortedDictionary(Of Integer, List(Of Newtonsoft.Json.Linq.JObject))()
-        Dim maxDepth As Integer = 0
-        For Each node As Newtonsoft.Json.Linq.JObject In nodes
-            Dim depth As Integer = GetWordOrgChartDepth(node, byId)
-            maxDepth = Math.Max(maxDepth, depth)
-            If Not levels.ContainsKey(depth) Then levels(depth) = New List(Of Newtonsoft.Json.Linq.JObject)()
-            levels(depth).Add(node)
-        Next
-
-        Dim accent As System.Drawing.Color = WordVisualColor(accentHex, "#17365D")
-        Dim accentOle As Integer = System.Drawing.ColorTranslator.ToOle(accent)
-        Dim connectorOle As Integer = System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.FromArgb(145, 154, 165))
-        Dim childFillOle As Integer = System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.FromArgb(246, 249, 252))
-        Dim childTextOle As Integer = System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.FromArgb(30, 35, 42))
-        Dim detailTextOle As Integer = System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.FromArgb(80, 88, 98))
-
-        Dim availableWidth As Single = Math.Max(300.0F, doc.PageSetup.PageWidth - doc.PageSetup.LeftMargin - doc.PageSetup.RightMargin)
-        Dim availableHeight As Single = Math.Max(360.0F, doc.PageSetup.PageHeight - doc.PageSetup.TopMargin - doc.PageSetup.BottomMargin)
-        Dim requestedWidth As Single = CSng(GetVisualNumber(visual, "width_inches", 8.4R, 4.0R, 10.5R) * 72.0R)
-        Dim canvasWidth As Single = Math.Min(requestedWidth, availableWidth)
-        Dim sidePadding As Single = 10.0F
-        Dim usableWidth As Single = Math.Max(280.0F, canvasWidth - sidePadding * 2.0F)
-
-        ' Readability has priority over packing. On a normal portrait page this keeps
-        ' organization-chart boxes near 1.6-2.0 inches rather than shrinking text to fit.
-        Dim minBoxWidth As Single = 118.0F
-        Dim columnGap As Single = 12.0F
-        Dim columnsPerRow As Integer = Math.Max(1, CInt(Math.Floor((usableWidth + columnGap) / (minBoxWidth + columnGap))))
-        columnsPerRow = Math.Min(4, columnsPerRow)
-
-        Dim title As String = GetVisualText(visual, "title")
-        Dim caption As String = GetVisualText(visual, "caption")
-        Dim titleArea As Single = If(String.IsNullOrWhiteSpace(title) AndAlso String.IsNullOrWhiteSpace(caption), 8.0F, 52.0F)
-        Dim boxHeight As Single = 72.0F
-        Dim rowGap As Single = 12.0F
-        Dim levelGap As Single = 28.0F
-        Dim levelRows As New Dictionary(Of Integer, Integer)()
-        Dim contentHeight As Single = titleArea
-        For Each kvp As KeyValuePair(Of Integer, List(Of Newtonsoft.Json.Linq.JObject)) In levels
-            Dim rows As Integer = CInt(Math.Ceiling(kvp.Value.Count / CDbl(columnsPerRow)))
-            levelRows(kvp.Key) = Math.Max(1, rows)
-            contentHeight += levelRows(kvp.Key) * boxHeight
-            contentHeight += Math.Max(0, levelRows(kvp.Key) - 1) * rowGap
-            If kvp.Key < maxDepth Then contentHeight += levelGap
-        Next
-        contentHeight += 12.0F
-
-        ' Prefer a full-page readable canvas. Only reduce geometry moderately when the
-        ' hierarchy is unusually deep; never reduce body text below 9 pt.
-        Dim labelFontSize As Single = 11.0F
-        Dim detailFontSize As Single = 9.5F
-        If contentHeight > availableHeight Then
-            boxHeight = 58.0F
-            rowGap = 9.0F
-            levelGap = 20.0F
-            labelFontSize = 10.0F
-            detailFontSize = 9.0F
-            contentHeight = titleArea
-            For Each kvp As KeyValuePair(Of Integer, List(Of Newtonsoft.Json.Linq.JObject)) In levels
-                contentHeight += levelRows(kvp.Key) * boxHeight
-                contentHeight += Math.Max(0, levelRows(kvp.Key) - 1) * rowGap
-                If kvp.Key < maxDepth Then contentHeight += levelGap
-            Next
-            contentHeight += 12.0F
-        End If
-        Dim canvasHeight As Single = Math.Min(Math.Max(180.0F, contentHeight), availableHeight)
-
-        Dim canvas As Microsoft.Office.Interop.Word.Shape = Nothing
-        Dim canvasItems As Microsoft.Office.Interop.Word.CanvasShapes = Nothing
-        Dim nodeShapes As New Dictionary(Of String, Microsoft.Office.Interop.Word.Shape)(StringComparer.Ordinal)
-        Dim nodeRects As New Dictionary(Of String, System.Drawing.RectangleF)(StringComparer.Ordinal)
-        Dim createdShapes As New List(Of Microsoft.Office.Interop.Word.Shape)()
-        Dim createdConnectors As New List(Of Microsoft.Office.Interop.Word.Shape)()
+        Dim layouts As Microsoft.Office.Core.SmartArtLayouts = Nothing
+        Dim bestLayout As Microsoft.Office.Core.SmartArtLayout = Nothing
+        Dim bestScore As Integer = Integer.MinValue
+        Dim requestedLayoutRaw As String = GetVisualText(visual, "smartart_layout")
+        Dim requestedLayout As String = requestedLayoutRaw.ToLowerInvariant()
 
         Try
-            canvas = doc.Shapes.AddCanvas(0.0F, 0.0F, canvasWidth, canvasHeight, anchorRange)
-            canvas.RelativeHorizontalPosition = Microsoft.Office.Interop.Word.WdRelativeHorizontalPosition.wdRelativeHorizontalPositionMargin
-            canvas.RelativeVerticalPosition = Microsoft.Office.Interop.Word.WdRelativeVerticalPosition.wdRelativeVerticalPositionParagraph
-            canvas.Left = 0.0F
-            canvas.Top = 0.0F
-            canvas.WrapFormat.Type = Microsoft.Office.Interop.Word.WdWrapType.wdWrapTopBottom
-            canvas.LockAnchor = True
-            canvas.Fill.Visible = Microsoft.Office.Core.MsoTriState.msoFalse
-            canvas.Line.Visible = Microsoft.Office.Core.MsoTriState.msoFalse
-            canvasItems = canvas.CanvasItems
-
-            If Not String.IsNullOrWhiteSpace(title) OrElse Not String.IsNullOrWhiteSpace(caption) Then
-                Dim titleBox As Microsoft.Office.Interop.Word.Shape = canvasItems.AddTextbox(
-                    Microsoft.Office.Core.MsoTextOrientation.msoTextOrientationHorizontal,
-                    sidePadding, 4.0F, usableWidth, 42.0F)
-                createdShapes.Add(titleBox)
-                titleBox.Fill.Visible = Microsoft.Office.Core.MsoTriState.msoFalse
-                titleBox.Line.Visible = Microsoft.Office.Core.MsoTriState.msoFalse
-                Dim titleRange As Microsoft.Office.Interop.Word.Range = Nothing
-                Try
-                    titleRange = titleBox.TextFrame.TextRange
-                    titleRange.Text = If(String.IsNullOrWhiteSpace(caption), title, title & vbCrLf & caption)
-                    titleRange.Font.Name = fontName
-                    titleRange.Font.Size = 11.0F
-                    titleRange.Font.Bold = 0
-                    titleRange.ParagraphFormat.Alignment = Microsoft.Office.Interop.Word.WdParagraphAlignment.wdAlignParagraphLeft
-                    If Not String.IsNullOrWhiteSpace(title) Then
-                        Dim titleOnly As Microsoft.Office.Interop.Word.Range = titleRange.Duplicate
-                        Try
-                            titleOnly.End = Math.Min(titleOnly.End, titleOnly.Start + title.Length)
-                            titleOnly.Font.Size = 14.0F
-                            titleOnly.Font.Bold = 1
-                            titleOnly.Font.Color = accentOle
-                        Finally
-                            Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(titleOnly) : Catch ex As System.Exception : End Try
-                        End Try
-                    End If
-                Finally
-                    If titleRange IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(titleRange) : Catch ex As System.Exception : End Try
-                End Try
+            layouts = doc.Application.SmartArtLayouts
+            If layouts Is Nothing OrElse layouts.Count <= 0 Then
+                warning = "Word did not expose any SmartArt layouts."
+                Return Nothing
             End If
 
-            Dim y As Single = titleArea
-            For Each kvp As KeyValuePair(Of Integer, List(Of Newtonsoft.Json.Linq.JObject)) In levels
-                Dim levelNodes As List(Of Newtonsoft.Json.Linq.JObject) = kvp.Value
-                Dim rows As Integer = levelRows(kvp.Key)
-                For row As Integer = 0 To rows - 1
-                    Dim startIndex As Integer = row * columnsPerRow
-                    Dim rowCount As Integer = Math.Min(columnsPerRow, levelNodes.Count - startIndex)
-                    If rowCount <= 0 Then Continue For
+            ' Prefer stable built-in SmartArt layout IDs where Microsoft Office exposes them.
+            ' This avoids depending on localized display names (for example German vs. English Word).
+            Dim directLayoutIds As New List(Of String)()
+            If Not String.IsNullOrWhiteSpace(requestedLayoutRaw) Then directLayoutIds.Add(requestedLayoutRaw.Trim())
+            Select Case visualType
+                Case "org_chart", "hierarchy"
+                    directLayoutIds.Add("urn:microsoft.com/office/officeart/2005/8/layout/orgChart1")
+                Case "process"
+                    directLayoutIds.Add("urn:microsoft.com/office/officeart/2005/8/layout/process1")
+                Case "cycle"
+                    directLayoutIds.Add("urn:microsoft.com/office/officeart/2005/8/layout/cycle1")
+            End Select
 
-                    Dim boxWidth As Single = Math.Min(168.0F, (usableWidth - columnGap * (rowCount - 1)) / rowCount)
-                    boxWidth = Math.Max(minBoxWidth, boxWidth)
-                    Dim rowWidth As Single = rowCount * boxWidth + Math.Max(0, rowCount - 1) * columnGap
-                    Dim xStart As Single = sidePadding + Math.Max(0.0F, (usableWidth - rowWidth) / 2.0F)
+            For Each layoutId As String In directLayoutIds
+                If String.IsNullOrWhiteSpace(layoutId) Then Continue For
+                Dim directLayout As Microsoft.Office.Core.SmartArtLayout = Nothing
+                Try
+                    directLayout = layouts.Item(layoutId)
+                    If directLayout IsNot Nothing Then Return directLayout
+                Catch ex As System.Exception
+                    If directLayout IsNot Nothing Then
+                        Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(directLayout) : Catch releaseEx As System.Exception : End Try
+                    End If
+                End Try
+            Next
 
-                    For column As Integer = 0 To rowCount - 1
-                        Dim node As Newtonsoft.Json.Linq.JObject = levelNodes(startIndex + column)
-                        Dim id As String = GetVisualText(node, "id")
-                        Dim label As String = GetVisualText(node, "label")
-                        Dim detail As String = GetVisualText(node, "detail")
-                        Dim isRoot As Boolean = String.IsNullOrWhiteSpace(GetVisualText(node, "parent_id"))
-                        Dim x As Single = xStart + column * (boxWidth + columnGap)
-                        Dim nodeShape As Microsoft.Office.Interop.Word.Shape = canvasItems.AddShape(
-                            Microsoft.Office.Core.MsoAutoShapeType.msoShapeRoundedRectangle,
-                            x, y, boxWidth, boxHeight)
-                        createdShapes.Add(nodeShape)
-                        nodeShapes(id) = nodeShape
-                        nodeRects(id) = New System.Drawing.RectangleF(x, y, boxWidth, boxHeight)
+            ' Fall back to localized metadata scoring for layouts without a stable built-in ID
+            ' mapping here, and for installations where a built-in ID is unavailable.
+            For index As Integer = 1 To layouts.Count
+                Dim layout As Microsoft.Office.Core.SmartArtLayout = Nothing
+                Try
+                    layout = layouts.Item(index)
+                    If layout Is Nothing Then Continue For
 
-                        nodeShape.Line.ForeColor.RGB = accentOle
-                        nodeShape.Line.Weight = 1.5F
-                        nodeShape.Fill.ForeColor.RGB = If(isRoot, accentOle, childFillOle)
-                        nodeShape.TextFrame.MarginLeft = 6.0F
-                        nodeShape.TextFrame.MarginRight = 6.0F
-                        nodeShape.TextFrame.MarginTop = 4.0F
-                        nodeShape.TextFrame.MarginBottom = 4.0F
-                        nodeShape.TextFrame.VerticalAnchor = Microsoft.Office.Core.MsoVerticalAnchor.msoAnchorMiddle
+                    Dim name As String = String.Empty
+                    Dim category As String = String.Empty
+                    Dim description As String = String.Empty
+                    Dim layoutId As String = String.Empty
+                    Try : name = If(layout.Name, String.Empty).ToLowerInvariant() : Catch ex As System.Exception : End Try
+                    Try : category = If(layout.Category, String.Empty).ToLowerInvariant() : Catch ex As System.Exception : End Try
+                    Try : description = If(layout.Description, String.Empty).ToLowerInvariant() : Catch ex As System.Exception : End Try
+                    Try : layoutId = If(layout.Id, String.Empty).ToLowerInvariant() : Catch ex As System.Exception : End Try
 
-                        Dim textRange As Microsoft.Office.Interop.Word.Range = Nothing
-                        Try
-                            textRange = nodeShape.TextFrame.TextRange
-                            textRange.Text = If(String.IsNullOrWhiteSpace(detail), label, label & vbCrLf & detail)
-                            textRange.Font.Name = fontName
-                            textRange.Font.Size = detailFontSize
-                            textRange.Font.Bold = 0
-                            textRange.Font.Color = If(isRoot, System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.White), detailTextOle)
-                            textRange.ParagraphFormat.Alignment = Microsoft.Office.Interop.Word.WdParagraphAlignment.wdAlignParagraphCenter
-                            textRange.ParagraphFormat.SpaceAfter = 0.0F
+                    Dim haystack As String = name & " " & category & " " & description & " " & layoutId
+                    Dim score As Integer = 0
 
-                            Dim labelRange As Microsoft.Office.Interop.Word.Range = textRange.Duplicate
-                            Try
-                                labelRange.End = Math.Min(labelRange.End, labelRange.Start + label.Length)
-                                labelRange.Font.Size = labelFontSize
-                                labelRange.Font.Bold = 1
-                                labelRange.Font.Color = If(isRoot, System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.White), childTextOle)
-                            Finally
-                                Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(labelRange) : Catch ex As System.Exception : End Try
-                            End Try
-                        Finally
-                            If textRange IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(textRange) : Catch ex As System.Exception : End Try
-                        End Try
-                    Next
-                    y += boxHeight + rowGap
+                    If Not String.IsNullOrWhiteSpace(requestedLayout) Then
+                        If String.Equals(name, requestedLayout, StringComparison.OrdinalIgnoreCase) OrElse
+                           String.Equals(layoutId, requestedLayout, StringComparison.OrdinalIgnoreCase) Then
+                            score += 2000
+                        ElseIf haystack.Contains(requestedLayout) Then
+                            score += 1200
+                        End If
+                    End If
+
+                    Select Case visualType
+                        Case "org_chart", "hierarchy"
+                            If name.Contains("organization chart") OrElse name.Contains("organisation chart") OrElse name.Contains("organigram") Then score += 900
+                            If name.Contains("hierarchy") OrElse name.Contains("hierarchie") Then score += 500
+                            If category.Contains("hierarchy") OrElse category.Contains("hierarchie") Then score += 450
+                            If description.Contains("organization") OrElse description.Contains("organisation") OrElse description.Contains("hierarchy") OrElse description.Contains("hierarchie") Then score += 250
+                        Case "timeline"
+                            If name.Contains("timeline") OrElse name.Contains("zeitachse") OrElse name.Contains("zeitlinie") Then score += 900
+                            If category.Contains("process") OrElse category.Contains("prozess") Then score += 250
+                            If description.Contains("timeline") OrElse description.Contains("zeitachse") OrElse description.Contains("chronolog") Then score += 300
+                        Case "cycle"
+                            If name.Contains("cycle") OrElse name.Contains("zyklus") OrElse name.Contains("kreis") Then score += 900
+                            If category.Contains("cycle") OrElse category.Contains("zyklus") Then score += 450
+                        Case "relationship"
+                            If name.Contains("relationship") OrElse name.Contains("beziehung") Then score += 900
+                            If category.Contains("relationship") OrElse category.Contains("beziehung") Then score += 450
+                        Case "matrix"
+                            If name.Contains("matrix") Then score += 900
+                            If category.Contains("matrix") Then score += 450
+                        Case "pyramid"
+                            If name.Contains("pyramid") OrElse name.Contains("pyramide") Then score += 900
+                            If category.Contains("pyramid") OrElse category.Contains("pyramide") Then score += 450
+                        Case "list"
+                            If name.Contains("list") OrElse name.Contains("liste") Then score += 750
+                            If category.Contains("list") OrElse category.Contains("liste") Then score += 450
+                        Case Else
+                            If name.Contains("basic process") OrElse name.Contains("einfacher prozess") Then score += 900
+                            If name.Contains("process") OrElse name.Contains("prozess") Then score += 600
+                            If category.Contains("process") OrElse category.Contains("prozess") Then score += 450
+                            If description.Contains("process") OrElse description.Contains("prozess") Then score += 200
+                    End Select
+
+                    If score > bestScore Then
+                        If bestLayout IsNot Nothing Then
+                            Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(bestLayout) : Catch ex As System.Exception : End Try
+                        End If
+                        bestLayout = layout
+                        layout = Nothing
+                        bestScore = score
+                    End If
+                Finally
+                    If layout IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(layout) : Catch ex As System.Exception : End Try
+                End Try
+            Next
+
+            If bestLayout Is Nothing OrElse bestScore <= 0 Then
+                warning = "No suitable SmartArt layout was found for visual type '" & visualType & "'."
+                If bestLayout IsNot Nothing Then
+                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(bestLayout) : Catch ex As System.Exception : End Try
+                    bestLayout = Nothing
+                End If
+            End If
+
+            Return bestLayout
+        Catch ex As System.Exception
+            warning = "SmartArt layout discovery failed: " & ex.Message
+            If bestLayout IsNot Nothing Then
+                Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(bestLayout) : Catch releaseEx As System.Exception : End Try
+            End If
+            Return Nothing
+        Finally
+            If layouts IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(layouts) : Catch ex As System.Exception : End Try
+        End Try
+    End Function
+
+    Private Shared Sub SetAutoPilotWordSmartArtNodeText(node As Microsoft.Office.Core.SmartArtNode,
+                                                        label As String,
+                                                        detail As String,
+                                                        fontName As String,
+                                                        visualType As String)
+        If node Is Nothing Then Return
+        Dim textRange As Microsoft.Office.Core.TextRange2 = Nothing
+        Try
+            textRange = node.TextFrame2.TextRange
+            Dim nodeText As String = If(label, String.Empty).Trim()
+            If Not String.IsNullOrWhiteSpace(detail) Then
+                If Not String.IsNullOrWhiteSpace(nodeText) Then nodeText &= vbCrLf
+                nodeText &= detail.Trim()
+            End If
+            textRange.Text = nodeText
+            Try : textRange.Font.Name = fontName : Catch ex As System.Exception : End Try
+            Try
+                If visualType = "org_chart" OrElse visualType = "hierarchy" Then
+                    textRange.Font.Size = 9.0F
+                Else
+                    textRange.Font.Size = 10.0F
+                End If
+            Catch ex As System.Exception
+            End Try
+        Finally
+            If textRange IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(textRange) : Catch ex As System.Exception : End Try
+        End Try
+    End Sub
+
+    Private Shared Function PrepareAutoPilotWordSmartArtSeed(smartArt As Microsoft.Office.Core.SmartArt,
+                                                               ByRef seedNode As Microsoft.Office.Core.SmartArtNode,
+                                                               ByRef warning As String) As Boolean
+        seedNode = Nothing
+        warning = String.Empty
+        If smartArt Is Nothing Then Return False
+
+        Dim allNodes As Microsoft.Office.Core.SmartArtNodes = Nothing
+        Dim topNodes As Microsoft.Office.Core.SmartArtNodes = Nothing
+        Try
+            allNodes = smartArt.AllNodes
+            If allNodes Is Nothing Then
+                warning = "SmartArt did not expose its node collection."
+                Return False
+            End If
+
+            ' SmartArt layouts normally start with one or more seed nodes. Keep exactly one
+            ' native seed node and reuse it for the first requested item. Deleting every seed
+            ' and then adding new roots is layout-dependent and can leave an unusable model.
+            While allNodes.Count > 1
+                Dim node As Microsoft.Office.Core.SmartArtNode = Nothing
+                Try
+                    node = allNodes.Item(allNodes.Count)
+                    node.Delete()
+                Catch ex As System.Exception
+                    warning = "SmartArt seed normalization failed: " & ex.Message
+                    Return False
+                Finally
+                    If node IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(node) : Catch releaseEx As System.Exception : End Try
+                End Try
+            End While
+
+            If allNodes.Count = 1 Then
+                seedNode = allNodes.Item(1)
+                Return seedNode IsNot Nothing
+            End If
+
+            topNodes = smartArt.Nodes
+            If topNodes Is Nothing Then
+                warning = "SmartArt did not expose top-level nodes."
+                Return False
+            End If
+            seedNode = topNodes.Add()
+            If seedNode Is Nothing Then warning = "SmartArt could not create its seed node."
+            Return seedNode IsNot Nothing
+        Catch ex As System.Exception
+            warning = "SmartArt seed preparation failed: " & ex.Message
+            Return False
+        Finally
+            If topNodes IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(topNodes) : Catch ex As System.Exception : End Try
+            If allNodes IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(allNodes) : Catch ex As System.Exception : End Try
+        End Try
+    End Function
+
+    Private Shared Function PopulateAutoPilotWordSmartArt(smartArt As Microsoft.Office.Core.SmartArt,
+                                                           visual As Newtonsoft.Json.Linq.JObject,
+                                                           visualType As String,
+                                                           fontName As String,
+                                                           ByRef warning As String) As Boolean
+        warning = String.Empty
+        If smartArt Is Nothing OrElse visual Is Nothing Then Return False
+
+        Dim topNodes As Microsoft.Office.Core.SmartArtNodes = Nothing
+        Dim seedNode As Microsoft.Office.Core.SmartArtNode = Nothing
+        Dim createdNodes As New Dictionary(Of String, Microsoft.Office.Core.SmartArtNode)(StringComparer.Ordinal)
+        Try
+            Dim seedWarning As String = String.Empty
+            If Not PrepareAutoPilotWordSmartArtSeed(smartArt, seedNode, seedWarning) Then
+                warning = seedWarning
+                Return False
+            End If
+
+            topNodes = smartArt.Nodes
+            If topNodes Is Nothing Then
+                warning = "SmartArt did not expose a node collection."
+                Return False
+            End If
+
+            If visualType = "org_chart" OrElse visualType = "hierarchy" Then
+                Dim nodes As List(Of Newtonsoft.Json.Linq.JObject) = GetWordOrgChartNodes(visual)
+                If nodes.Count = 0 Then
+                    warning = "No valid org-chart nodes were supplied."
+                    Return False
+                End If
+
+                Dim byId As New Dictionary(Of String, Newtonsoft.Json.Linq.JObject)(StringComparer.Ordinal)
+                For Each sourceNode As Newtonsoft.Json.Linq.JObject In nodes
+                    byId(GetVisualText(sourceNode, "id")) = sourceNode
                 Next
-                y += levelGap - rowGap
-            Next
 
-            ' Connect after node placement so all coordinates are stable. These are native
-            ' elbow connectors inside the drawing canvas and remain editable in Word.
-            For Each node As Newtonsoft.Json.Linq.JObject In nodes
-                Dim id As String = GetVisualText(node, "id")
-                Dim parentId As String = GetVisualText(node, "parent_id")
-                If String.IsNullOrWhiteSpace(parentId) Then Continue For
-                If Not nodeRects.ContainsKey(id) OrElse Not nodeRects.ContainsKey(parentId) Then Continue For
-                Dim childRect As System.Drawing.RectangleF = nodeRects(id)
-                Dim parentRect As System.Drawing.RectangleF = nodeRects(parentId)
-                Dim connector As Microsoft.Office.Interop.Word.Shape = canvasItems.AddConnector(
-                    Microsoft.Office.Core.MsoConnectorType.msoConnectorElbow,
-                    parentRect.Left + parentRect.Width / 2.0F,
-                    parentRect.Bottom,
-                    childRect.Left + childRect.Width / 2.0F,
-                    childRect.Top)
-                createdConnectors.Add(connector)
-                connector.Line.ForeColor.RGB = connectorOle
-                connector.Line.Weight = 1.25F
-                connector.ZOrder(Microsoft.Office.Core.MsoZOrderCmd.msoSendToBack)
-            Next
+                Dim pending As New List(Of Newtonsoft.Json.Linq.JObject)()
+                Dim usedSeed As Boolean = False
+                For Each sourceNode As Newtonsoft.Json.Linq.JObject In nodes
+                    Dim id As String = GetVisualText(sourceNode, "id")
+                    Dim parentId As String = GetVisualText(sourceNode, "parent_id")
+                    If String.IsNullOrWhiteSpace(parentId) OrElse Not byId.ContainsKey(parentId) Then
+                        Dim smartNode As Microsoft.Office.Core.SmartArtNode = Nothing
+                        If Not usedSeed Then
+                            smartNode = seedNode
+                            seedNode = Nothing
+                            usedSeed = True
+                        Else
+                            smartNode = topNodes.Add()
+                        End If
+                        If smartNode Is Nothing Then
+                            warning = "SmartArt could not create a top-level organization node."
+                            Return False
+                        End If
+                        SetAutoPilotWordSmartArtNodeText(smartNode, GetVisualText(sourceNode, "label"), GetVisualText(sourceNode, "detail"), fontName, visualType)
+                        createdNodes(id) = smartNode
+                    Else
+                        pending.Add(sourceNode)
+                    End If
+                Next
+
+                If createdNodes.Count = 0 AndAlso nodes.Count > 0 Then
+                    Dim sourceNode As Newtonsoft.Json.Linq.JObject = nodes(0)
+                    Dim id As String = GetVisualText(sourceNode, "id")
+                    Dim smartNode As Microsoft.Office.Core.SmartArtNode = seedNode
+                    seedNode = Nothing
+                    If smartNode Is Nothing Then smartNode = topNodes.Add()
+                    If smartNode Is Nothing Then
+                        warning = "SmartArt could not create the organization root node."
+                        Return False
+                    End If
+                    SetAutoPilotWordSmartArtNodeText(smartNode, GetVisualText(sourceNode, "label"), GetVisualText(sourceNode, "detail"), fontName, visualType)
+                    createdNodes(id) = smartNode
+                    pending.Remove(sourceNode)
+                End If
+
+                Dim madeProgress As Boolean = True
+                While pending.Count > 0 AndAlso madeProgress
+                    madeProgress = False
+                    For index As Integer = pending.Count - 1 To 0 Step -1
+                        Dim sourceNode As Newtonsoft.Json.Linq.JObject = pending(index)
+                        Dim id As String = GetVisualText(sourceNode, "id")
+                        Dim parentId As String = GetVisualText(sourceNode, "parent_id")
+                        If createdNodes.ContainsKey(parentId) Then
+                            Dim parentNode As Microsoft.Office.Core.SmartArtNode = createdNodes(parentId)
+                            Dim smartNode As Microsoft.Office.Core.SmartArtNode = parentNode.AddNode(
+                                Microsoft.Office.Core.MsoSmartArtNodePosition.msoSmartArtNodeBelow,
+                                Microsoft.Office.Core.MsoSmartArtNodeType.msoSmartArtNodeTypeDefault)
+                            If smartNode Is Nothing Then
+                                warning = "SmartArt could not create a child organization node."
+                                Return False
+                            End If
+                            SetAutoPilotWordSmartArtNodeText(smartNode, GetVisualText(sourceNode, "label"), GetVisualText(sourceNode, "detail"), fontName, visualType)
+                            createdNodes(id) = smartNode
+                            pending.RemoveAt(index)
+                            madeProgress = True
+                        End If
+                    Next
+                End While
+
+                ' Broken or cyclic parent links must not make a requested node disappear.
+                ' Preserve editability by placing unresolved nodes at the top level.
+                For Each sourceNode As Newtonsoft.Json.Linq.JObject In pending
+                    Dim id As String = GetVisualText(sourceNode, "id")
+                    Dim smartNode As Microsoft.Office.Core.SmartArtNode = topNodes.Add()
+                    If smartNode Is Nothing Then
+                        warning = "SmartArt could not preserve an unresolved organization node."
+                        Return False
+                    End If
+                    SetAutoPilotWordSmartArtNodeText(smartNode, GetVisualText(sourceNode, "label"), GetVisualText(sourceNode, "detail"), fontName, visualType)
+                    createdNodes(id) = smartNode
+                Next
+
+                If createdNodes.Count <> nodes.Count Then
+                    warning = "SmartArt node population was incomplete. Expected " & nodes.Count.ToString() & ", created " & createdNodes.Count.ToString() & "."
+                    Return False
+                End If
+
+                ' Keep wide management levels compact. Organization Chart SmartArt supports
+                ' native hanging child layouts, so use them instead of manually routing lines
+                ' or shrinking/overlapping boxes. Word remains responsible for the geometry.
+                Dim childCounts As New Dictionary(Of String, Integer)(StringComparer.Ordinal)
+                For Each sourceNode As Newtonsoft.Json.Linq.JObject In nodes
+                    Dim parentId As String = GetVisualText(sourceNode, "parent_id")
+                    If Not String.IsNullOrWhiteSpace(parentId) Then
+                        If Not childCounts.ContainsKey(parentId) Then childCounts(parentId) = 0
+                        childCounts(parentId) += 1
+                    End If
+                Next
+                For Each childCount As KeyValuePair(Of String, Integer) In childCounts
+                    If childCount.Value >= 4 AndAlso createdNodes.ContainsKey(childCount.Key) Then
+                        Try
+                            createdNodes(childCount.Key).OrgChartLayout = Microsoft.Office.Core.MsoOrgChartLayoutType.msoOrgChartLayoutBothHanging
+                        Catch ex As System.Exception
+                            ' Some hierarchy layouts do not expose organization-chart branch layout.
+                        End Try
+                    End If
+                Next
+            Else
+                Dim items As List(Of System.Tuple(Of String, String)) = GetWordVisualItems(visual)
+                If items.Count = 0 Then
+                    warning = "No valid SmartArt items were supplied."
+                    Return False
+                End If
+
+                For index As Integer = 0 To items.Count - 1
+                    Dim smartNode As Microsoft.Office.Core.SmartArtNode = Nothing
+                    If index = 0 Then
+                        smartNode = seedNode
+                        seedNode = Nothing
+                    Else
+                        smartNode = topNodes.Add()
+                    End If
+                    If smartNode Is Nothing Then
+                        warning = "SmartArt could not create item " & (index + 1).ToString() & "."
+                        Return False
+                    End If
+                    SetAutoPilotWordSmartArtNodeText(smartNode, items(index).Item1, items(index).Item2, fontName, visualType)
+                    createdNodes("item_" & index.ToString()) = smartNode
+                Next
+            End If
+
+            Dim verifyNodes As Microsoft.Office.Core.SmartArtNodes = Nothing
+            Try
+                verifyNodes = smartArt.AllNodes
+                Dim expectedCount As Integer = If(visualType = "org_chart" OrElse visualType = "hierarchy", GetWordOrgChartNodes(visual).Count, GetWordVisualItems(visual).Count)
+                If verifyNodes Is Nothing OrElse verifyNodes.Count < expectedCount Then
+                    warning = "SmartArt verification failed after node population."
+                    Return False
+                End If
+            Finally
+                If verifyNodes IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(verifyNodes) : Catch ex As System.Exception : End Try
+            End Try
 
             Return True
         Catch ex As System.Exception
-            warning = "Editable Word organigram insertion failed: " & ex.Message
-            If canvas IsNot Nothing Then
-                Try : canvas.Delete() : Catch deleteEx As System.Exception : End Try
-            End If
+            warning = "SmartArt population failed: " & ex.Message
             Return False
         Finally
-            For Each connector As Microsoft.Office.Interop.Word.Shape In createdConnectors
-                Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(connector) : Catch ex As System.Exception : End Try
+            If seedNode IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(seedNode) : Catch ex As System.Exception : End Try
+            For Each kvp As KeyValuePair(Of String, Microsoft.Office.Core.SmartArtNode) In createdNodes
+                If kvp.Value IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(kvp.Value) : Catch ex As System.Exception : End Try
             Next
-            For Each shape As Microsoft.Office.Interop.Word.Shape In createdShapes
-                Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(shape) : Catch ex As System.Exception : End Try
-            Next
-            If canvasItems IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(canvasItems) : Catch ex As System.Exception : End Try
-            If canvas IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(canvas) : Catch ex As System.Exception : End Try
+            If topNodes IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(topNodes) : Catch ex As System.Exception : End Try
         End Try
+    End Function
+
+    Private Shared Function TryInsertEditableWordSmartArt(doc As Microsoft.Office.Interop.Word.Document,
+                                                           visual As Newtonsoft.Json.Linq.JObject,
+                                                           anchorRange As Microsoft.Office.Interop.Word.Range,
+                                                           fontName As String,
+                                                           visualType As String,
+                                                           asInline As Boolean,
+                                                           ByRef warning As String) As Boolean
+        warning = String.Empty
+        If doc Is Nothing OrElse visual Is Nothing OrElse anchorRange Is Nothing Then Return False
+
+        Dim layout As Microsoft.Office.Core.SmartArtLayout = Nothing
+        Dim inlineShape As Microsoft.Office.Interop.Word.InlineShape = Nothing
+        Dim floatingShape As Microsoft.Office.Interop.Word.Shape = Nothing
+        Dim smartArt As Microsoft.Office.Core.SmartArt = Nothing
+        Try
+            Dim layoutWarning As String = String.Empty
+            layout = FindAutoPilotWordSmartArtLayout(doc, visual, visualType, layoutWarning)
+            If layout Is Nothing Then
+                warning = layoutWarning
+                Return False
+            End If
+
+            Dim availableWidth As Single = Math.Max(240.0F, doc.PageSetup.PageWidth - doc.PageSetup.LeftMargin - doc.PageSetup.RightMargin)
+            Dim availableHeight As Single = Math.Max(180.0F, doc.PageSetup.PageHeight - doc.PageSetup.TopMargin - doc.PageSetup.BottomMargin)
+            Dim defaultWidthInches As Double = If(visualType = "org_chart" OrElse visualType = "hierarchy", 5.8R, 6.4R)
+            Dim defaultHeightInches As Double = If(visualType = "org_chart" OrElse visualType = "hierarchy", 2.9R, If(visualType = "timeline", 2.2R, 2.4R))
+            Dim requestedWidth As Single = CSng(GetVisualNumber(visual, "width_inches", defaultWidthInches, 3.0R, 10.5R) * 72.0R)
+            Dim requestedHeight As Single = CSng(GetVisualNumber(visual, "height_inches", defaultHeightInches, 1.6R, 7.0R) * 72.0R)
+            Dim maxTypeWidth As Single = If(visualType = "org_chart" OrElse visualType = "hierarchy", 430.0F, 475.0F)
+            Dim displayWidth As Single = Math.Min(Math.Min(requestedWidth, availableWidth), maxTypeWidth)
+            Dim displayHeight As Single = Math.Min(requestedHeight, Math.Min(availableHeight, If(visualType = "org_chart" OrElse visualType = "hierarchy", 250.0F, 250.0F)))
+
+            If asInline Then
+                Dim rangeArgument As Object = anchorRange
+                inlineShape = doc.InlineShapes.AddSmartArt(layout, rangeArgument)
+                If inlineShape Is Nothing Then
+                    warning = "Word did not return an inline SmartArt object."
+                    Return False
+                End If
+                Try : inlineShape.LockAspectRatio = Microsoft.Office.Core.MsoTriState.msoFalse : Catch ex As System.Exception : End Try
+                Try : inlineShape.Width = displayWidth : Catch ex As System.Exception : End Try
+                Try : inlineShape.Height = displayHeight : Catch ex As System.Exception : End Try
+                smartArt = inlineShape.SmartArt
+            Else
+                Dim leftArgument As Object = 0.0F
+                Dim topArgument As Object = 0.0F
+                Dim widthArgument As Object = displayWidth
+                Dim heightArgument As Object = displayHeight
+                Dim anchorArgument As Object = anchorRange
+                floatingShape = doc.Shapes.AddSmartArt(layout, leftArgument, topArgument, widthArgument, heightArgument, anchorArgument)
+                If floatingShape Is Nothing Then
+                    warning = "Word did not return a floating SmartArt object."
+                    Return False
+                End If
+                floatingShape.RelativeHorizontalPosition = Microsoft.Office.Interop.Word.WdRelativeHorizontalPosition.wdRelativeHorizontalPositionMargin
+                floatingShape.RelativeVerticalPosition = Microsoft.Office.Interop.Word.WdRelativeVerticalPosition.wdRelativeVerticalPositionParagraph
+                floatingShape.Left = Math.Max(0.0F, (availableWidth - displayWidth) / 2.0F)
+                floatingShape.Top = 0.0F
+                floatingShape.WrapFormat.Type = Microsoft.Office.Interop.Word.WdWrapType.wdWrapTopBottom
+                floatingShape.LockAnchor = True
+                smartArt = floatingShape.SmartArt
+            End If
+
+            If smartArt Is Nothing Then
+                warning = "The inserted Word object does not expose editable SmartArt."
+                Return False
+            End If
+
+            Dim populateWarning As String = String.Empty
+            If Not PopulateAutoPilotWordSmartArt(smartArt, visual, visualType, fontName, populateWarning) Then
+                warning = populateWarning
+                Return False
+            End If
+
+            Dim altText As String = GetVisualText(visual, "title")
+            If String.IsNullOrWhiteSpace(altText) Then altText = "Editable " & visualType.Replace("_", " ")
+            If inlineShape IsNot Nothing Then Try : inlineShape.AlternativeText = altText : Catch ex As System.Exception : End Try
+            If floatingShape IsNot Nothing Then Try : floatingShape.AlternativeText = altText : Catch ex As System.Exception : End Try
+            Return True
+        Catch ex As System.Exception
+            warning = "Editable Word SmartArt insertion failed: " & ex.Message
+            Return False
+        Finally
+            If Not String.IsNullOrWhiteSpace(warning) Then
+                If inlineShape IsNot Nothing Then Try : inlineShape.Delete() : Catch ex As System.Exception : End Try
+                If floatingShape IsNot Nothing Then Try : floatingShape.Delete() : Catch ex As System.Exception : End Try
+            End If
+            If smartArt IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(smartArt) : Catch ex As System.Exception : End Try
+            If floatingShape IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(floatingShape) : Catch ex As System.Exception : End Try
+            If inlineShape IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(inlineShape) : Catch ex As System.Exception : End Try
+            If layout IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(layout) : Catch ex As System.Exception : End Try
+        End Try
+    End Function
+
+    Private Shared Function GetAutoPilotWordChartType(visual As Newtonsoft.Json.Linq.JObject) As Integer
+        Dim visualType As String = GetVisualText(visual, "type", "bar_chart").ToLowerInvariant()
+        If visualType = "line_chart" Then Return 4 ' xlLine
+        Return 51 ' xlColumnClustered
+    End Function
+
+    Private Shared Sub GetAutoPilotWordChartSize(doc As Microsoft.Office.Interop.Word.Document,
+                                                  visual As Newtonsoft.Json.Linq.JObject,
+                                                  ByRef displayWidth As Single,
+                                                  ByRef displayHeight As Single)
+        Dim requestedWidth As Single = CSng(GetVisualNumber(visual, "width_inches", 7.0R, 3.0R, 10.5R) * 72.0R)
+        Dim requestedHeight As Single = CSng(GetVisualNumber(visual, "height_inches", 3.8R, 2.0R, 7.0R) * 72.0R)
+        Dim availableWidth As Single = Math.Max(240.0F, doc.PageSetup.PageWidth - doc.PageSetup.LeftMargin - doc.PageSetup.RightMargin)
+        Dim availableHeight As Single = Math.Max(180.0F, doc.PageSetup.PageHeight - doc.PageSetup.TopMargin - doc.PageSetup.BottomMargin)
+        displayWidth = Math.Min(requestedWidth, availableWidth)
+        displayHeight = Math.Min(requestedHeight, availableHeight)
+        If requestedWidth > 0.0F AndAlso requestedHeight > 0.0F Then
+            Dim aspectRatio As Single = requestedHeight / requestedWidth
+            displayHeight = displayWidth * aspectRatio
+            If displayHeight > availableHeight Then
+                displayHeight = availableHeight
+                displayWidth = displayHeight / Math.Max(0.01F, aspectRatio)
+            End If
+        End If
+    End Sub
+
+    Private Shared Function PopulateAutoPilotWordChart(chart As Object,
+                                                        visual As Newtonsoft.Json.Linq.JObject,
+                                                        fontName As String,
+                                                        accentHex As String,
+                                                        ByRef warning As String) As Boolean
+        warning = String.Empty
+        If chart Is Nothing OrElse visual Is Nothing Then Return False
+
+        Dim categories As List(Of String) = GetWordVisualCategories(visual)
+        Dim series As List(Of System.Tuple(Of String, List(Of Double))) = GetWordVisualSeries(visual)
+        If categories.Count = 0 OrElse series.Count = 0 Then
+            warning = "No valid chart categories/series were supplied."
+            Return False
+        End If
+
+        Dim maxValues As Integer = 0
+        For Each item As System.Tuple(Of String, List(Of Double)) In series
+            If item IsNot Nothing AndAlso item.Item2 IsNot Nothing Then maxValues = Math.Max(maxValues, item.Item2.Count)
+        Next
+        Dim categoryCount As Integer = Math.Min(categories.Count, maxValues)
+        If categoryCount <= 0 Then
+            warning = "The chart does not contain matching category/value data."
+            Return False
+        End If
+
+        Dim chartType As Integer = GetAutoPilotWordChartType(visual)
+        Dim visualType As String = GetVisualText(visual, "type", "bar_chart").ToLowerInvariant()
+        Dim chartData As Object = Nothing
+        Dim workbook As Object = Nothing
+        Dim worksheet As Object = Nothing
+        Dim dataRange As Object = Nothing
+        Dim accent As System.Drawing.Color = WordVisualColor(accentHex, "#17365D")
+        Dim accentOle As Integer = System.Drawing.ColorTranslator.ToOle(accent)
+
+        Try
+            Dim chartDataWarning As String = String.Empty
+            Dim populatedFromWorkbook As Boolean = False
+            Try
+                chartData = chart.ChartData
+                chartData.Activate()
+                workbook = chartData.Workbook
+                If workbook Is Nothing Then Throw New System.InvalidOperationException("Word ChartData did not expose an embedded workbook.")
+                Try : workbook.Application.Visible = False : Catch ex As System.Exception : End Try
+                worksheet = workbook.Worksheets(1)
+                If worksheet Is Nothing Then Throw New System.InvalidOperationException("Word ChartData did not expose a worksheet.")
+
+                Try : worksheet.Cells.Clear() : Catch ex As System.Exception : End Try
+                worksheet.Cells(1, 1).Value2 = String.Empty
+                For categoryIndex As Integer = 0 To categoryCount - 1
+                    worksheet.Cells(1, categoryIndex + 2).Value2 = categories(categoryIndex)
+                Next
+
+                For seriesIndex As Integer = 0 To series.Count - 1
+                    Dim seriesItem As System.Tuple(Of String, List(Of Double)) = series(seriesIndex)
+                    worksheet.Cells(seriesIndex + 2, 1).Value2 = If(String.IsNullOrWhiteSpace(seriesItem.Item1), "Series " & (seriesIndex + 1).ToString(), seriesItem.Item1)
+                    For categoryIndex As Integer = 0 To categoryCount - 1
+                        Dim value As Double = 0.0R
+                        If seriesItem.Item2 IsNot Nothing AndAlso categoryIndex < seriesItem.Item2.Count Then value = seriesItem.Item2(categoryIndex)
+                        worksheet.Cells(seriesIndex + 2, categoryIndex + 2).Value2 = value
+                    Next
+                Next
+
+                dataRange = worksheet.Range(worksheet.Cells(1, 1), worksheet.Cells(series.Count + 1, categoryCount + 1))
+                If dataRange Is Nothing Then Throw New System.InvalidOperationException("Word ChartData did not expose the populated data range.")
+                Dim sourceAddress As String = CStr(dataRange.Address(True, True, 1, True))
+                chart.SetSourceData(sourceAddress, 1)
+                populatedFromWorkbook = True
+            Catch chartDataEx As System.Exception
+                chartDataWarning = "Embedded chart-data workbook unavailable (" & chartDataEx.Message & "); native series values were used instead."
+
+                Dim directSeriesCollection As Object = Nothing
+                Try
+                    directSeriesCollection = chart.SeriesCollection()
+                    If directSeriesCollection Is Nothing Then Throw New System.InvalidOperationException("Word chart did not expose a SeriesCollection.")
+
+                    Do While CInt(directSeriesCollection.Count) > 0
+                        Dim staleSeries As Object = Nothing
+                        Try
+                            staleSeries = directSeriesCollection.Item(1)
+                            staleSeries.Delete()
+                        Finally
+                            If staleSeries IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(staleSeries) : Catch ex As System.Exception : End Try
+                        End Try
+                    Loop
+
+                    Dim categoryValues(categoryCount - 1) As String
+                    For categoryIndex As Integer = 0 To categoryCount - 1
+                        categoryValues(categoryIndex) = categories(categoryIndex)
+                    Next
+
+                    For seriesIndex As Integer = 0 To series.Count - 1
+                        Dim seriesItem As System.Tuple(Of String, List(Of Double)) = series(seriesIndex)
+                        Dim valueValues(categoryCount - 1) As Double
+                        For categoryIndex As Integer = 0 To categoryCount - 1
+                            If seriesItem.Item2 IsNot Nothing AndAlso categoryIndex < seriesItem.Item2.Count Then
+                                valueValues(categoryIndex) = seriesItem.Item2(categoryIndex)
+                            Else
+                                valueValues(categoryIndex) = 0.0R
+                            End If
+                        Next
+
+                        Dim nativeSeries As Object = Nothing
+                        Try
+                            nativeSeries = directSeriesCollection.NewSeries()
+                            nativeSeries.Name = If(String.IsNullOrWhiteSpace(seriesItem.Item1), "Series " & (seriesIndex + 1).ToString(), seriesItem.Item1)
+                            nativeSeries.XValues = categoryValues
+                            nativeSeries.Values = valueValues
+                        Finally
+                            If nativeSeries IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(nativeSeries) : Catch ex As System.Exception : End Try
+                        End Try
+                    Next
+                Finally
+                    If directSeriesCollection IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(directSeriesCollection) : Catch ex As System.Exception : End Try
+                End Try
+            End Try
+
+            chart.ChartType = chartType
+            If Not populatedFromWorkbook AndAlso Not String.IsNullOrWhiteSpace(chartDataWarning) Then warning = chartDataWarning
+
+            Dim title As String = GetVisualText(visual, "title")
+            If Not String.IsNullOrWhiteSpace(title) Then
+                chart.HasTitle = True
+                chart.ChartTitle.Text = title
+                Try : chart.ChartTitle.Format.TextFrame2.TextRange.Font.Name = fontName : Catch ex As System.Exception : End Try
+            Else
+                Try : chart.HasTitle = False : Catch ex As System.Exception : End Try
+            End If
+
+            Dim showLegend As Boolean = series.Count > 1
+            Dim legendToken As Newtonsoft.Json.Linq.JToken = visual("show_legend")
+            If legendToken IsNot Nothing AndAlso legendToken.Type = Newtonsoft.Json.Linq.JTokenType.Boolean Then showLegend = CBool(legendToken)
+            Try : chart.HasLegend = showLegend : Catch ex As System.Exception : End Try
+            If showLegend Then Try : chart.Legend.Position = -4107 : Catch ex As System.Exception : End Try
+
+            Try
+                Dim seriesCollection As Object = chart.SeriesCollection()
+                For seriesIndex As Integer = 1 To series.Count
+                    Dim nativeSeries As Object = Nothing
+                    Try
+                        nativeSeries = seriesCollection.Item(seriesIndex)
+                        nativeSeries.Format.Fill.ForeColor.RGB = accentOle
+                        nativeSeries.Format.Line.ForeColor.RGB = accentOle
+                        If visualType = "line_chart" Then
+                            nativeSeries.Format.Line.Weight = 2.25F
+                            Try : nativeSeries.MarkerStyle = 8 : Catch ex As System.Exception : End Try
+                            Try : nativeSeries.MarkerSize = 6 : Catch ex As System.Exception : End Try
+                        End If
+                    Finally
+                        If nativeSeries IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(nativeSeries) : Catch ex As System.Exception : End Try
+                    End Try
+                Next
+                If seriesCollection IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(seriesCollection) : Catch ex As System.Exception : End Try
+            Catch formatEx As System.Exception
+                Debug.WriteLine($"Word native chart formatting warning: {formatEx.Message}")
+            End Try
+
+            Try : chart.ChartArea.Format.Line.Visible = Microsoft.Office.Core.MsoTriState.msoFalse : Catch ex As System.Exception : End Try
+            Try : chart.PlotArea.Format.Line.Visible = Microsoft.Office.Core.MsoTriState.msoFalse : Catch ex As System.Exception : End Try
+            Try : chart.Refresh() : Catch ex As System.Exception : End Try
+            Try : workbook.Close(True) : Catch ex As System.Exception : End Try
+            Return True
+        Catch ex As System.Exception
+            warning = "Editable Word chart population failed: " & ex.Message
+            Return False
+        Finally
+            If dataRange IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(dataRange) : Catch ex As System.Exception : End Try
+            If worksheet IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(worksheet) : Catch ex As System.Exception : End Try
+            If workbook IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(workbook) : Catch ex As System.Exception : End Try
+            If chartData IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(chartData) : Catch ex As System.Exception : End Try
+        End Try
+    End Function
+
+    Private Shared Function TryInsertEditableWordChart(doc As Microsoft.Office.Interop.Word.Document,
+                                                        visual As Newtonsoft.Json.Linq.JObject,
+                                                        anchorRange As Microsoft.Office.Interop.Word.Range,
+                                                        fontName As String,
+                                                        accentHex As String,
+                                                        ByRef warning As String) As Boolean
+        warning = String.Empty
+        If doc Is Nothing OrElse visual Is Nothing OrElse anchorRange Is Nothing Then Return False
+
+        Dim inlineShapesObject As Object = Nothing
+        Dim chartShape As Object = Nothing
+        Dim chart As Object = Nothing
+        Dim succeeded As Boolean = False
+        Try
+            Dim chartType As Integer = GetAutoPilotWordChartType(visual)
+            Dim displayWidth As Single = 0.0F
+            Dim displayHeight As Single = 0.0F
+            GetAutoPilotWordChartSize(doc, visual, displayWidth, displayHeight)
+
+            inlineShapesObject = doc.InlineShapes
+            Try
+                chartShape = inlineShapesObject.AddChart2(-1, chartType, anchorRange, True)
+            Catch addChart2Ex As System.Exception
+                chartShape = inlineShapesObject.AddChart(chartType, anchorRange)
+            End Try
+            If chartShape Is Nothing Then
+                warning = "Word did not return an editable inline chart object."
+                Return False
+            End If
+
+            Try : chartShape.LockAspectRatio = Microsoft.Office.Core.MsoTriState.msoFalse : Catch ex As System.Exception : End Try
+            Try : chartShape.Width = displayWidth : Catch ex As System.Exception : End Try
+            Try : chartShape.Height = displayHeight : Catch ex As System.Exception : End Try
+            chart = chartShape.Chart
+            If chart Is Nothing Then
+                warning = "The inserted inline Word object does not expose an editable chart."
+                Return False
+            End If
+
+            Dim populateWarning As String = String.Empty
+            If Not PopulateAutoPilotWordChart(chart, visual, fontName, accentHex, populateWarning) Then
+                warning = populateWarning
+                Return False
+            End If
+            If Not String.IsNullOrWhiteSpace(populateWarning) Then warning = populateWarning
+            succeeded = True
+            Return True
+        Catch ex As System.Exception
+            warning = "Editable inline Word chart insertion failed: " & ex.Message
+            Return False
+        Finally
+            If Not succeeded AndAlso chartShape IsNot Nothing Then Try : chartShape.Delete() : Catch ex As System.Exception : End Try
+            If chart IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(chart) : Catch ex As System.Exception : End Try
+            If chartShape IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(chartShape) : Catch ex As System.Exception : End Try
+            If inlineShapesObject IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(inlineShapesObject) : Catch ex As System.Exception : End Try
+        End Try
+    End Function
+
+    Private Shared Function TryInsertEditableWordFloatingChart(doc As Microsoft.Office.Interop.Word.Document,
+                                                                visual As Newtonsoft.Json.Linq.JObject,
+                                                                anchorRange As Microsoft.Office.Interop.Word.Range,
+                                                                fontName As String,
+                                                                accentHex As String,
+                                                                ByRef warning As String) As Boolean
+        warning = String.Empty
+        If doc Is Nothing OrElse visual Is Nothing OrElse anchorRange Is Nothing Then Return False
+
+        Dim shapesObject As Object = Nothing
+        Dim chartShape As Object = Nothing
+        Dim chart As Object = Nothing
+        Dim succeeded As Boolean = False
+        Try
+            Dim chartType As Integer = GetAutoPilotWordChartType(visual)
+            Dim displayWidth As Single = 0.0F
+            Dim displayHeight As Single = 0.0F
+            GetAutoPilotWordChartSize(doc, visual, displayWidth, displayHeight)
+            Dim availableWidth As Single = Math.Max(240.0F, doc.PageSetup.PageWidth - doc.PageSetup.LeftMargin - doc.PageSetup.RightMargin)
+
+            shapesObject = doc.Shapes
+            chartShape = shapesObject.AddChart2(-1, chartType, 0.0F, 0.0F, displayWidth, displayHeight, anchorRange, True)
+            If chartShape Is Nothing Then
+                warning = "Word did not return an editable floating chart object."
+                Return False
+            End If
+
+            Try : chartShape.RelativeHorizontalPosition = Microsoft.Office.Interop.Word.WdRelativeHorizontalPosition.wdRelativeHorizontalPositionMargin : Catch ex As System.Exception : End Try
+            Try : chartShape.RelativeVerticalPosition = Microsoft.Office.Interop.Word.WdRelativeVerticalPosition.wdRelativeVerticalPositionParagraph : Catch ex As System.Exception : End Try
+            Try : chartShape.Left = Math.Max(0.0F, (availableWidth - displayWidth) / 2.0F) : Catch ex As System.Exception : End Try
+            Try : chartShape.Top = 0.0F : Catch ex As System.Exception : End Try
+            Try : chartShape.WrapFormat.Type = Microsoft.Office.Interop.Word.WdWrapType.wdWrapTopBottom : Catch ex As System.Exception : End Try
+            Try : chartShape.LockAnchor = True : Catch ex As System.Exception : End Try
+
+            chart = chartShape.Chart
+            If chart Is Nothing Then
+                warning = "The inserted floating Word object does not expose an editable chart."
+                Return False
+            End If
+
+            Dim populateWarning As String = String.Empty
+            If Not PopulateAutoPilotWordChart(chart, visual, fontName, accentHex, populateWarning) Then
+                warning = populateWarning
+                Return False
+            End If
+            If Not String.IsNullOrWhiteSpace(populateWarning) Then warning = populateWarning
+            succeeded = True
+            Return True
+        Catch ex As System.Exception
+            warning = "Editable floating Word chart insertion failed: " & ex.Message
+            Return False
+        Finally
+            If Not succeeded AndAlso chartShape IsNot Nothing Then Try : chartShape.Delete() : Catch ex As System.Exception : End Try
+            If chart IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(chart) : Catch ex As System.Exception : End Try
+            If chartShape IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(chartShape) : Catch ex As System.Exception : End Try
+            If shapesObject IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(shapesObject) : Catch ex As System.Exception : End Try
+        End Try
+    End Function
+
+    Private Shared Function TryInsertEditableAutoPilotWordVisual(doc As Microsoft.Office.Interop.Word.Document,
+                                                                  visual As Newtonsoft.Json.Linq.JObject,
+                                                                  insertionPosition As Integer,
+                                                                  fontName As String,
+                                                                  accentHex As String,
+                                                                  ByRef modeUsed As String,
+                                                                  ByRef warning As String) As Boolean
+        modeUsed = String.Empty
+        warning = String.Empty
+        If doc Is Nothing OrElse visual Is Nothing Then Return False
+
+        Dim visualType As System.String = GetVisualText(visual, "type", "process").ToLowerInvariant()
+        Dim requestedMode As String = GetAutoPilotWordVisualInsertionMode(visual)
+        Dim firstWarning As String = String.Empty
+        Dim secondWarning As String = String.Empty
+
+        Select Case visualType
+            Case "org_chart", "hierarchy", "process", "timeline", "cycle", "relationship", "matrix", "pyramid", "list", "smartart"
+                If requestedMode = "auto" OrElse requestedMode = "inline" Then
+                    Dim inlineRange As Microsoft.Office.Interop.Word.Range = Nothing
+                    Try
+                        inlineRange = doc.Range(insertionPosition, insertionPosition)
+                        If TryInsertEditableWordSmartArt(doc, visual, inlineRange, fontName, visualType, True, firstWarning) Then
+                            modeUsed = "inline_smartart"
+                            warning = firstWarning
+                            Return True
+                        End If
+                    Finally
+                        If inlineRange IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(inlineRange) : Catch ex As System.Exception : End Try
+                    End Try
+                    If requestedMode = "inline" Then
+                        warning = firstWarning
+                        Return False
+                    End If
+                End If
+
+                If requestedMode = "auto" OrElse requestedMode = "floating" Then
+                    Dim floatingRange As Microsoft.Office.Interop.Word.Range = Nothing
+                    Try
+                        floatingRange = doc.Range(insertionPosition, insertionPosition)
+                        If TryInsertEditableWordSmartArt(doc, visual, floatingRange, fontName, visualType, False, secondWarning) Then
+                            modeUsed = "floating_smartart"
+                            warning = secondWarning
+                            Return True
+                        End If
+                    Finally
+                        If floatingRange IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(floatingRange) : Catch ex As System.Exception : End Try
+                    End Try
+                End If
+
+            Case "bar_chart", "line_chart"
+                If requestedMode = "auto" OrElse requestedMode = "inline" Then
+                    Dim inlineRange As Microsoft.Office.Interop.Word.Range = Nothing
+                    Try
+                        inlineRange = doc.Range(insertionPosition, insertionPosition)
+                        If TryInsertEditableWordChart(doc, visual, inlineRange, fontName, accentHex, firstWarning) Then
+                            modeUsed = "inline_chart"
+                            warning = firstWarning
+                            Return True
+                        End If
+                    Finally
+                        If inlineRange IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(inlineRange) : Catch ex As System.Exception : End Try
+                    End Try
+                    If requestedMode = "inline" Then
+                        warning = firstWarning
+                        Return False
+                    End If
+                End If
+
+                If requestedMode = "auto" OrElse requestedMode = "floating" Then
+                    Dim floatingRange As Microsoft.Office.Interop.Word.Range = Nothing
+                    Try
+                        floatingRange = doc.Range(insertionPosition, insertionPosition)
+                        If TryInsertEditableWordFloatingChart(doc, visual, floatingRange, fontName, accentHex, secondWarning) Then
+                            modeUsed = "floating_chart"
+                            warning = secondWarning
+                            Return True
+                        End If
+                    Finally
+                        If floatingRange IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(floatingRange) : Catch ex As System.Exception : End Try
+                    End Try
+                End If
+
+            Case Else
+                warning = "Unsupported editable Word visual type '" & visualType & "'."
+                Return False
+        End Select
+
+        Dim warningParts As New List(Of String)()
+        If Not String.IsNullOrWhiteSpace(firstWarning) Then warningParts.Add(firstWarning)
+        If Not String.IsNullOrWhiteSpace(secondWarning) Then warningParts.Add(secondWarning)
+        warning = String.Join(" | ", warningParts)
+        If String.IsNullOrWhiteSpace(warning) Then warning = "No editable Word insertion mode succeeded for visual type '" & visualType & "'."
+        Return False
     End Function
 
     Private Shared Function InsertAutoPilotWordVisuals(doc As Microsoft.Office.Interop.Word.Document,
@@ -4825,56 +5740,70 @@ Partial Public Class ThisAddIn
             End If
 
             Dim visual As Newtonsoft.Json.Linq.JObject = DirectCast(token, Newtonsoft.Json.Linq.JObject)
-            Dim id As String = GetVisualText(visual, "id")
+            Dim id As System.String = GetVisualText(visual, "id")
             If String.IsNullOrWhiteSpace(id) OrElse Not System.Text.RegularExpressions.Regex.IsMatch(id, "^[A-Za-z0-9_.-]{1,64}$") Then
                 warnings.Add("Ignored a visual with a missing or invalid id.")
                 Continue For
             End If
 
-            Dim placeholder As String = "[[visual:" & id & "]]"
-            Dim visualType As String = GetVisualText(visual, "type", "process").ToLowerInvariant()
+            Dim placeholder As System.String = "[[visual:" & id & "]]"
+            Dim editable As Boolean = GetAutoPilotWordVisualEditable(visual)
 
-            ' Organization charts are inserted as native Word drawing-canvas shapes and
-            ' connectors so users can edit boxes, text and reporting lines after creation.
-            ' The existing PNG renderer remains a compatibility fallback only.
-            Dim preferEditable As Boolean = True
-            Dim editableToken As Newtonsoft.Json.Linq.JToken = visual("editable")
-            If editableToken IsNot Nothing AndAlso editableToken.Type = Newtonsoft.Json.Linq.JTokenType.Boolean Then
-                preferEditable = CBool(editableToken)
-            End If
-            If visualType = "org_chart" AndAlso preferEditable Then
-                Dim nativeTarget As Microsoft.Office.Interop.Word.Range = Nothing
-                Dim nativeFinder As Microsoft.Office.Interop.Word.Find = Nothing
+            If editable Then
+                ' Editable visuals use native Word objects only. Remove the placeholder BEFORE
+                ' insertion and keep its original position. This avoids mutable Word Range
+                ' expansion deleting a newly inserted object. If every editable insertion mode
+                ' fails, restore the exact placeholder and fail the visual pass; do not silently
+                ' replace the requested editable object with a PNG.
+                Dim target As Microsoft.Office.Interop.Word.Range = Nothing
+                Dim finder As Microsoft.Office.Interop.Word.Find = Nothing
                 Try
-                    nativeTarget = doc.Content.Duplicate
-                    nativeFinder = nativeTarget.Find
-                    nativeFinder.ClearFormatting()
-                    nativeFinder.Text = placeholder
-                    nativeFinder.Forward = True
-                    nativeFinder.Wrap = Microsoft.Office.Interop.Word.WdFindWrap.wdFindStop
-                    If nativeFinder.Execute() Then
-                        Dim nativeWarning As String = String.Empty
-                        If TryInsertEditableWordOrgChart(doc, visual, nativeTarget, fontName, accentHex, nativeWarning) Then
-                            nativeTarget.Text = String.Empty
-                            embeddedCount += 1
-                            Continue For
-                        End If
-                        If Not String.IsNullOrWhiteSpace(nativeWarning) Then
-                            warnings.Add($"Visual '{id}' could not be inserted as editable Word shapes; using raster fallback. {nativeWarning}")
-                        Else
-                            warnings.Add($"Visual '{id}' could not be inserted as editable Word shapes; using raster fallback.")
-                        End If
+                    target = doc.Content.Duplicate
+                    finder = target.Find
+                    finder.ClearFormatting()
+                    finder.Text = placeholder
+                    finder.Forward = True
+                    finder.Wrap = Microsoft.Office.Interop.Word.WdFindWrap.wdFindStop
+                    If Not finder.Execute() Then
+                        warnings.Add("Visual placeholder '" & placeholder & "' was not found; the editable visual was not inserted.")
+                        Continue For
                     End If
+
+                    Dim insertionPosition As Integer = target.Start
+                    target.Text = String.Empty
+                    Dim modeUsed As String = String.Empty
+                    Dim nativeWarning As String = String.Empty
+                    If TryInsertEditableAutoPilotWordVisual(doc, visual, insertionPosition, fontName, accentHex, modeUsed, nativeWarning) Then
+                        embeddedCount += 1
+                        If Not String.IsNullOrWhiteSpace(nativeWarning) Then
+                            warnings.Add("Visual '" & id & "' was inserted as " & modeUsed & " with warning: " & nativeWarning)
+                        End If
+                        Continue For
+                    End If
+
+                    Dim restoreRange As Microsoft.Office.Interop.Word.Range = Nothing
+                    Try
+                        restoreRange = doc.Range(insertionPosition, insertionPosition)
+                        restoreRange.Text = placeholder
+                    Finally
+                        If restoreRange IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(restoreRange) : Catch ex As System.Exception : End Try
+                    End Try
+
+                    warnings.Add("Visual '" & id & "' could not be inserted as an editable native Word object. No PNG fallback was used. " & nativeWarning)
                 Finally
-                    If nativeFinder IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(nativeFinder) : Catch ex As System.Exception : End Try
-                    If nativeTarget IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(nativeTarget) : Catch ex As System.Exception : End Try
+                    If finder IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(finder) : Catch ex As System.Exception : End Try
+                    If target IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(target) : Catch ex As System.Exception : End Try
                 End Try
+
+                Continue For
             End If
 
+            ' Raster output is now opt-in only through editable=false. It is retained for
+            ' callers that explicitly want a flattened visual, never as an implicit fallback.
             Dim imagePath As String = Path.Combine(tempDirectory, ".word_visual_" & Guid.NewGuid().ToString("N") & ".png")
             Try
                 If Not RenderAutoPilotWordVisual(visual, imagePath, fontName, accentHex) Then
-                    warnings.Add($"Could not render visual '{id}'.")
+                    warnings.Add("Could not render non-editable visual '" & id & "'.")
                     Continue For
                 End If
 
@@ -4889,12 +5818,20 @@ Partial Public Class ThisAddIn
                     finder.Forward = True
                     finder.Wrap = Microsoft.Office.Interop.Word.WdFindWrap.wdFindStop
                     If Not finder.Execute() Then
-                        warnings.Add($"Visual placeholder '{placeholder}' was not found; the visual was not inserted.")
+                        warnings.Add("Visual placeholder '" & placeholder & "' was not found; the visual was not inserted.")
                         Continue For
                     End If
 
+                    Dim insertionPosition As Integer = target.Start
                     target.Text = String.Empty
-                    inlineShape = doc.InlineShapes.AddPicture(imagePath, False, True, target)
+                    Dim pictureRange As Microsoft.Office.Interop.Word.Range = Nothing
+                    Try
+                        pictureRange = doc.Range(insertionPosition, insertionPosition)
+                        inlineShape = doc.InlineShapes.AddPicture(imagePath, False, True, pictureRange)
+                    Finally
+                        If pictureRange IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(pictureRange) : Catch ex As System.Exception : End Try
+                    End Try
+
                     Dim requestedWidth As Single = CSng(GetVisualNumber(visual, "width_inches", 8.4R, 4.0R, 10.5R) * 72.0R)
                     Dim requestedHeight As Single = CSng(GetVisualNumber(visual, "height_inches", 4.7R, 2.5R, 7.0R) * 72.0R)
                     Try
@@ -4903,37 +5840,89 @@ Partial Public Class ThisAddIn
                         Dim displayWidth As Single = Math.Min(requestedWidth, Math.Max(72.0F, availableWidth))
                         Dim aspectRatio As Single = If(requestedWidth > 0.0F, requestedHeight / requestedWidth, 1.0F)
                         Dim displayHeight As Single = displayWidth * aspectRatio
-
-                        ' Keep the visual fully inside the printable page while preserving
-                        ' the renderer's aspect ratio; never stretch it merely to hit a size.
                         If displayHeight > availableHeight AndAlso availableHeight > 72.0F Then
                             displayHeight = availableHeight
                             displayWidth = displayHeight / Math.Max(0.01F, aspectRatio)
                         End If
-
                         inlineShape.LockAspectRatio = Microsoft.Office.Core.MsoTriState.msoTrue
                         inlineShape.Width = displayWidth
-                    Catch
+                    Catch ex As System.Exception
                     End Try
 
                     Dim altText As String = GetVisualText(visual, "title")
                     If String.IsNullOrWhiteSpace(altText) Then altText = "Document visual " & id
-                    Try : inlineShape.AlternativeText = altText : Catch : End Try
+                    Try : inlineShape.AlternativeText = altText : Catch ex As System.Exception : End Try
                     embeddedCount += 1
+                Catch ex As System.Exception
+                    warnings.Add("Non-editable visual '" & id & "' could not be inserted: " & ex.Message)
                 Finally
-                    If inlineShape IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(inlineShape) : Catch : End Try
-                    If finder IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(finder) : Catch : End Try
-                    If target IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(target) : Catch : End Try
+                    If inlineShape IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(inlineShape) : Catch ex As System.Exception : End Try
+                    If finder IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(finder) : Catch ex As System.Exception : End Try
+                    If target IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(target) : Catch ex As System.Exception : End Try
                 End Try
             Finally
                 Try
                     If File.Exists(imagePath) Then File.Delete(imagePath)
-                Catch
+                Catch ex As System.Exception
                 End Try
             End Try
         Next
 
-        Return warnings.Count = 0 AndAlso embeddedCount = visuals.Count
+        Return embeddedCount = visuals.Count
+    End Function
+
+    Private Shared Function ValidateSavedAutoPilotWordVisualPersistence(outputPath As String,
+                                                                         visuals As Newtonsoft.Json.Linq.JArray,
+                                                                         ByRef validationError As System.String) As Boolean
+        validationError = String.Empty
+        If visuals Is Nothing OrElse visuals.Count = 0 Then Return True
+        If String.IsNullOrWhiteSpace(outputPath) OrElse Not System.IO.File.Exists(outputPath) Then
+            validationError = "The saved Word file is unavailable for visual persistence validation."
+            Return False
+        End If
+
+        Dim expectedCharts As Integer = 0
+        Dim expectedSmartArt As Integer = 0
+        For Each token As Newtonsoft.Json.Linq.JToken In visuals
+            If token Is Nothing OrElse token.Type <> Newtonsoft.Json.Linq.JTokenType.Object Then Continue For
+            Dim visual As Newtonsoft.Json.Linq.JObject = DirectCast(token, Newtonsoft.Json.Linq.JObject)
+            If Not GetAutoPilotWordVisualEditable(visual) Then Continue For
+            Select Case GetVisualText(visual, "type", "process").ToLowerInvariant()
+                Case "bar_chart", "line_chart"
+                    expectedCharts += 1
+                Case "org_chart", "hierarchy", "process", "timeline", "cycle", "relationship", "matrix", "pyramid", "list", "smartart"
+                    expectedSmartArt += 1
+            End Select
+        Next
+
+        If expectedCharts = 0 AndAlso expectedSmartArt = 0 Then Return True
+
+        Try
+            Using archive As System.IO.Compression.ZipArchive = System.IO.Compression.ZipFile.OpenRead(outputPath)
+                Dim persistedCharts As Integer = 0
+                Dim persistedSmartArt As Integer = 0
+                For Each entry As System.IO.Compression.ZipArchiveEntry In archive.Entries
+                    Dim normalizedName As String = entry.FullName.Replace("\\", "/")
+                    If System.Text.RegularExpressions.Regex.IsMatch(normalizedName, "^word/charts/chart[0-9]+\\.xml$", System.Text.RegularExpressions.RegexOptions.IgnoreCase) Then
+                        persistedCharts += 1
+                    ElseIf System.Text.RegularExpressions.Regex.IsMatch(normalizedName, "^word/diagrams/data[0-9]+\\.xml$", System.Text.RegularExpressions.RegexOptions.IgnoreCase) Then
+                        persistedSmartArt += 1
+                    End If
+                Next
+
+                If persistedCharts < expectedCharts OrElse persistedSmartArt < expectedSmartArt Then
+                    validationError = "Saved DOCX visual persistence check failed. Expected editable charts=" & expectedCharts.ToString() &
+                                      ", persisted=" & persistedCharts.ToString() &
+                                      "; expected SmartArt visuals=" & expectedSmartArt.ToString() &
+                                      ", persisted=" & persistedSmartArt.ToString() & "."
+                    Return False
+                End If
+            End Using
+            Return True
+        Catch ex As System.Exception
+            validationError = "Saved DOCX visual persistence validation failed: " & ex.Message
+            Return False
+        End Try
     End Function
 
     Private Async Function ExecuteCreateWordDocTool(
@@ -4959,9 +5948,16 @@ Partial Public Class ThisAddIn
                 context)
 
             Dim visuals As Newtonsoft.Json.Linq.JArray = GetAutoPilotWordVisuals(toolCall.Arguments)
+            Dim visualContractError As System.String = System.String.Empty
+            If Not ValidateAutoPilotWordVisualContract(markdownContent, visuals, context, visualContractError) Then
+                response.Success = False
+                response.ErrorMessage = visualContractError
+                response.Response = response.ErrorMessage
+                Return response
+            End If
             If ContainsLikelyWordPseudoGraphic(markdownContent) Then
                 response.Success = False
-                response.ErrorMessage = "Diagram-like ASCII/Unicode/Mermaid content is not allowed in create_word_document. For an organization chart use visuals type='org_chart' with nodes [{id,label,detail,parent_id}] and insert an exact [[visual:ID]] placeholder in markdown_content. For other diagrams/charts use the appropriate native visual type."
+                response.ErrorMessage = "Diagram-like ASCII/Unicode/Mermaid/block-character content is not allowed in create_word_document. Requested graphics must use native editable visuals with one exact [[visual:ID]] placeholder each. For an organization chart use type='org_chart' with nodes [{id,label,detail,parent_id}]; for quantitative graphics use bar_chart/column_chart/line_chart/area_chart/pie_chart/doughnut_chart."
                 response.Response = response.ErrorMessage
                 Return response
             End If
@@ -5061,11 +6057,11 @@ Partial Public Class ThisAddIn
                                                    ' every visual can be constrained to the actual printable page area.
                                                    ApplyAutoPilotWordDocumentStyling(doc, toolCall.Arguments)
 
-                                                   If visuals.Count > 0 Then
-                                                       If Not InsertAutoPilotWordVisuals(doc, toolCall.Arguments, baseFontName, accentHex, _apCurrentTempDir, embeddedVisualCount, visualWarnings) Then
-                                                           Throw New System.InvalidOperationException("Not all requested Word visuals could be rendered and embedded: " & String.Join(" | ", visualWarnings))
-                                                       End If
-                                                   End If
+                                                   ' V8: Visual objects are deliberately NOT created through Word/Excel COM.
+                                                   ' The formatted DOCX is saved first with exact [[visual:ID]] marker paragraphs.
+                                                   ' After Word is closed, InsertAutoPilotWordVisualsOpenXml writes native
+                                                   ' chart parts / embedded workbooks / editable DrawingML directly into
+                                                   ' the package. This removes Range/anchor/ChartData COM failure modes.
 
                                                    Dim currentDocPath As String = ""
                                                    Try : currentDocPath = doc.FullName : Catch ex As System.Exception : End Try
@@ -5106,6 +6102,19 @@ Partial Public Class ThisAddIn
                                                    End If
                                                End Try
                                            End Function)
+
+            If success AndAlso File.Exists(outputPath) AndAlso visuals.Count > 0 Then
+                If Not InsertAutoPilotWordVisualsOpenXml(outputPath, visuals, fontName:=GetArgString(toolCall.Arguments, "base_font_name"), accentHexRaw:=GetArgString(toolCall.Arguments, "accent_color"), embeddedCount:=embeddedVisualCount, warnings:=visualWarnings) Then
+                    success = False
+                    creationError = "Native OOXML Word visual insertion failed: " & String.Join(" | ", visualWarnings)
+                Else
+                    Dim persistenceError As String = String.Empty
+                    If Not ValidateSavedAutoPilotWordVisualPersistenceOpenXml(outputPath, visuals, persistenceError) Then
+                        success = False
+                        creationError = persistenceError
+                    End If
+                End If
+            End If
 
             If success AndAlso File.Exists(outputPath) Then
                 RegisterAutoPilotGeneratedOutputFile(outputPath)

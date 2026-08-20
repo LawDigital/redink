@@ -505,11 +505,17 @@ Partial Public Class ThisAddIn
 
         ToolingFileLogger.StartSession()
 
-        ' Per-turn Chat Agent deliverables reset (prevents prior-turn output files
-        ' from being re-presented). Sub-agents inherit parent state and must not
-        ' reset. AutoPilot is single-threaded per Q4.
-        If Not subAgentMode AndAlso _chatAgentActive Then
-            ResetChatAgentDeliverableTrackingForNewTurn()
+        ' Per-run deliverable tracking reset. Local Chat retains its session files but
+        ' marks prior-turn outputs as already surfaced. AutoPilot MUST start from empty
+        ' forced/surfaced sets so a previous Local Chat run in the same Outlook instance
+        ' can never donate a deliverable path to an unrelated mail workflow.
+        If Not subAgentMode Then
+            If _chatAgentActive Then
+                ResetChatAgentDeliverableTrackingForNewTurn()
+            Else
+                _chatAgentSurfacedFiles = New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+                _chatAgentForcedDeliverables = New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            End If
         End If
 
         Dim parentToolingContext = _activeToolingContext
@@ -870,6 +876,19 @@ Partial Public Class ThisAddIn
                                Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
                                t.ToolName.Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase)
                     End Function)
+
+            ' Prompt-only skill routing is not sufficient for assessment/checklist workflows.
+            ' Strong matching requests get a deterministic first-skill execution gate.
+            If ShouldRequireGuidedCaseAssessmentFirst(context) Then
+                Dim requiredSkill As ModelConfig =
+                    EnsureVisibleToolLoaded(GuidedCaseAssessmentToolName, context)
+
+                If requiredSkill IsNot Nothing Then
+                    context.RequiredFirstSkillToolName = GuidedCaseAssessmentToolName
+                    context.RequiredFirstSkillSatisfied = False
+                    context.Log("Deterministic skill-first gate activated for guided case assessment.", "diag")
+                End If
+            End If
         End If
 
         selectedTools = New List(Of ModelConfig)(context.SelectedTools)
@@ -1495,6 +1514,7 @@ Partial Public Class ThisAddIn
 
                     Dim stopCurrentBatchAfterTool As Boolean = False
                     Dim restartForRequiredMemoryGrounding As Boolean = False
+                    Dim restartForRequiredFirstSkill As System.Boolean = False
                     Dim restartAfterToolLoader As Boolean = False
                     Dim restartAfterExposureMiss As Boolean = False
                     Dim turnVisibleToolNames As HashSet(Of String) =
@@ -1585,6 +1605,67 @@ Partial Public Class ThisAddIn
                             context.LogWarn(
                                 "Blocked tooling loop after repeated attempts to bypass required Memory grounding.",
                                 details:=$"host={context.HostKind}; tool={tc.ToolName}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}")
+                            Exit For
+                        End If
+
+                        ' Matching configured assessments must be the first substantive work.
+                        ' Do not lazy-load research/knowledge tools before the required skill.
+                        If Not subAgentMode AndAlso
+                           Not String.IsNullOrWhiteSpace(context.RequiredFirstSkillToolName) AndAlso
+                           Not context.RequiredFirstSkillSatisfied AndAlso
+                           Not IsNonSubstantiveSkillFirstBypassTool(tc.ToolName) AndAlso
+                           Not tc.ToolName.Equals(context.RequiredFirstSkillToolName, StringComparison.OrdinalIgnoreCase) Then
+
+                            Dim requiredSkillResponse As New ToolResponse() With {
+                                .CallId = tc.CallId,
+                                .ToolName = tc.ToolName,
+                                .Success = False,
+                                .ErrorCode = "required_skill_first",
+                                .ErrorMessage = "This workflow requires '" & context.RequiredFirstSkillToolName & "' as the first substantive tool.",
+                                .OriginalCallJson = tc.RawJson
+                            }
+
+                            context.AllToolResponses.Add(requiredSkillResponse)
+                            context.PendingContinuationGuardPrompt = BuildRequiredFirstSkillGuardPrompt(context.RequiredFirstSkillToolName)
+                            context.PendingGuardTitle = "HOST REQUIRED SKILL-FIRST ROUTING"
+                            context.PendingRejectedTurnExplanation = "Your previous turn attempted substantive work before the required configured assessment skill."
+                            context.PendingRejectedAssistantTurn = If(currentResponse, "")
+                            context.PrematureTextRetryCount = 0
+                            restartForRequiredFirstSkill = True
+                            stopCurrentBatchAfterTool = True
+
+                            context.LogWarn("Blocked substantive tool before required first skill.",
+                                            details:=$"host={context.HostKind}; attemptedTool={tc.ToolName}; requiredSkill={context.RequiredFirstSkillToolName}")
+                            Exit For
+                        End If
+
+                        ' Once the constrained assessment is loaded, its allowed_tools list is
+                        ' a host-side execution boundary, not merely prompt guidance.
+                        If Not subAgentMode AndAlso
+                           context.ActiveSkillAllowedToolNames IsNot Nothing AndAlso
+                           context.ActiveSkillAllowedToolNames.Count > 0 AndAlso
+                           Not IsToolPermittedByActiveSkillScope(tc.ToolName, context) Then
+
+                            Dim skillScopeResponse As New ToolResponse() With {
+                                .CallId = tc.CallId,
+                                .ToolName = tc.ToolName,
+                                .Success = False,
+                                .ErrorCode = "active_skill_tool_scope",
+                                .ErrorMessage = "Tool '" & tc.ToolName & "' is outside the active skill's allowed_tools scope.",
+                                .OriginalCallJson = tc.RawJson
+                            }
+
+                            context.AllToolResponses.Add(skillScopeResponse)
+                            context.PendingContinuationGuardPrompt = BuildActiveSkillScopeGuardPrompt(context.ActiveSkillToolScopeName)
+                            context.PendingGuardTitle = "HOST ACTIVE SKILL TOOL SCOPE"
+                            context.PendingRejectedTurnExplanation = "Your previous turn attempted a tool outside the selected skill's declared allowed_tools scope."
+                            context.PendingRejectedAssistantTurn = If(currentResponse, "")
+                            context.PrematureTextRetryCount = 0
+                            restartForRequiredFirstSkill = True
+                            stopCurrentBatchAfterTool = True
+
+                            context.LogWarn("Blocked tool outside active skill scope.",
+                                            details:=$"host={context.HostKind}; tool={tc.ToolName}; skill={context.ActiveSkillToolScopeName}")
                             Exit For
                         End If
 
@@ -2088,6 +2169,16 @@ Partial Public Class ThisAddIn
 
                             If toolResponse IsNot Nothing AndAlso
                                toolResponse.Success AndAlso
+                               Not String.IsNullOrWhiteSpace(context.RequiredFirstSkillToolName) AndAlso
+                               tc.ToolName.Equals(context.RequiredFirstSkillToolName, StringComparison.OrdinalIgnoreCase) Then
+
+                                context.RequiredFirstSkillSatisfied = True
+                                ActivateGuidedCaseAssessmentToolScope(toolResponse.Response, context)
+                                context.Log("Required guided case assessment skill loaded; active skill tool scope enforced.", "diag")
+                            End If
+
+                            If toolResponse IsNot Nothing AndAlso
+                               toolResponse.Success AndAlso
                                SharedLibrary.Agents.ArtifactDelivery.ResponseDeclaresExplicitArtifacts(
                                    toolResponse.Response) Then
 
@@ -2513,6 +2604,17 @@ Partial Public Class ThisAddIn
                         End If
                     Next
 
+                    If restartForRequiredFirstSkill Then
+                        Dim preparedToolResponsesForRequiredSkill As String = BuildToolResponsesForModelBudgeted(
+                            context.AllToolResponses,
+                            context.ToolingModel,
+                            compactForSubAgent:=subAgentMode)
+
+                        INI_APICall_ToolResponses_2 = preparedToolResponsesForRequiredSkill
+                        context.Log("Required skill-first/active-skill guard applied; restarting next iteration.", "diag")
+                        Continue While
+                    End If
+
                     If restartAfterExposureMiss Then
                         Dim preparedToolResponsesAfterExposureMiss As String = BuildToolResponsesForModelBudgeted(
                             context.AllToolResponses,
@@ -2616,6 +2718,44 @@ Partial Public Class ThisAddIn
                         End If
 
                         context.Log("Sub-agent final text response accepted (no tool calls)")
+                        Exit While
+                    End If
+
+                    ' A matching assessment may not be bypassed by returning final prose instead of a tool call.
+                    If Not subAgentMode AndAlso
+                       Not System.String.IsNullOrWhiteSpace(context.RequiredFirstSkillToolName) AndAlso
+                       Not context.RequiredFirstSkillSatisfied Then
+
+                        If context.PrematureTextRetryCount < ToolExecutionContext.MaxContinuationRetries Then
+                            context.PrematureTextRetryCount += 1
+                            context.PendingContinuationGuardPrompt = BuildRequiredFirstSkillGuardPrompt(context.RequiredFirstSkillToolName)
+                            context.PendingGuardTitle = "HOST REQUIRED SKILL-FIRST ROUTING"
+                            context.PendingRejectedTurnExplanation = "Your previous turn attempted to finalize before running the required configured assessment skill."
+                            context.PendingRejectedAssistantTurn = If(currentResponse, "")
+
+                            context.LogWarn(
+                                "Rejected final text before required first skill.",
+                                details:=$"host={context.HostKind}; requiredSkill={context.RequiredFirstSkillToolName}; repairAttempt={context.PrematureTextRetryCount}/{ToolExecutionContext.MaxContinuationRetries}")
+                            Continue While
+                        End If
+
+                        context.FinalizationBlocked = True
+                        context.FinalizationBlockedReason = "required_skill_first"
+                        currentResponse = Await BuildBlockedToolingResultAsync(
+                            context,
+                            "required_skill_first",
+                            "The configured assessment skill was required as the first substantive workflow but was not executed successfully.",
+                            useSecondAPI,
+                            hideSplash,
+                            cancellationToken)
+
+                        If context.SequencingState IsNot Nothing Then
+                            context.SequencingState.FinalResponseOrigin = "host_generated"
+                            context.SequencingState.HasOpenToolWorkflow = False
+                        End If
+
+                        acceptedFinalStatus = "blocked"
+                        context.LogWarn("Required skill-first repair exhausted; returning host-generated blocked result.")
                         Exit While
                     End If
 
@@ -4313,6 +4453,84 @@ Partial Public Class ThisAddIn
                "Return a blocked message only if no reliable answer and no useful recovery step is possible."
     End Function
 
+    Private Const GuidedCaseAssessmentToolName As System.String = "skill_guided_case_assessment"
+
+    Private Function ShouldRequireGuidedCaseAssessmentFirst(context As ToolExecutionContext) As System.Boolean
+        If context Is Nothing OrElse context.AllowedToolRegistry Is Nothing Then Return False
+        If String.IsNullOrWhiteSpace(context.LatestUserRequestRaw) Then Return False
+        If context.AllowedToolRegistry.Get(GuidedCaseAssessmentToolName) Is Nothing Then Return False
+
+        ' Strong workflow markers only. Bare references to GwG/AML/legal topics are not enough.
+        Dim pattern As System.String =
+            "(?ix)" &
+            "(?:\bgwg[\s\-]*beraterpr(?:ü|ue)fung\b|" &
+            "\bberaterpr(?:ü|ue)fung\b|" &
+            "\baml[\s\-]*(?:berater|assessment|screening|check)\b|" &
+            "\bguided[\s\-]*case[\s\-]*assessment\b|" &
+            "\bcase[\s\-]*assessment\b|" &
+            "\bcompliance[\s\-]*(?:check|screening|assessment|pr(?:ü|ue)fung)\b|" &
+            "\beligibility[\s\-]*(?:check|assessment|screening)\b|" &
+            "\btriage[\s\-]*(?:check|assessment|screening)\b)"
+
+        Return System.Text.RegularExpressions.Regex.IsMatch(context.LatestUserRequestRaw, pattern, System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+    End Function
+
+    Private Shared Function IsNonSubstantiveSkillFirstBypassTool(toolName As System.String) As System.Boolean
+        Dim normalized As System.String = If(toolName, "").Trim()
+        If normalized = "" Then Return False
+
+        Return normalized.Equals("report_progress", StringComparison.OrdinalIgnoreCase) OrElse
+               normalized.Equals(SharedLibrary.Agents.ContextCompactTool.ToolName, StringComparison.OrdinalIgnoreCase) OrElse
+               normalized.Equals(SharedLibrary.Agents.ContextExpandTool.ToolName, StringComparison.OrdinalIgnoreCase)
+    End Function
+
+    Private Shared Function BuildRequiredFirstSkillGuardPrompt(requiredSkillToolName As System.String) As System.String
+        Return "HOST SKILL-FIRST ROUTING: This request matches a configured assessment/checklist workflow. " &
+               "Do not perform research, knowledge-base lookup, legal analysis, issue spotting, or another checklist first. " &
+               "Call '" & If(requiredSkillToolName, GuidedCaseAssessmentToolName) & "' now and follow that skill. " &
+               "Do not call tool_loader for research tools before the required skill."
+    End Function
+
+    Private Shared Function BuildActiveSkillScopeGuardPrompt(skillName As System.String) As System.String
+        Return "HOST ACTIVE SKILL SCOPE: Continue the selected skill using only its declared allowed_tools. " &
+               "Do not load or call legal, web, knowledge-base, or other substantive tools outside that scope. " &
+               "If the skill requires a missing fact, follow its clarification/blocked-workflow rules instead of researching around it."
+    End Function
+
+    Private Sub ActivateGuidedCaseAssessmentToolScope(skillResponse As System.String, context As ToolExecutionContext)
+        If context Is Nothing OrElse String.IsNullOrWhiteSpace(skillResponse) Then Return
+
+        Try
+            Dim obj As JObject = JObject.Parse(skillResponse)
+            Dim allowedToolsToken As JToken = obj("allowed_tools")
+            If allowedToolsToken Is Nothing OrElse allowedToolsToken.Type <> JTokenType.Array Then Return
+
+            Dim scope As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            For Each item As JToken In DirectCast(allowedToolsToken, JArray)
+                Dim toolName As System.String = item.ToString().Trim()
+                If toolName <> "" Then scope.Add(toolName)
+            Next
+
+            ' Non-substantive orchestration/audit helpers remain available.
+            scope.Add("report_progress")
+            scope.Add(SharedLibrary.Agents.ContextCompactTool.ToolName)
+            scope.Add(SharedLibrary.Agents.ContextExpandTool.ToolName)
+            scope.Add(AP_Tool_ReportInability)
+            scope.Add("attest_response")
+
+            context.ActiveSkillToolScopeName = "guided-case-assessment"
+            context.ActiveSkillAllowedToolNames = scope
+        Catch ex As System.Exception
+            context.LogWarn("Could not activate guided-case allowed_tools scope.", details:=ex.Message)
+        End Try
+    End Sub
+
+    Private Shared Function IsToolPermittedByActiveSkillScope(toolName As System.String, context As ToolExecutionContext) As System.Boolean
+        If context Is Nothing OrElse context.ActiveSkillAllowedToolNames Is Nothing Then Return True
+        If String.IsNullOrWhiteSpace(toolName) Then Return False
+        Return context.ActiveSkillAllowedToolNames.Contains(toolName.Trim())
+    End Function
+
     Private Sub LogToolBatchPlan(context As ToolExecutionContext,
                              plan As SharedLibrary.Agents.ToolCallSequencing.ToolBatchPlan)
         If context Is Nothing OrElse plan Is Nothing Then Return
@@ -4938,48 +5156,6 @@ Partial Public Class ThisAddIn
         Return String.Join(Environment.NewLine, parts)
     End Function
 
-    Private Function ShouldEagerlyExposeBrowserTools(promptText As String) As Boolean
-        If String.IsNullOrWhiteSpace(promptText) Then
-            Return False
-        End If
-
-        Dim text As String = promptText.ToLowerInvariant()
-
-        Dim hasSiteAnchor As Boolean =
-            text.Contains("http://") OrElse
-            text.Contains("https://") OrElse
-            text.Contains("www.") OrElse
-            System.Text.RegularExpressions.Regex.IsMatch(
-                text,
-                "\b[a-z0-9][a-z0-9\-]*(?:\.[a-z0-9][a-z0-9\-]*)+\b",
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase) OrElse
-            text.Contains("website") OrElse
-            text.Contains("webseite") OrElse
-            text.Contains("site ")
-
-        If Not hasSiteAnchor Then
-            Return False
-        End If
-
-        Dim hasSiteExplorationIntent As Boolean =
-            text.Contains("find") OrElse
-            text.Contains("search") OrElse
-            text.Contains("scan") OrElse
-            text.Contains("browse") OrElse
-            text.Contains("link") OrElse
-            text.Contains("download") OrElse
-            text.Contains("original") OrElse
-            text.Contains("hole ") OrElse
-            text.Contains("hol mir") OrElse
-            text.Contains("suche") OrElse
-            text.Contains("finde") OrElse
-            text.Contains("seite") OrElse
-            text.Contains("website") OrElse
-            text.Contains("webseite")
-
-        Return hasSiteExplorationIntent
-    End Function
-
     Private Function BuildInitialToolExposure(allowedTools As List(Of ModelConfig),
                                               allowedRegistry As SharedLibrary.Agents.ToolRegistry,
                                               promptText As String) As List(Of ModelConfig)
@@ -5012,51 +5188,6 @@ Partial Public Class ThisAddIn
         If allowedRegistry Is Nothing Then
             result.AddRange(deduplicatedTools)
             Return result
-        End If
-
-        ' Site-specific browsing is a special case: when the request clearly asks us to
-        ' inspect/find/download something on a named website, expose Playwright directly
-        ' on the FIRST model turn instead of hoping the model discovers it via tool_loader.
-        ' This is intentionally only an exposure preference; BrowserToolsDisable and the
-        ' authoritative registry remain absolute availability controls.
-        If ShouldEagerlyExposeBrowserTools(promptText) Then
-            Dim browserNames As String() = {
-                SharedLibrary.Agents.BrowserTools.BrowserOpenToolName,
-                SharedLibrary.Agents.BrowserTools.BrowserSnapshotToolName,
-                SharedLibrary.Agents.BrowserTools.BrowserInteractToolName
-            }
-
-            Dim exposedBrowserCount As Integer = 0
-
-            For Each browserName As String In browserNames
-                If Not allowedRegistry.Contains(browserName) Then
-                    Continue For
-                End If
-
-                Dim browserTool As ModelConfig = allowedRegistry.Get(browserName)
-                If browserTool Is Nothing Then
-                    Continue For
-                End If
-
-                If result.Any(Function(t)
-                                  Return t IsNot Nothing AndAlso
-                                         Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
-                                         t.ToolName.Equals(browserName, StringComparison.OrdinalIgnoreCase)
-                              End Function) Then
-                    Continue For
-                End If
-
-                result.Add(browserTool)
-                exposedBrowserCount += 1
-            Next
-
-            If exposedBrowserCount > 0 Then
-                ToolingFileLogger.LogStep(
-                    $"Site-specific web request detected; eagerly exposed {exposedBrowserCount} Playwright browser tool(s) on the initial model turn.")
-            Else
-                ToolingFileLogger.LogWarn(
-                    "Site-specific web request detected, but Playwright browser tools are unavailable in the authoritative tool registry. Check BrowserToolsDisable and host tool registration.")
-            End If
         End If
 
         Dim loaderManifests As List(Of SharedLibrary.Agents.ToolManifest) =
@@ -6463,7 +6594,21 @@ __AfterDispatch:
                     End Using
                 End Sub)
 
-            If selector.ShowDialog() = DialogResult.OK Then
+            ' Belt-and-suspenders: pass a same-thread owner when one is available so
+            ' the modal is correctly parented (Z-order + re-activation) even though it
+            ' is spawned in response to activity in the Local Chat page hosted in Edge.
+            ' ResolveSameThreadDialogOwner returns Nothing for any cross-thread/foreign
+            ' owner, in which case we fall back to the ownerless (TopMost) dialog, so
+            ' this cannot reintroduce the cross-host modal-close deadlock.
+            Dim selectorOwner As System.Windows.Forms.IWin32Window =
+                SharedMethods.ResolveSameThreadDialogOwner()
+
+            Dim selectorResult As DialogResult =
+                If(selectorOwner IsNot Nothing,
+                   selector.ShowDialog(selectorOwner),
+                   selector.ShowDialog())
+
+            If selectorResult = DialogResult.OK Then
                 updatedAdvancedToolNames = workingAdvanced.
                     Distinct(StringComparer.OrdinalIgnoreCase).
                     ToList()

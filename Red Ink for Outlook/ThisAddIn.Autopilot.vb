@@ -4661,9 +4661,28 @@ Partial Public Class ThisAddIn
         Dim forcedDeliverables As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
         If runState IsNot Nothing AndAlso _chatAgentForcedDeliverables IsNot Nothing Then
             For Each forcedPath As String In _chatAgentForcedDeliverables
-                If Not String.IsNullOrWhiteSpace(forcedPath) Then
-                    forcedDeliverables.Add(forcedPath)
-                End If
+                If String.IsNullOrWhiteSpace(forcedPath) Then Continue For
+
+                Try
+                    Dim normalizedForcedPath As System.String = System.IO.Path.GetFullPath(forcedPath)
+
+                    ' AutoPilot forced/legacy outputs are session-local by definition. Never
+                    ' materialize a path originating from Local Chat, a prior mail, or another
+                    ' temp root merely because it remained in a shared tracking set.
+                    If _apActive Then
+                        If System.String.IsNullOrWhiteSpace(tempDirFull) OrElse
+                           Not normalizedForcedPath.StartsWith(tempDirFull, System.StringComparison.OrdinalIgnoreCase) Then
+
+                            ToolingFileLogger.LogWarn(
+                                "Rejected cross-session forced deliverable path for AutoPilot.",
+                                details:=$"file={System.IO.Path.GetFileName(normalizedForcedPath)}")
+                            Continue For
+                        End If
+                    End If
+
+                    forcedDeliverables.Add(normalizedForcedPath)
+                Catch ex As System.Exception
+                End Try
             Next
         End If
 

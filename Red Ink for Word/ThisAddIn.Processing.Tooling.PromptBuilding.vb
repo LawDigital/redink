@@ -449,48 +449,6 @@ Partial Public Class ThisAddIn
         Return String.Join(Environment.NewLine, parts)
     End Function
 
-    Private Function ShouldEagerlyExposeBrowserTools(promptText As String) As Boolean
-        If String.IsNullOrWhiteSpace(promptText) Then
-            Return False
-        End If
-
-        Dim text As String = promptText.ToLowerInvariant()
-
-        Dim hasSiteAnchor As Boolean =
-            text.Contains("http://") OrElse
-            text.Contains("https://") OrElse
-            text.Contains("www.") OrElse
-            System.Text.RegularExpressions.Regex.IsMatch(
-                text,
-                "\b[a-z0-9][a-z0-9\-]*(?:\.[a-z0-9][a-z0-9\-]*)+\b",
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase) OrElse
-            text.Contains("website") OrElse
-            text.Contains("webseite") OrElse
-            text.Contains("site ")
-
-        If Not hasSiteAnchor Then
-            Return False
-        End If
-
-        Dim hasSiteExplorationIntent As Boolean =
-            text.Contains("find") OrElse
-            text.Contains("search") OrElse
-            text.Contains("scan") OrElse
-            text.Contains("browse") OrElse
-            text.Contains("link") OrElse
-            text.Contains("download") OrElse
-            text.Contains("original") OrElse
-            text.Contains("hole ") OrElse
-            text.Contains("hol mir") OrElse
-            text.Contains("suche") OrElse
-            text.Contains("finde") OrElse
-            text.Contains("seite") OrElse
-            text.Contains("website") OrElse
-            text.Contains("webseite")
-
-        Return hasSiteExplorationIntent
-    End Function
-
     Private Function BuildInitialToolExposure(allowedTools As List(Of ModelConfig),
                                               allowedRegistry As SharedLibrary.Agents.ToolRegistry,
                                               promptText As String) As List(Of ModelConfig)
@@ -523,51 +481,6 @@ Partial Public Class ThisAddIn
         If allowedRegistry Is Nothing Then
             result.AddRange(deduplicatedTools)
             Return result
-        End If
-
-        ' Site-specific browsing is a special case: when the request clearly asks us to
-        ' inspect/find/download something on a named website, expose Playwright directly
-        ' on the FIRST model turn instead of hoping the model discovers it via tool_loader.
-        ' This is intentionally only an exposure preference; BrowserToolsDisable and the
-        ' authoritative registry remain absolute availability controls.
-        If ShouldEagerlyExposeBrowserTools(promptText) Then
-            Dim browserNames As String() = {
-                SharedLibrary.Agents.BrowserTools.BrowserOpenToolName,
-                SharedLibrary.Agents.BrowserTools.BrowserSnapshotToolName,
-                SharedLibrary.Agents.BrowserTools.BrowserInteractToolName
-            }
-
-            Dim exposedBrowserCount As Integer = 0
-
-            For Each browserName As String In browserNames
-                If Not allowedRegistry.Contains(browserName) Then
-                    Continue For
-                End If
-
-                Dim browserTool As ModelConfig = allowedRegistry.Get(browserName)
-                If browserTool Is Nothing Then
-                    Continue For
-                End If
-
-                If result.Any(Function(t)
-                                  Return t IsNot Nothing AndAlso
-                                         Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
-                                         t.ToolName.Equals(browserName, StringComparison.OrdinalIgnoreCase)
-                              End Function) Then
-                    Continue For
-                End If
-
-                result.Add(browserTool)
-                exposedBrowserCount += 1
-            Next
-
-            If exposedBrowserCount > 0 Then
-                ToolingFileLogger.LogStep(
-                    $"Site-specific web request detected; eagerly exposed {exposedBrowserCount} Playwright browser tool(s) on the initial model turn.")
-            Else
-                ToolingFileLogger.LogWarn(
-                    "Site-specific web request detected, but Playwright browser tools are unavailable in the authoritative tool registry. Check BrowserToolsDisable and host tool registration.")
-            End If
         End If
 
         Dim loaderManifests As List(Of SharedLibrary.Agents.ToolManifest) =

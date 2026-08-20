@@ -507,6 +507,7 @@
     <Compile Include="ThisAddIn.AutoPIlot.Tools.Other.vb" />
     <Compile Include="ThisAddIn.AutoPIlot.Tools.PDF.vb" />
     <Compile Include="ThisAddIn.AutoPIlot.Tools.Office.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.Tools.Office.OpenXmlVisuals.vb" />
     <Compile Include="ThisAddIn.AutoPIlot.Tools.vb" />
     <Compile Include="ThisAddIn.AutoPilot.UserStorage.vb" />
     <Compile Include="ThisAddIn.AutoPilot.UserStorageDashboard.vb" />

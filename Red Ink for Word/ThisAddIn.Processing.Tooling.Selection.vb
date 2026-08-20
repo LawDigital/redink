@@ -601,7 +601,21 @@ Partial Public Class ThisAddIn
                     End Using
                 End Sub)
 
-            If selector.ShowDialog() = DialogResult.OK Then
+            ' Belt-and-suspenders: pass a same-thread owner when one is available so
+            ' the modal is correctly parented (Z-order + re-activation) even though it
+            ' is spawned in response to activity in the Local Chat page hosted in Edge.
+            ' ResolveSameThreadDialogOwner returns Nothing for any cross-thread/foreign
+            ' owner, in which case we fall back to the ownerless (TopMost) dialog, so
+            ' this cannot reintroduce the cross-host modal-close deadlock.
+            Dim selectorOwner As System.Windows.Forms.IWin32Window =
+                SharedMethods.ResolveSameThreadDialogOwner()
+
+            Dim selectorResult As DialogResult =
+                If(selectorOwner IsNot Nothing,
+                   selector.ShowDialog(selectorOwner),
+                   selector.ShowDialog())
+
+            If selectorResult = DialogResult.OK Then
                 updatedAdvancedToolNames = workingAdvanced.
                     Distinct(StringComparer.OrdinalIgnoreCase).
                     ToList()

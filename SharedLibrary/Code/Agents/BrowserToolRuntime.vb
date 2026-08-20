@@ -31,6 +31,9 @@
 '  - A browser context is non-persistent by default; cookies/session state live
 '    for the lifetime of the current host process only.
 '  - browser_interact is write-capable and may submit forms or mutate remote data.
+'  - Browser sessions are headless by default. After navigation, the runtime makes a
+'    conservative best-effort attempt to dismiss common cookie/consent overlays using
+'    only reject/necessary-only actions; it never auto-clicks accept-all.
 ' =============================================================================
 
 Option Explicit On
@@ -40,7 +43,7 @@ Option Infer On
 Namespace Agents
 
     Public NotInheritable Class BrowserToolOptions
-        Public Property Headless As System.Boolean = False
+        Public Property Headless As System.Boolean = True
         Public Property BrowserChannel As System.String = "msedge"
         Public Property FallbackToBundledChromium As System.Boolean = True
         Public Property IgnoreHTTPSErrors As System.Boolean = False
@@ -198,6 +201,7 @@ Namespace Agents
 
                 Await CurrentPage.GotoAsync(url, gotoOptions).ConfigureAwait(False)
                 SelectNewestOpenPage()
+                Await TryDismissCommonCookieConsentAsync(CurrentPage, cancellationToken).ConfigureAwait(False)
 
                 Dim title As System.String = Await CurrentPage.TitleAsync().ConfigureAwait(False)
                 Return New Newtonsoft.Json.Linq.JObject(
@@ -374,6 +378,7 @@ Namespace Agents
                 Dim locator As Microsoft.Playwright.ILocator = CurrentPage.Locator("aria-ref=" & refValue)
                 Await ExecuteLocatorActionAsync(locator, action, value, timeoutMs).ConfigureAwait(False)
                 SelectNewestOpenPage()
+                Await TryDismissCommonCookieConsentAsync(CurrentPage, cancellationToken).ConfigureAwait(False)
 
                 Dim title As System.String = Await CurrentPage.TitleAsync().ConfigureAwait(False)
                 Return New Newtonsoft.Json.Linq.JObject(
@@ -402,6 +407,85 @@ Namespace Agents
             Finally
                 Gate.Release()
             End Try
+        End Function
+
+        Private Shared Async Function TryDismissCommonCookieConsentAsync(
+            page As Microsoft.Playwright.IPage,
+            cancellationToken As System.Threading.CancellationToken
+        ) As System.Threading.Tasks.Task
+            If page Is Nothing OrElse page.IsClosed Then
+                Return
+            End If
+
+            cancellationToken.ThrowIfCancellationRequested()
+
+            ' Deliberately conservative: only reject / necessary-only wording.
+            ' Never auto-click "accept all", because that would grant optional tracking.
+            Dim preferredLabels As System.String() = {
+                "Nur notwendige",
+                "Nur erforderliche",
+                "Nur notwendige Cookies",
+                "Nur erforderliche Cookies",
+                "Nicht notwendige ablehnen",
+                "Alle ablehnen",
+                "Ablehnen",
+                "Reject all",
+                "Reject optional",
+                "Decline all",
+                "Decline",
+                "Necessary only",
+                "Essential only",
+                "Only necessary",
+                "Only essential",
+                "Tout refuser",
+                "Refuser tout",
+                "Refuser",
+                "Uniquement nécessaires",
+                "Solo necessari",
+                "Rifiuta tutto",
+                "Rifiuta"
+            }
+
+            For Each label As System.String In preferredLabels
+                cancellationToken.ThrowIfCancellationRequested()
+
+                Try
+                    Dim locator As Microsoft.Playwright.ILocator =
+                        page.GetByRole(
+                            Microsoft.Playwright.AriaRole.Button,
+                            New Microsoft.Playwright.PageGetByRoleOptions() With {
+                                .Name = label,
+                                .Exact = True
+                            })
+
+                    Dim count As System.Int32 =
+                        Await locator.CountAsync().ConfigureAwait(False)
+
+                    If count <= 0 Then
+                        Continue For
+                    End If
+
+                    Dim candidate As Microsoft.Playwright.ILocator = locator.First
+
+                    If Not Await candidate.IsVisibleAsync().ConfigureAwait(False) Then
+                        Continue For
+                    End If
+
+                    Await candidate.ClickAsync(
+                        New Microsoft.Playwright.LocatorClickOptions() With {
+                            .Timeout = 1500.0F
+                        }).ConfigureAwait(False)
+
+                    ' Consent UIs usually disappear immediately; a short delay lets
+                    ' the DOM settle without waiting for network-idle trackers.
+                    Await page.WaitForTimeoutAsync(150).ConfigureAwait(False)
+                    Return
+                Catch ex As System.Exception
+                    ' Consent handling is best effort only. A failure must never make
+                    ' browser_open/browser_interact fail; the next snapshot can expose
+                    ' the banner so the model can handle it explicitly.
+                End Try
+            Next
         End Function
 
         Private Shared Async Function ExecuteLocatorActionAsync(

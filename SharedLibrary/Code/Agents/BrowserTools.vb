@@ -177,7 +177,7 @@ Namespace Agents
                 .ToolInstructionsPrompt =
                     "Use browser_open when a specific website must be explored as a rendered browser page, especially to find links, menus, sections, downloads, pagination, JavaScript-rendered content, or controls that simple HTTP text retrieval may miss. " &
                     "Prefer web_grounding when the relevant site/page is not yet known and public-web discovery is required. Prefer retrieve_web_content for a known mostly-static URL when readable text/ordinary links are sufficient. " &
-                    "Pass an absolute http:// or https:// URL. This tool navigates only; after it succeeds, call browser_snapshot to inspect the rendered page before attempting interaction. Do not invent element refs."
+                    "Pass an absolute http:// or https:// URL. The browser runs headless by default. This tool navigates only; after it succeeds, call browser_snapshot to inspect the rendered page before attempting interaction. The runtime may conservatively dismiss common reject/necessary-only cookie banners, but never grants optional tracking by clicking accept-all. Do not invent element refs."
             }
         End Function
 
@@ -192,7 +192,7 @@ Namespace Agents
                 .ToolInstructionsPrompt =
                     "Use browser_snapshot to inspect the actually rendered page structure, including accessible links, buttons, menus, headings, form controls and other interactive elements. It is especially useful for scanning a specific website for relevant links/pages or for content/navigation produced by JavaScript. " &
                     "The returned YAML snapshot contains Playwright refs such as [ref=e7]. Treat those refs as short-lived handles. Only refs from the most recent successful browser_snapshot may be passed to browser_interact. " &
-                    "If the relevant link is already visible in the snapshot, use its current ref rather than falling back to a new internet search."
+                    "If a cookie/consent overlay is still present, deal with that overlay FIRST before unrelated navigation; prefer reject/necessary-only choices over accept-all. Then take a fresh browser_snapshot. If the relevant link is already visible in the snapshot, use its current ref rather than falling back to a new web_grounding search."
             }
         End Function
 
