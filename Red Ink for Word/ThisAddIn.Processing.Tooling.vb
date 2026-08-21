@@ -316,12 +316,7 @@ Partial Public Class ThisAddIn
         context.SequencingState.UserLanguage =
             If(Not String.IsNullOrWhiteSpace(userLanguage),
                userLanguage.Trim(),
-               Await ResolveToolingUserLanguageAsync(
-                   userText,
-                   otherPrompt,
-                   fullPromptOverride,
-                   useSecondAPI,
-                   hideSplash))
+               "")
 
         context.LatestUserRequestRaw =
             ResolveLatestUserRequestRaw(
@@ -658,7 +653,7 @@ Partial Public Class ThisAddIn
         _activeToolingContext = context
 
         context.ProgressSink = progressSink
-        context.ReportProgress("Getting started...")
+        context.ReportProgress("Preparing request: determining language, context and workflow...")
 
         context.Log("Starting tooling session...")
         If selectedTools IsNot Nothing Then
@@ -668,16 +663,68 @@ Partial Public Class ThisAddIn
         End If
 
         Try
-            Await ResolveMemoryGroundingModeAsync(
-                context,
-                userText,
-                otherPrompt,
-                fullPromptOverride,
-                useSecondAPI,
-                hideSplash,
-                memoryGroundingMode,
-                memoryGroundingModeIsExplicit,
-                subAgentMode)
+            Dim bootstrapDecision As SharedLibrary.Agents.ToolingBootstrapPreflight.Decision = Nothing
+
+            If Not subAgentMode Then
+                Dim bootstrapAttempt As Integer = 0
+                Do
+                    bootstrapAttempt += 1
+                    ToolingFileLogger.LogStep($"[PERF] Bootstrap preflight attempt {bootstrapAttempt}/2.")
+                    Try
+                        bootstrapDecision = Await ResolveToolingBootstrapPreflightAsync(
+                            context,
+                            useSecondAPI,
+                            hideSplash,
+                            cancellationToken,
+                            userLanguage,
+                            memoryGroundingMode,
+                            memoryGroundingModeIsExplicit,
+                            subAgentMode)
+                        Exit Do
+                    Catch ex As System.TimeoutException
+                        If bootstrapAttempt >= 2 Then
+                            context.LogError("Bootstrap preflight timed out twice; stopping instead of entering a timeout cascade.", ex:=ex)
+                            ToolingFileLogger.EndSession(False, "Bootstrap preflight timeout")
+                            Return "The AI model did not respond while preparing the request. Please try again."
+                        End If
+
+                        context.LogWarn(
+                            "Bootstrap preflight timed out; retrying once.",
+                            details:=$"host={context.HostKind}; attempt={bootstrapAttempt}/2; error={ex.Message}")
+                        context.ReportProgress("The AI model is taking longer than expected. Retrying request preparation once...")
+                    End Try
+                Loop
+            End If
+
+            If String.IsNullOrWhiteSpace(context.SequencingState.UserLanguage) Then
+                context.SequencingState.UserLanguage = Await ResolveToolingUserLanguageAsync(
+                    userText,
+                    otherPrompt,
+                    fullPromptOverride,
+                    useSecondAPI,
+                    hideSplash)
+                context.Log("Fallback response-language resolution applied after bootstrap did not provide a usable language.", "diag")
+            End If
+
+            If bootstrapDecision Is Nothing OrElse Not bootstrapDecision.MemoryApplied Then
+                Await ResolveMemoryGroundingModeAsync(
+                    context,
+                    userText,
+                    otherPrompt,
+                    fullPromptOverride,
+                    useSecondAPI,
+                    hideSplash,
+                    memoryGroundingMode,
+                    memoryGroundingModeIsExplicit,
+                    subAgentMode)
+            End If
+
+            selectedTools = New List(Of ModelConfig)(If(context.SelectedTools, New List(Of ModelConfig)()))
+            If Not subAgentMode Then
+                ToolingFileLogger.LogStep("[PERF] Post-bootstrap selected tools: " &
+                                          If(selectedTools.Count = 0, "(none)", String.Join(", ", selectedTools.Select(Function(t) t.ToolName))))
+            End If
+            context.ReportProgress("Request prepared. Starting workflow...")
 
             If Not subAgentMode Then
                 Await TryPrimeRecentMemoryStubsAsync(context, cancellationToken)
@@ -963,10 +1010,27 @@ Partial Public Class ThisAddIn
                 Try
                     cancellationToken.ThrowIfCancellationRequested()
 
+                    Dim configuredTimeoutMs As Long = If(useSecondAPI AndAlso INI_Timeout_2 > 0, INI_Timeout_2, INI_Timeout)
+                    Dim exposedToolNames As IEnumerable(Of String) =
+                        If(context.SelectedTools, New List(Of ModelConfig)()).
+                            Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
+                            Select(Function(t) t.ToolName.Trim())
+                    Dim perCallTimeoutMs As Integer = SharedLibrary.Agents.HostToolRegistration.GetPerCallLlmTimeoutMs(
+                        configuredTimeoutMs,
+                        exposedToolNames,
+                        If(INI_APICall_ToolInstructions_2, "").Length,
+                        If(INI_APICall_ToolResponses_2, "").Length)
+                    If SharedLibrary.Agents.HostToolRegistration.GetLlmTimeoutMultiplier(
+                            exposedToolNames,
+                            If(INI_APICall_ToolInstructions_2, "").Length,
+                            If(INI_APICall_ToolResponses_2, "").Length) > 1 Then
+                        context.Log($"Heavy LLM timeout policy applied: timeoutMs={perCallTimeoutMs}.", "diag")
+                    End If
+
                     currentResponse = Await LLM(
                         sysPromptForThisCall,
                         userPromptForThisCall,
-                        "", "", 0,
+                        "", "", perCallTimeoutMs,
                         useSecondAPI,
                         hideSplash,
                         otherPrompt,
@@ -5336,7 +5400,8 @@ Partial Public Class ThisAddIn
 
         sb.AppendLine()
         sb.AppendLine("CAPABILITY ROUTING (HOST-ENFORCED):")
-        sb.AppendLine("- On a top-level tooling run, resolve_capability_route is the mandatory first routing decision before substantive work.")
+        sb.AppendLine("- On a top-level tooling run, capability routing is mandatory before substantive work; normally use resolve_capability_route when the host has not already resolved the route during bootstrap.")
+        sb.AppendLine("- If a host bootstrap/continuation guard already identifies a selected capability, do NOT call resolve_capability_route again; invoke that selected capability first.")
         sb.AppendLine("- Use only advertised skill/agent names and descriptions for this decision; do not preload their bodies or gather background first.")
         sb.AppendLine("- A specifically applicable workflow skill takes precedence over agents and generic tools. Choose a skill only when its description matches the requested workflow/task type, not merely a broad topic.")
         sb.AppendLine("- Only when no skill specifically applies may you select a specifically applicable top-level agent. Do not select an evidently bounded worker/helper agent for a broader request unless the whole request is exactly that bounded task.")
@@ -5741,6 +5806,12 @@ Partial Public Class ThisAddIn
         End If
 
         If toolResponse.Success Then
+            context.ConsecutiveFailedToolName = ""
+            context.ConsecutiveFailedToolCount = 0
+            Return False
+        End If
+
+        If toolResponse.RepairLoopRecoverable Then
             context.ConsecutiveFailedToolName = ""
             context.ConsecutiveFailedToolCount = 0
             Return False

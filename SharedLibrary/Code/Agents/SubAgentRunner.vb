@@ -178,6 +178,11 @@ Namespace Agents
            CType(Array.Empty(Of String)(), IReadOnlyList(Of String)),
            ag.AllowedTools.AsReadOnly())
 
+            Dim optionalTools As IReadOnlyList(Of String) =
+        If(ag.OptionalTools Is Nothing,
+           CType(Array.Empty(Of String)(), IReadOnlyList(Of String)),
+           ag.OptionalTools.AsReadOnly())
+
             Dim retryCount As Integer = 0
             Dim userMessageForRun As String = baseUserMessage.ToString()
 
@@ -192,6 +197,7 @@ Namespace Agents
                 .UserMessage = userMessageForRun,
                 .SpecialModelKey = If(String.IsNullOrWhiteSpace(ag.Model), "agentdefaultmodel", ag.Model),
                 .AllowedToolNames = allowedTools,
+                .OptionalToolNames = optionalTools,
                 .MaxIterations = 0,
                 .TimeoutSeconds = ag.TimeoutSeconds,
                 .WorkflowId = effectiveWorkflowId,
@@ -206,6 +212,7 @@ Namespace Agents
                     "sub_agent_invoked",
                     agentName:=ag.Name) &
                 " allowed_tools=" & FormatAllowedTools(req.AllowedToolNames) &
+                " optional_tools=" & FormatAllowedTools(req.OptionalToolNames) &
                 " retry=" & retryCount)
 
                     Dim finalText As String = Nothing

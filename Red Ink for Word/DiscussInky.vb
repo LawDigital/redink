@@ -6016,7 +6016,7 @@ Public Class DiscussInky
                                                displayName As String,
                                                Optional forwardToTalkToMe As Boolean = True)
         md = If(md, "")
-        Dim body = Markdig.Markdown.ToHtml(md, _mdPipeline)
+        Dim body = Markdig.Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(md), _mdPipeline)
         Dim t = body.Trim()
         Dim isSingle = Regex.IsMatch(t, "^\s*<p>[\s\S]*?</p>\s*$", RegexOptions.IgnoreCase) AndAlso
                    Not Regex.IsMatch(t, "<(ul|ol|pre|table|h[1-6]|blockquote|hr|div)\b", RegexOptions.IgnoreCase)
@@ -6710,7 +6710,7 @@ Public Class DiscussInky
     Private Sub AppendAutoResponderHtml(responderName As String,
                                         text As String,
                                         Optional forwardToTalkToMe As Boolean = True)
-        Dim body = Markdig.Markdown.ToHtml(text, _mdPipeline)
+        Dim body = Markdig.Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(text), _mdPipeline)
         Dim t = body.Trim()
         Dim whoHtml = WebUtility.HtmlEncode(responderName)
 
@@ -7496,7 +7496,7 @@ Public Class DiscussInky
     ''' </summary>
     Private Sub ShowDiscussionSummaryHtml(summaryMarkdown As String)
         Try
-            Dim htmlText As String = Markdig.Markdown.ToHtml(summaryMarkdown, _mdPipeline)
+            Dim htmlText As String = Markdig.Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(summaryMarkdown), _mdPipeline)
 
             Dim fullHtml As String =
                 "<!DOCTYPE html>" &

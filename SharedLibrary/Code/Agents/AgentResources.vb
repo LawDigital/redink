@@ -12,7 +12,7 @@
 '  - Inky.md: Project-wide guidance appended to system prompts by InkyPromptBuilder.
 '  - SkillDescriptor: Skill resources with YAML frontmatter and optional scripts/.
 '  - AgentDescriptor: Agent resources with YAML frontmatter for sub-agent delegation.
-'  - YAML parsing: Supports name, description, allowed-tools, model, network, timeout.
+'  - YAML parsing: Supports name, description, allowed-tools, optional-tools, model, network, timeout.
 '  - Lazy loading: Bodies and scripts are loaded on demand to keep startup fast.
 ' =============================================================================
 
@@ -31,6 +31,7 @@ Namespace Agents
         Public Property Name As String
         Public Property Description As String
         Public Property AllowedTools As New List(Of String)
+        Public Property OptionalTools As New List(Of String)
         Public Property Model As String                 ' optional, e.g. "researchmodel" (special-task-model key)
         Public Property Network As Boolean = False      ' opt-in for tools that touch the network (js.run, fetch)
         Public Property TimeoutSeconds As Integer = 0   ' 0 = use default
@@ -669,6 +670,7 @@ Namespace Agents
                 If Integer.TryParse(v, n) Then target.TimeoutSeconds = n
             End If
             If fm.TryGetValue("allowed-tools", v) Then target.AllowedTools = ParseList(v)
+            If fm.TryGetValue("optional-tools", v) Then target.OptionalTools = ParseList(v)
         End Sub
 
         ''' <summary>
@@ -872,7 +874,13 @@ Namespace Agents
         Public Shared Function GetDesigns() As IReadOnlyList(Of DocumentDesignDescriptor)
             Dim merged As New Dictionary(Of String, DocumentDesignDescriptor)(StringComparer.OrdinalIgnoreCase)
 
+            ' Approved standalone Office template carriers placed in the conventional
+            ' designs\word, designs\powerpoint, or designs\excel directories are
+            ' exposed as implicit design profiles. An explicit designs.json entry with
+            ' the same id always wins. Local resources override central resources.
+            LoadLooseTemplateCarriersInto(AgentResources.ConfiguredCentralPath, isLocal:=False, merged:=merged)
             LoadCatalogInto(AgentResources.ConfiguredCentralPath, isLocal:=False, merged:=merged)
+            LoadLooseTemplateCarriersInto(AgentResources.ConfiguredLocalPath, isLocal:=True, merged:=merged)
             LoadCatalogInto(AgentResources.ConfiguredLocalPath, isLocal:=True, merged:=merged)
 
             Return merged.Values.
@@ -906,7 +914,7 @@ Namespace Agents
         Public Shared Function BuildPromptFragment(Optional maxDesigns As Integer = 24) As String
             Dim designs As IReadOnlyList(Of DocumentDesignDescriptor) = GetDesigns()
             If designs Is Nothing OrElse designs.Count = 0 Then
-                Return "DESIGN REPOSITORY: No named Office design profiles are currently configured under AgentResourcesPath/AgentResourcesPathLocal\\designs\\designs.json. Named corporate designs must therefore not be claimed from model knowledge; use neutral professional design unless another concrete authorized source is available."
+                Return "DESIGN REPOSITORY: No named Office design profiles or approved standalone template carriers are currently configured under AgentResourcesPath/AgentResourcesPathLocal\\designs. Named corporate designs must therefore not be claimed from model knowledge; use neutral professional design unless another concrete authorized source is available."
             End If
 
             Dim items As New List(Of String)()
@@ -1008,6 +1016,153 @@ Namespace Agents
                 ' Creator tools simply fall back to neutral design and can surface that the design
                 ' could not be resolved.
             End Try
+        End Sub
+
+        Private Shared Sub LoadLooseTemplateCarriersInto(root As String,
+                                                           isLocal As Boolean,
+                                                           merged As Dictionary(Of String, DocumentDesignDescriptor))
+            If merged Is Nothing OrElse String.IsNullOrWhiteSpace(root) Then Return
+
+            Dim designsDir As String
+            Try
+                designsDir = System.IO.Path.GetFullPath(
+                    System.IO.Path.Combine(root, DesignsDirectoryName)
+                )
+            Catch ex As System.Exception
+                Return
+            End Try
+
+            AddLooseTemplateApplication(
+                designsDir,
+                isLocal,
+                "word",
+                New String() {".dotx", ".dotm", ".docx"},
+                merged
+            )
+
+            AddLooseTemplateApplication(
+                designsDir,
+                isLocal,
+                "powerpoint",
+                New String() {".potx", ".pptx"},
+                merged
+            )
+
+            AddLooseTemplateApplication(
+                designsDir,
+                isLocal,
+                "excel",
+                New String() {".xltx"},
+                merged
+            )
+        End Sub
+
+        Private Shared Sub AddLooseTemplateApplication(designsDir As String,
+                                                       isLocal As Boolean,
+                                                       applicationName As String,
+                                                       allowedExtensions As IEnumerable(Of String),
+                                                       merged As Dictionary(Of String, DocumentDesignDescriptor))
+            If String.IsNullOrWhiteSpace(designsDir) OrElse
+               String.IsNullOrWhiteSpace(applicationName) OrElse
+               allowedExtensions Is Nothing OrElse
+               merged Is Nothing Then
+
+                Return
+            End If
+
+            Dim applicationDir As String
+            Try
+                applicationDir = System.IO.Path.Combine(designsDir, applicationName)
+            Catch ex As System.Exception
+                Return
+            End Try
+
+            If Not System.IO.Directory.Exists(applicationDir) Then Return
+
+            Dim allowed As New HashSet(Of String)(
+                allowedExtensions,
+                StringComparer.OrdinalIgnoreCase
+            )
+
+            Dim files As IEnumerable(Of String)
+            Try
+                files = System.IO.Directory.EnumerateFiles(
+                    applicationDir,
+                    "*.*",
+                    System.IO.SearchOption.TopDirectoryOnly
+                )
+            Catch ex As System.Exception
+                Return
+            End Try
+
+            For Each filePath As String In files
+                Dim extension As String = System.IO.Path.GetExtension(filePath)
+                If Not allowed.Contains(extension) Then Continue For
+
+                Dim stem As String = System.IO.Path.GetFileNameWithoutExtension(filePath)
+                Dim mergeKey As String = NormalizeLookupKey(stem)
+                If mergeKey = "" Then Continue For
+
+                Dim descriptor As DocumentDesignDescriptor = Nothing
+                If merged.ContainsKey(mergeKey) Then
+                    Dim existing As DocumentDesignDescriptor = merged(mergeKey)
+                    If existing IsNot Nothing AndAlso
+                       existing.IsLocal = isLocal AndAlso
+                       String.IsNullOrWhiteSpace(existing.CatalogPath) Then
+
+                        descriptor = existing
+                    End If
+                End If
+
+                If descriptor Is Nothing Then
+                    Dim displayName As String = stem.Replace("_"c, " "c).Replace("-"c, " "c).Trim()
+                    If displayName = "" Then displayName = stem
+
+                    descriptor = New DocumentDesignDescriptor() With {
+                        .Id = stem,
+                        .Name = displayName,
+                        .Description = "Approved standalone Office template carrier discovered from the design repository.",
+                        .Enabled = True,
+                        .IsLocal = isLocal,
+                        .CatalogPath = "",
+                        .DirectoryPath = designsDir,
+                        .Raw = New JObject()
+                    }
+                    descriptor.Aliases.Add(stem)
+                    descriptor.Aliases.Add(System.IO.Path.GetFileName(filePath))
+                    merged(mergeKey) = descriptor
+                End If
+
+                Dim relativePath As String =
+                    applicationName & "/" & System.IO.Path.GetFileName(filePath)
+
+                Dim appConfig As New JObject() From {
+                    {"template_file", relativePath}
+                }
+
+                ' Optional human-readable companion guidance uses the same basename
+                ' as the Office carrier. This keeps design authoring user-friendly:
+                ' a user can drop Example.potx + Example.md into designs\powerpoint
+                ' without writing or editing designs.json.
+                Dim guidanceCandidate As String =
+                    System.IO.Path.Combine(
+                        applicationDir,
+                        System.IO.Path.GetFileNameWithoutExtension(filePath) & ".md"
+                    )
+                If System.IO.File.Exists(guidanceCandidate) Then
+                    appConfig("guidance_file") =
+                        applicationName & "/" & System.IO.Path.GetFileName(guidanceCandidate)
+                End If
+
+                Select Case applicationName.ToLowerInvariant()
+                    Case "word"
+                        appConfig("use_template_styles") = True
+                    Case "powerpoint"
+                        appConfig("preserve_template_slides") = False
+                End Select
+
+                descriptor.Raw(applicationName) = appConfig
+            Next
         End Sub
 
         Private Shared Function NormalizeLookupKey(value As String) As String

@@ -65,7 +65,7 @@ Namespace Agents
         '     results, and keep bigger previews so the model rarely needs context_expand.
         '
         '   MEDIUM models (default, ~128k-200k tokens):
-        '     ToolResponsePayloadBudgetChars           = 120000
+        '     ToolResponsePayloadBudgetChars           = 60000
         '     BudgetMediumCompactionThresholdChars     = 6000
         '     BudgetAggressiveCompactionThresholdChars = 2000
         '     BudgetCompactionPreviewChars             = 600
@@ -86,7 +86,7 @@ Namespace Agents
         ''' (still retrievable via context_expand). 0 disables budget-driven compaction.
         ''' Default for medium-context models; override via INI ToolResponsePayloadBudgetChars.
         ''' </summary>
-        Public Const ToolResponsePayloadBudgetChars As Integer = 120000
+        Public Const ToolResponsePayloadBudgetChars As Integer = 60000
 
         ''' <summary>First (milder) threshold for reference-compacting older medium-sized results under budget pressure. Override via INI BudgetMediumCompactionThresholdChars.</summary>
         Public Const BudgetMediumCompactionThresholdChars As Integer = 6000

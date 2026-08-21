@@ -203,19 +203,58 @@ Partial Public Class ThisAddIn
                            0,
                            authoritativeSnapshot.ListNames().Count)
 
-            Dim expandedAllowedToolNames As IReadOnlyList(Of String) =
-    ExpandAllowedToolNamesForRegistry(
-        request.AllowedToolNames,
-        authoritativeSnapshot)
+            Dim expandedRequiredToolNames As IReadOnlyList(Of String) =
+                ExpandAllowedToolNamesForRegistry(
+                    request.AllowedToolNames,
+                    authoritativeSnapshot)
+
+            Dim expandedOptionalCandidates As IReadOnlyList(Of String) =
+                ExpandAllowedToolNamesForRegistry(
+                    request.OptionalToolNames,
+                    authoritativeSnapshot)
+
+            Dim expandedOptionalToolNames As New System.Collections.Generic.List(Of String)()
+            Dim optionalToolNameSet As New System.Collections.Generic.HashSet(Of String)(System.StringComparer.OrdinalIgnoreCase)
+            If expandedOptionalCandidates IsNot Nothing AndAlso authoritativeSnapshot IsNot Nothing Then
+                For Each optionalName As String In expandedOptionalCandidates
+                    Dim normalizedOptionalName As String = If(optionalName, "").Trim()
+                    If normalizedOptionalName <> "" AndAlso
+                       authoritativeSnapshot.Contains(normalizedOptionalName) AndAlso
+                       optionalToolNameSet.Add(normalizedOptionalName) Then
+                        expandedOptionalToolNames.Add(normalizedOptionalName)
+                    End If
+                Next
+            End If
+
+            Dim effectiveAllowedToolNames As New System.Collections.Generic.List(Of String)()
+            Dim effectiveAllowedToolNameSet As New System.Collections.Generic.HashSet(Of String)(System.StringComparer.OrdinalIgnoreCase)
+            If expandedRequiredToolNames IsNot Nothing Then
+                For Each requiredName As String In expandedRequiredToolNames
+                    Dim normalizedRequiredName As String = If(requiredName, "").Trim()
+                    If normalizedRequiredName <> "" AndAlso effectiveAllowedToolNameSet.Add(normalizedRequiredName) Then
+                        effectiveAllowedToolNames.Add(normalizedRequiredName)
+                    End If
+                Next
+            End If
+            For Each optionalName As String In expandedOptionalToolNames
+                If effectiveAllowedToolNameSet.Add(optionalName) Then
+                    effectiveAllowedToolNames.Add(optionalName)
+                End If
+            Next
 
             Dim preflight = SharedLibrary.Agents.SubAgentToolScopeInitializer.Initialize(
-    authoritativeSnapshot,
-    expandedAllowedToolNames)
+                authoritativeSnapshot,
+                effectiveAllowedToolNames)
 
             Dim requestedNamesText As String =
-    If(expandedAllowedToolNames Is Nothing OrElse expandedAllowedToolNames.Count = 0,
-       "(none)",
-       String.Join(", ", expandedAllowedToolNames))
+                If(expandedRequiredToolNames Is Nothing OrElse expandedRequiredToolNames.Count = 0,
+                   "(none)",
+                   System.String.Join(", ", expandedRequiredToolNames))
+
+            Dim optionalNamesText As String =
+                If(expandedOptionalToolNames.Count = 0,
+                   "(none)",
+                   System.String.Join(", ", expandedOptionalToolNames))
 
             Dim resolvedNamesText As String =
                         If(preflight.ResolvedToolNames.Count = 0,
@@ -248,6 +287,7 @@ Partial Public Class ThisAddIn
                 " [parentRegistrySnapshotExists: " & authoritativeSnapshotAvailable & "]" &
                 " [snapshotToolCount: " & snapshotToolCount & "]" &
                 " [requestedAllowedTools: " & requestedNamesText & "]" &
+                " [resolvedOptionalTools: " & optionalNamesText & "]" &
                 " [resolvedTools: " & resolvedNamesText & "]" &
                 " [missingTools: " & missingNamesText & "]" &
                 " [finalSelectedTools: " & finalSelectedNamesText & "]" &
@@ -323,7 +363,7 @@ Partial Public Class ThisAddIn
                     hideSplash:=True,
                     hideLogWindow:=True,
                     subAgentMode:=True,
-                    subAgentAllowedToolNames:=expandedAllowedToolNames,
+                    subAgentAllowedToolNames:=effectiveAllowedToolNames,
                     subAgentSpecialModelKey:=request.SpecialModelKey,
                     subAgentAuthoritativeRegistry:=authoritativeSnapshot,
                     subAgentRegistrySource:=registrySource,

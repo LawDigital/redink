@@ -348,6 +348,7 @@ Namespace SharedLibrary
                     ' instead; its OffsetRectangle is independent of viewport height.
                     Dim questionMeasurePending As Boolean = False
                     Dim lastQuestionWidth As Integer = -1
+                    Dim growFormForOptionsIfNeeded As System.Action = Nothing
 
                     Dim measureQuestionHeight As System.Action =
                         Sub()
@@ -398,6 +399,10 @@ Namespace SharedLibrary
 
                                 promptHost.AutoScrollPosition =
                                     New System.Drawing.Point(0, 0)
+
+                                If growFormForOptionsIfNeeded IsNot Nothing Then
+                                    growFormForOptionsIfNeeded()
+                                End If
                             Catch ex As System.Exception
                                 ' Keep the current height if IE/DOM measurement is
                                 ' temporarily unavailable.
@@ -952,6 +957,95 @@ Namespace SharedLibrary
                             End Sub
                     End If
 
+                    ' Grow the whole dialog only when predefined answer buttons do not
+                    ' fit in the prompt panel. Automatic growth is deliberately
+                    ' capped at 60% of the current working-screen height; beyond that,
+                    ' promptHost remains scrollable and the fixed input/footer rows stay
+                    ' reachable. Manual user resizing/maximizing remains available.
+                    Dim optionGrowthPending As Boolean = False
+                    growFormForOptionsIfNeeded =
+                        Sub()
+                            If optionGrowthPending OrElse
+                               Not hasOptions OrElse
+                               optionsTable Is Nothing OrElse
+                               optionButtons.Count = 0 OrElse
+                               inputForm.IsDisposed OrElse
+                               inputForm.WindowState <>
+                                   System.Windows.Forms.FormWindowState.Normal Then
+
+                                Return
+                            End If
+
+                            optionGrowthPending = True
+                            Try
+                                inputForm.PerformLayout()
+                                updateOptionButtonHeights()
+                                promptLayout.PerformLayout()
+
+                                Dim contentHeight As Integer =
+                                    System.Math.Max(
+                                        promptLayout.Height,
+                                        promptLayout.PreferredSize.Height
+                                    )
+
+                                Dim visiblePromptHeight As Integer =
+                                    promptHost.ClientSize.Height
+
+                                If visiblePromptHeight <= 0 OrElse
+                                   contentHeight <= visiblePromptHeight +
+                                       AskUserScale(inputForm, 2) Then
+
+                                    Return
+                                End If
+
+                                Dim edgeMargin As Integer =
+                                    AskUserScale(inputForm, 28)
+
+                                Dim screenSafeHeight As Integer =
+                                    System.Math.Max(
+                                        AskUserScale(inputForm, 260),
+                                        wa.Height - (edgeMargin * 2)
+                                    )
+
+                                Dim automaticHeightCap As Integer =
+                                    System.Math.Min(
+                                        screenSafeHeight,
+                                        System.Math.Max(
+                                            AskUserScale(inputForm, 260),
+                                            CInt(System.Math.Floor(wa.Height * 0.6R))
+                                        )
+                                    )
+
+                                Dim fixedChromeHeight As Integer =
+                                    System.Math.Max(
+                                        0,
+                                        inputForm.Height - visiblePromptHeight
+                                    )
+
+                                Dim targetHeight As Integer =
+                                    System.Math.Min(
+                                        automaticHeightCap,
+                                        fixedChromeHeight +
+                                        contentHeight +
+                                        AskUserScale(inputForm, 4)
+                                    )
+
+                                If targetHeight > inputForm.Height Then
+                                    inputForm.Height = targetHeight
+                                    inputForm.Location =
+                                        New System.Drawing.Point(
+                                            wa.X +
+                                            (wa.Width - inputForm.Width) \ 2,
+                                            wa.Y +
+                                            (wa.Height - inputForm.Height) \ 2
+                                        )
+                                    inputForm.PerformLayout()
+                                End If
+                            Finally
+                                optionGrowthPending = False
+                            End Try
+                        End Sub
+
                     ' =========================================================
                     ' Shown: final DPI-aware sizing, positioning and foreground
                     ' protection.
@@ -1031,6 +1125,7 @@ Namespace SharedLibrary
                             inputForm.PerformLayout()
                             updateOptionButtonHeights()
                             queueQuestionHeightMeasure()
+                            growFormForOptionsIfNeeded()
 
                             ' Never let layout/focus side effects leave the prompt
                             ' scrolled down when the dialog first becomes visible.

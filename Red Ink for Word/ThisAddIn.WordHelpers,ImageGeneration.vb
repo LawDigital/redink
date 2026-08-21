@@ -285,7 +285,7 @@ Partial Public Class ThisAddIn
             If Not String.IsNullOrWhiteSpace(modelText) Then
                 Try
                     Dim pipeline = New MarkdownPipelineBuilder().UseAdvancedExtensions().Build()
-                    bodyHtml = Markdig.Markdown.ToHtml(modelText, pipeline)
+                    bodyHtml = Markdig.Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(modelText), pipeline)
                 Catch
                     ' Fallback: plain-text HTML encoding
                     bodyHtml = "<p>" & System.Net.WebUtility.HtmlEncode(modelText).Replace(vbLf, "<br/>") & "</p>"

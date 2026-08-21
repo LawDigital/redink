@@ -316,7 +316,12 @@ Partial Public Class ThisAddIn
         allowedOperations.Add("llm.complete")
         handler.LlmAsync =
             Async Function(systemPrompt As String, userPrompt As String, ct As System.Threading.CancellationToken) As Task(Of String)
-                Return Await SharedMethods.LLM(_context, systemPrompt, userPrompt, cancellationToken:=ct, ToolExecution:=True).ConfigureAwait(False)
+                Dim perCallTimeoutMs As Integer = SharedLibrary.Agents.HostToolRegistration.GetPerCallLlmTimeoutMs(
+                    INI_Timeout,
+                    New String() {Agents.PythonExecuteTool.ToolName},
+                    If(systemPrompt, "").Length,
+                    If(userPrompt, "").Length)
+                Return Await SharedMethods.LLM(_context, systemPrompt, userPrompt, Timeout:=perCallTimeoutMs, cancellationToken:=ct, ToolExecution:=True).ConfigureAwait(False)
             End Function
 
         Dim selected As List(Of ModelConfig) = If(context IsNot Nothing, context.SelectedTools, Nothing)

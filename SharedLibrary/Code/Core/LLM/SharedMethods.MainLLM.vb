@@ -1163,6 +1163,12 @@ PostProcess:
 
                     Return Returnvalue
 
+                Catch ex As System.TimeoutException
+                    Throw
+
+                Catch ex As System.OperationCanceledException
+                    Throw
+
                 Catch ex As System.Exception
 
 #If DEBUG Then

@@ -13,15 +13,13 @@
 '   - Use SubAgentRunRequest.SystemPrompt as the only system prompt
 '     (this already includes the AGENT.md body composed by SubAgentRunner).
 '   - Use SubAgentRunRequest.UserMessage as the single user turn.
-'   - Restrict tool availability to SubAgentRunRequest.AllowedToolNames
-'     (a narrowing filter; if Nothing or empty => no narrowing).
+'   - Restrict tool availability to SubAgentRunRequest.AllowedToolNames plus any
+'     SubAgentRunRequest.OptionalToolNames that exist in the authoritative registry.
+'     Missing required tools block the run; missing optional tools are ignored.
 '   - Honor SubAgentRunRequest.SpecialModelKey by resolving the corresponding
 '     special-task-model and using it for this run only (restoring the previous
 '     model afterwards), falling back to "agentdefaultmodel".
 '   - Return the final assistant text (the runner will try to parse it as JSON).
-'   - Restrict tool availability to SubAgentRunRequest.AllowedToolNames.
-'     If AllowedToolNames is Nothing, the host may use its default active tool set.
-'     If AllowedToolNames is an empty list, the sub-agent gets no callable tools.
 ' =============================================================================
 
 Option Strict On
@@ -38,6 +36,7 @@ Namespace Agents
         Public Property UserMessage As String
         Public Property SpecialModelKey As String
         Public Property AllowedToolNames As IReadOnlyList(Of String)
+        Public Property OptionalToolNames As IReadOnlyList(Of String)
         Public Property MaxIterations As Integer
         Public Property TimeoutSeconds As Integer
         Public Property WorkflowId As String

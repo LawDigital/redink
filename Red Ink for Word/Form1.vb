@@ -4838,10 +4838,7 @@ Partial Public Class frmAIChat
     ''' Configured with advanced extensions (tables, footnotes), emoji support, and soft line breaks.
     ''' </summary>
     Private ReadOnly _mdPipeline As MarkdownPipeline =
-        New MarkdownPipelineBuilder().
-            UseAdvancedExtensions().
-            UseSoftlineBreakAsHardlineBreak().
-            Build()
+        Global.SharedLibrary.SharedLibrary.SharedMethods.CreateMarkdownHtmlPipeline(True)
 
     ''' <summary>DOM ID of current "Thinking..." placeholder for removal when LLM responds</summary>
     Private _lastThinkingId As String = Nothing
@@ -6442,7 +6439,7 @@ function setThinking(id, text) {{
                 Else
                     ' Assistant message: convert Markdown to HTML
                     Dim md = RemoveCommands(content.ToString())
-                    Dim body = Markdown.ToHtml(md, _mdPipeline)
+                    Dim body = Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(md), _mdPipeline)
                     body = InstrumentLinks(body)
                     Dim t = If(body, "").Trim()
 
@@ -6553,7 +6550,7 @@ function setThinking(id, text) {{
     ''' </remarks>
     Public Sub AppendAssistantMarkdown(md As String)
         If md Is Nothing Then md = ""
-        Dim body As String = Markdown.ToHtml(md, _mdPipeline)
+        Dim body As String = Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(md), _mdPipeline)
         body = InstrumentLinks(body)
         Dim t As String = If(body, "").Trim()
 

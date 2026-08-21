@@ -432,7 +432,7 @@ Partial Public Class ThisAddIn
                     Continue For
                 End If
 
-                Dim skillToolName As String = "skill_" & skill.Name.Trim()
+                Dim skillToolName As String = SharedLibrary.Agents.ToolRegistryBuilder.BuildSkillToolName(skill.Name)
 
                 If Not selectedSet.Contains(skillToolName) Then
                     Continue For

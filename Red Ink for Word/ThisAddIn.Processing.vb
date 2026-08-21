@@ -3012,7 +3012,7 @@ Partial Public Class ThisAddIn
 
         Debug.WriteLine("Result=" & Result)
 
-        Dim htmlResult As String = Markdown.ToHtml(Result, markdownPipeline).Trim
+        Dim htmlResult As String = Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(Result), markdownPipeline).Trim
 
         ' ============= RESTORE PROTECTED PATTERNS AFTER MARKDOWN CONVERSION =============
         ' Restore {{...}} placeholders - DO NOT encode, these need to be processed by RestoreSpecialTextElements

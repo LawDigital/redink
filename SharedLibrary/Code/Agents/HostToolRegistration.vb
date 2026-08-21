@@ -78,7 +78,6 @@ Namespace Agents
         }
 
         Private ReadOnly OutlookOnlyInternalToolNames As String() = New String() {
-            "process_word_document",
             "comment_word_document",
             "extract_pdf_text",
             "merge_pdfs",
@@ -131,6 +130,41 @@ Namespace Agents
             "agent_workspace_inventory_report"
         }
 
+        ' LLM timeout load policy. This classifies MODEL-CALL planning/interpretation cost,
+        ' not the local execution duration of the tool itself. Keep this explicit and host-agnostic.
+        Private ReadOnly HeavyLlmToolNames As String() = New String() {
+            "create_word_document",
+            "complete_word_tables",
+            "comment_word_document",
+            "compare_word_documents",
+            "read_word_document_details",
+            "create_excel_spreadsheet",
+            "extract_excel_data",
+            "excel_list_live_worksheets",
+            "excel_read_live_range",
+            "excel_complete_live_workbook",
+            "create_powerpoint",
+            "create_pdf_from_text",
+            "create_code_file",
+            "create_audio_file",
+            "comment_pdf_document",
+            "redact_pdf",
+            "extract_data_from_attachments",
+            PythonExecuteTool.ToolName,
+            JsRunTool.ToolName,
+            "word_doc_read",
+            "word_doc_edit",
+            "word_doc_create"
+        }
+
+        Private ReadOnly HeavyLlmToolNameSet As HashSet(Of String) =
+            BuildToolNameSet(HeavyLlmToolNames)
+
+        ' A very large active tool/payload context is itself a model-call cost signal.
+        ' This threshold is deliberately mechanical; it does not infer semantics from descriptions.
+        Public Const HeavyLlmPayloadThresholdChars As Integer = 60000
+        Public Const HeavyLlmTimeoutMultiplier As Integer = 2
+
         Private ReadOnly WordOnlyInternalToolNames As String() = New String() {
             WorkspaceTools.ToolGet,
             WorkspaceTools.ToolInventory,
@@ -180,7 +214,6 @@ Namespace Agents
             WordTools.ToolFormat,
             WordTools.ToolApplyTemplate,
             WordTools.ToolSaveAs,
-            "process_word_document",
             "comment_word_document",
             "merge_pdfs",
             "compare_word_documents",
@@ -255,6 +288,8 @@ Namespace Agents
         Private ReadOnly DynamicOutlookDeliverableToolNames As New System.Collections.Generic.HashSet(Of String)(System.StringComparer.OrdinalIgnoreCase)
         Private ReadOnly DynamicWordDeliverableToolNames As New System.Collections.Generic.HashSet(Of String)(System.StringComparer.OrdinalIgnoreCase)
         Private ReadOnly DeliverableCapabilitySyncRoot As New System.Object()
+
+
 
         Private ReadOnly CommonInternalToolNameSet As HashSet(Of String) =
             BuildToolNameSet(CommonInternalToolNames)
@@ -414,6 +449,38 @@ Namespace Agents
             End If
 
             Return " (built-in)"
+        End Function
+
+        Public Function IsHeavyLlmToolName(toolName As String) As Boolean
+            Dim name As String = If(toolName, "").Trim()
+            Return name <> "" AndAlso HeavyLlmToolNameSet.Contains(name)
+        End Function
+
+        Public Function GetLlmTimeoutMultiplier(toolNames As IEnumerable(Of String),
+                                                toolInstructionsChars As Integer,
+                                                toolResponsesChars As Integer) As Integer
+            If toolNames IsNot Nothing Then
+                For Each rawName As String In toolNames
+                    If IsHeavyLlmToolName(rawName) Then Return HeavyLlmTimeoutMultiplier
+                Next
+            End If
+
+            Dim combinedChars As Long = CLng(System.Math.Max(0, toolInstructionsChars)) +
+                                        CLng(System.Math.Max(0, toolResponsesChars))
+            If combinedChars >= HeavyLlmPayloadThresholdChars Then Return HeavyLlmTimeoutMultiplier
+            Return 1
+        End Function
+
+        Public Function GetPerCallLlmTimeoutMs(configuredTimeoutMs As Long,
+                                               toolNames As IEnumerable(Of String),
+                                               toolInstructionsChars As Integer,
+                                               toolResponsesChars As Integer) As Integer
+            Dim baseMs As Long = configuredTimeoutMs
+            If baseMs <= 0 Then baseMs = 30000
+            Dim multiplier As Integer = GetLlmTimeoutMultiplier(toolNames, toolInstructionsChars, toolResponsesChars)
+            Dim effectiveMs As Long = baseMs * CLng(multiplier)
+            If effectiveMs > System.Int32.MaxValue Then effectiveMs = System.Int32.MaxValue
+            Return CInt(System.Math.Max(1L, effectiveMs))
         End Function
 
         Public Function GetDeliverableCapableToolNames(host As ToolingHostKind) As IReadOnlyCollection(Of String)

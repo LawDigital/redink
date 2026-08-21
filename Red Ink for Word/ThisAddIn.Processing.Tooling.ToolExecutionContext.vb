@@ -75,6 +75,11 @@ Partial Public Class ThisAddIn
         Public Property CapabilityRoutingName As String
         Public Property CapabilityRoutingEntered As Boolean
 
+        ' Persist an explicitly selected PowerPoint design/template across retries so a
+        ' failed branded attempt cannot silently degrade into a neutral deliverable.
+        Public Property RequiredPowerPointDesignName As String = ""
+        Public Property RequiredPowerPointTemplateAttachmentName As String = ""
+
         ''' <summary>All responses generated during this session (successful and failed).</summary>
         Public Property AllToolResponses As List(Of ToolResponse)
 

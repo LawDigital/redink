@@ -184,41 +184,111 @@ Namespace SharedLibrary
         ''' <summary>
         ''' Normalizes lightweight LaTeX-style notation emitted by LLMs before Markdown-to-HTML rendering.
         ''' Embedded Red Ink viewers do not run MathJax, so wrappers such as \(\rightarrow\) would otherwise
-        ''' remain visible verbatim. Fenced code blocks and inline code spans are preserved unchanged.
+        ''' remain visible verbatim. Only a bounded allow-list is substituted; Markdown link destinations remain unchanged.
         ''' </summary>
         Public Shared Function NormalizeMarkdownForHtmlDisplay(markdown As String) As String
             If String.IsNullOrEmpty(markdown) Then Return If(markdown, String.Empty)
 
-            Dim normalized As String = markdown.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf)
-            Dim lines As String() = normalized.Split(New String() {vbLf}, StringSplitOptions.None)
-            Dim result As New System.Text.StringBuilder(markdown.Length + 32)
-            Dim inFence As Boolean = False
-            Dim fenceMarker As String = String.Empty
+            ' Keep this deliberately bounded. Red Ink is not a LaTeX renderer: it only
+            ' substitutes a known allow-list of common inline commands that models emit
+            ' in otherwise ordinary prose. Markdown link/image destinations are preserved
+            ' byte-for-byte so backslashes in paths and URLs cannot be damaged.
+            Return NormalizeKnownLatexCodesPreservingMarkdownLinks(markdown)
+        End Function
 
-            For lineIndex As Integer = 0 To lines.Length - 1
-                Dim line As String = lines(lineIndex)
-                Dim trimmed As String = line.TrimStart()
+        Private Shared Function NormalizeKnownLatexCodesPreservingMarkdownLinks(value As String) As String
+            If String.IsNullOrEmpty(value) Then Return If(value, String.Empty)
 
-                If trimmed.StartsWith("```", StringComparison.Ordinal) OrElse trimmed.StartsWith("~~~", StringComparison.Ordinal) Then
-                    Dim marker As String = trimmed.Substring(0, 3)
-                    If Not inFence Then
-                        inFence = True
-                        fenceMarker = marker
-                    ElseIf marker.Equals(fenceMarker, StringComparison.Ordinal) Then
-                        inFence = False
-                        fenceMarker = String.Empty
-                    End If
-                    result.Append(line)
-                ElseIf inFence Then
-                    result.Append(line)
-                Else
-                    result.Append(NormalizeMarkdownInlineLatexOutsideCode(line))
+            Dim output As New System.Text.StringBuilder(value.Length + 16)
+            Dim index As Integer = 0
+            While index < value.Length
+                Dim linkStart As Integer = FindNextMarkdownLinkStart(value, index)
+                If linkStart < 0 Then
+                    output.Append(NormalizeKnownLatexCodes(value.Substring(index)))
+                    Exit While
                 End If
 
-                If lineIndex < lines.Length - 1 Then result.Append(vbLf)
+                If linkStart > index Then output.Append(NormalizeKnownLatexCodes(value.Substring(index, linkStart - index)))
+
+                Dim labelOpen As Integer = If(value(linkStart) = "!"c, linkStart + 1, linkStart)
+                Dim labelClose As Integer = FindUnescapedMarkdownDelimiter(value, labelOpen + 1, "]"c)
+                If labelClose < 0 OrElse labelClose + 1 >= value.Length OrElse value(labelClose + 1) <> "("c Then
+                    output.Append(NormalizeKnownLatexCodes(value.Substring(linkStart, 1)))
+                    index = linkStart + 1
+                    Continue While
+                End If
+
+                Dim destinationClose As Integer = FindMarkdownLinkDestinationClose(value, labelClose + 2)
+                If destinationClose < 0 Then
+                    output.Append(NormalizeKnownLatexCodes(value.Substring(linkStart)))
+                    Exit While
+                End If
+
+                If value(linkStart) = "!"c Then output.Append("!")
+                output.Append("[")
+                output.Append(NormalizeKnownLatexCodes(value.Substring(labelOpen + 1, labelClose - labelOpen - 1)))
+                output.Append("](")
+                output.Append(value.Substring(labelClose + 2, destinationClose - labelClose - 2))
+                output.Append(")")
+                index = destinationClose + 1
+            End While
+            Return output.ToString()
+        End Function
+
+        Private Shared Function NormalizeKnownLatexCodes(value As String) As String
+            If String.IsNullOrEmpty(value) Then Return If(value, String.Empty)
+
+            Dim result As String = value
+
+            ' A few structured commands need their annotation/content retained.
+            result = System.Text.RegularExpressions.Regex.Replace(result, "\\xrightarrow\{\\text\{([^{}]*)\}\}", " —$1→ ")
+            result = System.Text.RegularExpressions.Regex.Replace(result, "\\xrightarrow\{([^{}]*)\}", " —$1→ ")
+            result = System.Text.RegularExpressions.Regex.Replace(result, "\\xleftarrow\{\\text\{([^{}]*)\}\}", " ←$1— ")
+            result = System.Text.RegularExpressions.Regex.Replace(result, "\\xleftarrow\{([^{}]*)\}", " ←$1— ")
+            result = System.Text.RegularExpressions.Regex.Replace(result, "\\(?:text|mathrm|mathbf|mathit)\{([^{}]*)\}", "$1")
+            result = System.Text.RegularExpressions.Regex.Replace(result, "_\{\\text\{([^{}]*)\}\}", "_$1")
+            result = System.Text.RegularExpressions.Regex.Replace(result, "\^\{?\\circ\}?", "°")
+
+            Dim replacements As New System.Collections.Generic.Dictionary(Of String, String)(StringComparer.Ordinal) From {
+                {"\leftrightarrow", "↔"}, {"\rightarrow", "→"}, {"\leftarrow", "←"}, {"\to", "→"}, {"\gets", "←"},
+                {"\Longleftrightarrow", "⟺"}, {"\Longrightarrow", "⟹"}, {"\Longleftarrow", "⟸"},
+                {"\Rightarrow", "⇒"}, {"\Leftarrow", "⇐"}, {"\Leftrightarrow", "⇔"}, {"\implies", "⇒"}, {"\impliedby", "⇐"}, {"\iff", "⇔"}, {"\mapsto", "↦"},
+                {"\Updownarrow", "⇕"}, {"\Uparrow", "⇑"}, {"\Downarrow", "⇓"},
+                {"\uparrow", "↑"}, {"\downarrow", "↓"}, {"\updownarrow", "↕"},
+                {"\leq", "≤"}, {"\le", "≤"}, {"\geq", "≥"}, {"\ge", "≥"}, {"\neq", "≠"}, {"\ne", "≠"},
+                {"\ll", "≪"}, {"\gg", "≫"}, {"\approx", "≈"}, {"\equiv", "≡"}, {"\propto", "∝"},
+                {"\pm", "±"}, {"\mp", "∓"}, {"\times", "×"}, {"\cdot", "·"}, {"\div", "÷"}, {"\circ", "°"},
+                {"\checkmark", "✓"}, {"\star", "★"}, {"\bullet", "•"}, {"\textdegree", "°"},
+                {"\notin", "∉"}, {"\in", "∈"}, {"\subseteq", "⊆"}, {"\supseteq", "⊇"}, {"\subset", "⊂"}, {"\supset", "⊃"},
+                {"\cap", "∩"}, {"\cup", "∪"}, {"\forall", "∀"}, {"\exists", "∃"},
+                {"\land", "∧"}, {"\lor", "∨"}, {"\neg", "¬"}
+            }
+
+            For Each pair As System.Collections.Generic.KeyValuePair(Of String, String) In System.Linq.Enumerable.OrderByDescending(replacements, Function(item) item.Key.Length)
+                Dim pattern As String = System.Text.RegularExpressions.Regex.Escape(pair.Key) & "(?![A-Za-z])"
+                result = System.Text.RegularExpressions.Regex.Replace(result, pattern, pair.Value)
             Next
 
-            Return result.ToString()
+            ' Section/paragraph commands are unusually ambiguous in ordinary paths, so
+            ' require a boundary that looks like prose/reference notation.
+            result = System.Text.RegularExpressions.Regex.Replace(result, "\\S(?=(?:\\,)?(?:\s|\d|[().,:;]))", "§")
+            result = System.Text.RegularExpressions.Regex.Replace(result, "\\P(?=(?:\\,)?(?:\s|\d|[().,:;]))", "¶")
+            result = result.Replace("\,", " ")
+            result = System.Text.RegularExpressions.Regex.Replace(result, "_\{([^{}]+)\}", "_$1")
+            result = NormalizeSimpleLatexSubscriptsAndSuperscripts(result)
+
+            ' Remove math delimiters only for spans where one of the allow-listed commands
+            ' has already become a known symbol. Currency and unrelated $...$ text remain untouched.
+            Dim symbolClass As String = "[≤≥≠≈≡∝≪≫→←↔⇒⇐⇔⟹⟸⟺↦↑↓↕⇑⇓⇕✓★•∈∉⊂⊆⊃⊇∩∪∀∃∧∨¬±∓×·÷°]"
+            result = System.Text.RegularExpressions.Regex.Replace(
+                result,
+                "(?<!\\)\$(?!\$)([^$\r\n]*" & symbolClass & "[^$\r\n]*)(?<!\\)\$(?!\$)",
+                "$1")
+            result = System.Text.RegularExpressions.Regex.Replace(result, "\\\(([^()\r\n]*" & symbolClass & "[^()\r\n]*)\\\)", "$1")
+            result = System.Text.RegularExpressions.Regex.Replace(result, "\\\[([^\[\]\r\n]*" & symbolClass & "[^\[\]\r\n]*)\\\]", "$1")
+            result = result.Replace("$>$", ">").Replace("$<$", "<")
+
+            Return result
         End Function
 
         Private Shared Function NormalizeMarkdownInlineLatexOutsideCode(line As String) As String
@@ -260,43 +330,173 @@ Namespace SharedLibrary
         Private Shared Function NormalizeLatexTextSegment(segment As String) As String
             If String.IsNullOrEmpty(segment) Then Return If(segment, String.Empty)
 
-            Dim value As String = segment
+            ' Preserve Markdown link/image destinations byte-for-byte. Math-like backslash
+            ' sequences may legitimately occur in file/UNC paths and URLs; only visible link
+            ' labels are normalized. This keeps [label](C:\folder\file.docx), images, and
+            ' URL query strings safe while still allowing LaTeX notation in the label text.
+            Dim output As New System.Text.StringBuilder(segment.Length + 16)
+            Dim index As Integer = 0
+            While index < segment.Length
+                Dim linkStart As Integer = FindNextMarkdownLinkStart(segment, index)
+                If linkStart < 0 Then
+                    output.Append(NormalizeLatexMathWrappers(segment.Substring(index)))
+                    Exit While
+                End If
 
-            ' Full expression normalization is deliberately limited to explicit LaTeX math
-            ' wrappers. Applying short commands such as \in or \le to arbitrary prose can
-            ' corrupt legitimate backslash text (for example file paths).
-            value = System.Text.RegularExpressions.Regex.Replace(
-                value,
+                If linkStart > index Then output.Append(NormalizeLatexMathWrappers(segment.Substring(index, linkStart - index)))
+
+                Dim labelOpen As Integer = If(segment(linkStart) = "!"c, linkStart + 1, linkStart)
+                Dim labelClose As Integer = FindUnescapedMarkdownDelimiter(segment, labelOpen + 1, "]"c)
+                If labelClose < 0 OrElse labelClose + 1 >= segment.Length OrElse segment(labelClose + 1) <> "("c Then
+                    output.Append(NormalizeLatexMathWrappers(segment.Substring(linkStart, 1)))
+                    index = linkStart + 1
+                    Continue While
+                End If
+
+                Dim destinationClose As Integer = FindMarkdownLinkDestinationClose(segment, labelClose + 2)
+                If destinationClose < 0 Then
+                    output.Append(NormalizeLatexMathWrappers(segment.Substring(linkStart)))
+                    Exit While
+                End If
+
+                If segment(linkStart) = "!"c Then output.Append("!")
+                output.Append("[")
+                output.Append(NormalizeLatexMathWrappers(segment.Substring(labelOpen + 1, labelClose - labelOpen - 1)))
+                output.Append("](")
+                output.Append(segment.Substring(labelClose + 2, destinationClose - labelClose - 2))
+                output.Append(")")
+                index = destinationClose + 1
+            End While
+
+            Return output.ToString()
+        End Function
+
+        Private Shared Function FindNextMarkdownLinkStart(value As String, startIndex As Integer) As Integer
+            For i As Integer = Math.Max(0, startIndex) To value.Length - 2
+                ' Escaped brackets include the LaTeX display wrapper \[...\]; they are not Markdown links.
+                Dim escapedBracket As Boolean = (i > 0 AndAlso value(i - 1) = "\"c)
+                If value(i) = "["c AndAlso Not escapedBracket Then Return i
+                If value(i) = "!"c AndAlso value(i + 1) = "["c Then Return i
+            Next
+            Return -1
+        End Function
+
+        Private Shared Function FindUnescapedMarkdownDelimiter(value As String, startIndex As Integer, delimiter As Char) As Integer
+            Dim escaped As Boolean = False
+            For i As Integer = Math.Max(0, startIndex) To value.Length - 1
+                Dim ch As Char = value(i)
+                If escaped Then
+                    escaped = False
+                ElseIf ch = "\"c Then
+                    escaped = True
+                ElseIf ch = delimiter Then
+                    Return i
+                End If
+            Next
+            Return -1
+        End Function
+
+        Private Shared Function FindMarkdownLinkDestinationClose(value As String, startIndex As Integer) As Integer
+            Dim depth As Integer = 0
+            Dim escaped As Boolean = False
+            For i As Integer = Math.Max(0, startIndex) To value.Length - 1
+                Dim ch As Char = value(i)
+                If escaped Then
+                    escaped = False
+                    Continue For
+                End If
+                If ch = "\"c Then
+                    escaped = True
+                    Continue For
+                End If
+                If ch = "("c Then
+                    depth += 1
+                ElseIf ch = ")"c Then
+                    If depth = 0 Then Return i
+                    depth -= 1
+                End If
+            Next
+            Return -1
+        End Function
+
+        Private Shared Function NormalizeLatexMathWrappers(value As String) As String
+            If String.IsNullOrEmpty(value) Then Return If(value, String.Empty)
+
+            Dim normalized As String = value
+            normalized = System.Text.RegularExpressions.Regex.Replace(
+                normalized,
                 "\\\((.*?)\\\)",
                 Function(m As System.Text.RegularExpressions.Match) NormalizeLatexExpression(m.Groups(1).Value),
                 System.Text.RegularExpressions.RegexOptions.Singleline)
 
-            value = System.Text.RegularExpressions.Regex.Replace(
-                value,
+            normalized = System.Text.RegularExpressions.Regex.Replace(
+                normalized,
                 "\\\[(.*?)\\\]",
                 Function(m As System.Text.RegularExpressions.Match) NormalizeLatexExpression(m.Groups(1).Value),
                 System.Text.RegularExpressions.RegexOptions.Singleline)
 
-            ' Outside explicit math wrappers no TeX command rewriting is performed.
-            ' This avoids changing legitimate backslash text such as Windows paths.
+            ' LLMs also commonly emit standard inline/display dollar delimiters. Convert only
+            ' paired, unescaped delimiters; standalone currency such as $500 is left untouched.
+            normalized = System.Text.RegularExpressions.Regex.Replace(
+                normalized,
+                "(?<!\\)\$\$(.+?)(?<!\\)\$\$",
+                Function(m As System.Text.RegularExpressions.Match) NormalizeLatexExpression(m.Groups(1).Value),
+                System.Text.RegularExpressions.RegexOptions.Singleline)
 
-            Return value
+            normalized = System.Text.RegularExpressions.Regex.Replace(
+                normalized,
+                "(?<!\\)\$(?!\$)(.+?)(?<!\\)\$(?!\$)",
+                Function(m As System.Text.RegularExpressions.Match)
+                    Dim expressionText As String = m.Groups(1).Value
+                    If Not ShouldNormalizeDollarLatexExpression(expressionText) Then Return m.Value
+                    Return NormalizeLatexExpression(expressionText)
+                End Function,
+                System.Text.RegularExpressions.RegexOptions.Singleline)
+
+            Return normalized
+        End Function
+
+        Private Shared Function ShouldNormalizeDollarLatexExpression(expression As String) As Boolean
+            If String.IsNullOrWhiteSpace(expression) Then Return False
+            Dim value As String = expression.Trim()
+            If value.IndexOf("\"c) >= 0 Then Return True
+            If System.Text.RegularExpressions.Regex.IsMatch(value, "^[A-Za-z](?:_[A-Za-z0-9]+|\^\{?[A-Za-z0-9]+\}?)?$") Then Return True
+            If System.Text.RegularExpressions.Regex.IsMatch(value, "[=<>+*/^_]") Then Return True
+            Return False
         End Function
 
         Private Shared Function NormalizeLatexExpression(expression As String) As String
             If String.IsNullOrEmpty(expression) Then Return If(expression, String.Empty)
 
             Dim value As String = expression
-            value = value.Replace("\left", String.Empty).Replace("\right", String.Empty)
+            ' Remove delimiter-sizing commands only when they actually prefix a delimiter.
+            ' A blind Replace("\left", "") corrupts valid commands such as \leftarrow and \leftrightarrow.
+            value = System.Text.RegularExpressions.Regex.Replace(value, "\\left(?=\s*[\(\[\{<|])", String.Empty)
+            value = System.Text.RegularExpressions.Regex.Replace(value, "\\right(?=\s*[\)\]\}>|])", String.Empty)
             value = value.Replace("\,", " ").Replace("\;", " ").Replace("\!", String.Empty)
+            value = value.Replace("\$", "$").Replace("\%", "%").Replace("\&", "&").Replace("\_", "_")
+
+            ' Preserve the annotation of labelled arrows instead of dropping it with \text{}.
+            value = System.Text.RegularExpressions.Regex.Replace(value, "\\xrightarrow\{\\text\{([^{}]*)\}\}", " —$1→ ")
+            value = System.Text.RegularExpressions.Regex.Replace(value, "\\xrightarrow\{([^{}]*)\}", " —$1→ ")
+            value = System.Text.RegularExpressions.Regex.Replace(value, "\\xleftarrow\{\\text\{([^{}]*)\}\}", " ←$1— ")
+            value = System.Text.RegularExpressions.Regex.Replace(value, "\\xleftarrow\{([^{}]*)\}", " ←$1— ")
+
             value = System.Text.RegularExpressions.Regex.Replace(value, "\\(?:text|mathrm|mathbf|mathit)\{([^{}]*)\}", "$1")
             value = System.Text.RegularExpressions.Regex.Replace(value, "\\frac\{([^{}]*)\}\{([^{}]*)\}", "$1/$2")
 
             Dim replacements As New System.Collections.Generic.Dictionary(Of String, String)(StringComparer.Ordinal) From {
-                {"\leftrightarrow", "↔"}, {"\rightarrow", "→"}, {"\leftarrow", "←"},
-                {"\Rightarrow", "⇒"}, {"\Leftarrow", "⇐"}, {"\Leftrightarrow", "⇔"}, {"\mapsto", "↦"},
-                {"\leq", "≤"}, {"\le", "≤"}, {"\geq", "≥"}, {"\ge", "≥"}, {"\neq", "≠"}, {"\ne", "≠"},
-                {"\approx", "≈"}, {"\equiv", "≡"}, {"\pm", "±"}, {"\times", "×"}, {"\cdot", "·"}, {"\div", "÷"},
+                {"\leftrightarrow", "↔"}, {"\rightarrow", "→"}, {"\leftarrow", "←"}, {"\to", "→"}, {"\gets", "←"},
+                {"\Longleftrightarrow", "⟺"}, {"\Longrightarrow", "⟹"}, {"\Longleftarrow", "⟸"},
+                {"\Rightarrow", "⇒"}, {"\Leftarrow", "⇐"}, {"\Leftrightarrow", "⇔"}, {"\implies", "⇒"}, {"\impliedby", "⇐"}, {"\iff", "⇔"}, {"\mapsto", "↦"},
+                {"\Updownarrow", "⇕"}, {"\Uparrow", "⇑"}, {"\Downarrow", "⇓"},
+                {"\uparrow", "↑"}, {"\downarrow", "↓"}, {"\updownarrow", "↕"},
+                {"\leq", "≤"}, {"\le", "≤"}, {"\geq", "≥"}, {"\ge", "≥"}, {"\lt", "<"}, {"\gt", ">"},
+                {"\neq", "≠"}, {"\ne", "≠"}, {"\nleq", "≰"}, {"\ngeq", "≱"}, {"\ll", "≪"}, {"\gg", "≫"},
+                {"\lesssim", "≲"}, {"\gtrsim", "≳"}, {"\approx", "≈"}, {"\sim", "∼"}, {"\simeq", "≃"},
+                {"\equiv", "≡"}, {"\propto", "∝"}, {"\pm", "±"}, {"\mp", "∓"},
+                {"\times", "×"}, {"\cdot", "·"}, {"\div", "÷"}, {"\circ", "°"},
+                {"\checkmark", "✓"}, {"\star", "★"}, {"\bullet", "•"},
                 {"\infty", "∞"}, {"\notin", "∉"}, {"\in", "∈"}, {"\subseteq", "⊆"}, {"\supseteq", "⊇"},
                 {"\subset", "⊂"}, {"\supset", "⊃"}, {"\cup", "∪"}, {"\cap", "∩"}, {"\forall", "∀"}, {"\exists", "∃"},
                 {"\neg", "¬"}, {"\land", "∧"}, {"\lor", "∨"}, {"\alpha", "α"}, {"\beta", "β"}, {"\gamma", "γ"},
@@ -309,8 +509,23 @@ Namespace SharedLibrary
                 value = value.Replace(pair.Key, pair.Value)
             Next
 
+            value = NormalizeSimpleLatexSubscriptsAndSuperscripts(value)
             value = System.Text.RegularExpressions.Regex.Replace(value, "\\([()\[\]{}<>])", "$1")
-            Return value
+            Return value.Trim()
+        End Function
+
+        Private Shared Function NormalizeSimpleLatexSubscriptsAndSuperscripts(value As String) As String
+            If String.IsNullOrEmpty(value) Then Return If(value, String.Empty)
+            Dim result As String = value
+            Dim subDigits As String() = {"₀", "₁", "₂", "₃", "₄", "₅", "₆", "₇", "₈", "₉"}
+            Dim superDigits As String() = {"⁰", "¹", "²", "³", "⁴", "⁵", "⁶", "⁷", "⁸", "⁹"}
+            For digit As Integer = 0 To 9
+                result = result.Replace("_" & digit.ToString(Globalization.CultureInfo.InvariantCulture), subDigits(digit))
+                result = result.Replace("_{" & digit.ToString(Globalization.CultureInfo.InvariantCulture) & "}", subDigits(digit))
+                result = result.Replace("^" & digit.ToString(Globalization.CultureInfo.InvariantCulture), superDigits(digit))
+                result = result.Replace("^{" & digit.ToString(Globalization.CultureInfo.InvariantCulture) & "}", superDigits(digit))
+            Next
+            Return result
         End Function
 
         ''' <summary>

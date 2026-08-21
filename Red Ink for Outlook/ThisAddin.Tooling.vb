@@ -53,6 +53,7 @@ Option Strict Off
 
 Imports System.Diagnostics
 Imports System.IO
+Imports System.Linq
 Imports System.Reflection
 Imports System.Text.RegularExpressions
 Imports System.Threading.Tasks
@@ -176,6 +177,9 @@ Partial Public Class ThisAddIn
 
         Public Property NormalizedCallSignature As String
         Public Property WasDuplicateReplay As Boolean
+
+        ''' <summary>True when a tool classifies a failed result as recoverable planning/input feedback that should not count toward the generic host failure circuit breaker.</summary>
+        Public Property RepairLoopRecoverable As Boolean
 
         ''' <summary>True when a repair-loop advisor determined the failure is terminal (budget exhausted or non-recoverable).</summary>
         Public Property RepairLoopTerminal As Boolean
@@ -404,6 +408,185 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
+    Private Async Function ResolveToolingBootstrapPreflightAsync(
+        context As ToolExecutionContext,
+        useSecondAPI As Boolean,
+        hideSplash As Boolean,
+        cancellationToken As System.Threading.CancellationToken,
+        explicitUserLanguage As String,
+        explicitMemoryGroundingMode As SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode,
+        memoryGroundingModeIsExplicit As Boolean,
+        subAgentMode As Boolean) As System.Threading.Tasks.Task(Of SharedLibrary.Agents.ToolingBootstrapPreflight.Decision)
+
+        If context Is Nothing OrElse subAgentMode Then
+            Return Nothing
+        End If
+
+        Dim manifests As IEnumerable(Of SharedLibrary.Agents.ToolManifest) =
+            If(context.AllowedToolRegistry Is Nothing,
+               Enumerable.Empty(Of SharedLibrary.Agents.ToolManifest)(),
+               context.AllowedToolRegistry.ListManifests())
+
+        Dim systemPrompt As String = SharedLibrary.Agents.ToolingBootstrapPreflight.BuildSystemPrompt(manifests)
+        Dim userPrompt As String = SharedLibrary.Agents.ToolingBootstrapPreflight.BuildUserPrompt(
+            context.LatestUserRequestRaw,
+            context.HostTaskSummary)
+
+        context.Log("Bootstrap preflight started: response language, memory grounding, capability routing, and first capability load.")
+        ToolingFileLogger.LogStep("[PERF] Bootstrap preflight LLM request started.")
+        LogLatestUserRequestDiagnostic(context, "bootstrap")
+
+        Dim sw As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
+        Dim raw As String = ""
+
+        Try
+            raw = Await LLM(
+                systemPrompt,
+                userPrompt,
+                "", "", 0,
+                useSecondAPI,
+                hideSplash,
+                "",
+                "",
+                cancellationToken,
+                True,
+                False)
+        Catch ex As System.TimeoutException
+            sw.Stop()
+            ToolingFileLogger.LogStep($"[PERF] Bootstrap preflight timed out: elapsedMs={sw.ElapsedMilliseconds}.")
+            context.LogWarn("Bootstrap preflight timed out while contacting the AI model.", details:=$"host={context.HostKind}; error={ex.Message}")
+            Throw
+        Catch ex As System.OperationCanceledException
+            sw.Stop()
+            ToolingFileLogger.LogStep($"[PERF] Bootstrap preflight cancelled: elapsedMs={sw.ElapsedMilliseconds}.")
+            Throw
+        Catch ex As System.Exception
+            sw.Stop()
+            ToolingFileLogger.LogStep($"[PERF] Bootstrap preflight failed: elapsedMs={sw.ElapsedMilliseconds}.")
+            context.LogWarn("Bootstrap preflight failed; falling back to the existing per-decision paths.",
+                            details:=$"host={context.HostKind}; error={ex.Message}")
+            Return New SharedLibrary.Agents.ToolingBootstrapPreflight.Decision()
+        End Try
+
+        sw.Stop()
+        ToolingFileLogger.LogStep($"[PERF] Bootstrap preflight LLM completed: elapsedMs={sw.ElapsedMilliseconds}; responseChars={If(raw, "").Length}.")
+        context.Log($"Bootstrap preflight model step completed in {sw.ElapsedMilliseconds} ms.")
+
+        Dim decision As SharedLibrary.Agents.ToolingBootstrapPreflight.Decision =
+            SharedLibrary.Agents.ToolingBootstrapPreflight.ParseDecision(raw)
+
+        Dim normalizedForLog As String = If(decision.NormalizedOutput, "")
+        If normalizedForLog.Length > 1200 Then normalizedForLog = normalizedForLog.Substring(0, 1200) & "..."
+        context.Log("bootstrapNormalizedOutput=" & normalizedForLog, "diag")
+        If Not String.IsNullOrWhiteSpace(decision.ParseError) Then
+            context.Log("bootstrapParseError=" & decision.ParseError, "diag")
+        End If
+
+        If Not String.IsNullOrWhiteSpace(explicitUserLanguage) Then
+            context.SequencingState.UserLanguage = explicitUserLanguage.Trim()
+            decision.LanguageApplied = True
+            context.Log("Bootstrap language skipped because an explicit user language was supplied: " & context.SequencingState.UserLanguage, "diag")
+        ElseIf decision.LanguageValid Then
+            context.SequencingState.UserLanguage = decision.Language
+            decision.LanguageApplied = True
+            context.Log("Bootstrap response language applied: " & decision.Language, "diag")
+        End If
+
+        If memoryGroundingModeIsExplicit Then
+            context.SequencingState.MemoryGroundingMode = explicitMemoryGroundingMode
+            context.SequencingState.MemoryGroundingAuthority =
+                If(explicitMemoryGroundingMode = SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None,
+                   SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingAuthority.None,
+                   SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingAuthority.ExplicitOverride)
+            context.SequencingState.ShouldExposeRecentMemoryStubs =
+                explicitMemoryGroundingMode <> SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None
+
+            If context.SequencingState.MemoryGroundingMode <> SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None AndAlso
+               context.SequencingState.ShouldExposeRecentMemoryStubs Then
+                ResolveMemoryGroundingToolConfig(context, SharedLibrary.Agents.MemoryTools.ToolList)
+                ResolveMemoryGroundingToolConfig(context, SharedLibrary.Agents.MemoryTools.ToolGet)
+                If context.SequencingState.MemoryGroundingStage = SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingStage.NotStarted Then
+                    context.SequencingState.MemoryGroundingStage = SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingStage.ListRequired
+                End If
+            End If
+
+            decision.MemoryApplied = True
+            context.Log("Bootstrap memory classification skipped because an explicit memory mode was supplied; explicit mode applied.", "diag")
+        ElseIf Not HasMemoryGroundingClassifierInputsAvailable(context) Then
+            context.SequencingState.MemoryGroundingMode = SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None
+            context.SequencingState.MemoryGroundingAuthority = SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingAuthority.None
+            context.SequencingState.ShouldExposeRecentMemoryStubs = False
+            decision.MemoryApplied = True
+            context.Log("Bootstrap memory classification not required: no memory tools and no workflow memory available.", "diag")
+        ElseIf decision.MemoryValid Then
+            ApplyBootstrapMemoryGroundingDecision(context, decision.MemoryDecision)
+            decision.MemoryApplied = True
+        End If
+
+        If context.CapabilityRoutingRequired AndAlso decision.RoutingSyntaxValid Then
+            If decision.RouteKind = SharedLibrary.Agents.CapabilityRoutingTool.KindNone Then
+                context.CapabilityRoutingResolved = True
+                context.CapabilityRoutingKind = SharedLibrary.Agents.CapabilityRoutingTool.KindNone
+                context.CapabilityRoutingName = ""
+                context.CapabilityRoutingEntered = True
+                decision.RouteApplied = True
+                context.Log("Bootstrap capability route resolved: kind=none; reason=" & decision.RouteReason, "diag")
+                context.Log("Bootstrap routing complete: no specific skill or top-level agent selected; normal tool planning will continue.")
+                ToolingFileLogger.LogStep("[ROUTE] bootstrap resolved kind=none; host=" & context.HostKind & "; reason=" & decision.RouteReason)
+            Else
+                Dim matchingManifest As SharedLibrary.Agents.ToolManifest =
+                    context.AllowedToolRegistry.ListManifests().FirstOrDefault(
+                        Function(m)
+                            Return m IsNot Nothing AndAlso
+                                   Not String.IsNullOrWhiteSpace(m.Name) AndAlso
+                                   m.Name.Equals(decision.RouteName, StringComparison.OrdinalIgnoreCase) AndAlso
+                                   String.Equals(m.Category, decision.RouteKind, StringComparison.OrdinalIgnoreCase)
+                        End Function)
+
+                If matchingManifest IsNot Nothing Then
+                    Dim loaded As ModelConfig = EnsureVisibleToolLoaded(matchingManifest.Name, context)
+                    If loaded IsNot Nothing Then
+                        context.CapabilityRoutingResolved = True
+                        context.CapabilityRoutingKind = decision.RouteKind
+                        context.CapabilityRoutingName = matchingManifest.Name
+                        context.CapabilityRoutingEntered = False
+                        decision.RouteApplied = True
+                        context.PendingContinuationGuardPrompt = BuildCapabilityRoutingGuardPrompt(context)
+                        context.PendingGuardTitle = "HOST BOOTSTRAP CAPABILITY ROUTE"
+                        context.PendingRejectedTurnExplanation = "The host bootstrap already resolved the capability route; invoke the selected capability first."
+                        context.PendingRejectedAssistantTurn = ""
+                        context.Log("Bootstrap capability route resolved: kind=" & decision.RouteKind & "; name=" & matchingManifest.Name & "; reason=" & decision.RouteReason, "diag")
+                        context.Log("Bootstrap selected workflow capability: " & matchingManifest.Name)
+                        ToolingFileLogger.LogStep("[ROUTE] bootstrap resolved kind=" & decision.RouteKind & "; name=" & matchingManifest.Name & "; entered=false; host=" & context.HostKind & "; reason=" & decision.RouteReason)
+                        ToolingFileLogger.LogStep("[PERF] Bootstrap first capability loaded: " & matchingManifest.Name)
+                    End If
+                End If
+            End If
+        End If
+
+        If decision.RouteApplied AndAlso context.SelectedTools IsNot Nothing Then
+            context.SelectedTools.RemoveAll(
+                Function(tool)
+                    Return tool IsNot Nothing AndAlso
+                           SharedLibrary.Agents.CapabilityRoutingTool.IsResolverToolName(tool.ToolName)
+                End Function)
+            context.Log("Bootstrap capability router removed from the first normal turn because routing is already resolved.", "diag")
+        End If
+
+        If context.CapabilityRoutingRequired AndAlso Not decision.RouteApplied Then
+            context.LogWarn(
+                "Bootstrap capability route was not applied; the existing capability router will resolve it in the first normal model turn.",
+                details:=$"host={context.HostKind}; syntaxValid={decision.RoutingSyntaxValid}; routeKind={decision.RouteKind}; routeName={decision.RouteName}; parseError={decision.ParseError}",
+                visibleToUser:=False)
+        End If
+
+        context.Log("Bootstrap preflight completed: languageApplied=" & decision.LanguageApplied.ToString().ToLowerInvariant() &
+                    "; memoryApplied=" & decision.MemoryApplied.ToString().ToLowerInvariant() &
+                    "; routeApplied=" & decision.RouteApplied.ToString().ToLowerInvariant() &
+                    "; route=" & If(context.CapabilityRoutingName, ""), "diag")
+
+        Return decision
+    End Function
 
 
 #Region "Execute Tooling"
@@ -617,13 +800,7 @@ Partial Public Class ThisAddIn
         context.SequencingState.UserLanguage =
             If(Not String.IsNullOrWhiteSpace(userLanguage),
                userLanguage.Trim(),
-               Await ResolveToolingUserLanguageAsync(
-                   userText,
-                   otherPrompt,
-                   fullPromptOverride,
-                   useSecondAPI,
-                   hideSplash,
-                   cancellationToken))
+               "")
 
         context.LatestUserRequestRaw =
             ResolveLatestUserRequestRaw(
@@ -956,7 +1133,7 @@ Partial Public Class ThisAddIn
         _activeToolingContext = context
 
         context.ProgressSink = progressSink
-        context.ReportProgress("Getting started...")
+        context.ReportProgress("Preparing request: determining language, context and workflow...")
 
         context.Log("Starting tooling session...")
         If selectedTools IsNot Nothing Then
@@ -974,17 +1151,70 @@ Partial Public Class ThisAddIn
         Dim effectiveTimeout As Integer = System.Math.Max(1, CInt(System.Math.Ceiling(configuredTimeoutMs / 1000.0)))
 
         Try
-            Await ResolveMemoryGroundingModeAsync(
-                context,
-                userText,
-                otherPrompt,
-                fullPromptOverride,
-                useSecondAPI,
-                hideSplash,
-                cancellationToken,
-                memoryGroundingMode,
-                memoryGroundingModeIsExplicit,
-                subAgentMode)
+            Dim bootstrapDecision As SharedLibrary.Agents.ToolingBootstrapPreflight.Decision = Nothing
+
+            If Not subAgentMode Then
+                Dim bootstrapAttempt As Integer = 0
+                Do
+                    bootstrapAttempt += 1
+                    ToolingFileLogger.LogStep($"[PERF] Bootstrap preflight attempt {bootstrapAttempt}/2.")
+                    Try
+                        bootstrapDecision = Await ResolveToolingBootstrapPreflightAsync(
+                            context,
+                            useSecondAPI,
+                            hideSplash,
+                            cancellationToken,
+                            userLanguage,
+                            memoryGroundingMode,
+                            memoryGroundingModeIsExplicit,
+                            subAgentMode)
+                        Exit Do
+                    Catch ex As System.TimeoutException
+                        If bootstrapAttempt >= 2 Then
+                            context.LogError("Bootstrap preflight timed out twice; stopping instead of entering a timeout cascade.", ex:=ex)
+                            ToolingFileLogger.EndSession(False, "Bootstrap preflight timeout")
+                            Return "The AI model did not respond while preparing the request. Please try again."
+                        End If
+
+                        context.LogWarn(
+                            "Bootstrap preflight timed out; retrying once.",
+                            details:=$"host={context.HostKind}; attempt={bootstrapAttempt}/2; error={ex.Message}")
+                        context.ReportProgress("The AI model is taking longer than expected. Retrying request preparation once...")
+                    End Try
+                Loop
+            End If
+
+            If String.IsNullOrWhiteSpace(context.SequencingState.UserLanguage) Then
+                context.SequencingState.UserLanguage = Await ResolveToolingUserLanguageAsync(
+                    userText,
+                    otherPrompt,
+                    fullPromptOverride,
+                    useSecondAPI,
+                    hideSplash,
+                    cancellationToken)
+                context.Log("Fallback response-language resolution applied after bootstrap did not provide a usable language.", "diag")
+            End If
+
+            If bootstrapDecision Is Nothing OrElse Not bootstrapDecision.MemoryApplied Then
+                Await ResolveMemoryGroundingModeAsync(
+                    context,
+                    userText,
+                    otherPrompt,
+                    fullPromptOverride,
+                    useSecondAPI,
+                    hideSplash,
+                    cancellationToken,
+                    memoryGroundingMode,
+                    memoryGroundingModeIsExplicit,
+                    subAgentMode)
+            End If
+
+            selectedTools = New List(Of ModelConfig)(If(context.SelectedTools, New List(Of ModelConfig)()))
+            If Not subAgentMode Then
+                ToolingFileLogger.LogStep("[PERF] Post-bootstrap selected tools: " &
+                                          If(selectedTools.Count = 0, "(none)", String.Join(", ", selectedTools.Select(Function(t) t.ToolName))))
+            End If
+            context.ReportProgress("Request prepared. Starting workflow...")
 
             If Not subAgentMode Then
                 Await TryPrimeRecentMemoryStubsAsync(context, cancellationToken)
@@ -1279,9 +1509,26 @@ Partial Public Class ThisAddIn
 
                 LogFinalResponseContractDiagnostics(context, effectiveSysPrompt)
 
-                ' Create linked cancellation with timeout (matches RunLlmAsync pattern)
+                ' Per-call LLM timeout policy: keep the configured model timeout unchanged,
+                ' but allow explicitly classified heavy tools (or very large active payloads)
+                ' more time for this individual model call.
+                Dim exposedToolNames As IEnumerable(Of String) =
+                    If(context.SelectedTools, New List(Of ModelConfig)()).
+                        Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
+                        Select(Function(t) t.ToolName.Trim())
+                Dim perCallTimeoutMs As Integer = SharedLibrary.Agents.HostToolRegistration.GetPerCallLlmTimeoutMs(
+                    configuredTimeoutMs,
+                    exposedToolNames,
+                    If(INI_APICall_ToolInstructions_2, "").Length,
+                    If(INI_APICall_ToolResponses_2, "").Length)
+                Dim perCallMultiplier As Integer = System.Math.Max(1, CInt(System.Math.Round(perCallTimeoutMs / CDbl(configuredTimeoutMs))))
+                If perCallMultiplier > 1 Then
+                    context.Log($"Heavy LLM timeout policy applied: multiplier={perCallMultiplier}; timeoutMs={perCallTimeoutMs}.", "diag")
+                End If
+
+                ' Create linked cancellation with timeout (matches RunLlmAsync pattern).
                 Using timeoutCts As New System.Threading.CancellationTokenSource()
-                    Dim totalTimeout = effectiveTimeout + 60 ' 60 second buffer
+                    Dim totalTimeout As Integer = CInt(System.Math.Ceiling(perCallTimeoutMs / 1000.0)) + 60 ' transport timeout + host buffer
                     timeoutCts.CancelAfter(TimeSpan.FromSeconds(totalTimeout))
 
                     Using combinedCts As System.Threading.CancellationTokenSource =
@@ -1292,7 +1539,7 @@ Partial Public Class ThisAddIn
                             currentResponse = Await LLM(
                                 effectiveSysPrompt,
                                 effectiveUserPrompt,
-                                "", "", 0,
+                                "", "", perCallTimeoutMs,
                                 useSecondAPI,
                                 hideSplash,
                                 otherPrompt,
@@ -1673,11 +1920,16 @@ Partial Public Class ThisAddIn
 
                             context.AllToolResponses.Add(hiddenResponse)
 
-                            If context.SequencingState IsNot Nothing Then
+                            If context.SequencingState IsNot Nothing AndAlso Not preparedForNextTurn Then
                                 context.SequencingState.NoteToolFailure(
                                     tc.ToolName,
                                     If(hiddenResponse.ErrorCode, SharedLibrary.Agents.ToolCallSequencing.ToolNotExposedInCurrentTurnCode),
                                     If(hiddenResponse.ErrorMessage, "Tool schema was not exposed at the start of the turn."))
+                            End If
+
+                            If preparedForNextTurn Then
+                                context.ToolLoaderConfirmedAvailableToolsPendingUse = True
+                                context.ToolLoaderConfirmedAvailableTools = tc.ToolName
                             End If
 
                             context.PendingContinuationGuardPrompt =
@@ -1703,6 +1955,13 @@ Partial Public Class ThisAddIn
                                     details:=$"host={context.HostKind}; tool={tc.ToolName}; preparedForNextTurn=false")
                             End If
                             Exit For
+                        End If
+
+                        If context.ToolLoaderConfirmedAvailableToolsPendingUse AndAlso
+                           Not tc.ToolName.Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase) Then
+                            context.ToolLoaderConfirmedAvailableToolsPendingUse = False
+                            context.ToolLoaderConfirmedAvailableTools = ""
+                            context.Log($"Confirmed exposed tool is now being attempted: {tc.ToolName}.", "diag")
                         End If
 
                         If subAgentMode AndAlso Not IsToolAllowedForCurrentContext(tc.ToolName, context) Then
@@ -2411,12 +2670,14 @@ Partial Public Class ThisAddIn
                             ' loaded). Do not consume an extra iteration or stop the batch; instead
                             ' steer the model back toward an already-exposed tool. Capability-driven:
                             ' relies solely on the loader's own "loaded" array, no tool-name heuristics.
-                            context.PendingContinuationGuardPrompt = BuildToolLoaderBarrierGuardPrompt()
+                            context.PendingContinuationGuardPrompt = BuildToolLoaderNoOpGuardPrompt(toolResponse.Response)
                             context.PendingGuardTitle = "HOST TOOL LOADER NO-OP"
                             context.PendingRejectedTurnExplanation =
                                 "The requested tools were already loaded. Their schemas are already available; call one of the exposed tools instead of loading again."
                             context.PendingRejectedAssistantTurn = ""
                             context.PrematureTextRetryCount = 0
+                            context.ToolLoaderConfirmedAvailableToolsPendingUse = True
+                            context.ToolLoaderConfirmedAvailableTools = ExtractToolLoaderAlreadyLoadedNames(toolResponse.Response)
 
                             context.LogWarn(
                                 "Ignoring no-op tool_loader call; all requested tools were already loaded.",
@@ -2482,14 +2743,21 @@ Partial Public Class ThisAddIn
                         End If
 
                         If Not toolResponse.Success Then
-                            context.LogError(
-        $"Tool error ({tc.ToolName}): {toolResponse.ErrorMessage}",
-        details:=$"CallId={tc.CallId}; RawCall={tc.RawJson}")
-
-                            If context.FailedToolCallCounts.ContainsKey(toolCallSignature) Then
-                                context.FailedToolCallCounts(toolCallSignature) += 1
+                            Dim recoverablePlanningFailure As Boolean = toolResponse.RepairLoopRecoverable
+                            If recoverablePlanningFailure Then
+                                context.Log($"Recoverable tool planning rejection: tool={tc.ToolName}; {toolResponse.ErrorMessage}", "diag")
                             Else
-                                context.FailedToolCallCounts(toolCallSignature) = 1
+                                context.LogError(
+            $"Tool error ({tc.ToolName}): {toolResponse.ErrorMessage}",
+            details:=$"CallId={tc.CallId}; RawCall={tc.RawJson}")
+                            End If
+
+                            If Not recoverablePlanningFailure Then
+                                If context.FailedToolCallCounts.ContainsKey(toolCallSignature) Then
+                                    context.FailedToolCallCounts(toolCallSignature) += 1
+                                Else
+                                    context.FailedToolCallCounts(toolCallSignature) = 1
+                                End If
                             End If
 
                             ' A repair-loop advisor may signal that the failure is terminal (repair budget
@@ -2602,6 +2870,11 @@ Partial Public Class ThisAddIn
                         INI_APICall_ToolResponses_2 = preparedRoutingResponses
                         context.Log("Capability routing completed/guarded; restarting next iteration.", "diag")
                         Continue While
+                    End If
+
+                    If context.ForceNoToolFinalizationRequested Then
+                        context.Log("Terminal repair-loop state reached; leaving active tool loop for forced no-tool finalization.", "diag")
+                        Exit While
                     End If
 
                     If restartAfterExposureMiss Then
@@ -2745,6 +3018,20 @@ Partial Public Class ThisAddIn
 
                     Select Case turnValidation.TurnKind
                         Case SharedLibrary.Agents.ToolCallSequencing.ActiveToolingTurnKind.FinalCompleteTurn
+                            If context.ToolLoaderConfirmedAvailableToolsPendingUse Then
+                                context.PendingContinuationGuardPrompt =
+                                    "HOST CONFIRMED TOOL AVAILABILITY: tool_loader already confirmed that the required tool is loaded and exposed" &
+                                    If(String.IsNullOrWhiteSpace(context.ToolLoaderConfirmedAvailableTools), ". ", " (" & context.ToolLoaderConfirmedAvailableTools & "). ") &
+                                    "Do not finalize by claiming the tool is unavailable. Call the exposed tool now."
+                                context.PendingGuardTitle = "HOST CONFIRMED TOOL AVAILABILITY"
+                                context.PendingRejectedTurnExplanation =
+                                    "The previous final response falsely treated a host-confirmed exposed tool as unavailable before attempting it."
+                                context.PendingRejectedAssistantTurn = If(currentResponse, "")
+                                context.PrematureTextRetryCount += 1
+                                context.LogWarn("Final complete turn rejected because tool_loader had already confirmed the required tool as available.")
+                                Continue While
+                            End If
+
                             If Not SharedLibrary.Agents.ToolCallSequencing.IsRequiredMemoryGroundingSatisfied(
                                 context.SequencingState,
                                 turnValidation.TurnKind) Then
@@ -2856,6 +3143,20 @@ Partial Public Class ThisAddIn
                             Exit While
 
                         Case SharedLibrary.Agents.ToolCallSequencing.ActiveToolingTurnKind.FinalBlockedTurn
+                            If context.ToolLoaderConfirmedAvailableToolsPendingUse Then
+                                context.PendingContinuationGuardPrompt =
+                                    "HOST CONFIRMED TOOL AVAILABILITY: tool_loader already confirmed that the required tool is loaded and exposed" &
+                                    If(String.IsNullOrWhiteSpace(context.ToolLoaderConfirmedAvailableTools), ". ", " (" & context.ToolLoaderConfirmedAvailableTools & "). ") &
+                                    "Do not report the task blocked because that tool is unavailable. Call the exposed tool now."
+                                context.PendingGuardTitle = "HOST CONFIRMED TOOL AVAILABILITY"
+                                context.PendingRejectedTurnExplanation =
+                                    "The previous blocked response falsely treated a host-confirmed exposed tool as unavailable before attempting it."
+                                context.PendingRejectedAssistantTurn = If(currentResponse, "")
+                                context.PrematureTextRetryCount += 1
+                                context.LogWarn("Final blocked turn rejected because tool_loader had already confirmed the required tool as available.")
+                                Continue While
+                            End If
+
                             context.PrematureTextRetryCount = 0
 
                             If context.SequencingState IsNot Nothing Then
@@ -3182,7 +3483,7 @@ Partial Public Class ThisAddIn
                             Dim finalResponse As String = Await LLM(
                                 finalSysPrompt,
                                 fullUserPrompt,
-                                "", "", 0,
+                                "", "", configuredTimeoutMs,
                                 useSecondAPI,
                                 hideSplash,
                                 otherPrompt,
@@ -4016,6 +4317,26 @@ Partial Public Class ThisAddIn
                "Newly loaded tool schemas are available only from the next assistant turn onward. " &
                "Do NOT combine tool_loader and a newly loaded tool call in the same turn. " &
                "In this turn, either call one of the now-exposed tools or continue with another already-exposed step."
+    End Function
+
+    Private Function BuildToolLoaderNoOpGuardPrompt(loaderResponse As String) As String
+        Dim confirmedNames As String = ExtractToolLoaderAlreadyLoadedNames(loaderResponse)
+        Return "HOST TOOL LOADER NO-OP: tool_loader confirmed that the requested tool(s) are already loaded and exposed" &
+               If(String.IsNullOrWhiteSpace(confirmedNames), ". ", " (" & confirmedNames & "). ") &
+               "Do NOT claim that these tools are unavailable or not authorized. Do NOT call tool_loader again for them. " &
+               "If the task requires one of them, call that already-exposed tool now."
+    End Function
+
+    Private Function ExtractToolLoaderAlreadyLoadedNames(loaderResponse As String) As String
+        If String.IsNullOrWhiteSpace(loaderResponse) Then Return ""
+        Try
+            Dim obj As JObject = JObject.Parse(loaderResponse)
+            Dim arr As JArray = TryCast(obj("already_loaded"), JArray)
+            If arr Is Nothing OrElse arr.Count = 0 Then Return ""
+            Return String.Join(", ", arr.Values(Of String)().Where(Function(name) Not String.IsNullOrWhiteSpace(name)))
+        Catch ex As System.Exception
+            Return ""
+        End Try
     End Function
 
     Private Function BuildInvalidToolArgumentsGuardPrompt(toolName As String,
@@ -4980,7 +5301,8 @@ Partial Public Class ThisAddIn
 
         sb.AppendLine()
         sb.AppendLine("CAPABILITY ROUTING (HOST-ENFORCED):")
-        sb.AppendLine("- On a top-level tooling run, resolve_capability_route is the mandatory first routing decision before substantive work.")
+        sb.AppendLine("- On a top-level tooling run, capability routing is mandatory before substantive work; normally use resolve_capability_route when the host has not already resolved the route during bootstrap.")
+        sb.AppendLine("- If a host bootstrap/continuation guard already identifies a selected capability, do NOT call resolve_capability_route again; invoke that selected capability first.")
         sb.AppendLine("- Use only advertised skill/agent names and descriptions for this decision; do not preload their bodies or gather background first.")
         sb.AppendLine("- A specifically applicable workflow skill takes precedence over agents and generic tools. Choose a skill only when its description matches the requested workflow/task type, not merely a broad topic.")
         sb.AppendLine("- Only when no skill specifically applies may you select a specifically applicable top-level agent. Do not select an evidently bounded worker/helper agent for a broader request unless the whole request is exactly that bounded task.")
@@ -5328,6 +5650,12 @@ Partial Public Class ThisAddIn
             Return False
         End If
 
+        If toolResponse.RepairLoopRecoverable Then
+            context.ConsecutiveFailedToolName = ""
+            context.ConsecutiveFailedToolCount = 0
+            Return False
+        End If
+
         Dim failedName As String = If(toolCall.ToolName, "").Trim()
 
         If failedName.Equals(context.ConsecutiveFailedToolName, StringComparison.OrdinalIgnoreCase) Then
@@ -5648,6 +5976,125 @@ Partial Public Class ThisAddIn
 
         ' ── AutoPilot / Chat Agent internal tool routing ──
         If (_apActive OrElse _chatAgentActive) AndAlso IsAutoPilotInternalTool(toolCall.ToolName) Then
+            ' Preserve an explicitly selected PowerPoint design/template at the dispatcher boundary.
+            ' This prevents a model retry after a template-binding/provider failure from silently
+            ' dropping the branding constraint and producing a neutral deck.
+            If context IsNot Nothing AndAlso
+               String.Equals(toolCall.ToolName, "create_powerpoint", StringComparison.OrdinalIgnoreCase) Then
+
+                If toolCall.Arguments Is Nothing Then
+                    toolCall.Arguments = New Dictionary(Of String, Object)(StringComparer.OrdinalIgnoreCase)
+                End If
+
+                Dim requestedDesign As String = ""
+                If toolCall.Arguments.ContainsKey("design_name") AndAlso toolCall.Arguments("design_name") IsNot Nothing Then
+                    requestedDesign = toolCall.Arguments("design_name").ToString().Trim()
+                End If
+                Dim requestedTemplate As String = ""
+                If toolCall.Arguments.ContainsKey("template_attachment_name") AndAlso toolCall.Arguments("template_attachment_name") IsNot Nothing Then
+                    requestedTemplate = toolCall.Arguments("template_attachment_name").ToString().Trim()
+                End If
+
+                If requestedDesign = "" AndAlso requestedTemplate = "" Then
+                    If Not String.IsNullOrWhiteSpace(context.RequiredPowerPointDesignName) Then
+                        toolCall.Arguments("design_name") = context.RequiredPowerPointDesignName
+                        requestedDesign = context.RequiredPowerPointDesignName
+                        context.Log($"PowerPoint dispatcher restored required design on retry: {requestedDesign}.", "diag")
+                    ElseIf Not String.IsNullOrWhiteSpace(context.RequiredPowerPointTemplateAttachmentName) Then
+                        toolCall.Arguments("template_attachment_name") = context.RequiredPowerPointTemplateAttachmentName
+                        requestedTemplate = context.RequiredPowerPointTemplateAttachmentName
+                        context.Log($"PowerPoint dispatcher restored required template on retry: {requestedTemplate}.", "diag")
+                    End If
+                End If
+
+                If Not String.IsNullOrWhiteSpace(context.RequiredPowerPointDesignName) AndAlso
+                   requestedDesign <> "" AndAlso
+                   Not String.Equals(context.RequiredPowerPointDesignName, requestedDesign, StringComparison.OrdinalIgnoreCase) Then
+                    Return New ToolResponse() With {
+                        .CallId = toolCall.CallId,
+                        .ToolName = toolCall.ToolName,
+                        .Timestamp = DateTime.UtcNow,
+                        .Success = False,
+                        .ErrorMessage = "PowerPoint design constraint changed during retry.",
+                        .Response = $"The PowerPoint design '{context.RequiredPowerPointDesignName}' remains binding for this run; retry with that same design."
+                    }
+                End If
+
+                If Not String.IsNullOrWhiteSpace(context.RequiredPowerPointTemplateAttachmentName) AndAlso
+                   requestedTemplate <> "" AndAlso
+                   Not String.Equals(context.RequiredPowerPointTemplateAttachmentName, requestedTemplate, StringComparison.OrdinalIgnoreCase) Then
+                    Return New ToolResponse() With {
+                        .CallId = toolCall.CallId,
+                        .ToolName = toolCall.ToolName,
+                        .Timestamp = DateTime.UtcNow,
+                        .Success = False,
+                        .ErrorMessage = "PowerPoint template constraint changed during retry.",
+                        .Response = $"The PowerPoint template '{context.RequiredPowerPointTemplateAttachmentName}' remains binding for this run; retry with that same template."
+                    }
+                End If
+
+                If requestedDesign <> "" Then context.RequiredPowerPointDesignName = requestedDesign
+                If requestedTemplate <> "" Then context.RequiredPowerPointTemplateAttachmentName = requestedTemplate
+
+                ' Preserve rich slide intent across automatic retries. A retry may refine wording,
+                ' but it must not silently degrade structured cards/comparison slides to bullets.
+                Dim retrySlides As JArray = Nothing
+                If toolCall.Arguments.ContainsKey("slides") Then retrySlides = TryCast(toolCall.Arguments("slides"), JArray)
+                If retrySlides IsNot Nothing AndAlso retrySlides.Count > 0 AndAlso
+                   (requestedDesign <> "" OrElse requestedTemplate <> "") Then
+
+                    If String.IsNullOrWhiteSpace(context.RequiredPowerPointSlidesJson) Then
+                        context.RequiredPowerPointSlidesJson = retrySlides.ToString(Newtonsoft.Json.Formatting.None)
+                        context.Log("PowerPoint structured slide intent captured for retry protection.", "diag")
+                    Else
+                        Try
+                            Dim previousPowerPointVisualQualityFailure As Boolean = False
+                            If context.AllToolResponses IsNot Nothing Then
+                                Dim previousPowerPointResponse As ToolResponse = context.AllToolResponses.LastOrDefault(
+                                    Function(r) r IsNot Nothing AndAlso
+                                                String.Equals(r.ToolName, "create_powerpoint", StringComparison.OrdinalIgnoreCase))
+                                If previousPowerPointResponse IsNot Nothing AndAlso Not previousPowerPointResponse.Success Then
+                                    Dim priorMessage As String = (If(previousPowerPointResponse.Response, "") & " " & If(previousPowerPointResponse.ErrorMessage, "")).Trim()
+                                    previousPowerPointVisualQualityFailure =
+                                        priorMessage.StartsWith("PowerPoint visual-quality guard:", StringComparison.OrdinalIgnoreCase) OrElse
+                                        priorMessage.IndexOf("PowerPoint rich-content density guard:", StringComparison.OrdinalIgnoreCase) >= 0
+                                End If
+                            End If
+
+                            If previousPowerPointVisualQualityFailure Then
+                                ' A quality-guard retry is specifically supposed to change the text/visual mix.
+                                ' Rebase the snapshot to the newly balanced plan instead of restoring the rejected one.
+                                context.RequiredPowerPointSlidesJson = retrySlides.ToString(Newtonsoft.Json.Formatting.None)
+                                context.Log("PowerPoint retry accepted visual rebalance and rebased structured slide intent.", "diag")
+                            Else
+                                Dim requiredSlides As JArray = JArray.Parse(context.RequiredPowerPointSlidesJson)
+                                Dim restoredCount As Integer = 0
+                                For retryIndex As Integer = 0 To Math.Min(requiredSlides.Count, retrySlides.Count) - 1
+                                    Dim requiredSlide As JObject = TryCast(requiredSlides(retryIndex), JObject)
+                                    Dim currentSlide As JObject = TryCast(retrySlides(retryIndex), JObject)
+                                    If requiredSlide Is Nothing OrElse currentSlide Is Nothing Then Continue For
+
+                                    Dim requiredLayout As String = If(requiredSlide.Value(Of String)("layout"), "").Trim().ToLowerInvariant()
+                                    Dim currentLayout As String = If(currentSlide.Value(Of String)("layout"), "").Trim().ToLowerInvariant()
+                                    Dim requiredRich As Boolean = requiredLayout = "cards" OrElse requiredLayout = "comparison" OrElse requiredLayout = "structure" OrElse requiredLayout = "process" OrElse requiredLayout = "timeline" OrElse requiredLayout = "matrix" OrElse requiredLayout = "chart" OrElse requiredLayout = "kpi"
+                                    Dim currentRich As Boolean = currentLayout = "cards" OrElse currentLayout = "comparison" OrElse currentLayout = "structure" OrElse currentLayout = "process" OrElse currentLayout = "timeline" OrElse currentLayout = "matrix" OrElse currentLayout = "chart" OrElse currentLayout = "kpi"
+                                    If requiredRich AndAlso Not currentRich Then
+                                        retrySlides(retryIndex) = requiredSlide.DeepClone()
+                                        restoredCount += 1
+                                    End If
+                                Next
+                                If restoredCount > 0 Then
+                                    toolCall.Arguments("slides") = retrySlides
+                                    context.Log($"PowerPoint retry restored structured slide intent for {restoredCount} slide(s).", "diag")
+                                End If
+                            End If
+                        Catch ex As System.Exception
+                            context.Log($"PowerPoint retry slide-intent restoration skipped: {ex.Message}", "diag")
+                        End Try
+                    End If
+                End If
+            End If
+
             Dim apResult = Await TryExecuteAutoPilotTool(toolCall, context, cancellationToken)
             If apResult IsNot Nothing Then
                 ' Record for "Sources used:" footer
