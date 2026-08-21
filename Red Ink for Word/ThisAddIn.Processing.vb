@@ -3825,7 +3825,8 @@ Partial Public Class ThisAddIn
             Dim selectedPath As String = Nothing
 
             Using f As New DragDropForm(DragDropMode.FileOnly)
-                If f.ShowDialog() <> DialogResult.OK Then
+                Dim __safeDialogOwner3828 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If If(__safeDialogOwner3828 IsNot Nothing, f.ShowDialog(__safeDialogOwner3828), f.ShowDialog()) <> DialogResult.OK Then
                     ' User cancelled the file picker - ask if they want to create a new empty diagram
                     Dim createNew As String = ShowCustomInputBox(
     "You did not select a file. Do you want to create a new empty diagram instead?" & vbCrLf & vbCrLf &

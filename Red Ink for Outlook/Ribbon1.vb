@@ -945,7 +945,12 @@ Public Class Ribbon2
     Private Sub RI_KnowledgeStores_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_KnowledgeStores.Click
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "KnowledgeStores_Outlook invoked")
         Using frm As New KnowledgeStoreForm(ThisAddIn._context)
-            frm.ShowDialog()
+            Dim __safeDialogOwner948 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            If __safeDialogOwner948 IsNot Nothing Then
+                frm.ShowDialog(__safeDialogOwner948)
+            Else
+                frm.ShowDialog()
+            End If
         End Using
     End Sub
 

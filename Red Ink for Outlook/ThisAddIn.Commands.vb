@@ -1330,7 +1330,8 @@ Partial Public Class ThisAddIn
 
                     Dim reviewed As String = Nothing
                     Using dlg As New ReviewChangesDialog(strippedOriginalForReview, strippedSuggestedForReview)
-                        If dlg.ShowDialog() <> System.Windows.Forms.DialogResult.OK Then
+                        Dim __safeDialogOwner1333 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                        If If(__safeDialogOwner1333 IsNot Nothing, dlg.ShowDialog(__safeDialogOwner1333), dlg.ShowDialog()) <> System.Windows.Forms.DialogResult.OK Then
                             ' Cancel = do absolutely nothing
                             Return
                         End If
@@ -2206,7 +2207,8 @@ SkipPromptWin:
 
                 Dim reviewed As String = Nothing
                 Using dlg As New ReviewChangesDialog(textToProcess, reviewSuggested)
-                    If dlg.ShowDialog() <> System.Windows.Forms.DialogResult.OK Then
+                    Dim __safeDialogOwner2209 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                    If If(__safeDialogOwner2209 IsNot Nothing, dlg.ShowDialog(__safeDialogOwner2209), dlg.ShowDialog()) <> System.Windows.Forms.DialogResult.OK Then
                         Return
                     End If
                     reviewed = dlg.ReviewedText

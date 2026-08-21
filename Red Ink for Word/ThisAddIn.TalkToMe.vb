@@ -4038,6 +4038,14 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
     Private NotInheritable Class TalkToMeConfigForm
         Inherits Form
 
+        Protected Overrides Sub OnShown(e As System.EventArgs)
+            MyBase.OnShown(e)
+            Me.TopMost = True
+            SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(Me)
+            SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(Me)
+        End Sub
+
+
         Private ReadOnly _ownerAdapter As WordTalkToMeSpeechAdapter
         Private ReadOnly _descriptors As List(Of LiveEngineDescriptor)
         Private ReadOnly _savedLanguageByEngine As Dictionary(Of String, String)
@@ -4101,7 +4109,7 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
             Me.AutoScaleDimensions = New System.Drawing.SizeF(96.0F, 96.0F)
             Me.AutoScaleMode = AutoScaleMode.Dpi
             Me.FormBorderStyle = FormBorderStyle.FixedDialog
-            Me.StartPosition = FormStartPosition.CenterParent
+            Me.StartPosition = FormStartPosition.CenterScreen
             Me.MinimizeBox = False
             Me.MaximizeBox = False
             Me.ShowInTaskbar = False

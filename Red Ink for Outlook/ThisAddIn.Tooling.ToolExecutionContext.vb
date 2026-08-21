@@ -74,6 +74,13 @@ Partial Public Class ThisAddIn
         ''' <summary>True when only a lightweight tool index is initially exposed to the model.</summary>
         Public Property LazyToolLoadingEnabled As Boolean
 
+        ''' <summary>Top-level capability-routing gate state.</summary>
+        Public Property CapabilityRoutingRequired As Boolean
+        Public Property CapabilityRoutingResolved As Boolean
+        Public Property CapabilityRoutingKind As String
+        Public Property CapabilityRoutingName As String
+        Public Property CapabilityRoutingEntered As Boolean
+
         ''' <summary>All responses generated during this session (successful and failed).</summary>
         Public Property AllToolResponses As List(Of ToolResponse)
 
@@ -143,14 +150,6 @@ Partial Public Class ThisAddIn
         Public Property LatestUserRequestRaw As String
         Public Property HostTaskSummary As String
 
-        ' Deterministic skill-first gate for configured assessment/checklist workflows.
-        Public Property RequiredFirstSkillToolName As System.String = ""
-        Public Property RequiredFirstSkillSatisfied As System.Boolean = False
-
-        ' Host-enforced allowed_tools boundary for the active constrained skill.
-        Public Property ActiveSkillToolScopeName As System.String = ""
-        Public Property ActiveSkillAllowedToolNames As System.Collections.Generic.HashSet(Of System.String)
-
         Public Property FinalResponseContract As SharedLibrary.Agents.ToolingFinalResponseContract =
             SharedLibrary.Agents.ToolingFinalResponseContract.UserFacingTaskStatus
 
@@ -166,6 +165,11 @@ Partial Public Class ThisAddIn
             CurrentIteration = 0
             MaxIterations = INI_ToolingMaximumIterations
             IsCancelled = False
+            CapabilityRoutingRequired = False
+            CapabilityRoutingResolved = True
+            CapabilityRoutingKind = "none"
+            CapabilityRoutingName = ""
+            CapabilityRoutingEntered = True
             LastToolExecutionSignature = ""
             LastToolExecutionRepeatCount = 0
             DuplicateToolExecutionAbortThreshold = 3
@@ -191,10 +195,6 @@ Partial Public Class ThisAddIn
             LastInvalidTurnRepeatCount = 0
             ForceNoToolFinalizationRequested = False
             ForceNoToolFinalizationReason = ""
-            RequiredFirstSkillToolName = ""
-            RequiredFirstSkillSatisfied = False
-            ActiveSkillToolScopeName = ""
-            ActiveSkillAllowedToolNames = Nothing
         End Sub
 
         ''' <summary>Per-target counts of transport-successful but zero-change (no-op) tool results this run.</summary>

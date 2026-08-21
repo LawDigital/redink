@@ -15,6 +15,14 @@ End Enum
 Partial Public Class DragDropForm
     Inherits System.Windows.Forms.Form
 
+    Protected Overrides Sub OnShown(e As System.EventArgs)
+        MyBase.OnShown(e)
+        Me.TopMost = True
+        SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(Me)
+        SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(Me)
+    End Sub
+
+
     Private _selectedFilePath As String = String.Empty
     Private _selectionMode As DragDropMode = DragDropMode.FileOnly
     Private _dialogOwnerScope As System.IDisposable = Nothing
@@ -108,9 +116,6 @@ Partial Public Class DragDropForm
         Me.BringToFront()
         Me.Activate()
 
-        ' Surface any same-process native host prompt that would otherwise stay
-        ' hidden behind this TopMost modal dialog.
-        SharedMethods.AttachForeignForegroundWatchdog(Me)
     End Sub
 
     Private Sub DragDropForm_DragEnter(sender As Object, e As DragEventArgs) Handles MyBase.DragEnter
@@ -294,7 +299,8 @@ Partial Public Class DragDropForm
             ofd.Title = "Select a File"
             ofd.Multiselect = False
 
-            If ofd.ShowDialog() = DialogResult.OK Then
+            Dim __safeDialogOwner297 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            If If(__safeDialogOwner297 IsNot Nothing, ofd.ShowDialog(__safeDialogOwner297), ofd.ShowDialog()) = DialogResult.OK Then
                 _selectedFilePath = ofd.FileName
                 Me.DialogResult = DialogResult.OK
                 Me.Close()
@@ -307,7 +313,8 @@ Partial Public Class DragDropForm
             fbd.Description = "Select a Folder"
             fbd.ShowNewFolderButton = True
 
-            If fbd.ShowDialog() = DialogResult.OK Then
+            Dim __safeDialogOwner310 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            If If(__safeDialogOwner310 IsNot Nothing, fbd.ShowDialog(__safeDialogOwner310), fbd.ShowDialog()) = DialogResult.OK Then
                 _selectedFilePath = fbd.SelectedPath
                 Me.DialogResult = DialogResult.OK
                 Me.Close()

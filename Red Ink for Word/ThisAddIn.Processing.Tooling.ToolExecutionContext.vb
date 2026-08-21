@@ -68,6 +68,13 @@ Partial Public Class ThisAddIn
         ''' <summary>True when only a lightweight tool index is initially exposed to the model.</summary>
         Public Property LazyToolLoadingEnabled As Boolean
 
+        ''' <summary>Top-level capability-routing gate state.</summary>
+        Public Property CapabilityRoutingRequired As Boolean
+        Public Property CapabilityRoutingResolved As Boolean
+        Public Property CapabilityRoutingKind As String
+        Public Property CapabilityRoutingName As String
+        Public Property CapabilityRoutingEntered As Boolean
+
         ''' <summary>All responses generated during this session (successful and failed).</summary>
         Public Property AllToolResponses As List(Of ToolResponse)
 
@@ -157,6 +164,11 @@ Partial Public Class ThisAddIn
             CurrentIteration = 0
             MaxIterations = INI_ToolingMaximumIterations
             IsCancelled = False
+            CapabilityRoutingRequired = False
+            CapabilityRoutingResolved = True
+            CapabilityRoutingKind = "none"
+            CapabilityRoutingName = ""
+            CapabilityRoutingEntered = True
             LastToolExecutionSignature = ""
             LastToolExecutionRepeatCount = 0
             DuplicateToolExecutionAbortThreshold = 3

@@ -352,7 +352,7 @@ Partial Public Class ThisAddIn
 
         Try
             SharedLibrary.Agents.AgentResources.SetPaths(INI_AgentResourcesPath, INI_AgentResourcesPathLocal)
-            SharedLibrary.Agents.AgentResources.Refresh()
+            SharedLibrary.Agents.AgentResources.EnsureFresh()
         Catch
         End Try
 
@@ -369,7 +369,7 @@ Partial Public Class ThisAddIn
             ' This keeps Word aligned with Outlook and prevents unselected skills/agents
             ' from becoming callable just because they exist on disk.
             Try
-                SharedLibrary.Agents.AgentResources.Refresh()
+                SharedLibrary.Agents.AgentResources.EnsureFresh()
 
                 Dim selectedToolNames As New HashSet(Of String)(
             If(fullAllowedTools, New List(Of ModelConfig)()).
@@ -383,7 +383,7 @@ Partial Public Class ThisAddIn
                     Where(Function(sk)
                               Return sk IsNot Nothing AndAlso
                                      Not String.IsNullOrWhiteSpace(sk.Name) AndAlso
-                                     selectedToolNames.Contains("skill_" & sk.Name.Trim())
+                                     selectedToolNames.Contains(SharedLibrary.Agents.ToolRegistryBuilder.BuildSkillToolName(sk.Name))
                           End Function)
 
                     Dim selectedAgents =
@@ -391,7 +391,7 @@ Partial Public Class ThisAddIn
                     Where(Function(ag)
                               Return ag IsNot Nothing AndAlso
                                      Not String.IsNullOrWhiteSpace(ag.Name) AndAlso
-                                     selectedToolNames.Contains("agent_" & ag.Name.Trim())
+                                     selectedToolNames.Contains(SharedLibrary.Agents.ToolRegistryBuilder.BuildAgentToolName(ag.Name))
                           End Function)
 
                     SharedLibrary.Agents.ToolRegistryBuilder.AddSkills(authoritativeRegistrySource, selectedSkills)
@@ -577,6 +577,18 @@ Partial Public Class ThisAddIn
                                Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
                                t.ToolName.Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase)
                     End Function)
+        End If
+
+        If Not subAgentMode Then
+            context.CapabilityRoutingRequired =
+                context.SelectedTools IsNot Nothing AndAlso
+                context.SelectedTools.Any(Function(t) t IsNot Nothing AndAlso SharedLibrary.Agents.CapabilityRoutingTool.IsResolverToolName(t.ToolName))
+            context.CapabilityRoutingResolved = Not context.CapabilityRoutingRequired
+            context.CapabilityRoutingKind = If(context.CapabilityRoutingRequired, "", SharedLibrary.Agents.CapabilityRoutingTool.KindNone)
+            context.CapabilityRoutingName = ""
+            context.CapabilityRoutingEntered = Not context.CapabilityRoutingRequired
+            context.Log("Capability routing initialized: required=" & context.CapabilityRoutingRequired.ToString().ToLowerInvariant() &
+                        "; resolved=" & context.CapabilityRoutingResolved.ToString().ToLowerInvariant(), "diag")
         End If
 
         selectedTools = New List(Of ModelConfig)(context.SelectedTools)
@@ -1143,6 +1155,37 @@ Partial Public Class ThisAddIn
 
                 Dim detectionPattern = context.ToolingModel.ToolCallDetectionPattern
 
+                If Not subAgentMode AndAlso
+                   context.CapabilityRoutingRequired AndAlso
+                   ShouldBlockForCapabilityRouting("", context) AndAlso
+                   Not ContainsToolCalls(currentResponse, detectionPattern) Then
+
+                    If context.PrematureTextRetryCount < ToolExecutionContext.MaxContinuationRetries Then
+                        context.PrematureTextRetryCount += 1
+                        context.PendingContinuationGuardPrompt = BuildCapabilityRoutingGuardPrompt(context)
+                        context.PendingGuardTitle = "HOST CAPABILITY ROUTING GUARD"
+                        context.PendingRejectedTurnExplanation = "The previous turn attempted to finalize before mandatory capability routing was complete."
+                        context.PendingRejectedAssistantTurn = If(currentResponse, "")
+                        context.LogWarn("Final text blocked by capability-routing gate.", details:="host=" & context.HostKind & "; resolved=" & context.CapabilityRoutingResolved.ToString().ToLowerInvariant() & "; selected=" & If(context.CapabilityRoutingName, ""))
+                        Continue While
+                    End If
+
+                    context.FinalizationBlocked = True
+                    context.FinalizationBlockedReason = "capability_routing_unresolved"
+                    currentResponse = Await BuildBlockedToolingResultAsync(
+                        context,
+                        "capability_routing_unresolved",
+                        "The tooling run could not complete mandatory capability routing before finalization.",
+                        useSecondAPI,
+                        hideSplash,
+                        cancellationToken)
+                    If context.SequencingState IsNot Nothing Then
+                        context.SequencingState.FinalResponseOrigin = "host_generated"
+                        context.SequencingState.HasOpenToolWorkflow = False
+                    End If
+                    Exit While
+                End If
+
                 If ContainsToolCalls(currentResponse, detectionPattern) Then
                     context.Log("Tool calls detected in response")
 
@@ -1164,6 +1207,7 @@ Partial Public Class ThisAddIn
                     Dim restartForRequiredMemoryGrounding As Boolean = False
                     Dim restartAfterToolLoader As Boolean = False
                     Dim restartAfterExposureMiss As Boolean = False
+                    Dim restartForCapabilityRouting As Boolean = False
                     Dim turnVisibleToolNames As HashSet(Of String) =
                         BuildTurnVisibleToolNameSet(context.SelectedTools)
 
@@ -1194,6 +1238,25 @@ Partial Public Class ThisAddIn
 
                             context.Log("Progress update reported to the user.", "diag")
                             Continue For
+                        End If
+
+                        If SharedLibrary.Agents.CapabilityRoutingTool.IsResolverToolName(tc.ToolName) Then
+                            Dim routingResponse As ToolResponse = ResolveCapabilityRoutingCall(tc, context)
+                            context.AllToolResponses.Add(routingResponse)
+                            restartForCapabilityRouting = True
+                            Exit For
+                        End If
+
+                        If ShouldBlockForCapabilityRouting(tc.ToolName, context) Then
+                            Dim blockedRoutingResponse As ToolResponse = BuildCapabilityRoutingBlockedResponse(tc, context)
+                            context.AllToolResponses.Add(blockedRoutingResponse)
+                            context.PendingContinuationGuardPrompt = BuildCapabilityRoutingGuardPrompt(context)
+                            context.PendingGuardTitle = "HOST CAPABILITY ROUTING GUARD"
+                            context.PendingRejectedTurnExplanation = "The previous turn attempted substantive tooling before mandatory capability routing was completed."
+                            context.PendingRejectedAssistantTurn = If(currentResponse, "")
+                            restartForCapabilityRouting = True
+                            context.LogWarn("Blocked tool call by capability-routing gate.", details:="host=" & context.HostKind & "; tool=" & If(tc.ToolName, "") & "; resolved=" & context.CapabilityRoutingResolved.ToString().ToLowerInvariant() & "; selected=" & If(context.CapabilityRoutingName, ""))
+                            Exit For
                         End If
 
                         context.ReportProgress(BuildFriendlyProgressText(tc, context))
@@ -1941,6 +2004,17 @@ Partial Public Class ThisAddIn
                         End If
 
                         If toolResponse.Success AndAlso
+                           context.CapabilityRoutingRequired AndAlso
+                           context.CapabilityRoutingResolved AndAlso
+                           Not context.CapabilityRoutingEntered AndAlso
+                           Not String.IsNullOrWhiteSpace(context.CapabilityRoutingName) AndAlso
+                           tc.ToolName.Equals(context.CapabilityRoutingName, StringComparison.OrdinalIgnoreCase) Then
+                            context.CapabilityRoutingEntered = True
+                            context.Log("Capability route entered: kind=" & context.CapabilityRoutingKind & "; name=" & context.CapabilityRoutingName, "diag")
+                            ToolingFileLogger.LogStep("[ROUTE] entered kind=" & context.CapabilityRoutingKind & "; name=" & context.CapabilityRoutingName & "; host=" & context.HostKind)
+                        End If
+
+                        If toolResponse.Success AndAlso
                            tc.ToolName.Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase) Then
 
                             If LoaderResponseExposedNewTools(toolResponse.Response) Then
@@ -2128,6 +2202,16 @@ Partial Public Class ThisAddIn
                             Exit For
                         End If
                     Next
+
+                    If restartForCapabilityRouting Then
+                        Dim preparedRoutingResponses As String = BuildToolResponsesForModelBudgeted(
+                            context.AllToolResponses,
+                            context.ToolingModel,
+                            compactForSubAgent:=subAgentMode)
+                        INI_APICall_ToolResponses_2 = preparedRoutingResponses
+                        context.Log("Capability routing completed/guarded; restarting next iteration.", "diag")
+                        Continue While
+                    End If
 
                     If restartAfterExposureMiss Then
                         Dim preparedToolResponsesAfterExposureMiss As String = BuildToolResponsesForModelBudgeted(
@@ -5250,6 +5334,15 @@ Partial Public Class ThisAddIn
 
         sb.AppendLine(SharedLibrary.Agents.ToolCallSequencing.DependentBatchingInstruction)
 
+        sb.AppendLine()
+        sb.AppendLine("CAPABILITY ROUTING (HOST-ENFORCED):")
+        sb.AppendLine("- On a top-level tooling run, resolve_capability_route is the mandatory first routing decision before substantive work.")
+        sb.AppendLine("- Use only advertised skill/agent names and descriptions for this decision; do not preload their bodies or gather background first.")
+        sb.AppendLine("- A specifically applicable workflow skill takes precedence over agents and generic tools. Choose a skill only when its description matches the requested workflow/task type, not merely a broad topic.")
+        sb.AppendLine("- Only when no skill specifically applies may you select a specifically applicable top-level agent. Do not select an evidently bounded worker/helper agent for a broader request unless the whole request is exactly that bounded task.")
+        sb.AppendLine("- If neither a skill nor a top-level agent specifically applies, resolve kind='none'; normal tool planning begins only after that decision.")
+        sb.AppendLine("- If a skill or agent is selected, invoke that selected capability before any other substantive tool. Once entered, follow its instructions; a skill may delegate to agents/tools as its workflow requires.")
+
         If selectedTools IsNot Nothing AndAlso selectedTools.Any(
                 Function(t) t IsNot Nothing AndAlso
                             (SharedLibrary.Agents.ContextExpandTool.IsContextExpandTool(t.ToolName) OrElse
@@ -5820,6 +5913,152 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
+
+    Private Function ResolveCapabilityRoutingCall(toolCall As ToolCall,
+                                                  context As ToolExecutionContext) As ToolResponse
+        Dim response As New ToolResponse() With {
+            .CallId = If(toolCall?.CallId, ""),
+            .ToolName = SharedLibrary.Agents.CapabilityRoutingTool.ResolverToolName,
+            .OriginalCallJson = If(toolCall?.RawJson, ""),
+            .Timestamp = DateTime.Now
+        }
+
+        If context Is Nothing OrElse Not context.CapabilityRoutingRequired Then
+            response.Success = False
+            response.ErrorCode = "capability_routing_not_required"
+            response.ErrorMessage = "Capability routing is not required for this run."
+            response.Response = "{""ok"":false,""error"":""capability_routing_not_required""}"
+            Return response
+        End If
+
+        If context.CapabilityRoutingResolved Then
+            response.Success = False
+            response.ErrorCode = "capability_routing_already_resolved"
+            response.ErrorMessage = "Capability routing has already been resolved."
+            response.Response = "{""ok"":false,""error"":""capability_routing_already_resolved""}"
+            Return response
+        End If
+
+        Dim kind As String = GetCapabilityRoutingArgument(toolCall.Arguments, "kind").ToLowerInvariant()
+        Dim name As String = GetCapabilityRoutingArgument(toolCall.Arguments, "name")
+        Dim reason As String = GetCapabilityRoutingArgument(toolCall.Arguments, "reason")
+
+        If kind = SharedLibrary.Agents.CapabilityRoutingTool.KindNone Then
+            context.CapabilityRoutingResolved = True
+            context.CapabilityRoutingKind = SharedLibrary.Agents.CapabilityRoutingTool.KindNone
+            context.CapabilityRoutingName = ""
+            context.CapabilityRoutingEntered = True
+            response.Success = True
+            response.Response = "{""ok"":true,""kind"":""none""}"
+            context.Log("Capability route resolved: kind=none; reason=" & reason, "diag")
+            ToolingFileLogger.LogStep("[ROUTE] resolved kind=none; host=" & context.HostKind & "; reason=" & reason)
+            Return response
+        End If
+
+        If kind <> SharedLibrary.Agents.CapabilityRoutingTool.KindSkill AndAlso
+           kind <> SharedLibrary.Agents.CapabilityRoutingTool.KindAgent Then
+            response.Success = False
+            response.ErrorCode = "invalid_capability_route_kind"
+            response.ErrorMessage = "Routing kind must be skill, agent, or none."
+            response.Response = "{""ok"":false,""error"":""invalid_capability_route_kind""}"
+            Return response
+        End If
+
+        If String.IsNullOrWhiteSpace(name) OrElse context.AllowedToolRegistry Is Nothing Then
+            response.Success = False
+            response.ErrorCode = "invalid_capability_route_name"
+            response.ErrorMessage = "A valid advertised capability name is required."
+            response.Response = "{""ok"":false,""error"":""invalid_capability_route_name""}"
+            Return response
+        End If
+
+        Dim matchingManifest As SharedLibrary.Agents.ToolManifest =
+            context.AllowedToolRegistry.ListManifests().FirstOrDefault(
+                Function(m)
+                    Return m IsNot Nothing AndAlso
+                           Not String.IsNullOrWhiteSpace(m.Name) AndAlso
+                           m.Name.Equals(name, StringComparison.OrdinalIgnoreCase) AndAlso
+                           String.Equals(m.Category, kind, StringComparison.OrdinalIgnoreCase)
+                End Function)
+
+        If matchingManifest Is Nothing Then
+            response.Success = False
+            response.ErrorCode = "capability_route_not_advertised"
+            response.ErrorMessage = "The selected capability is not an advertised candidate of the requested kind."
+            response.Response = "{""ok"":false,""error"":""capability_route_not_advertised""}"
+            context.LogWarn("Rejected invalid capability route.", details:="host=" & context.HostKind & "; kind=" & kind & "; name=" & name)
+            Return response
+        End If
+
+        Dim loaded As ModelConfig = EnsureVisibleToolLoaded(matchingManifest.Name, context)
+        If loaded Is Nothing Then
+            response.Success = False
+            response.ErrorCode = "capability_route_load_failed"
+            response.ErrorMessage = "The selected capability could not be prepared for the next turn."
+            response.Response = "{""ok"":false,""error"":""capability_route_load_failed""}"
+            context.LogWarn("Selected capability could not be prepared.", details:="host=" & context.HostKind & "; kind=" & kind & "; name=" & matchingManifest.Name)
+            Return response
+        End If
+
+        context.CapabilityRoutingResolved = True
+        context.CapabilityRoutingKind = kind
+        context.CapabilityRoutingName = matchingManifest.Name
+        context.CapabilityRoutingEntered = False
+        response.Success = True
+        response.Response = "{""ok"":true,""kind"":""" & kind & """,""name"":""" & matchingManifest.Name & """,""next"":""invoke_selected_capability""}"
+        context.Log("Capability route resolved: kind=" & kind & "; name=" & matchingManifest.Name & "; reason=" & reason, "diag")
+        ToolingFileLogger.LogStep("[ROUTE] resolved kind=" & kind & "; name=" & matchingManifest.Name & "; entered=false; host=" & context.HostKind & "; reason=" & reason)
+        Return response
+    End Function
+
+    Private Shared Function GetCapabilityRoutingArgument(arguments As Dictionary(Of String, Object),
+                                                         argumentName As String) As String
+        If arguments Is Nothing OrElse String.IsNullOrWhiteSpace(argumentName) OrElse
+           Not arguments.ContainsKey(argumentName) OrElse arguments(argumentName) Is Nothing Then
+            Return ""
+        End If
+        Return arguments(argumentName).ToString().Trim()
+    End Function
+
+    Private Shared Function ShouldBlockForCapabilityRouting(toolName As String,
+                                                            context As ToolExecutionContext) As Boolean
+        If context Is Nothing OrElse Not context.CapabilityRoutingRequired Then Return False
+        If Not context.CapabilityRoutingResolved Then Return True
+        If context.CapabilityRoutingEntered Then Return False
+        If context.CapabilityRoutingKind = SharedLibrary.Agents.CapabilityRoutingTool.KindNone Then Return False
+        Return String.IsNullOrWhiteSpace(context.CapabilityRoutingName) OrElse
+               Not String.Equals(If(toolName, "").Trim(), context.CapabilityRoutingName, StringComparison.OrdinalIgnoreCase)
+    End Function
+
+    Private Shared Function BuildCapabilityRoutingGuardPrompt(context As ToolExecutionContext) As String
+        If context Is Nothing OrElse Not context.CapabilityRoutingResolved Then
+            Return "CAPABILITY ROUTING REQUIRED: Before any substantive tool call, call resolve_capability_route exactly once. Select a specifically applicable skill first; only if no skill applies select a specifically applicable top-level agent; otherwise select none. Use only advertised names/descriptions and do not gather background first."
+        End If
+
+        If Not context.CapabilityRoutingEntered AndAlso Not String.IsNullOrWhiteSpace(context.CapabilityRoutingName) Then
+            Return "CAPABILITY ROUTE ENFORCEMENT: The route is already resolved to '" & context.CapabilityRoutingName & "'. Invoke that selected " & context.CapabilityRoutingKind & " now. Do not call any other substantive tool until the selected capability has been entered successfully."
+        End If
+
+        Return "Capability routing is complete; continue normally."
+    End Function
+
+    Private Shared Function BuildCapabilityRoutingBlockedResponse(toolCall As ToolCall,
+                                                                  context As ToolExecutionContext) As ToolResponse
+        Dim selected As String = If(context?.CapabilityRoutingName, "")
+        Dim code As String = If(context IsNot Nothing AndAlso context.CapabilityRoutingResolved,
+                                "selected_capability_must_run_first",
+                                "capability_routing_required")
+        Return New ToolResponse() With {
+            .CallId = If(toolCall?.CallId, ""),
+            .ToolName = If(toolCall?.ToolName, ""),
+            .Success = False,
+            .ErrorCode = code,
+            .ErrorMessage = BuildCapabilityRoutingGuardPrompt(context),
+            .Response = "{""ok"":false,""error"":""" & code & """,""selected"":""" & selected & """}",
+            .OriginalCallJson = If(toolCall?.RawJson, ""),
+            .Timestamp = DateTime.Now
+        }
+    End Function
 
     Private Function TryPrepareToolForNextTurnAfterExposureMiss(toolName As String,
                                                             context As ToolExecutionContext) As Boolean

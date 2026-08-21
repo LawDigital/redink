@@ -538,10 +538,9 @@ Namespace SharedLibrary
                         End Try
 
                         Try
-                            editorForm.BringToFront()
-                            editorForm.Activate()
-                            NativeMethods.SetForegroundWindow(editorForm.Handle)
-                        Catch
+                            Global.SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(editorForm)
+                            Global.SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(editorForm)
+                        Catch ex As System.Exception
                         End Try
                     End Sub
 

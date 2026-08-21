@@ -217,14 +217,11 @@ Namespace Agents
                 "If the user asks for a named organization's design but no such source is available, say briefly that the specific design is not available and create a neutral professional design instead unless the user asks you to stop. " &
                 "Do not infer a corporate design merely from the organization name, prior general knowledge, or a logo alone. When a concrete source is used, describe it accurately as the source (for example: 'using the configured VISCHER design profile' or 'using the attached template'), not as independent knowledge of the brand."
 
-            Dim skillFirstFragment As String =
-                "SKILL-FIRST ROUTING RULE: When an available skill directly matches the user's requested workflow, use that skill before generic research/search/knowledge-base tools even if the user did not explicitly ask for a skill. In particular, configured checklist/assessment/screening/scope/eligibility/compliance-decision workflows must use the matching assessment skill first (normally skill_guided_case_assessment when available). Do not perform preliminary legal, web, statute, case-law, or knowledge-base research before loading and reading the matching skill. After loading the skill, obey its own source/research policy. If no skill matches, normal tool selection applies."
-
             Dim webToolRoutingFragment As String =
                 "WEB TOOL ROUTING RULE: Use web_grounding when relevant public pages first need to be discovered. Use retrieve_web_content for a known mostly-static URL when readable text/ordinary links are sufficient. Do not expose/load browser tools by default. For a task that needs browser behavior, load them lazily via tool_loader. Then prefer browser_open + browser_snapshot for exploration of a specific website, finding links/pages/downloads within that site, menus/navigation, pagination, or JavaScript/dynamically rendered content. Use browser_interact only when an actual browser action is needed, and take a fresh browser_snapshot after every interaction. If retrieve_web_content returns navigation failure, empty links, incomplete client-side content, or otherwise cannot expose the requested site structure, load browser_open, browser_snapshot and browser_interact via tool_loader and switch to browser_open + browser_snapshot before doing another broad web_grounding search. If the current browser snapshot already exposes the needed link/control, continue via the browser rather than restarting web_grounding."
 
             Dim repositoryFragment As String = DesignRepository.BuildPromptFragment()
-            Dim combinedDesignFragment As String = designFragment & System.Environment.NewLine & skillFirstFragment & System.Environment.NewLine & webToolRoutingFragment
+            Dim combinedDesignFragment As String = designFragment & System.Environment.NewLine & webToolRoutingFragment
             If Not System.String.IsNullOrWhiteSpace(repositoryFragment) Then
                 combinedDesignFragment &= System.Environment.NewLine & repositoryFragment.Trim()
             End If

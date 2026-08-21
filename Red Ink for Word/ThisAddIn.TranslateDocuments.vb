@@ -504,7 +504,8 @@ Partial Public Class ThisAddIn
 
         Try
             Using frm As New DragDropForm(DragDropMode.FileOrDirectory, allowUseActiveDocument:=True)
-                If frm.ShowDialog() = DialogResult.OK Then
+                Dim __safeDialogOwner507 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If If(__safeDialogOwner507 IsNot Nothing, frm.ShowDialog(__safeDialogOwner507), frm.ShowDialog()) = DialogResult.OK Then
                     selectedPath = frm.SelectedFilePath
                     usedActiveDocument = frm.UsedActiveDocument
 

@@ -21,6 +21,14 @@ Imports SharedLibrary.SharedLibrary
 Public Class WordWorkspaceForm
     Inherits Form
 
+    Protected Overrides Sub OnShown(e As System.EventArgs)
+        MyBase.OnShown(e)
+        Me.TopMost = True
+        SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(Me)
+        SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(Me)
+    End Sub
+
+
     Private Const HostKey As String = "word"
     Private Const EM_SETCUEBANNER As Integer = &H1501
 

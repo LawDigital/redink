@@ -342,7 +342,8 @@ Partial Public Class ThisAddIn
                 instruction:="Select file(s) to delete:")
 
                 dlg.StartPosition = FormStartPosition.CenterScreen
-                If dlg.ShowDialog() = DialogResult.OK Then
+                Dim __safeDialogOwner345 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If If(__safeDialogOwner345 IsNot Nothing, dlg.ShowDialog(__safeDialogOwner345), dlg.ShowDialog()) = DialogResult.OK Then
                     Dim selected = dlg.SelectedModels
                     If selected IsNot Nothing AndAlso selected.Count > 0 Then
                         Dim deleted = 0

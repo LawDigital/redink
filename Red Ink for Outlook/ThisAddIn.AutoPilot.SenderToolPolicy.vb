@@ -367,7 +367,7 @@ Partial Public Class ThisAddIn
         If System.String.IsNullOrWhiteSpace(exclusiveSkillToolName) Then Return result
 
         Try
-            SharedLibrary.Agents.AgentResources.Refresh()
+            SharedLibrary.Agents.AgentResources.EnsureFresh()
 
             For Each skill As SharedLibrary.Agents.SkillDescriptor In SharedLibrary.Agents.AgentResources.Skills
                 If skill Is Nothing OrElse System.String.IsNullOrWhiteSpace(skill.Name) Then Continue For

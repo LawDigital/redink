@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 20.8.2026
+' 21.8.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -62,7 +62,7 @@ Partial Public Class ThisAddIn
     Public Const AN4 As String = "redink_"
     Public Const AN3 As String = "redink"
 
-    Public Shared Version As String = "V.200826" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.210826" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -434,6 +434,7 @@ Partial Public Class ThisAddIn
 
         Try
             InitializeConfig(True, True)
+            QueueModelAndAgentResourceWarmup()
 
             ' Reconcile the persisted CrashLog switch with the INI parameter. Any change
             ' takes effect on the next host launch (the INI is read after ThisAddIn_Startup).
@@ -814,6 +815,42 @@ Partial Public Class ThisAddIn
         Return tcs.Task
     End Function
 
+
+    ''' <summary>
+    ''' Primes context-independent model/tool INI parsing and the skill/agent index off the
+    ''' Outlook UI thread. The on-demand paths remain authoritative and retry on failure.
+    ''' No Office COM or WinForms objects are touched by the background task.
+    ''' </summary>
+    Private Sub QueueModelAndAgentResourceWarmup()
+        Try
+            Dim alternateModelPath As String = SharedMethods.ExpandEnvironmentVariables(If(INI_AlternateModelPath, ""))
+            Dim specialServicePath As String = SharedMethods.ExpandEnvironmentVariables(If(INI_SpecialServicePath, ""))
+            Dim centralResourcePath As String = SharedMethods.ExpandEnvironmentVariables(If(INI_AgentResourcesPath, ""))
+            Dim localResourcePath As String = SharedMethods.ExpandEnvironmentVariables(If(INI_AgentResourcesPathLocal, ""))
+
+            SharedLibrary.Agents.AgentResources.SetPaths(centralResourcePath, localResourcePath)
+
+            System.Threading.Tasks.Task.Run(
+                Sub()
+                    Dim stopwatch As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
+                    Try
+                        SharedMethods.WarmAlternativeModelsCache(alternateModelPath)
+                        SharedMethods.WarmAlternativeModelsCache(specialServicePath)
+                        SharedLibrary.Agents.AgentResources.EnsureFresh()
+                    Catch ex As System.Exception
+                        System.Diagnostics.Debug.WriteLine("[PERF] Outlook startup warm-up failed: " & ex.Message)
+                    Finally
+                        stopwatch.Stop()
+                        System.Diagnostics.Debug.WriteLine(
+                            "[PERF] Outlook model/tool/resource warm-up: " &
+                            stopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                            " ms")
+                    End Try
+                End Sub)
+        Catch ex As System.Exception
+            ' Non-fatal. Each on-demand path performs the same work if the cache is cold.
+        End Try
+    End Sub
 
     ' Bridge to SharedLibrary 
 

@@ -299,6 +299,7 @@ Namespace SharedLibrary
                 MyBase.OnShown(e)
                 If ForceForegroundOnShow Then
                     SharedMethods.ForceDialogToForeground(Me)
+                    SharedMethods.AttachForeignForegroundWatchdog(Me)
                 End If
             End Sub
 

@@ -27,7 +27,7 @@ Namespace Agents
         Private Sub New()
         End Sub
 
-        Private Shared Function ToSafeToolSuffix(value As String) As String
+        Public Shared Function ToSafeToolSuffix(value As String) As String
             If String.IsNullOrWhiteSpace(value) Then
                 Return ""
             End If
@@ -46,6 +46,18 @@ Namespace Agents
             Next
 
             Return sb.ToString().Trim("_"c)
+        End Function
+
+        Public Shared Function BuildSkillToolName(skillName As String) As String
+            Dim suffix As String = ToSafeToolSuffix(skillName)
+            If String.IsNullOrWhiteSpace(suffix) Then Return ""
+            Return "skill_" & suffix
+        End Function
+
+        Public Shared Function BuildAgentToolName(agentName As String) As String
+            Dim suffix As String = ToSafeToolSuffix(agentName)
+            If String.IsNullOrWhiteSpace(suffix) Then Return ""
+            Return "agent_" & suffix
         End Function
 
         ''' <summary>
@@ -97,7 +109,7 @@ Namespace Agents
                 Dim toolSuffix As String = ToSafeToolSuffix(localSk.Name)
                 If String.IsNullOrWhiteSpace(toolSuffix) Then Continue For
 
-                Dim toolName As String = "skill_" & toolSuffix
+                Dim toolName As String = BuildSkillToolName(localSk.Name)
                 Dim shortDesc As String = If(localSk.Description, "")
                 Dim originLabel As String = If(localSk.IsLocal, "local", "central")
 
@@ -127,7 +139,7 @@ Namespace Agents
                 Dim toolSuffix As String = ToSafeToolSuffix(localAg.Name)
                 If String.IsNullOrWhiteSpace(toolSuffix) Then Continue For
 
-                Dim toolName As String = "agent_" & toolSuffix
+                Dim toolName As String = BuildAgentToolName(localAg.Name)
                 Dim shortDesc As String = If(localAg.Description, "")
                 Dim originLabel As String = If(localAg.IsLocal, "local", "central")
 

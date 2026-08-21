@@ -1638,7 +1638,8 @@ Partial Public Class ThisAddIn
 
                     dlg.StartPosition = FormStartPosition.CenterScreen
 
-                    Dim result As DialogResult = dlg.ShowDialog()
+                    Dim __safeDialogOwner1641 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                    Dim result As DialogResult = If(__safeDialogOwner1641 IsNot Nothing, dlg.ShowDialog(__safeDialogOwner1641), dlg.ShowDialog())
 
                     If result = DialogResult.OK Then
                         Dim selected = dlg.SelectedModels

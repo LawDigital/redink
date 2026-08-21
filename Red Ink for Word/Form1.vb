@@ -5995,7 +5995,8 @@ Partial Public Class frmAIChat
             Dim selectedPath As String = ""
 
             Using frm As New DragDropForm(DragDropMode.FileOrDirectory)
-                If frm.ShowDialog() = DialogResult.OK Then
+                Dim __safeDialogOwner5998 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If If(__safeDialogOwner5998 IsNot Nothing, frm.ShowDialog(__safeDialogOwner5998), frm.ShowDialog()) = DialogResult.OK Then
                     selectedPath = frm.SelectedFilePath
                 End If
             End Using

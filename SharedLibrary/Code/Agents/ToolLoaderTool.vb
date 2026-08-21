@@ -67,7 +67,6 @@ Namespace Agents
             sb.Append("Plan ahead: in a single tool_loader call, load ALL tools you expect to need for the whole task (use the 'tools' array), then wait for the next turn and call them. ")
             sb.Append("If a tool is already exposed with its full schema this turn, call it directly and do NOT load it again via tool_loader. ")
             sb.Append("If you decide to use a skill or an agent, load it first; once its instructions list the tools it needs, load ALL of those required tools together in a single tool_loader call before invoking them. ")
-            sb.Append("SKILL-FIRST ROUTING (BINDING): Before loading generic research/search/knowledge-base tools, inspect the available skill entries. If an available skill directly describes the user's requested workflow (for example a configured checklist/assessment, intake, review playbook, comparison or form workflow), you MUST load that skill FIRST even when the user did not say the word 'skill'. Do not perform preliminary research before reading the matching skill. After the skill is loaded, follow its allowed-tools and research policy. For checklist/assessment/screening/scope/eligibility/compliance-decision requests, prefer skill_guided_case_assessment when it is available and matches the task; do not load legal/web/knowledge research tools first unless that selected skill expressly requires them. ")
             sb.Append("WEB TOOL ROUTING (BINDING): Use web_grounding to discover relevant public pages when the site or URL is not yet known. Use retrieve_web_content for a known, mostly static URL when readable text and ordinary links are sufficient. Load the Playwright browser tools lazily only when the task needs them. Prefer browser_open -> browser_snapshot, then browser_interact only when needed, followed by a fresh browser_snapshot when the task is to explore or scan a specific website, find links/pages/downloads on that site, inspect menus/navigation, follow pagination, or handle JavaScript/dynamically rendered content that simple retrieval may miss. If retrieve_web_content reports navigation failure, no links, or incomplete client-side content for a specific site, load browser_open, browser_snapshot and browser_interact together via tool_loader, then use browser_open + browser_snapshot next instead of repeating web_grounding. If a browser_snapshot already exposes the needed link/control, continue through the browser instead of restarting with web_grounding. ")
             sb.Append("SKILL/AGENT WORK: If the task is to create, install, modify, convert, review, or diagnose a Skill or Agent (even when the user does not name the skill-author), you MUST load and use the skill-author skill and the resource filesystem tools (file_make_dir, file_copy, text_write) writing under the resource root. Never satisfy such a task with workspace_write or by creating a folder in the temporary workspace - workspace outputs are temporary and do not install a skill. ")
             sb.Append("TOOLING-RUN DIAGNOSIS: If the task is to analyze, diagnose, debug, review, or explain what happened in a PREVIOUS tooling run (for example 'how did the last run go', 'analyze the last tool/python run', or 'did you really read the log'), treat this as a skill-author diagnostics task (its diagnostics section is the authority): you MUST load and use the skill-author skill together with text_read, then use skill_use.resource_index.diagnostics_files as the authoritative inventory of exact available diagnostics files. If that inventory is empty or absent, STOP and report that no deterministic diagnostics file inventory is available in this run. Do NOT reconstruct a run from session memory, the active document, or agent_workspace_* / memory_list searches, and do NOT use js_run or python_execute to probe the host filesystem for diagnostics files. ")
@@ -186,6 +185,87 @@ Namespace Agents
                 Return text
             End If
 
+            Return text.Substring(0, maxLength - 1).TrimEnd() & "…"
+        End Function
+
+    End Class
+
+    ''' <summary>
+    ''' Internal manifest-only routing handshake for top-level tooling runs.
+    ''' It exposes only skill/agent names and descriptions; resource bodies stay lazy.
+    ''' </summary>
+    Public NotInheritable Class CapabilityRoutingTool
+
+        Public Const ResolverToolName As String = "resolve_capability_route"
+        Public Const KindSkill As String = "skill"
+        Public Const KindAgent As String = "agent"
+        Public Const KindNone As String = "none"
+
+        Private Sub New()
+        End Sub
+
+        Public Shared Function Build(manifests As IEnumerable(Of ToolManifest)) As SharedLibrary.ModelConfig
+            Dim candidates = If(manifests, Enumerable.Empty(Of ToolManifest)()).
+                Where(Function(m)
+                          If m Is Nothing OrElse String.IsNullOrWhiteSpace(m.Name) Then Return False
+                          Return String.Equals(m.Category, KindSkill, StringComparison.OrdinalIgnoreCase) OrElse
+                                 String.Equals(m.Category, KindAgent, StringComparison.OrdinalIgnoreCase)
+                      End Function).
+                OrderBy(Function(m)
+                            If String.Equals(m.Category, KindSkill, StringComparison.OrdinalIgnoreCase) Then Return 0
+                            Return 1
+                        End Function).
+                ThenBy(Function(m) m.Name, StringComparer.OrdinalIgnoreCase).
+                ToList()
+
+            If candidates.Count = 0 Then Return Nothing
+
+            Dim sb As New StringBuilder()
+            sb.Append("CAPABILITY ROUTING GATE (MANDATORY FIRST DECISION): Before any substantive tool work, resolve whether the user's requested workflow has a specifically applicable skill or, only if no such skill applies, a specifically applicable top-level agent. ")
+            sb.Append("Skills have semantic precedence over agents because a skill represents the prescribed workflow and may itself delegate to agents. ")
+            sb.Append("Choose a skill only when its description clearly matches the requested workflow/task type, not merely a broad topic. ")
+            sb.Append("If no skill clearly matches, choose an agent only when its description fits the user's whole top-level task; do not choose an agent that is evidently a bounded worker/helper/criterion checker intended for delegation unless the user's entire request is exactly that bounded task. ")
+            sb.Append("If neither applies, resolve kind='none'. Do not perform web/search/knowledge/compliance/research/document-analysis or other substantive tooling before this routing decision. ")
+            sb.Append("Use only the metadata below; do not preload skill or agent bodies. Call resolve_capability_route exactly once with kind='skill' or kind='agent' plus the exact candidate name, or kind='none' with no name. Candidates:")
+
+            For Each item In candidates
+                sb.AppendLine()
+                sb.Append("- ").Append(item.Name).Append(" [").Append(item.Category.Trim()).Append("]")
+                Dim shortDesc As String = ShrinkRouting(item.Description, 700)
+                If shortDesc <> "" Then sb.Append(": ").Append(shortDesc)
+            Next
+
+            Dim def As String =
+                "{""name"":""resolve_capability_route""," &
+                """description"":""Mandatory first routing handshake: select the specifically applicable skill, otherwise a top-level agent, otherwise none.""," &
+                """parameters"":{""type"":""object"",""properties"":{" &
+                """kind"":{""type"":""string"",""enum"":[""skill"",""agent"",""none""],""description"":""Routing result. Skills take precedence when a specifically applicable skill exists.""}," &
+                """name"":{""type"":""string"",""description"":""Exact advertised skill/agent tool name. Omit or leave empty when kind is none.""}," &
+                """reason"":{""type"":""string"",""description"":""One short reason based only on the advertised names/descriptions.""}" &
+                "},""required"":[""kind""],""additionalProperties"":false}}"
+
+            Return New SharedLibrary.ModelConfig() With {
+                .ToolName = ResolverToolName,
+                .ToolInstructionsPrompt = sb.ToString(),
+                .ToolDefinition = def,
+                .ModelDescription = "Capability Router (internal)",
+                .Tool = True,
+                .ToolPriority = -1100,
+                .ToolErrorHandling = "skip"
+            }
+        End Function
+
+        Public Shared Function IsResolverToolName(toolName As String) As Boolean
+            Return Not String.IsNullOrWhiteSpace(toolName) AndAlso
+                   toolName.Trim().Equals(ResolverToolName, StringComparison.OrdinalIgnoreCase)
+        End Function
+
+        Private Shared Function ShrinkRouting(value As String, maxLength As Integer) As String
+            Dim text As String = If(value, "").Replace(vbCr, " ").Replace(vbLf, " ").Trim()
+            While text.Contains("  ")
+                text = text.Replace("  ", " ")
+            End While
+            If text.Length <= maxLength Then Return text
             Return text.Substring(0, maxLength - 1).TrimEnd() & "…"
         End Function
 

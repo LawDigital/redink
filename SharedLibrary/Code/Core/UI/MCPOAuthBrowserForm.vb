@@ -68,6 +68,8 @@ Namespace SharedLibrary
 
             Try
                 Me.TopMost = True
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(Me)
+                Global.SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(Me)
                 Me.Activate()
                 Me.BringToFront()
             Catch

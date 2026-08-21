@@ -558,7 +558,8 @@ Namespace SharedLibrary
             End If
 
             Using browserForm As New MCPOAuthBrowserForm(authUrl.ToString(), redirectUri)
-                Dim dlgResult As Windows.Forms.DialogResult = browserForm.ShowDialog()
+                Dim __safeDialogOwner561 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                Dim dlgResult As Windows.Forms.DialogResult = If(__safeDialogOwner561 IsNot Nothing, browserForm.ShowDialog(__safeDialogOwner561), browserForm.ShowDialog())
 
                 If dlgResult <> Windows.Forms.DialogResult.OK OrElse
                    String.IsNullOrWhiteSpace(browserForm.CapturedRedirectUrl) Then

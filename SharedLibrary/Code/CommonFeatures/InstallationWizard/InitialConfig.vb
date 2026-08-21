@@ -81,6 +81,14 @@ Namespace SharedLibrary
     Public Class InitialConfig
         Inherits Form
 
+        Protected Overrides Sub OnShown(e As System.EventArgs)
+            MyBase.OnShown(e)
+            Me.TopMost = True
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(Me)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(Me)
+        End Sub
+
+
         ''' <summary>Shared configuration context passed ByRef from host add-in (Word/Excel/Outlook).</summary>
         Private _context As ISharedContext
 

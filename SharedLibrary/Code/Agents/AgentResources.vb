@@ -242,6 +242,8 @@ Namespace Agents
         Private Shared _agents As List(Of AgentDescriptor)
         Private Shared _inkyMd As String
         Private Shared _initialized As Boolean
+        Private Shared _resourceWatchers As New List(Of System.IO.FileSystemWatcher)()
+        Private Shared _refreshGeneration As Long
 
         ''' <summary>Skills offered to the model — excludes entries with frontmatter "enabled: false".</summary>
         Public Shared ReadOnly Property Skills As IReadOnlyList(Of SkillDescriptor)
@@ -359,21 +361,118 @@ Namespace Agents
             Refresh()
         End Sub
 
-        ''' <summary>Rescans both roots and refreshes the in-memory index.</summary>
+        ''' <summary>
+        ''' Ensures that the in-memory resource index exists without forcing a disk rescan
+        ''' when the configured roots have not changed and no watcher has marked them dirty.
+        ''' </summary>
+        Public Shared Sub EnsureFresh()
+            EnsureInitialized()
+        End Sub
+
+        Public Shared ReadOnly Property RefreshGeneration As Long
+            Get
+                SyncLock _syncRoot
+                    Return _refreshGeneration
+                End SyncLock
+            End Get
+        End Property
+
         Private Shared _configuredCentralPath As String
         Private Shared _configuredLocalPath As String
 
-        Public Shared Sub SetPaths(centralPath As String, localPath As String)
-            SyncLock _syncRoot
-                _configuredCentralPath = SharedLibrary.SharedMethods.ExpandEnvironmentVariables(centralPath)
-                _configuredLocalPath = SharedLibrary.SharedMethods.ExpandEnvironmentVariables(localPath)
-                _initialized = False
+        Private Shared Function NormalizeConfiguredResourcePath(value As String) As String
+            Dim expanded As String = SharedLibrary.SharedMethods.ExpandEnvironmentVariables(If(value, ""))
+            If String.IsNullOrWhiteSpace(expanded) Then Return ""
 
+            Try
+                Return System.IO.Path.GetFullPath(expanded).
+                    TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar)
+            Catch
+                Return expanded.Trim().
+                    TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar)
+            End Try
+        End Function
+
+        Private Shared Sub DisposeResourceWatchersUnsafe()
+            For Each watcher As System.IO.FileSystemWatcher In _resourceWatchers
+                If watcher Is Nothing Then Continue For
+                Try
+                    watcher.EnableRaisingEvents = False
+                    watcher.Dispose()
+                Catch
+                End Try
+            Next
+            _resourceWatchers.Clear()
+        End Sub
+
+        Private Shared Sub MarkResourceIndexDirty(sender As Object, e As System.IO.FileSystemEventArgs)
+            SyncLock _syncRoot
+                _initialized = False
+            End SyncLock
+        End Sub
+
+        Private Shared Sub MarkResourceIndexDirtyOnRename(sender As Object, e As System.IO.RenamedEventArgs)
+            SyncLock _syncRoot
+                _initialized = False
+            End SyncLock
+        End Sub
+
+        Private Shared Sub AddResourceWatcherUnsafe(root As String)
+            If String.IsNullOrWhiteSpace(root) OrElse Not System.IO.Directory.Exists(root) Then Return
+
+            Try
+                Dim watcher As New System.IO.FileSystemWatcher(root)
+                watcher.IncludeSubdirectories = True
+                watcher.NotifyFilter =
+                    System.IO.NotifyFilters.FileName Or
+                    System.IO.NotifyFilters.DirectoryName Or
+                    System.IO.NotifyFilters.LastWrite Or
+                    System.IO.NotifyFilters.CreationTime
+
+                AddHandler watcher.Changed, AddressOf MarkResourceIndexDirty
+                AddHandler watcher.Created, AddressOf MarkResourceIndexDirty
+                AddHandler watcher.Deleted, AddressOf MarkResourceIndexDirty
+                AddHandler watcher.Renamed, AddressOf MarkResourceIndexDirtyOnRename
+                watcher.EnableRaisingEvents = True
+                _resourceWatchers.Add(watcher)
+            Catch
+                ' Watchers are an optimization/freshness aid only. Explicit resource writes
+                ' still call RefreshIfResourcePath, and manual refresh remains available.
+            End Try
+        End Sub
+
+        Private Shared Sub RebuildResourceWatchersUnsafe()
+            DisposeResourceWatchersUnsafe()
+
+            Dim seen As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+            For Each root As String In New String() {_configuredCentralPath, _configuredLocalPath}
+                If String.IsNullOrWhiteSpace(root) OrElse seen.Contains(root) Then Continue For
+                seen.Add(root)
+                AddResourceWatcherUnsafe(root)
+            Next
+        End Sub
+
+        Public Shared Sub SetPaths(centralPath As String, localPath As String)
+            Dim normalizedCentral As String = NormalizeConfiguredResourcePath(centralPath)
+            Dim normalizedLocal As String = NormalizeConfiguredResourcePath(localPath)
+
+            SyncLock _syncRoot
+                If String.Equals(_configuredCentralPath, normalizedCentral, StringComparison.OrdinalIgnoreCase) AndAlso
+                   String.Equals(_configuredLocalPath, normalizedLocal, StringComparison.OrdinalIgnoreCase) Then
+                    Return
+                End If
+
+                _configuredCentralPath = normalizedCentral
+                _configuredLocalPath = normalizedLocal
+                _initialized = False
+                RebuildResourceWatchersUnsafe()
             End SyncLock
         End Sub
 
         ''' <summary>Rescans both roots and refreshes the in-memory index.</summary>
         Public Shared Sub Refresh()
+            Dim stopwatch As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
+
             SyncLock _syncRoot
                 Dim central = _configuredCentralPath
                 Dim localPath = _configuredLocalPath
@@ -388,8 +487,15 @@ Namespace Agents
 
                 _inkyMd = ReadInkyMd(central, localPath)
                 _initialized = True
-
+                _refreshGeneration += 1
             End SyncLock
+
+            stopwatch.Stop()
+            System.Diagnostics.Debug.WriteLine(
+                "[PERF] AgentResources.Refresh: " &
+                stopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                " ms; generation=" &
+                RefreshGeneration.ToString(System.Globalization.CultureInfo.InvariantCulture))
         End Sub
 
         ' ------------------------------------------------------------------ scanning

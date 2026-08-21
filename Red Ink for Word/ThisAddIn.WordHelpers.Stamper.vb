@@ -131,7 +131,8 @@ Partial Public Class ThisAddIn
 
                 Try
                     Using frm As New DragDropForm(DragDropMode.FileOnly)
-                        If frm.ShowDialog() = DialogResult.OK AndAlso Not System.String.IsNullOrWhiteSpace(frm.SelectedFilePath) Then
+                        Dim __safeDialogOwner134 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                        If If(__safeDialogOwner134 IsNot Nothing, frm.ShowDialog(__safeDialogOwner134), frm.ShowDialog()) = DialogResult.OK AndAlso Not System.String.IsNullOrWhiteSpace(frm.SelectedFilePath) Then
                             stampImagePath = frm.SelectedFilePath
                         End If
                     End Using
@@ -188,7 +189,8 @@ Partial Public Class ThisAddIn
             DragDropFormFilter = "PDF Files|*.pdf|All Files|*.*"
             Try
                 Using frm As New DragDropForm(DragDropMode.FileOrDirectory)
-                    If frm.ShowDialog() = DialogResult.OK AndAlso Not System.String.IsNullOrWhiteSpace(frm.SelectedFilePath) Then
+                    Dim __safeDialogOwner191 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                    If If(__safeDialogOwner191 IsNot Nothing, frm.ShowDialog(__safeDialogOwner191), frm.ShowDialog()) = DialogResult.OK AndAlso Not System.String.IsNullOrWhiteSpace(frm.SelectedFilePath) Then
                         selectedPath = frm.SelectedFilePath
                         isDirectory = frm.IsDirectory
                     End If

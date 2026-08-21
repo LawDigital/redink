@@ -2618,7 +2618,8 @@ Partial Public Class ThisAddIn
                                                  Using dlg As New DragDropForm(DragDropMode.DirectoryOnly)
                                                      dlg.Text = "Select Agent Workspace Folder"
                                                      dlg.SetInstructionText("Drag and drop the workspace folder here, or click Browse. The Local Agent will only be allowed to access this folder and its subfolders.")
-                                                     If dlg.ShowDialog() = DialogResult.OK Then
+                                                     Dim __safeDialogOwner2621 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                                                     If If(__safeDialogOwner2621 IsNot Nothing, dlg.ShowDialog(__safeDialogOwner2621), dlg.ShowDialog()) = DialogResult.OK Then
                                                          selectedPath = dlg.SelectedFilePath
                                                      End If
                                                  End Using

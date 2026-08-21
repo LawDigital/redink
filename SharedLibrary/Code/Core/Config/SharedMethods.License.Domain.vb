@@ -793,7 +793,12 @@ Namespace SharedLibrary
                     End Sub
 
                 form.AcceptButton = btnGenerate
-                form.ShowDialog()
+                Dim __safeDialogOwner796 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If __safeDialogOwner796 IsNot Nothing Then
+                    form.ShowDialog(__safeDialogOwner796)
+                Else
+                    form.ShowDialog()
+                End If
             End Using
         End Sub
 

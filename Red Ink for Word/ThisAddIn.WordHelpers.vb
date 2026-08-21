@@ -1182,7 +1182,8 @@ Partial Public Class ThisAddIn
 
         Try
             Using frm As New DragDropForm(DragDropMode.FileOrDirectory)
-                If frm.ShowDialog() = DialogResult.OK Then
+                Dim __safeDialogOwner1185 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If If(__safeDialogOwner1185 IsNot Nothing, frm.ShowDialog(__safeDialogOwner1185), frm.ShowDialog()) = DialogResult.OK Then
                     selectedPath = frm.SelectedFilePath
                 End If
             End Using
@@ -1933,7 +1934,8 @@ Partial Public Class ThisAddIn
 
         Try
             Using frm As New DragDropForm(DragDropMode.FileOrDirectory)
-                If frm.ShowDialog() = DialogResult.OK Then
+                Dim __safeDialogOwner1936 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If If(__safeDialogOwner1936 IsNot Nothing, frm.ShowDialog(__safeDialogOwner1936), frm.ShowDialog()) = DialogResult.OK Then
                     selectedPath = frm.SelectedFilePath
                 End If
             End Using
@@ -5109,7 +5111,8 @@ Partial Public Class ThisAddIn
 
         Try
             Using frm As New DragDropForm(DragDropMode.FileOnly)
-                If frm.ShowDialog() = DialogResult.OK Then
+                Dim __safeDialogOwner5112 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If If(__safeDialogOwner5112 IsNot Nothing, frm.ShowDialog(__safeDialogOwner5112), frm.ShowDialog()) = DialogResult.OK Then
                     selectedPath = frm.SelectedFilePath
                 End If
             End Using

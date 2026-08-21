@@ -769,7 +769,7 @@ Namespace SharedLibrary
             Dim form As New Form() With {
                 .Text = $"{AN} - Signature Validation Errors",
                 .Size = New Size(850, 520),
-                .StartPosition = FormStartPosition.CenterParent,
+                .StartPosition = FormStartPosition.CenterScreen,
                 .FormBorderStyle = FormBorderStyle.Sizable,
                 .Font = New Font("Segoe UI", 9.0F),
                 .MinimumSize = New Size(750, 450),
@@ -898,7 +898,12 @@ Namespace SharedLibrary
                                               ShowSignatureManagementDialog()
                                           End Sub
 
-            form.ShowDialog()
+            Dim __safeDialogOwner901 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            If __safeDialogOwner901 IsNot Nothing Then
+                form.ShowDialog(__safeDialogOwner901)
+            Else
+                form.ShowDialog()
+            End If
         End Sub
 
 #End Region
@@ -1189,7 +1194,7 @@ Namespace SharedLibrary
             Dim form As New Form() With {
                 .Text = $"{AN} - Placeholder Values Required",
                 .Size = New Size(700, 450),
-                .StartPosition = FormStartPosition.CenterParent,
+                .StartPosition = FormStartPosition.CenterScreen,
                 .FormBorderStyle = FormBorderStyle.Sizable,
                 .Font = New Font("Segoe UI", 9.0F),
                 .MinimumSize = New Size(550, 350),
@@ -1337,7 +1342,12 @@ Namespace SharedLibrary
             ' that would otherwise stay hidden behind this TopMost modal dialog.
             AttachForeignForegroundWatchdog(form)
 
-            form.ShowDialog()
+            Dim __safeDialogOwner1340 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            If __safeDialogOwner1340 IsNot Nothing Then
+                form.ShowDialog(__safeDialogOwner1340)
+            Else
+                form.ShowDialog()
+            End If
 
             Return dialogResult
         End Function
@@ -2392,7 +2402,7 @@ Namespace SharedLibrary
             Dim form As New Form() With {
                 .Text = $"{AN} - Manage Ignored Update Parameters",
                 .Size = New Size(750, 520),
-                .StartPosition = FormStartPosition.CenterParent,
+                .StartPosition = FormStartPosition.CenterScreen,
                 .FormBorderStyle = FormBorderStyle.Sizable,
                 .Font = New Font("Segoe UI", 9.0F),
                 .MinimumSize = New Size(550, 400),
@@ -2540,7 +2550,12 @@ Namespace SharedLibrary
             ' that would otherwise stay hidden behind this TopMost modal dialog.
             AttachForeignForegroundWatchdog(form)
 
-            form.ShowDialog()
+            Dim __safeDialogOwner2543 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            If __safeDialogOwner2543 IsNot Nothing Then
+                form.ShowDialog(__safeDialogOwner2543)
+            Else
+                form.ShowDialog()
+            End If
         End Sub
 
 #End Region
@@ -2558,7 +2573,7 @@ Namespace SharedLibrary
             Dim form As New Form() With {
                 .Text = $"{AN} - Configuration Updates Available",
                 .Size = New Size(950, 600),
-                .StartPosition = FormStartPosition.CenterParent,
+                .StartPosition = FormStartPosition.CenterScreen,
                 .FormBorderStyle = FormBorderStyle.Sizable,
                 .Font = New Font("Segoe UI", 9.0F),
                 .MinimumSize = New Size(800, 450),
@@ -2771,7 +2786,12 @@ Namespace SharedLibrary
             ' that would otherwise stay hidden behind this TopMost modal dialog.
             AttachForeignForegroundWatchdog(form)
 
-            form.ShowDialog()
+            Dim __safeDialogOwner2774 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            If __safeDialogOwner2774 IsNot Nothing Then
+                form.ShowDialog(__safeDialogOwner2774)
+            Else
+                form.ShowDialog()
+            End If
 
             Return result
         End Function
@@ -2787,7 +2807,7 @@ Namespace SharedLibrary
             Dim form As New Form() With {
         .Text = $"{AN} - Ignore Future Updates?",
         .Size = New Size(750, 480),
-        .StartPosition = FormStartPosition.CenterParent,
+        .StartPosition = FormStartPosition.CenterScreen,
         .FormBorderStyle = FormBorderStyle.Sizable,
         .Font = New Font("Segoe UI", 9.0F),
         .MinimumSize = New Size(550, 350),
@@ -2896,7 +2916,18 @@ Namespace SharedLibrary
                                             form.Close()
                                         End Sub
 
-            form.ShowDialog()
+            AddHandler form.Shown,
+                Sub()
+                    form.TopMost = True
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(form)
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(form)
+                End Sub
+            Dim __safeDialogOwner2899 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            If __safeDialogOwner2899 IsNot Nothing Then
+                form.ShowDialog(__safeDialogOwner2899)
+            Else
+                form.ShowDialog()
+            End If
         End Sub
 
 
@@ -3344,7 +3375,7 @@ Namespace SharedLibrary
             Dim form As New Form() With {
                 .Text = $"{AN} - Update Signature Management",
                 .Size = New Size(750, 380),
-                .StartPosition = FormStartPosition.CenterParent,
+                .StartPosition = FormStartPosition.CenterScreen,
                 .FormBorderStyle = FormBorderStyle.Sizable,
                 .Font = New Font("Segoe UI", 9.0F),
                 .MinimumSize = New Size(700, 350),
@@ -3583,7 +3614,8 @@ Namespace SharedLibrary
                                                 Using ofd As New OpenFileDialog()
                                                     ofd.Title = "Select File to Sign"
                                                     ofd.Filter = "Text Files|*.txt|INI Files|*.ini|All Files|*.*"
-                                                    If ofd.ShowDialog() = DialogResult.OK Then
+                                                    Dim __safeDialogOwner3586 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                                                    If If(__safeDialogOwner3586 IsNot Nothing, ofd.ShowDialog(__safeDialogOwner3586), ofd.ShowDialog()) = DialogResult.OK Then
                                                         txtSignFile.Text = ofd.FileName
                                                     End If
                                                 End Using
@@ -3707,7 +3739,8 @@ Namespace SharedLibrary
                                                   Using ofd As New OpenFileDialog()
                                                       ofd.Title = "Select File to Verify"
                                                       ofd.Filter = "Text Files|*.txt|INI Files|*.ini|All Files|*.*"
-                                                      If ofd.ShowDialog() = DialogResult.OK Then
+                                                      Dim __safeDialogOwner3710 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                                                      If If(__safeDialogOwner3710 IsNot Nothing, ofd.ShowDialog(__safeDialogOwner3710), ofd.ShowDialog()) = DialogResult.OK Then
                                                           txtVerifyFile.Text = ofd.FileName
                                                       End If
                                                   End Using
@@ -3769,7 +3802,12 @@ Namespace SharedLibrary
             }
             tabHelp.Controls.Add(txtHelp)
 
-            form.ShowDialog()
+            Dim __safeDialogOwner3772 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            If __safeDialogOwner3772 IsNot Nothing Then
+                form.ShowDialog(__safeDialogOwner3772)
+            Else
+                form.ShowDialog()
+            End If
 
         End Sub
 
@@ -3861,7 +3899,7 @@ Namespace SharedLibrary
             Dim form As New Form() With {
                 .Text = $"{AN} - Batch Sign Files",
                 .Size = New Size(750, 520),
-                .StartPosition = FormStartPosition.CenterParent,
+                .StartPosition = FormStartPosition.CenterScreen,
                 .FormBorderStyle = FormBorderStyle.Sizable,
                 .Font = New Font("Segoe UI", 9.0F),
                 .MinimumSize = New Size(600, 400),
@@ -3997,7 +4035,8 @@ Namespace SharedLibrary
                                                   ofd.Title = "Select Files to Sign"
                                                   ofd.Filter = "Text Files|*.txt|INI Files|*.ini|All Files|*.*"
                                                   ofd.Multiselect = True
-                                                  If ofd.ShowDialog() = DialogResult.OK Then
+                                                  Dim __safeDialogOwner4000 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                                                  If If(__safeDialogOwner4000 IsNot Nothing, ofd.ShowDialog(__safeDialogOwner4000), ofd.ShowDialog()) = DialogResult.OK Then
                                                       For Each f In ofd.FileNames
                                                           If Not lbFiles.Items.Contains(f) Then
                                                               lbFiles.Items.Add(f)
@@ -4046,7 +4085,12 @@ Namespace SharedLibrary
                                              ShowCustomMessageBox(sb.ToString())
                                          End Sub
 
-            form.ShowDialog()
+            Dim __safeDialogOwner4049 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            If __safeDialogOwner4049 IsNot Nothing Then
+                form.ShowDialog(__safeDialogOwner4049)
+            Else
+                form.ShowDialog()
+            End If
         End Sub
 
 #End Region
@@ -4753,7 +4797,7 @@ Namespace SharedLibrary
             Dim form As New System.Windows.Forms.Form() With {
                 .Text = $"{AN} - Agent Resources Updates Available",
                 .Size = New System.Drawing.Size(1180, 680),
-                .StartPosition = System.Windows.Forms.FormStartPosition.CenterParent,
+                .StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen,
                 .FormBorderStyle = System.Windows.Forms.FormBorderStyle.Sizable,
                 .Font = New System.Drawing.Font("Segoe UI", 9.0F),
                 .MinimumSize = New System.Drawing.Size(950, 500),
@@ -5043,7 +5087,12 @@ Namespace SharedLibrary
             ' that would otherwise stay hidden behind this TopMost modal dialog.
             AttachForeignForegroundWatchdog(form)
 
-            form.ShowDialog()
+            Dim __safeDialogOwner5046 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            If __safeDialogOwner5046 IsNot Nothing Then
+                form.ShowDialog(__safeDialogOwner5046)
+            Else
+                form.ShowDialog()
+            End If
             Return approved
         End Function
 

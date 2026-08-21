@@ -980,7 +980,8 @@ Partial Public Class ThisAddIn
         StripTrailingSpaces(suggestedForReview, suggestedForReview, ignoredSuggestedSpaces)
 
         Using dlg As New ReviewChangesDialog(originalForReview, suggestedForReview)
-            Dim res As DialogResult = dlg.ShowDialog()
+            Dim __safeDialogOwner983 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            Dim res As DialogResult = If(__safeDialogOwner983 IsNot Nothing, dlg.ShowDialog(__safeDialogOwner983), dlg.ShowDialog())
             If res <> DialogResult.OK Then Return
             reviewed = ReapplyTrailingSpaces(If(dlg.ReviewedText, String.Empty), trailingSpaces)
         End Using

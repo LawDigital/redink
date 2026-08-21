@@ -100,7 +100,8 @@ Partial Public Class ThisAddIn
 
         Try
             Using frm As New DragDropForm(DragDropMode.FileOnly)
-                If frm.ShowDialog() = System.Windows.Forms.DialogResult.OK Then
+                Dim __safeDialogOwner103 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If If(__safeDialogOwner103 IsNot Nothing, frm.ShowDialog(__safeDialogOwner103), frm.ShowDialog()) = System.Windows.Forms.DialogResult.OK Then
                     selectedPath = frm.SelectedFilePath
                 End If
             End Using
@@ -149,7 +150,8 @@ Partial Public Class ThisAddIn
 
         Try
             Using cssFrm As New DragDropForm(DragDropMode.FileOnly)
-                If cssFrm.ShowDialog() = System.Windows.Forms.DialogResult.OK Then
+                Dim __safeDialogOwner152 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If If(__safeDialogOwner152 IsNot Nothing, cssFrm.ShowDialog(__safeDialogOwner152), cssFrm.ShowDialog()) = System.Windows.Forms.DialogResult.OK Then
                     cssPath = cssFrm.SelectedFilePath
                 End If
             End Using

@@ -147,6 +147,7 @@ Partial Public Class ThisAddIn
     ''' </summary>
     ''' <returns>List of available tools.</returns>
     Public Function GetAvailableTools() As List(Of ModelConfig)
+        Dim __perfAvailableTools As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
         Dim tools As New List(Of ModelConfig)()
         Dim specialServicePath As String = ExpandEnvironmentVariables(INI_SpecialServicePath)
 
@@ -187,7 +188,7 @@ Partial Public Class ThisAddIn
 
         ' Agent layer: session memory, skill loader, and discovered skills/agents (lazy registry-backed).
         Try
-            SharedLibrary.Agents.AgentResources.Refresh()
+            SharedLibrary.Agents.AgentResources.EnsureFresh()
             tools.AddRange(SharedLibrary.Agents.MemoryTools.BuildAll())
             tools.AddRange(SharedLibrary.Agents.TextTools.BuildAll())
             tools.AddRange(SharedLibrary.Agents.WorkspaceTools.BuildAll())
@@ -212,6 +213,18 @@ Partial Public Class ThisAddIn
             tools.AddRange(__agentReg.MaterializeAll())
         Catch ex As Exception
             ToolingFileLogger.LogWarn("Agent layer registration failed.", ex:=ex)
+        End Try
+
+        __perfAvailableTools.Stop()
+        Try
+            ToolingFileLogger.LogDiag(
+                "[PERF] GetAvailableTools: " &
+                __perfAvailableTools.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                " ms; tools=" &
+                tools.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                "; agentGeneration=" &
+                SharedLibrary.Agents.AgentResources.RefreshGeneration.ToString(System.Globalization.CultureInfo.InvariantCulture))
+        Catch
         End Try
 
         Return tools
@@ -412,7 +425,7 @@ Partial Public Class ThisAddIn
                 Return result
             End If
 
-            SharedLibrary.Agents.AgentResources.Refresh()
+            SharedLibrary.Agents.AgentResources.EnsureFresh()
 
             For Each skill As SharedLibrary.Agents.SkillDescriptor In SharedLibrary.Agents.AgentResources.Skills
                 If skill Is Nothing OrElse String.IsNullOrWhiteSpace(skill.Name) Then
@@ -539,7 +552,8 @@ Partial Public Class ThisAddIn
             instruction:="Select the advanced tools that may be callable. All available tools are on by default; " &
                          "uncheck any you want to disable. Workspace tools appear here only while a workspace is connected.")
 
-            If selector.ShowDialog() = DialogResult.OK Then
+            Dim __safeDialogOwner542 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            If If(__safeDialogOwner542 IsNot Nothing, selector.ShowDialog(__safeDialogOwner542), selector.ShowDialog()) = DialogResult.OK Then
                 Return selector.SelectedModels.
                     Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
                     Select(Function(t) t.ToolName).
