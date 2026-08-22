@@ -1918,6 +1918,22 @@ Partial Public Class ThisAddIn
                             Dim hiddenResponse As ToolResponse =
                                 BuildToolNotExposedThisTurnResponse(tc, turnVisibleToolNames)
 
+                            ' A lazy-load exposure miss is a turn-boundary deferral, not a tool failure.
+                            ' Returning an error-shaped tool response after the host has successfully prepared
+                            ' the tool can mislead the next model turn into declaring the tool unavailable.
+                            ' Convert that response to an explicit host-status result while preserving the call id.
+                            If preparedForNextTurn Then
+                                hiddenResponse.Success = True
+                                hiddenResponse.ErrorMessage = ""
+                                hiddenResponse.ErrorCode = ""
+                                hiddenResponse.ResultKind = "status"
+                                hiddenResponse.Response = JsonConvert.SerializeObject(New With {
+                                    Key .summary = $"Tool '{tc.ToolName}' is available and has been prepared for the next assistant turn.",
+                                    Key .result = New With {Key .tool = tc.ToolName, Key .callable_next_turn = True},
+                                    Key .resultKind = "status"
+                                })
+                            End If
+
                             context.AllToolResponses.Add(hiddenResponse)
 
                             If context.SequencingState IsNot Nothing AndAlso Not preparedForNextTurn Then
@@ -2685,21 +2701,22 @@ Partial Public Class ThisAddIn
                         End If
 
                         If RegisterToolFailureLoopState(tc, toolResponse, context) Then
+                            Dim repeatedFailureReason As String =
+                                $"Tool '{tc.ToolName}' failed {context.ConsecutiveFailedToolCount} consecutive times without a successful recovery. Further automatic retries of this tool have been stopped."
+
                             context.LogWarn(
-                                                    $"Tool '{tc.ToolName}' failed {context.ConsecutiveFailedToolCount} consecutive times. Forcing a recovery round to reassess the tool choice.")
+                                $"Tool '{tc.ToolName}' reached the consecutive-failure terminal threshold ({context.ConsecutiveFailedToolCount}).",
+                                details:=repeatedFailureReason)
 
                             ToolingFileLogger.LogWarn(
-                                                    "Forcing recovery round after repeated consecutive tool failures.",
-                                                    details:=$"ToolName='{tc.ToolName}'; Count={context.ConsecutiveFailedToolCount}")
+                                "Stopping automatic retries after repeated consecutive tool failures.",
+                                details:=$"ToolName='{tc.ToolName}'; Count={context.ConsecutiveFailedToolCount}; Terminal=true")
 
-                            context.PendingContinuationGuardPrompt = BuildToolFailureReassessmentGuardPrompt(tc.ToolName)
-                            context.PendingGuardTitle = "HOST TOOL FAILURE RECOVERY"
-                            context.PendingRejectedTurnExplanation =
-                                "Your previous tool step failed repeatedly. Reassess the tool choice before continuing."
-                            context.PendingRejectedAssistantTurn = ""
-                            context.PrematureTextRetryCount = 0
-                            stopCurrentBatchAfterTool = True
-                            Exit For
+                            ' Generic circuit breaker: the tool implementation is irrelevant here.
+                            ' Mark the current response terminal and let the existing no-tool finalization
+                            ' path produce a concise blocked status instead of another tool retry.
+                            toolResponse.RepairLoopTerminal = True
+                            toolResponse.RepairLoopTerminalReason = repeatedFailureReason
                         End If
 
                         Dim executedSignature As String = BuildExecutedToolSignature(tc, toolResponse)
@@ -2711,7 +2728,8 @@ Partial Public Class ThisAddIn
                             context.LastToolExecutionRepeatCount = 1
                         End If
 
-                        If context.LastToolExecutionRepeatCount >= context.DuplicateToolExecutionAbortThreshold Then
+                        If Not toolResponse.RepairLoopTerminal AndAlso
+                           context.LastToolExecutionRepeatCount >= context.DuplicateToolExecutionAbortThreshold Then
                             context.LogWarn($"Detected repeated identical tool execution for '{tc.ToolName}'. Terminating this tooling run to prevent an execution loop.")
                             ToolingFileLogger.LogWarn(
                                     "Terminating tooling run after repeated identical tool execution.",
@@ -4856,34 +4874,7 @@ Partial Public Class ThisAddIn
     End Function
 
     Private Function IsSelectedOnlineSourceToolName(toolName As String) As Boolean
-        If String.IsNullOrWhiteSpace(toolName) Then Return False
-
-        Dim name As String = toolName.Trim()
-
-        If name.StartsWith("skill_", StringComparison.OrdinalIgnoreCase) OrElse
-       name.StartsWith("agent_", StringComparison.OrdinalIgnoreCase) Then
-            Return False
-        End If
-
-        If name.Equals(InternalWebToolName, StringComparison.OrdinalIgnoreCase) OrElse
-       name.Equals(InternalDownloadWebFilesToolName, StringComparison.OrdinalIgnoreCase) OrElse
-       name.Equals(InternalSearchToolName, StringComparison.OrdinalIgnoreCase) OrElse
-       name.Equals(SharedLibrary.Agents.SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) OrElse
-       name.Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase) Then
-            Return False
-        End If
-
-        If IsInternalKnowledgeToolName(name) OrElse
-       SharedLibrary.Agents.WebGroundingTool.IsWebGroundingTool(name) OrElse
-       SharedLibrary.SharedLibrary.M365ToolService.IsM365ToolName(name) OrElse
-       SharedLibrary.Agents.MemoryTools.IsMemoryTool(name) OrElse
-       SharedLibrary.Agents.TextTools.IsTextTool(name) OrElse
-       SharedLibrary.Agents.WorkspaceTools.IsWorkspaceTool(name) OrElse
-       SharedLibrary.Agents.JsRunTool.IsJsTool(name) Then
-            Return False
-        End If
-
-        Return True
+        Return SharedLibrary.Agents.HostToolRegistration.IsSelectedOnlineSourceToolName(toolName)
     End Function
 
     Private Sub LoadSkillAllowedToolsFromResponse(skillResponse As String, context As ToolExecutionContext)

@@ -442,16 +442,15 @@ Namespace Agents
             Dim expectedRaw As System.Object = Nothing
             Dim hasExpectedArtifacts As Boolean = arguments.TryGetValue("expected_artifacts", expectedRaw)
 
-            Dim hasAnyExplicitMetadata As Boolean =
-                artifactId <> "" OrElse logicalId <> "" OrElse slotId <> "" OrElse
-                supersedesId <> "" OrElse stateText <> "" OrElse intentText <> "" OrElse
-                storageText <> ""
+            Dim hasAnyExplicitIdentity As Boolean =
+                artifactId <> "" OrElse logicalId <> "" OrElse slotId <> "" OrElse supersedesId <> ""
 
+            ' Lifecycle/delivery hints without an explicit identity remain legacy-compatible.
+            ' The sequencing validator already treats only the opaque identity fields as the
+            ' opt-in boundary. Keeping the delivery preparation aligned prevents a harmless
+            ' artifact_state/artifact_delivery_intent hint from causing a retry-loop failure.
             ' expected_artifacts by itself is orchestration context, not artifact identity.
-            ' This matters for locked expected_artifacts=[] delegated tasks that may still
-            ' create non-deliverable working files through the unchanged legacy protocol.
-
-            If Not hasAnyExplicitMetadata Then Return True
+            If Not hasAnyExplicitIdentity Then Return True
 
             If artifactId = "" OrElse logicalId = "" OrElse slotId = "" Then
                 failureCode = "explicit_artifact_identity_incomplete"

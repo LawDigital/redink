@@ -418,6 +418,43 @@ Namespace Agents
             Return name <> "" AndAlso AllInternalToolNameSet.Contains(name)
         End Function
 
+        ''' <summary>
+        ''' Classifies a tool for the special <c>selected_online_sources</c> agent/skill alias.
+        ''' The caller supplies the authoritative registry for the current run, which is already
+        ''' narrowed to tools selected/authorized for that run (including explicit dependencies of
+        ''' a selected skill). Keep this provider/jurisdiction agnostic:
+        ''' selected external resource tools qualify automatically; only generic built-in retrieval
+        ''' families qualify among host-internal tools. Mutation/deliverable tools never qualify.
+        ''' </summary>
+        Public Function IsSelectedOnlineSourceToolName(toolName As String) As Boolean
+            Dim name As String = If(toolName, "").Trim()
+            If name = "" Then Return False
+
+            If name.StartsWith("skill_", System.StringComparison.OrdinalIgnoreCase) OrElse
+               name.StartsWith("agent_", System.StringComparison.OrdinalIgnoreCase) Then
+                Return False
+            End If
+
+            Select Case name.ToLowerInvariant()
+                Case "internet_search",
+                     "web_grounding",
+                     "retrieve_web_content",
+                     "web_content_retriever",
+                     "knowledge_search"
+                    Return True
+            End Select
+
+            If SharedLibrary.M365ToolService.IsM365ToolName(name) Then Return True
+            If BrowserTools.IsBrowserTool(name) Then Return True
+
+            ' Every other built-in tool is an application/action capability, not a source.
+            ' External/plugin/MCP tools remain eligible because this method is only called on
+            ' the authoritative selected/authorized registry for the current run.
+            If IsInternalToolName(name) Then Return False
+
+            Return True
+        End Function
+
         Public Function IsSharedInternalToolName(toolName As String) As Boolean
             Dim name As String = If(toolName, "").Trim()
             Return name <> "" AndAlso CommonInternalToolNameSet.Contains(name)

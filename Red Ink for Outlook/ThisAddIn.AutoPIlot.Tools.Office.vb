@@ -522,6 +522,8 @@ Partial Public Class ThisAddIn
             Const ppSaveAsOpenXMLPresentation As Integer = 24
 
             Dim liveValidationError As String = ""
+            Dim nativeCreationError As String = ""
+            Dim nativeCreationStage As String = "initializing PowerPoint"
             Dim success As Boolean = Await SwitchToUi(Function()
                                                           Dim app As Object = Nothing
                                                           Dim pres As Object = Nothing
@@ -535,6 +537,7 @@ Partial Public Class ThisAddIn
                                                               End Try
 
                                                               If templatePath IsNot Nothing Then
+                                                                  nativeCreationStage = "opening PowerPoint template"
                                                                   pres = app.Presentations.Open(templatePath, ReadOnly:=0, Untitled:=-1, WithWindow:=0)
                                                                   If templateFromDesign AndAlso Not GetArgBool(toolCall.Arguments, "preserve_template_slides", False) Then
                                                                       For templateSlideIndex As Integer = CInt(pres.Slides.Count) To 1 Step -1
@@ -542,6 +545,7 @@ Partial Public Class ThisAddIn
                                                                       Next
                                                                   End If
                                                               Else
+                                                                  nativeCreationStage = "creating blank PowerPoint presentation"
                                                                   pres = app.Presentations.Add(0)
                                                                   ApplyAutoPilotPowerPointPageSetup(pres, toolCall.Arguments)
                                                               End If
@@ -557,6 +561,7 @@ Partial Public Class ThisAddIn
                                                                   Dim sld As Object = Nothing
                                                                   Try
                                                                       Dim generatedOrdinal As Integer = slideIndex - existingSlideCount
+                                                                      nativeCreationStage = $"rendering generated slide {generatedOrdinal}"
                                                                       Dim templateLayout As AutoPilotPowerPointLayoutCandidate = Nothing
                                                                       If templatePath IsNot Nothing AndAlso templateAssignments.ContainsKey(generatedOrdinal) Then
                                                                           templateLayout = templateAssignments(generatedOrdinal)
@@ -602,18 +607,27 @@ Partial Public Class ThisAddIn
                                                                   End Try
                                                               Next
 
+                                                              nativeCreationStage = "saving PowerPoint presentation"
                                                               pres.SaveAs(outputPath, ppSaveAsOpenXMLPresentation)
 
                                                               ' Validate the live PowerPoint object while it is still owned by this
                                                               ' UI-thread automation session. Starting a second PowerPoint COM server
                                                               ' immediately after SaveAs/Close proved unreliable and is not evidence
                                                               ' that the file PowerPoint just serialized is invalid.
+                                                              nativeCreationStage = "validating live PowerPoint presentation"
                                                               liveValidationError = ValidateAutoPilotPowerPointLivePresentation(
                                                                   pres, slidesArray, templateAssignments, context)
                                                               If Not String.IsNullOrWhiteSpace(liveValidationError) Then Return False
                                                               Return True
                                                           Catch ex As System.Exception
-                                                              Debug.WriteLine($"CreatePowerPoint error: {ex.Message}")
+                                                              nativeCreationError = $"{ex.GetType().FullName}: {ex.Message}"
+                                                              Debug.WriteLine($"CreatePowerPoint error during {nativeCreationStage}: {nativeCreationError}")
+                                                              Try
+                                                                  context.LogError(
+                                                                      "PowerPoint native creation failed.",
+                                                                      details:=$"stage={nativeCreationStage}; error={nativeCreationError}{System.Environment.NewLine}{ex.StackTrace}")
+                                                              Catch
+                                                              End Try
                                                               Return False
                                                           Finally
                                                               Try
@@ -655,6 +669,9 @@ Partial Public Class ThisAddIn
                 End If
                 If Not String.IsNullOrWhiteSpace(liveValidationError) Then
                     response.Response = liveValidationError
+                ElseIf Not String.IsNullOrWhiteSpace(nativeCreationError) Then
+                    response.ErrorMessage = $"PowerPoint native creation failed during {nativeCreationStage}: {nativeCreationError}"
+                    response.Response = response.ErrorMessage
                 Else
                     response.Response = "Failed to create PowerPoint presentation."
                 End If
@@ -3606,13 +3623,9 @@ Partial Public Class ThisAddIn
                     paragraph.ParagraphFormat.Bullet.Visible = -1
                     Try : paragraph.ParagraphFormat.Bullet.Type = 1 : Catch ex As System.Exception : End Try
                     paragraph.IndentLevel = Math.Min(5, level + 1)
-                    ' Do not depend on every customer template defining a visually distinct
-                    ' lvl2/lvl3 text size. Nested items must read as subordinate even in a
-                    ' minimal or third-party design carrier.
-                    If level > 0 Then
-                        Dim levelScale As Single = Math.Max(0.68F, 1.0F - 0.18F * level)
-                        Try : paragraph.Font.Size = Math.Max(11.0F, baseFontSize * levelScale) : Catch ex As System.Exception : End Try
-                    End If
+                    ' Keep the template's native typography for every indentation level.
+                    ' IndentLevel selects the design carrier's lvl1/lvl2/... paragraph style;
+                    ' the renderer must not impose a cross-template font-size scale here.
                     Try
                         paragraph.ParagraphFormat.SpaceAfter = If(level = 0, 9.0F, 4.0F)
                     Catch ex As System.Exception
@@ -4337,8 +4350,19 @@ Partial Public Class ThisAddIn
             Dim srcH As Single = Math.Max(1.0F, srcBottom - srcTop)
             Dim scale As Single = Math.Min(1.0F, Math.Min(canvas.W / srcW, canvas.H / srcH))
             If scale <= 0.0F Then Return False
-            Dim targetLeft As Single = canvas.X + (canvas.W - srcW * scale) / 2.0F
-            Dim targetTop As Single = canvas.Y + (canvas.H - srcH * scale) / 2.0F
+
+            ' Small geometric reductions are disproportionately harmful to editable PowerPoint
+            ' text boxes: PowerPoint can reflow a previously one-line label into two lines while
+            ' the box height is reduced at the same time. For near-fit compositions preserve the
+            ' renderer's native shape dimensions and only recenter them. The visual may use a few
+            ' points beyond the abstract content canvas, but remains inside the slide's protected
+            ' title/footer margins. Larger mismatches are still scaled normally.
+            Dim transformScale As Single = If(scale >= 0.9F, 1.0F, scale)
+            Dim targetLeft As Single = canvas.X + (canvas.W - srcW * transformScale) / 2.0F
+            Dim targetTop As Single = canvas.Y + (canvas.H - srcH * transformScale) / 2.0F
+            If context IsNot Nothing AndAlso Math.Abs(transformScale - scale) > 0.001F Then
+                context.Log($"PowerPoint rich Interop near-fit preserved native shape size: slide={slideIndex}; semantic='{semanticLayout}'; computedScale={scale:F3}; appliedScale={transformScale:F3}.", "diag")
+            End If
 
             For i As Integer = firstNewShapeIndex To count
                 Dim shape As Object = Nothing
@@ -4348,10 +4372,10 @@ Partial Public Class ThisAddIn
                     Dim oldTop As Single = CSng(shape.Top)
                     Dim oldW As Single = CSng(shape.Width)
                     Dim oldH As Single = CSng(shape.Height)
-                    shape.Left = targetLeft + (oldLeft - srcLeft) * scale
-                    shape.Top = targetTop + (oldTop - srcTop) * scale
-                    shape.Width = Math.Max(1.0F, oldW * scale)
-                    shape.Height = Math.Max(1.0F, oldH * scale)
+                    shape.Left = targetLeft + (oldLeft - srcLeft) * transformScale
+                    shape.Top = targetTop + (oldTop - srcTop) * transformScale
+                    shape.Width = Math.Max(1.0F, oldW * transformScale)
+                    shape.Height = Math.Max(1.0F, oldH * transformScale)
                 Finally
                     If shape IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(shape) : Catch : End Try
                 End Try
@@ -4395,6 +4419,31 @@ Partial Public Class ThisAddIn
                         Try : marginBottom = CSng(textFrame2.MarginBottom) : Catch : End Try
                         Dim availableH As Single = Math.Max(1.0F, CSng(shape.Height) - marginTop - marginBottom)
                         Dim availableW As Single = Math.Max(1.0F, CSng(shape.Width) - marginLeft - marginRight)
+
+                        ' PowerPoint occasionally reports a text box with a much smaller effective
+                        ' height after COM placement/reflow than the renderer requested. Before
+                        ' discarding the entire editable visual, restore the individual text box to
+                        ' the height/width actually required by TextFrame2 when that recovery remains
+                        ' wholly inside the safe visual canvas. This changes geometry, not typography.
+                        If boundH > availableH * 1.08F AndAlso boundW <= availableW * 1.08F Then
+                            Dim requiredHeight As Single = boundH + marginTop + marginBottom + 2.0F
+                            Dim maxHeight As Single = canvas.Y + canvas.H - CSng(shape.Top)
+                            If requiredHeight > CSng(shape.Height) AndAlso requiredHeight <= maxHeight AndAlso requiredHeight <= CSng(shape.Height) + 96.0F Then
+                                shape.Height = requiredHeight
+                                availableH = Math.Max(1.0F, CSng(shape.Height) - marginTop - marginBottom)
+                                If context IsNot Nothing Then context.Log($"PowerPoint rich Interop recovered text-box height: slide={slideIndex}; semantic='{semanticLayout}'; shape={i}; height={CSng(shape.Height):F1}.", "diag")
+                            End If
+                        End If
+                        If boundW > availableW * 1.08F AndAlso boundH <= availableH * 1.08F Then
+                            Dim requiredWidth As Single = boundW + marginLeft + marginRight + 2.0F
+                            Dim maxWidth As Single = canvas.X + canvas.W - CSng(shape.Left)
+                            If requiredWidth > CSng(shape.Width) AndAlso requiredWidth <= maxWidth AndAlso requiredWidth <= CSng(shape.Width) + 96.0F Then
+                                shape.Width = requiredWidth
+                                availableW = Math.Max(1.0F, CSng(shape.Width) - marginLeft - marginRight)
+                                If context IsNot Nothing Then context.Log($"PowerPoint rich Interop recovered text-box width: slide={slideIndex}; semantic='{semanticLayout}'; shape={i}; width={CSng(shape.Width):F1}.", "diag")
+                            End If
+                        End If
+
                         Dim shapeText As String = ""
                         Try : shapeText = CStr(textRange.Text) : Catch : End Try
                         Dim compactText As String = If(shapeText, "").Trim()
@@ -4925,7 +4974,7 @@ Partial Public Class ThisAddIn
                     If timelineObject IsNot Nothing Then events = TryCast(timelineObject("events"), JArray)
                 End If
                 If events IsNot Nothing AndAlso events.Count > 0 Then
-                    RenderAutoPilotPowerPointRichInterop(sld, slideObj, slideW, slideH, layout, richSettings, context, slideIndex, Sub() RenderPptTimeline(sld, events, slideW, fontName, textColor, muted, light, lineColor, accent, secondary))
+                    RenderAutoPilotPowerPointRichInterop(sld, slideObj, slideW, slideH, layout, richSettings, context, slideIndex, Sub() RenderPptTimeline(sld, events, slideW, slideH, fontName, textColor, muted, light, lineColor, accent, secondary))
                 Else
                     RenderPowerPointFallbackContent(sld, slideObj, templateLayoutApplied, slideW, fontName, textColor, light, lineColor, accent)
                 End If
@@ -5037,6 +5086,21 @@ Partial Public Class ThisAddIn
             tb.TextFrame.MarginRight = margin
             tb.TextFrame.MarginTop = margin
             tb.TextFrame.MarginBottom = margin
+            ' TextFrame and TextFrame2 can expose different effective margins in PowerPoint.
+            ' Rich-fit validation measures TextFrame2, so keep both APIs synchronized. Otherwise
+            ' perfectly valid editable visuals can be rejected because TextFrame2 still reports
+            ' inherited/default margins that the renderer never intended.
+            Dim textFrame2 As Object = Nothing
+            Try
+                textFrame2 = tb.TextFrame2
+                textFrame2.MarginLeft = margin
+                textFrame2.MarginRight = margin
+                textFrame2.MarginTop = margin
+                textFrame2.MarginBottom = margin
+            Catch ex As System.Exception
+            Finally
+                If textFrame2 IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(textFrame2) : Catch : End Try
+            End Try
             tb.TextFrame.TextRange.Text = If(text, "")
             tb.TextFrame.TextRange.Font.Name = fontName
             tb.TextFrame.TextRange.Font.Size = fontSize
@@ -5646,6 +5710,7 @@ Partial Public Class ThisAddIn
     Private Shared Sub RenderPptTimeline(sld As Object,
                                          events As JArray,
                                          slideW As Single,
+                                         slideH As Single,
                                          fontName As String,
                                          textColor As Integer,
                                          muted As Integer,
@@ -5657,7 +5722,10 @@ Partial Public Class ThisAddIn
         Dim count As Integer = Math.Min(6, events.Count)
         Dim left As Single = 75.0F
         Dim right As Single = slideW - 75.0F
-        Dim lineY As Single = 255.0F
+        ' Keep the timeline axis in a stable vertical band across arbitrary 16:9-style
+        ' templates. The previous fixed 255 pt axis left too little room for upper
+        ' event details and allowed TextFrame2 recovery to grow them into the axis.
+        Dim lineY As Single = Math.Max(245.0F, Math.Min(slideH - 245.0F, slideH * 0.53F))
         Dim axis As Object = Nothing
         Try
             axis = sld.Shapes.AddLine(left, lineY, right, lineY)
@@ -5681,13 +5749,17 @@ Partial Public Class ThisAddIn
             ' text-frame height up front instead of rejecting the complete editable visual after
             ' TextFrame2 measurement. The alternating geometry still keeps every event clear of
             ' the axis and leaves a separate detail area.
-            Dim labelY As Single = If(above, lineY - 135.0F, lineY + 32.0F)
-            Dim titleY As Single = If(above, lineY - 109.0F, lineY + 58.0F)
-            Dim bodyY As Single = If(above, lineY - 49.0F, lineY + 120.0F)
-            Dim titleH As Single = 58.0F
-            Dim bodyH As Single = If(above, 42.0F, 62.0F)
+            ' Reserve independent vertical zones. This keeps upper detail text clear of
+            ' the axis even when PowerPoint measures an extra wrapped line. It also means
+            ' generic text-fit recovery normally has nothing to resize or reposition.
+            Dim labelY As Single = If(above, lineY - 160.0F, lineY + 25.0F)
+            Dim titleY As Single = If(above, lineY - 116.0F, lineY + 69.0F)
+            Dim bodyY As Single = If(above, lineY - 67.0F, lineY + 118.0F)
+            Dim labelH As Single = 40.0F
+            Dim titleH As Single = 44.0F
+            Dim bodyH As Single = If(above, 56.0F, 58.0F)
             Dim boxW As Single = Math.Min(150.0F, Math.Max(110.0F, stepW + 18.0F))
-            AddPptTextBox(sld, eventObj.Value(Of String)("label"), x - boxW / 2.0F, labelY, boxW, 24.0F, 11.0F, True, colorValue, fontName, 2, 0.0F)
+            AddPptTextBox(sld, eventObj.Value(Of String)("label"), x - boxW / 2.0F, labelY, boxW, labelH, 11.0F, True, colorValue, fontName, 2, 0.0F)
             AddPptTextBox(sld, eventObj.Value(Of String)("title"), x - boxW / 2.0F, titleY, boxW, titleH, 13.0F, True, textColor, fontName, 2, 0.0F)
             AddPptTextBox(sld, GetPptArrayText(eventObj, "body"), x - boxW / 2.0F, bodyY, boxW, bodyH, 10.5F, False, muted, fontName, 2, 0.0F)
         Next
