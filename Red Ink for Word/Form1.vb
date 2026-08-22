@@ -3,193 +3,22 @@
 
 ' =============================================================================
 ' File: Form1.vb
-' PURPOSE
-'   Interactive chat assistant UI (Inky) embedded in Microsoft Word.
-'   Provides conversational interface to LLM with optional document manipulation
-'   commands and Markdown-rendered responses.
+' Purpose:
+'   Main interactive Inky chat window for Word. It gathers user/document context,
+'   maintains the conversation, invokes configured models/tooling when enabled and
+'   presents or applies results back to the Word host.
 '
-' =============================================================================
-' ARCHITECTURE OVERVIEW
-' =============================================================================
-'
-' UI Components
-'   • Primary Controls:
-'     - txtChatHistory:  Plain text transcript (hidden when HTML active)
-'     - txtUserInput:    Multiline user input box
-'     - wbChat:          WebBrowser control for Markdown-rendered HTML chat
-'     - lblInstructions: Usage instructions displayed at top
-'
-'   • Buttons:
-'     - btnSend:             Submit user message to LLM
-'     - btnCopy:             Copy entire conversation to clipboard
-'     - btnCopyLastAnswer:   Copy most recent assistant response
-'     - btnClear:            Clear conversation history
-'     - btnSwitchModel:      Toggle between primary/secondary/alternate models
-'     - btnTools:            Select which tools are available for the chat session
-'     - btnExit:             Close chat window (saves state)
-'
-'   • Checkboxes (User Configuration):
-'     - chkIncludeDocText:    Include complete active document content
-'     - chkIncludeSelection:  Include current selection or cursor context
-'     - chkIncludeOtherDocs:  Include all other open Word documents
-'     - chkPermitCommands:    Allow LLM to execute write operations
-'     - chkEnableTooling:     Enable tool calling loop (when model supports tools)
-'     - chkShowToolingLog:    Show/hide the tooling log window during tool runs
-'     - Passed to ExecuteToolingLoop via hideLogWindow:=Not chkShowToolingLog.Checked
-'     - Set from INI_ToolingLogWindow on first session load; not persisted
-'     - chkStayOnTop:         Toggle always-on-top window behavior
-'     - chkConvertMarkdown:   Apply Markdown formatting to inserted text
-'
-' Prompt Construction Pipeline
-'   1. System Prompt Assembly:
-'      - Base template from SharedContext.SP_ChatWord()
-'      - User language interpolation ({UserLanguage})
-'      - Assistant name and current timestamp
-'      - Conditional capability declarations:
-'        * "You have access to the user's active document" (if chkIncludeDocText)
-'        * "You have access to a selection..." (if chkIncludeSelection)
-'        * "You also have access to all other open Word documents" (if chkIncludeOtherDocs)
-'      - Command permission block (SP_Add_ChatWord_Commands or SP_Add_Chat_NoCommands)
-'
-'   2. User Prompt Construction:
-'      - Active document text (if enabled, extracted in Final view mode)
-'      - Selection text or cursor context (25 chars before/after with "[cursor is here]" marker)
-'      - Other open documents (via GatherSelectedDocuments with <DOCUMENTn> tags)
-'      - User's current message
-'      - Recent conversation history (trimmed to INI_ChatCap limit)
-'
-'   3. Context Enrichment:
-'      - Comments/bubbles extracted via BubblesExtract (when available)
-'      - Revision view temporarily set to wdRevisionsViewFinal (excludes deleted content)
-'      - Document names included for multi-document context
-'
-' Model Selection System
-'   • Primary Model:  Default model from INI_Model
-'   • Secondary API:  Optional second model (INI_SecondAPI / INI_Model_2)
-'   • Alternate Model: User-selectable from external INI file (INI_AlternateModelPath)
-'
-'   Model Switching Behavior:
-'     - btnSwitchModel toggles between available models
-'     - Alternate model selection uses ShowModelSelection dialog
-'     - Configuration snapshot/restore pattern preserves global context integrity
-'     - Secondary/alternate models disable document-related checkboxes (UpdateDocumentCheckboxesState)
-'     - CallLlmWithSelectedModelAsync handles temporary config application
-'
-' Tooling (Optional)
-'   • Tool selection:
-'     - btnTools opens SelectToolsForSession dialog
-'     - _selectedToolsForChat caches selected tool set per chat session
-'
-'   • Tool calling loop:
-'     - When chkEnableTooling is checked and current model supports tools,
-'       ExecuteToolingLoop is used instead of a direct LLM() call.
-'
-'   • Tooling log window:
-'     - chkShowToolingLog toggles visibility of the tooling log while tools run.
-'     - Passed to ExecuteToolingLoop via hideLogWindow:=Not chkShowToolingLog.Checked
-'     - Persisted to My.Settings.ChatShowToolingLog
-'
-'   • ToolTrigger "(t)" - One-Shot Tooling Model:
-'     - Users can type "(t)" anywhere in their prompt to invoke a one-shot tooling request.
-'     - The "(t)" token is always stripped from the prompt before it is sent to the LLM.
-'     - On detection, btnSend_Click loads the model marked ToolDefaultModel=True from the
-'       alternate models INI via GetSpecialTaskModel, without permanently altering context.
-'     - The ToolDefaultModel config is captured (snapshot), the global context is immediately
-'       restored, and the snapshot is applied temporarily only for the ExecuteToolingLoop call.
-'     - If no tools are currently selected, the tool selection dialog is shown (forceDialog).
-'     - Validation checks: INI path configured, ToolDefaultModel found, model supports tooling,
-'       tools selected. Each failure reports an error to chat and restores the original prompt
-'       (prefixed with "(t)") into txtUserInput so the user can resend without retyping.
-'     - Availability is checked at form load via HasToolingCapableSpecialTaskModel(). When 
-'       available, lblInstructions includes "(t)" usage hint.
-'     - The one-shot model is never persisted — after the request completes, subsequent messages
-'       use whatever model was previously active (primary/secondary/alternate).
-'
-' Bot Command Execution (Optional)
-'   Pattern: [#verb: @@argument1@@ §§argument2§§ #]
-'
-'   Supported Commands:
-'     • find:          Locate and highlight text (ExecuteFindCommand)
-'     • replace:       Replace or delete text with tracked changes (ExecuteReplaceCommand)
-'     • insert:        Insert at current cursor position (ExecuteInsertCommand)
-'     • insertbefore:  Insert text before anchor text (ExecuteInsertBeforeAfterCommand)
-'     • insertafter:   Insert text after anchor text (ExecuteInsertBeforeAfterCommand)
-'     • addcomment:    Add Word comment to matched text (ExecuteAddComment)
-'     • replycomment:  Add threaded reply to existing comment (ExecuteReplyToCommentByIdToken)
-'
-'   Command Processing:
-'     - ParseCommands extracts commands using tempered-greedy regex
-'     - Supports single @ or § inside arguments (only @@ or §§ terminate)
-'     - Second argument optional (empty for delete operations)
-'     - DecodeParagraphMarks normalizes line breaks (vbCr, vbLf, \r\n, ^p, ^13)
-'     - FindLongTextInChunks ensures reliability with large documents
-'     - MarkerChar (U+E000) prevents infinite loops during replacement
-'     - TOC ranges skipped to prevent corruption (TocEndIfInside)
-'     - ESC key aborts execution mid-operation
-'     - Failed commands reported to chat with error formatting
-'
-' Markdown & HTML Rendering
-'   • Markdig Pipeline:
-'     - UseAdvancedExtensions (tables, footnotes, task lists, etc.)
-'     - UseEmojiAndSmiley (emoji shortcode support)
-'     - UseSoftlineBreakAsHardlineBreak (single newlines render as <br>)
-'
-'   • User Messages:  HTML-encoded plain text with line breaks preserved
-'   • Assistant Messages: Markdown → HTML conversion with link instrumentation
-'   • Link Handling: All anchor tags instrumented to open in default browser
-'     via BrowserBridge COM-visible class (prevents internal WebBrowser navigation)
-'   • Thinking Indicator: Temporary DOM element removed on LLM response
-'   • Inline Optimization: Single-paragraph responses rendered as <span> instead of <div>
-'
-' Persistence & State Management
-'   • Chat History:
-'     - Plain text:  My.Settings.LastChatHistory (fallback, trimmed to INI_ChatCap)
-'     - HTML:        My.Settings.LastChatHistoryHtml (preferred, preserves formatting)
-'     - In-memory:   _chatHistory list of (Role, Content) tuples
-'
-'   • Window State:
-'     - Position:    My.Settings.FormLocation
-'     - Size:        My.Settings.FormSize
-'     - RestoreBounds saved when minimized/maximized
-'
-'   • User Preferences:
-'     - IncludeDocument, IncludeSelection, DoCommands
-'     - ChatEnableTooling (persisted), ChatShowToolingLog (session-only, from INI)
-'     - NotAlwaysOnTop, ConvertMarkdownInChat
-'     - All persisted via My.Settings except ChatShowToolingLog
-'
-' Safety & COM Interop
-'   • Word View Management:
-'     - Temporarily switches to wdRevisionsViewFinal for clean text extraction
-'     - ShowRevisionsAndComments toggled to hide markups during extraction
-'     - Original view settings restored in Finally blocks
-'
-'   • Selection Restoration:
-'     - Original selection bounds saved before command execution
-'     - Restored with boundary guards (Math.Min/Max to prevent out-of-range)
-'     - Main story enforcement prevents caret stuck in headers/footnotes/comments
-'
-'   • Abort Mechanism:
-'     - GetAsyncKeyState polls ESC key during long operations
-'     - InfoBox provides user feedback during command execution
-'
-'   • COM Object Cleanup:
-'     - Marshal.ReleaseComObject called on Word.Application references
-'     - Try-Catch-Finally patterns ensure cleanup on errors
-'
-' Dependencies
-'   • SharedLibrary.SharedContext:  INI configuration and model settings
-'   • SharedLibrary.SharedMethods:  LLM invocation, UI helpers, model selection
-'   • Markdig:                      Markdown parsing and HTML generation
-'   • Microsoft.Office.Interop.Word: Word automation and COM interop
-'   • HtmlAgilityPack:              HTML parsing (ConvertHtmlToPlainText)
-'
-' Known Limitations
-'   • WebBrowser control uses legacy IE rendering engine (no modern CSS support)
-'   • FindLongTextInChunks may fail on complex table structures
-'   • TOC detection relies on TablesOfContents collection (custom TOCs may be missed)
-'   • Comment ID tokens must match specific formats (see TryParseCommentIdToken)
-'
+' Architecture / Function:
+'   - WinForms/WebBrowser chat UI with persisted window/session preferences and bounded
+'     conversation history; UI controls determine which Word context is exposed.
+'   - Prompt assembly keeps system instructions, selected document/selection/other-document
+'     context and user turns separate before calling the shared LLM bridge.
+'   - Optional tooling delegates to ExecuteToolingLoop and the shared agent/tool registry;
+'     this form selects capabilities/permissions but does not implement tool semantics.
+'   - Document-changing commands are routed back through ThisAddIn command/processing
+'     methods so Word COM work remains on the host/UI boundary.
+'   - Model switching, Markdown/HTML rendering, clipboard/export and status/error handling
+'     are UI responsibilities; cross-host policy remains in SharedLibrary.
 ' =============================================================================
 
 

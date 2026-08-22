@@ -1,4 +1,19 @@
-﻿Option Explicit On
+﻿' Part of "Red Ink for Outlook"
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: DragDropForm.vb
+' Purpose:
+'   Outlook file/folder selection dialog used by workflows that need a local
+'   file, directory, or either kind of path from the user.
+'
+' Architecture:
+'   Implements the behavioral half of the WinForms dialog (selection mode,
+'   foreground ownership, drag/drop validation, and selected-path state); the
+'   generated control layout remains in DragDropForm.Designer.vb.
+' =============================================================================
+
+Option Explicit On
 Option Strict On
 
 Imports System.Drawing

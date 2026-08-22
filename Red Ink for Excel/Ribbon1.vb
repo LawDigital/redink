@@ -1,6 +1,18 @@
 ﻿' Part of "Red Ink for Excel"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
+' =============================================================================
+' File: Ribbon1.vb
+' Purpose:
+'   Excel Ribbon callback surface for worksheet processing, model selection,
+'   formatting helpers, analysis commands, settings, and related user workflows.
+'
+' Architecture:
+'   Thin VSTO UI adapter over the Excel ThisAddIn command surface. Generated
+'   controls live in Ribbon1.Designer.vb; this file owns callbacks, dynamic model
+'   menus, theme-aware icons, and configuration-driven control visibility.
+' =============================================================================
+
 Imports Microsoft.Office.Tools.Ribbon
 Imports Microsoft.Win32
 Imports SharedLibrary

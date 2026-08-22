@@ -3,31 +3,19 @@
 '
 ' =============================================================================
 ' File: ThisAddIn.Processing.Tooling.ToolExecutionContext.vb
-' Purpose: Execution state container for tool session lifecycle and diagnostics.
+' Purpose:
+'   Mutable per-run state object for the Word tooling loop, shared by selection,
+'   execution, retry/recovery, finalization and diagnostics phases.
 '
-' Responsibilities:
-'  - Hold per-session state: selected tools, allowed registries, iteration counts.
-'  - Track all tool responses (successful and failed) during session.
-'  - Manage continuation guards and retry prompts for failed turns.
-'  - Log session events with optional UI window display.
-'  - Track duplicate tool execution detection (signature + repeat count).
-'  - Track consecutive tool failures for abort thresholds.
-'  - Hold premature text response retry state.
-'  - Maintain sequencing state (tool ordering, deliverable requirements, memory grounding).
-'  - Expose finalization blocked state and reason codes.
-'  - Integrate with workflow continuity (WorkflowId, RuntimeState).
-'  - Provide diagnostic snapshots for logs.
-'
-' Architecture:
-'  - Mutable state container passed through ExecuteToolingLoop iterations.
-'  - Nested logging via optional LogWindow (WinForms Form).
-'  - External log sink support for sub-agent integration.
-'  - Exposes SequencingState for complex orchestration decisions.
-'
-' External Dependencies:
-'  - SharedLibrary.Agents.ToolCallSequencing for sequencing state.
-'  - SharedLibrary.Agents.WorkflowContinuity for workflow state.
-'  - LogWindow for optional UI logging display.
+' Architecture / Function:
+'   - Holds selected/authorized tool registries, lazy-loading and capability-routing
+'     state, iteration/cancellation state and the complete ToolResponse history.
+'   - Owns sequencing state for memory grounding, explicit operations, sub-agent tasks,
+'     deliverable requirements and retry/fidelity guards, plus workflow-continuity data.
+'   - Preserves required design/template choices across retries where host fidelity must
+'     not silently degrade.
+'   - Centralizes structured logging and finalization-block information; it contains
+'     state only and does not itself execute tools.
 ' =============================================================================
 
 Option Explicit On

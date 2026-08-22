@@ -2,7 +2,7 @@
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
-' File: M365SearchForm.vb
+' File: ThisAddIn.M365SearchForm.vb
 ' Purpose: Lightweight harness for SharedLibrary.M365Service. Lets the user
 '          enter a query, lists matching emails, and opens the selected
 '          message inside Outlook itself (or, as a last resort, in the

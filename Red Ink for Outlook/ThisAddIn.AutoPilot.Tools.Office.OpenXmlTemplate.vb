@@ -4,8 +4,20 @@
 ' =============================================================================
 ' File: ThisAddIn.AutoPilot.Tools.Office.OpenXmlTemplate.vb
 ' Purpose:
-'   Deterministic OOXML-only renderer for slot-bound create_word_document
-'   templates. This path never starts Word and never performs COM automation.
+'   Deterministic WordprocessingML renderer used by create_word_document for structured
+'   DOCX designs and the generic no-template OOXML path; it does not start Word/COM.
+'
+' Architecture / Function:
+'   - Replaces declared [[RI:...]] slots across supported Word stories and inserts the
+'     markdown_content body at its explicit body slot when a design contract is present.
+'   - Converts normalized Markdig HTML/Markdown blocks into WordprocessingML and applies
+'     semantic paragraph/heading/list mappings from the merged style policy + companion.
+'   - Preserves native Word style IDs and numbering, handles text/multiline fields,
+'     headings, bullets/numbered lists and tables, and aligns table left edges to the
+'     effective text indent of the preceding generated paragraph.
+'   - Validates required slots, supported structural levels, referenced styles and final
+'     package content before success; unsupported structure fails rather than degrading.
+'   - Visual placeholders remain stable anchors for the subsequent OpenXmlVisuals pass.
 ' =============================================================================
 
 Option Explicit On

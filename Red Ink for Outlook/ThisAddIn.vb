@@ -1,5 +1,18 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: ThisAddIn.vb
+' Purpose:
+'   Main Outlook VSTO add-in entry point. Owns startup/shutdown, Explorer lifecycle,
+'   configuration initialization, UI-thread marshaling, and host-level services.
+'
+' Architecture:
+'   Root partial ThisAddIn lifecycle module for the Outlook host. It coordinates
+'   shared configuration/resources, Outlook event hooks, COM/UI safety, and deferred
+'   warm-up while specialized mail, tooling, web, M365, and AutoPilot logic lives in
+'   the other ThisAddIn.* files.
+' =============================================================================
 '
 ' 22.8.2026
 '
@@ -931,133 +944,50 @@ Module GetAsyncKeyStateModule
     End Function
 End Module
 
-' =====================================================================================
-' Red Ink for Outlook – Architectural Overview (Reviewer Documentation)
-' =====================================================================================
-' PURPOSE
-'   AI-assisted authoring add-in for Outlook (with sibling add-ins for Word/Excel).
-'   Provides translation, summarization, rewriting, style application, freestyle prompting,
-'   markup/diff visualization, email-chain analysis, clipboard/object insertion, and
-'   configurable prompt library usage via local and alternate LLM endpoints.
+' =================================================================================================
+' Red Ink for Outlook - Architecture Overview
 '
-' CORE COMPONENTS (PARTIAL CLASS SPLIT)
-'   ThisAddIn.vb
-'       - Outlook/VSTO lifecycle (Startup/Shutdown) with a two-phase initialization:
-'           1. Early: capture UI SynchronizationContext + TaskScheduler, host HWND, set
-'              UpdateHandler.MainControl + HostHandle.
-'           2. Delayed: configuration load, ribbon refresh, update polling, HTTP listener start.
-'       - Global constants: product naming, version, command triggers (e.g. Markup:, Clip:, Insert:, Replace:, Newdoc:, (nf)/(kf)/(kpf)).
-'       - Mutable runtime variables (TranslateLanguage, ShortenLength, SummaryLength, Username, etc.)
-'       - COM robustness:
-'           * OleMessageFilter: temporary registration to auto-retry RPC_E_CALL_REJECTED / RETRYLATER.
-'           * ComRetry(): small exponential-ish retry for transient COM busy states.
-'       - UI thread marshaling:
-'           * EnsureUIThread(), SwitchToUi(Action/Func), SwitchToUiTask(Func(Of Task(Of T)))
-'           * Allows asynchronous background LLM calls while keeping final UI mutation safe.
-'       - External bridge to SharedLibrary.SharedMethods for:
-'           * InitializeConfig(), LLM(), PostCorrection(), Settings window, Prompt selector.
-'       - Startup-added watchdogs: power mode watcher, listener watchdog, update checker.
-'       - Shutdown order: graceful HTTP listener stop, watchdog stop, power watcher teardown.
+' ROLE OF THIS FILE
+'   ThisAddIn.vb is the Outlook VSTO composition root. It owns application startup/shutdown,
+'   Explorer/Inspector lifecycle integration, shared-context/config initialization,
+'   UI-thread marshaling and host-level services. Mail features, Local Chat tooling and
+'   AutoPilot are implemented in the other partial ThisAddIn.* files.
 '
-'   ThisAddIn.Commands.vb
-'       - Entry command dispatcher: MainMenu(RI_Command) routes ribbon actions.
-'       - Email-context resolution:
-'           * Supports inline response → optional forced Inspector promotion with selection reapplication.
-'           * Multi-selection aggregation for chain summarization.
-'       - High-level operations:
-'           * Translate / PrimLang / Correct / Summarize / Improve / NoFillers / ApplyMyStyle /
-'             Friendly / Convincing / Shorten / Sumup / Answers / Freestyle / InsertClipboard.
-'       - Freestyle engine:
-'           * Prefix parsing for behavior flags: Markup*, Replace:, Clipboard:, Clip:, Newdoc:, (net), (Lib),
-'             (mystyle), (nf)/(kf)/(kpf), (clip) object inclusion, (2nd) alternate model.
-'           * Dynamic prompt augmentation (default prefix injection).
-'       - Markup strategies:
-'           * Method 1: Word built-in compare.
-'           * Method 2: Diff (DiffPlex).
-'           * Method 3: Diff rendered in window (no inline insertion).
-'           * Cap enforcement (MarkupDiffCap) with user override prompt.
-'       - Formatting retention:
-'           * Optional HTML extraction + reinsertion (KeepFormat flags, cap INI_KeepFormatCap).
-'           * Markdown conversion of inline formatting when enabled (MarkdownConvert).
-'       - Clipboard insertion:
-'           * Robust multi-attempt STA clipboard setter with fallback to manual window or temp file.
-'           * Optional RTF conversion (MarkdownToRtf).
-'       - MyStyle:
-'           * Style prompt file selection, automatic AI-based profile generation and persistence.
-'       - Chain parsing heuristics:
-'           * GetLatestMailBody(): detects quoted sections using marker & header patterns.
+' PRIMARY ARCHITECTURAL AREAS
+'   - Outlook UI/commands: Ribbon1.vb, DragDropForm.vb, ReviewChangesDialog.vb and
+'     Commands.*, Helpers, Properties and Processing partials.
+'   - Local Chat tooling: Tooling.ToolExecution, ToolExecutionContext, ToolResponse,
+'     Tools, PromptBuilding, UserRequestResolution, Sources, Memory, M365, PythonExecute
+'     and Logging; shared registry/sequencing/finality rules live in SharedLibrary.Agents.
+'   - Agent isolation: ThisAddIn.AgentHost.vb implements ISubAgentHost and runs bounded
+'     isolated tooling loops under the parent's workflow/task contracts.
+'   - AutoPilot mail workflow: Autopilot.vb plus Config, Cleanup, Scheduler,
+'     SenderToolPolicy, ThreadRetention, UserStorage*, Doc/PDF/comment processors and
+'     CompleteTables. It processes one mail/session context while retaining explicit
+'     attachment/output identities.
+'   - AutoPilot tools: AutoPilot.Tools.vb aggregates tool definitions; Tools.Office*,
+'     Tools.PDF, Tools.Other and DataCollector own domain execution. Structured/generic
+'     Word generation is OOXML-first; Office.Interop is the explicit live-Excel COM
+'     compatibility boundary. OpenXmlTemplate/OpenXmlVisuals own deterministic DOCX work.
+'   - Microsoft 365/knowledge: Tooling.M365, M365SearchForm, Processing.KnowledgeRAG and
+'     KnowledgeStoreWiring bridge shared M365 and Knowledge Store services.
+'   - Web-extension surfaces: WebExtension.vb and Agent/FileHelpers/InkyPlay/
+'     ListenerAndPower partials provide the external/local browser integration boundary.
 '
-'   ThisAddIn.Helpers.vb (naming suggests; verify implementation)
-'       - Expected to host shared helper routines used across command code:
-'           * Text diff rendering, CompareAndInsertText / CompareAndInsertTextCompareDocs
-'           * HTML/Markdown conversion (RemoveHTML, ConvertRangeToMarkdown, InsertTextWithMarkdown,
-'             GetRangeHtml).
-'           * Utility wrappers for dialogs (ShowCustomMessageBox, ShowCustomWindow, Yes/No boxes).
-'           * Configuration override logic (Override()) and selection length retrieval.
-'       - Reviewer focus: ensure no unsafe string injection into COM automation or HTML; validate
-'         any file I/O or reflection usage.
+' DESIGN/ARTIFACT BOUNDARIES
+'   Office design catalogs and active design-set selection are data/configuration, not
+'   hard-coded organization logic. Generated files are registered through explicit
+'   artifact/deliverable identities. Retry fidelity must preserve resolved designs and
+'   other user-significant choices instead of silently degrading to a neutral result.
 '
-'   ThisAddIn.Processing.vb 
-'       - Background processing concerns:
-'           * HTTP listener startup (StartupHttpListener/ShutdownHttpListener), watchdog timers,
-'             periodic update check (UpdateHandler.PeriodicCheckForUpdates).
-'           * Post/Pre-correction pipelines (cleaning, normalization).
-'       - Reviewer focus: authentication/authorization of HTTP surface, port binding, exposure risk,
-'         timeout handling, cancellation token usage.
+' EXECUTION FLOW
+'   Outlook event/user request -> Local Chat or AutoPilot orchestration -> capability
+'   routing/tool loading -> shared sequencing + host tool execution -> validated artifact
+'   or mail result -> final-response/delivery contract. UI/COM work must cross the Outlook
+'   UI-thread boundary explicitly; OOXML-only document generation must not start Office.
 '
-'   ThisAddIn.Properties.vb 
-'       - Used to share configuration with SharedLibrary.
-'       - Lightweight computed properties and wrappers mapping INI/config values to runtime flags.
-'       - Reviewer focus: thread safety for shared state; ensure no implicit cross-thread access.
-'
-'   ThisAddIn.WebExtension.vb / ThisAddIn.WebExtension.FileHelpers.vb
-'       - Bridge to a local web extension (e.g., for UI panel or external integration).
-'       - FileHelpers: safe file access (prompt libraries, MyStyle storage, temp export).
-'           * Should sanitize paths (environment variable expansion), enforce allowed directories,
-'             handle large file sizes, avoid blocking UI thread.
-'       - WebExtension core: request routing, minimal protocol, likely JSON/HTTP.
-'       - Reviewer focus: validate no arbitrary file read/write, restrict external origin access,
-'         ensure request size limits, avoid code injection via prompt content.
-'
-'   Resources
-'       - Embedded assets: icons (ribbon), templates, prompt library defaults, language strings.
-'       - Reviewer focus: check for hardcoded secrets, mutable resources used as dynamic prompts,
-'         localization fallback behavior.
-'
-'   Ribbon1.vb (and Ribbon2 if present)
-'       - UI layer: button click handlers calling MainMenu or helper methods (e.g., ShowSettings, HelpMeInky).
-'       - Dynamic enable/disable based on config (INIloaded, GPTSetupError, selection context).
-'       - Reviewer focus: ensure no long-running work on UI callbacks; all heavy LLM calls are async.
-'
-' EXTERNAL DEPENDENCIES (FOR REVIEW)
-'   DiffPlex: text diff generation (verify unmodified usage, license Apache 2.0).
-'   Markdig: Markdown → HTML conversion (pipeline configured with advanced extensions; review for XSS if HTML rendered in custom windows).
-'   Newtonsoft.Json / Google Protobuf / gRPC libs: serialization / API calls (audit for external traffic).
-'   HtmlAgilityPack: HTML parsing (ensure safe usage for user-controlled HTML).
-'   Cryptography / Pdf libraries (BouncyCastle, PdfPig, PdfiumViewer): not directly shown here—confirm constrained usage.
-'   Whisper.net / Vosk / NAudio: speech/transcription modules (check if loaded lazily; resource cleanup).
-'   SharedLibrary.SharedMethods: central abstraction for LLM calls, config reading, UI dialogs; treat as trust boundary (audit separately).
-'
-' CONCURRENCY & THREADING
-'   - UI thread affinity enforced via captured SynchronizationContext.
-'   - Asynchronous Tasks for LLM requests; ConfigureAwait(False) used to prevent deadlocks.
-'   - Interlocked guards (e.g., inMainMenu, delayedStartupOnce) prevent reentrancy.
-'   - Timer-based OLE filter revocation to bound filter lifetime.
-'
-' SECURITY / REVIEW HOTSPOTS
-'   1. Prompt Injection: Freestyle and user-supplied prompts are concatenated into system prompts—validate escaping where model calls depend on structured markup (<TEXTTOPROCESS> tags).
-'   2. HTML / Markdown Rendering: Output into windows (ShowHTMLCustomMessageBox) → ensure no script execution (Markdig produces HTML; confirm viewer control neutralizes scripts).
-'   3. File I/O: MyStyle prompt storage & prompt library reading—check path validation and absence of directory traversal.
-'   4. HTTP Listener: Confirm authentication, port binding restrictions, and rejection of unsolicited external requests.
-'   5. Clipboard: Large data insertion & RTF conversion—ensure size caps to avoid memory pressure.
-'   6. COM Automation: Robust retry logic prevents crashes but could mask persistent failures—log repeated COMException patterns.
-'   7. Alternate Models: When switching (2nd API / model selection), verify restoration of original config (RestoreDefaults) always succeeds.
-'   8. Diff Cap (MarkupDiffCap): Performance safeguard—ensure enforced consistently for both Command_InsertAfter and Freestyle flows.
-'
-' QUICK TRACE POINTS
-'   Startup path: ThisAddIn_Startup → (Explorer_Activate OR BeginInvoke DelayedStartupTasks) → InitializeConfig → UpdateHandler.PeriodicCheckForUpdates → StartupHttpListener.
-'   Command flow (example): Ribbon click → MainMenu("Correct") → Command_InsertAfter(prompt...) → LLM() → (optional PostCorrection) → insertion + markup.
-''
-' =====================================================================================
-' End of Reviewer Documentation
-' =====================================================================================
+' MAINTENANCE HOTSPOTS
+'   Outlook COM/UI responsiveness; sender/trust and AutoPilot storage isolation; tooling
+'   retries/finality; design routing; OOXML package validity; explicit Excel COM boundary;
+'   attachment/path containment; M365/web external data; and user-visible artifact delivery.
+' =================================================================================================

@@ -3,7 +3,15 @@
 '
 ' =============================================================================
 ' File: ToolingFinalResponseContract.vb
-' Purpose: Defines the contract for the final response of tooling operations.
+' Purpose:
+'   Defines the small shared contract that tells a tooling loop how a model's final
+'   non-tool response must be interpreted and formatted.
+'
+' Architecture / Function:
+'   - UserFacingTaskStatus requires the machine-readable TASK_STATUS completion footer.
+'   - RawCallerText is used for nested/internal callers that must receive unwrapped text.
+'   - Helper functions centralize contract serialization and footer requirements so
+'     Word, Outlook and shared sub-agent flows do not diverge.
 ' =============================================================================
 
 

@@ -4,105 +4,20 @@
 ' =============================================================================
 ' File: DiscussInky.vb
 ' Purpose:
-'   WinForms surface that hosts the "Discuss this" multi-persona chat inside Word.
-'   Provides persona + mission selection, knowledge loading (file or directory),
-'   optional inclusion of the active Word document, transcript rendering/persistence,
-'   and LLM invocation with optional alternate-model / second-API support.
-'   Includes two automation modes:
-'     - Autorespond: simulates a second participant for multi-party dialogue
-'     - Sort It Out: structured Advocate vs Challenger discussion using the same engine
+'   Word WinForms surface for persona/mission-based discussion workflows, including
+'   optional knowledge/document context, multi-participant automation and tooling.
 '
-' Architecture / How it works:
-'  - UI Composition:
-'     * WebBrowser transcript renderer (Markdown -> HTML via Markdig, custom CSS; external links open in browser)
-'     * Multiline TextBox input with Enter-to-send (Shift+Enter for newline) and Esc-to-close
-'     * Buttons: Send, Persona, Mission, Edit Local Persona Lib, Load Knowledge, Alternate Model,
-'       Clear, Send to Doc, Close, Autorespond, Sort It Out, Tools
-'     * Checkboxes: Include active document, Persist knowledge temporarily, Enable tooling, Tooling log
-'
-'  - Session State & Persistence (`My.Settings`):
-'     * Persists window geometry, selected persona/mission, checkbox states, knowledge path, tooling settings
-'     * Persists transcript in two forms:
-'         - HTML fragment (`DiscussLastChatHtml`) for fast UI restoration
-'         - Plain transcript (`DiscussLastChat`) to rebuild `_history` for LLM context
-'     * Maintains an in-process runtime knowledge cache (`_cachedKnowledgeContent/_cachedKnowledgeFilePath`)
-'       (survives closing/reopening the form while Word remains running)
-'     * Optional temp-file persistence of knowledge when "Persist knowledge temporarily" is enabled
-'       (`%TEMP%\redink-discussknowledge.txt`)
-'
-'  - Personas & Missions:
-'     * Personas loaded from local and/or global persona libraries (Name|Prompt, `;` comments supported)
-'       - Local personas are labeled "(local)" and display names are de-duplicated
-'     * Missions loaded from a sibling file derived from the persona library filename:
-'         [personaFileNameWithoutExtension]-missions.txt (Name|Prompt, `;` comments supported)
-'     * Mission/Persona editing is available via the shared text editor; missions reload immediately
-'
-'  - Knowledge Loading (File/Directory):
-'     * Loads a single file or all supported files from a directory (top-level only; capped to prevent overload)
-'     * Supported formats include text/code/markup, RTF, DOC/DOCX, PPTX, PDF (optional OCR when available)
-'     * When multiple files are loaded, wraps each into numbered tags:
-'         <documentN name="file.ext"> ... </documentN>
-'     * Produces a user-confirmed load summary (loaded/failed/ignored, PDF extraction warnings)
-'
-'  - LLM Pipeline & Context Unification:
-'     * Builds prompts from shared context pieces:
-'         - Persona system prompt (+ optional mission clause)
-'         - Knowledge base (if loaded)
-'         - Active Word document excerpt
-'         - Conversation history (`_history`), capped/tail-truncated using `_context.INI_ChatCap`
-'     * History roles:
-'         - `user`
-'         - `assistant` (main persona; Sort It Out stores prefixed display names like "X (Advocate): ...")
-'         - `autoresponder` (second participant; stored already prefixed with its display name)
-'       `BuildConversationForAutoResponder()` normalizes roles into a single transcript so both parties see the
-'       full conversation regardless of who spoke.
-'     * Generates a brief welcome message (persona/mission aware) and displays session info on startup when needed
-'
-'  - Automation Modes:
-'     * Autorespond:
-'         - Alternates between responder persona and main persona for up to N rounds
-'         - Supports a stop phrase (`<AUTORESPOND_STOP>`) and optional progress UI
-'         - Can optionally generate a discussion summary after completion
-'     * Sort It Out:
-'         - Runs a structured Advocate vs Challenger dialogue using the same alternation engine
-'         - Missions can be auto-generated via LLM or selected manually; settings are persisted
-'         - Can optionally generate a discussion summary after completion
-'
-'  - Model Selection / Tooling:
-'     * Alternate model support:
-'         - If an alternate model INI is configured, user can select an alternate model; the model is applied
-'           only for the duration of each call and then restored (semaphore-protected)
-'         - Legacy "second API" toggle is supported when configured
-'     * Tooling support:
-'         - Optional per-session tool selection and execution via `Globals.ThisAddIn.ExecuteToolingLoop`
-'         - Tooling UI is enabled/disabled based on the currently selected model's tooling capability
-'     * ToolTrigger "(t)" - One-Shot Tooling Model:
-'         - Users can type "(t)" anywhere in their prompt to invoke a one-shot tooling request.
-'         - The "(t)" token is stripped from the prompt before it is sent to the LLM.
-'         - On detection, the model marked ToolDefaultModel=True is loaded from the alternate models INI
-'           via GetSpecialTaskModel, without permanently altering context.
-'         - The ToolDefaultModel config is captured (snapshot), the global context is immediately
-'           restored, and the snapshot is applied temporarily only for the ExecuteToolingLoop call.
-'         - If no tools are currently selected, the tool selection dialog is shown (forceDialog).
-'         - Validation checks: INI path configured, ToolDefaultModel found, model supports tooling,
-'           tools selected. Each failure reports an error to chat and restores the original prompt.
-'         - Availability is checked at form load via IsToolDefaultModelAvailable(). When available,
-'           session info includes a "(t)" usage hint.
-'         - The one-shot model is never persisted — after the request completes, subsequent messages
-'           use whatever model was previously active.
-'
-'  - Export:
-'     * "Send to Doc" exports the conversation to a new Word document using Markdown insertion,
-'       formatting speakers explicitly for `user`, `assistant`, and `autoresponder`
-'
-' External Dependencies:
-'  - Markdig: Markdown-to-HTML conversion for transcript rendering and summary display
-'  - `SharedLibrary.SharedMethods`:
-'     * LLM calls and model configuration switching
-'     * OCR/PDF utilities and file extraction helpers
-'     * Shared dialogs (selection, variable input, message boxes, text editor)
-'  - `Globals.ThisAddIn`:
-'     * Word interop access, tooling loop, presentation extraction, drag/drop picker, progress UI helpers
+' Architecture / Function:
+'   - Maintains its own bounded discussion history and renders Markdown conversation
+'     output while persisting only user-facing session/preferences needed for reopening.
+'   - Resolves personas/missions and optional file/directory knowledge, then composes that
+'     context with the active Word document before invoking the shared LLM bridge.
+'   - Autorespond and "Sort It Out" are orchestration modes over the same conversation
+'     engine; alternate/special-task model scopes are temporary and restored after calls.
+'   - Optional tools are executed through Globals.ThisAddIn.ExecuteToolingLoop rather than
+'     reimplemented here; tool permissions/log display remain explicit session choices.
+'   - Export back to Word delegates document creation/Markdown insertion to host helpers.
+'   - File extraction, model configuration and common dialogs come from SharedLibrary.
 ' =============================================================================
 
 Option Strict Off

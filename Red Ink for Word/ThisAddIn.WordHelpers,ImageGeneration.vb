@@ -2,7 +2,7 @@
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
 ' =============================================================================
-' File: ThisAddIn.WordHelpers.ImageGeneration.vb
+' File: ThisAddIn.WordHelpers,ImageGeneration.vb
 ' Purpose: Interactive image generation using a configured "ImageGeneration"
 '          special task model. Prompts the user for a description, optionally
 '          attaches a reference image via (file), calls the LLM, displays

@@ -1,11 +1,21 @@
-﻿' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+﻿' Part of "Red Ink for Outlook"
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
-' File: ThisAddIn.AutoPIlot.Tools.Office.Interop.vb
+' File: ThisAddIn.AutoPilot.Tools.Office.Interop.vb
 ' Purpose:
-'   Outlook-only AutoPilot / Local Agent Excel Interop tools for existing
-'   workbooks that must be inspected and completed live rather than through
-'   OpenXML/XML-only access.
+'   Explicit Microsoft Excel COM/Interop compatibility boundary for AutoPilot/Local Chat
+'   operations that must inspect or update an existing live workbook.
+'
+' Architecture / Function:
+'   - Implements live worksheet listing, range reads and bounded workbook completion where
+'     Excel's calculation/object model behavior is required and OOXML alone is insufficient.
+'   - Owns Excel.Application/workbook/worksheet COM lifetime, UI-thread switching, lift-lock
+'     detection and cleanup so those concerns do not leak into the OOXML Word path.
+'   - New Word document generation must not route through this file; structured and generic
+'     Word creation is handled by OpenXmlTemplate/OpenXmlVisuals without Office COM.
+'   - Callers pass validated paths/arguments and receive normalized results through the
+'     surrounding Office tool layer; this file is intentionally a narrow compatibility seam.
 ' =============================================================================
 
 Option Explicit On

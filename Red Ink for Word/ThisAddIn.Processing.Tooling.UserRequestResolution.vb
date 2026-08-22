@@ -3,16 +3,19 @@
 '
 ' =============================================================================
 ' File: ThisAddIn.Processing.Tooling.UserRequestResolution.vb
-' Purpose: User language detection and request text extraction for tooling sessions.
+' Purpose:
+'   Resolves language and bootstrap routing facts that must be established before the
+'   normal Word tooling loop begins.
 '
-' Responsibilities:
-'  - Detect user's preferred language via LLM classification.
-'  - Extract latest user turn from dialog/prompt structures.
-'  - Parse BCP-47 language tags and localization preferences.
-'  - Support fallback language handling.
-'
-' External Dependencies:
-'  - LLM() for language detection classification.
+' Architecture / Function:
+'   - Derives the authoritative latest user request and detects the requested response
+'     language through the configured LLM when necessary.
+'   - Performs the bootstrap preflight that can resolve memory-grounding mode and the
+'     initial capability route (specific skill, top-level agent, or normal tooling).
+'   - Normalizes and applies the bootstrap result to ToolExecutionContext so later turns
+'     do not repeat routing/language decisions or infer them from stale prompt history.
+'   - This file determines bootstrap intent/state; prompt assembly and actual tool
+'     execution remain in PromptBuilding/ToolExecution and shared sequencing classes.
 ' =============================================================================
 
 Option Explicit On

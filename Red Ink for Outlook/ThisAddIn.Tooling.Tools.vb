@@ -3,6 +3,20 @@
 
 ' =============================================================================
 ' File: ThisAddIn.Tooling.Tools.vb
+' Purpose:
+'   Outlook Local Chat tooling support layer for host-specific tool definitions,
+'   registration helpers and execution utilities that are not implemented in the shared
+'   AgentToolRouter.
+'
+' Architecture / Function:
+'   - Builds/augments the Outlook tool catalog and bridges Outlook-specific capabilities
+'     into the common tooling loop while shared tools remain registered centrally.
+'   - Provides web-content retrieval/link extraction, WebView2 integration, reflection
+'     helpers and host adapters used by individual Outlook tools.
+'   - Keeps model-facing tool schemas/instructions separate from the sequencing and
+'     finalization rules in SharedLibrary.Agents.
+'   - Binary downloads, M365, Python, Office and other substantial capabilities are
+'     delegated to their dedicated modules rather than being implemented monolithically here.
 ' =============================================================================
 
 Option Explicit On

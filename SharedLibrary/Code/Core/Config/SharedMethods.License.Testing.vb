@@ -1,6 +1,20 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
-' Purpose: Debug-only interactive test helpers for license system.
+'
+' =============================================================================
+' File: SharedMethods.License.Testing.vb
+' Purpose:
+'   DEBUG-only interactive harness for exercising license-system states and support
+'   operations during development; it is excluded from release behavior by #If DEBUG.
+'
+' Architecture / Function:
+'   - Adds test UI/actions to the SharedMethods partial class without changing the
+'     production license validation path.
+'   - Invokes the same license APIs/state used by production code so developers can
+'     inspect and simulate scenarios from one control panel.
+'   - Must remain side-effect-aware because tests can modify local development license
+'     state; no test entry point is compiled into non-DEBUG builds.
+' =============================================================================
 
 #If DEBUG Then
 

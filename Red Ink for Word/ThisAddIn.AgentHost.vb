@@ -3,7 +3,19 @@
 
 ' =============================================================================
 ' File: ThisAddIn.AgentHost.vb
-' Purpose: Agent host that manages sub-agent execution and tooling loops.
+' Purpose:
+'   Word-host implementation of SharedLibrary.Agents.ISubAgentHost for isolated agent
+'   work inside the main tooling architecture.
+'
+' Architecture / Function:
+'   - Validates explicit sub-agent task identity and expected-artifact contracts against
+'     the parent ToolCallSequencing/SubAgentTaskRegistry state.
+'   - Temporarily resolves and activates the requested special-task model, constructs a
+'     narrowed tool scope, and runs one isolated ExecuteToolingLoop with clean history.
+'   - Preserves parent workflow/logging context while preventing duplicate or unbounded
+'     sub-agent executions, then restores the original model configuration in all paths.
+'   - Returns normalized structured result envelopes to SubAgentRunner; it does not own
+'     agent discovery or general tool registration.
 ' =============================================================================
 
 Option Strict Off

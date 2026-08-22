@@ -4,83 +4,19 @@
 ' =============================================================================
 ' File: ThisAddIn.AutoPilot.Tools.vb
 ' Purpose:
-'   Central hub for AutoPilot internal tool registration and execution dispatch.
-'   Orchestrates all built-in tools across modular tool files (Tools.Office.vb,
-'   Tools.PDF.vb, Tools.Other.vb) into a unified tool-calling pipeline consumed
-'   by Outlook AutoPilot Chat-Agent runs.
+'   AutoPilot tool-surface aggregator for Outlook: assembles built-in tool definitions,
+'   normalizes results, tracks produced files and delegates execution to modular Office,
+'   PDF, data-collection and miscellaneous tool implementations.
 '
-' Architecture Overview:
-'   - Registration Hub:
-'       * `GetAutoPilotInternalTools()` centralizes tool registration into a single
-'         `List(Of ModelConfig)` that unifies all built-in tools across modules.
-'       * Each tool is registered with `ToolDefinition` (JSON schema) and
-'         `ToolInstructionsPrompt` (LLM-facing documentation).
-'       * Tools are marked with `Tool=True`, `ToolOnly=True` to enable tool-calling
-'         mode in the LLM integration layer.
-'   - Execution Dispatch:
-'       * `TryExecuteAutoPilotTool()` is the single entry point that routes all
-'         tool calls (from the LLM or user) to the appropriate executor.
-'       * A switch statement matches `toolCall.ToolName` to call-specific executor
-'         functions (e.g., `ExecuteCreateWordDocTool`, `ExecuteCommentPdfTool`,
-'         `ExecuteGenerateImageTool`).
-'       * Each executor is scoped to its module file (Tools.Office.vb,
-'         Tools.PDF.vb, Tools.Other.vb) as a `Private Async Function` and
-'         handles argument parsing, validation, and orchestration of that tool's
-'         specific operation.
-'       * Executors return structured `ToolResponse` payloads (success flag,
-'         response message, error details, callId).
-'   - Constant Definitions:
-'       * Tool name constants (e.g., `AP_Tool_ProcessWordDoc`, `AP_Tool_CreatePowerPoint`)
-'         are defined here for centralized reference and consistency.
-'   - Session State Management:
-'       * All tool executors access shared AutoPilot session state:
-'           - `_apCurrentAttachments`: attachment registry maintained across
-'             the mail processing lifecycle.
-'           - `_apCurrentTempDir`: per-mail temp directory for input/output files.
-'           - `_apCurrentMailInfo`: metadata about the current email.
-'       * Output files from one tool are registered in attachment.OutputFiles
-'         and become discoverable to subsequent tools via `FindAttachment`.
-'
-' Tool Categories:
-'
-'   Office (ThisAddIn.AutoPilot.Tools.Office.vb):
-'   - create_word_document, comment_word_document, create_excel_spreadsheet,
-'     create_powerpoint, word_to_pdf, pdf_to_word
-'
-'   PDF (ThisAddIn.AutoPilot.Tools.PDF.vb):
-'   - extract_pdf_text, merge_pdfs, split_pdf, add_pdf_watermark,
-'     comment_pdf_document, redact_pdf, overlay_pdf
-'
-'   Other (ThisAddIn.AutoPilot.Tools.Other.vb):
-'   - read_attachment, list_attachments, search_in_attachments,
-'     generate_image, create_audio_file, web_grounding, manage_scheduled_tasks,
-'     manage_user_memory, manage_user_files, complete_word_tables, report_inability
-'
-'   Utility:
-'   - js_run (from SharedLibrary.Agents.JsRunTool for deterministic computation)
-'   - process_word_document, extract_data_from_attachments, describe_binary_attachment,
-'     compare_word_documents, read_word_document_details, create_pdf_from_text
-'
-' Session Lifecycle:
-'   - Tool Registration: called during AutoPilot initialization to populate
-'     the model config with all available built-in tools.
-'   - Tool Execution: called for each tool invocation during the LLM run,
-'     always within the context of `_apCurrentAttachments`,
-'     `_apCurrentTempDir`, and `_apCurrentMailInfo`.
-'   - Output Chaining: output files are registered and become available for
-'     subsequent tool calls in the same session.
-'   - Cleanup: the session lifecycle handles cleanup of temp files after the
-'     mail processing is complete.
-'
-' Security & Safety:
-'   - Path containment: all file I/O is scoped to `_apCurrentTempDir`.
-'   - Attachment resolution: `FindAttachment` validates attachment availability
-'     and size limits before tools operate.
-'   - COM cleanup: Office interop objects are properly released via
-'     `Marshal.FinalReleaseComObject` to prevent resource leaks.
-'   - Error isolation: each tool reports errors independently without affecting
-'     other tools or the overall LLM run.
-'
+' Architecture / Function:
+'   - Registration combines host tools with the shared registry/lazy-loading model; tool
+'     names and schemas remain stable model-facing contracts.
+'   - Execution is delegated to the owning module and returns normalized ToolResponse
+'     payloads into the same sequencing/finality pipeline used by Local Chat.
+'   - Produced artifacts are registered with explicit artifact/deliverable semantics so
+'     later tool calls and final delivery do not rely on filename heuristics.
+'   - Uses per-run AutoPilot attachment/temp/session state but does not own the Office
+'     rendering algorithms implemented in Tools.Office* or the shared agent tools.
 ' =============================================================================
 
 

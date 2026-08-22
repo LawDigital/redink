@@ -2,7 +2,7 @@
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
-' File: SharedMethods.SandboxedReaders.vb
+' File: SharedMethods.SandboxedReaders.Docx.vb
 ' Purpose: Provides sandboxed, dependency-free text extraction for DOCX files
 '          by parsing the underlying OpenXML package. This approach avoids
 '          COM interop, enabling safe text extraction without requiring

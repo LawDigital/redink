@@ -28,14 +28,20 @@
 '
 ' =============================================================================
 ' Red Ink Source Code Overview
-' Updated: 2026-08-15
+' Updated: 2026-08-22
 '
 ' Purpose:
 '   Consolidated overview of the current hand-authored source files and helper
-'   assets across SharedLibrary and the Word, Excel, and Outlook VSTO add-ins.
+'   assets across SharedLibrary and the Word, Outlook, and Excel VSTO add-ins
+'   present in this source package.
 '
 ' Language: VB.NET (.NET Framework 4.8)
-' Targets: Microsoft Office VSTO Add-ins (Word, Excel, Outlook)
+' Targets: Microsoft Office VSTO Add-ins (Word, Outlook, Excel)
+' Scope:   Hand-authored compile sources and developer-facing helper assets.
+'          Generated *.Designer.vb and My Project files are intentionally omitted
+'          from this architectural overview.
+' Header audit policy: Purpose/architecture comments are maintained for material
+'          developer orientation; cosmetic comment uniformity is intentionally not required.
 ' =============================================================================
 '
 ' =============================================================================
@@ -47,11 +53,15 @@
 '   AgentGate.vb                     - Runtime gating, serialization, and reentrancy protection for agent execution.
 '   AgentResources.vb                - Discovers agent/skill resources such as `Inky.md`, `SKILL.md`, and `AGENT.md`.
 '   AgentResourcesViewerForm.vb      - Viewer UI for discovered agent and skill resources.
-'   AgentToolRouter.vb               - Centralized dispatch for the shared agent-layer tool surface.
+'   AgentToolRouter.vb               - Host-neutral execution router for authorized shared memory/file/workspace/skill/agent/Word/JS/browser/Python/context tools.
+'   ArtifactDelivery.vb              - Host-agnostic artifact registry, lifecycle tracking, validation, and final-delivery selection.
 '   AskUserTool.vb                   - Shared internal `ask_user` tool for one-step user clarification and input.
 '   BrowserToolRuntime.vb            - Shared Playwright runtime that owns the process-global browser/context/page and enforces snapshot/ref semantics.
 '   BrowserTools.vb                  - Shared `browser_open`, `browser_snapshot`, and `browser_interact` tool surface with host-independent dispatch.
-'   ContextCompactTool.vb            - Internal context-compaction tool that trims older tool results by workflow.'   ContextExpandTool.vb             - Shared `context_expand` tool definition for retrieving stored large tool results.
+'   ContextCompactTool.vb            - Internal context-compaction tool that trims older tool results by workflow.
+'   ContextExpandTool.vb             - Shared `context_expand` tool definition for retrieving stored large tool results.
+'   ExplicitOperationRegistry.vb     - Tracks explicit logical tool-operation identities and terminal states across a tooling run.
+'   ExplicitSubAgentTaskRegistry.vb  - Tracks explicit sub-agent task identities to prevent duplicate isolated executions.
 '   FileTools.vb                     - Binary-safe file and directory tools governed by `PathPolicy`.
 '   HostToolRegistration.vb          - Canonical host-tool naming, allowlist, and classification helpers.
 '   InkyPromptBuilder.vb             - Builds prompt addenda from `Inky.md` and active skill/agent resources.
@@ -86,7 +96,7 @@
 '   ToolDescribeTool.vb              - Internal inspection-only tool for describing tool schemas without exposing them.
 '   ToolExecutorRegistry.vb          - Registry of executable tool handlers and factories.
 '   ToolingConstants.vb              - Shared constants for agent and tooling infrastructure.
-'   ToolingFinalResponseContract.vb  - Final-response contract enums and validation helpers.
+'   ToolingFinalResponseContract.vb  - Selects user-facing TASK_STATUS vs raw-caller final-response semantics across hosts/sub-agents.
 '   ToolingOrchestrator.vb           - Host-agnostic final-turn accept/reject decision logic.
 '   ToolLoaderTool.vb                - Lazy manifest-only loader tool used to keep initial tool exposure small.
 '   ToolRegistry.vb                  - Lazy registry of tool manifests and factories.
@@ -96,9 +106,15 @@
 '   WebView2JsSandbox.vb             - Shared WebView2 sandbox host for JavaScript execution.
 '   WordDocTools.vb                  - Active-document `worddoc_*` tools implemented against `IWordDocumentHost`.
 '   WordTools.vb                     - File-level `.docx` `word_*` tools implemented via OpenXML.
-'   WorkflowContinuity.vb            - Workflow IDs, checkpoints, source continuity, and sub-agent isolation helpers.
+'   WorkflowContinuity.vb            - AsyncLocal cross-host workflow identity, runtime/source/output/memory state and diagnostic checkpoint envelopes.
 '   WorkspaceState.vb                - Workspace-scoped runtime state and permissions tracking.
 '   WorkspaceTools.vb                - Shared `workspace_*` tools for workspace inventory and file operations.
+'
+' [Agents - developer self-tests, not compiled by SharedLibrary.vbproj]
+'   SubAgentRunner.Tests.vb          - Developer self-tests for sub-agent envelope handling, retries, and memory grounding.
+'   SubAgentRuntimeHardening.SelfTests.vb - Developer self-tests for sub-agent output normalization and hardening behavior.
+'   ToolCallSequencingSelfTests.vb   - Developer self-tests for shared tool-call sequencing, retry, and workflow invariants.
+'   WorkflowContinuitySelfTests.vb   - DEBUG-only self-tests for workflow-continuity state, recovery, and completion invariants.
 '
 ' [CommonFeatures]
 '   AnonymizationModule.vb           - Top-level anonymization coordinator with reversible mappings and prompt helpers.
@@ -203,7 +219,7 @@
 '   JsonTemplateFormatter.vb         - Mustache-like template engine for structured JSON output.
 '   MimeHelper.vb                    - MIME detection and content-classification helpers.
 '   SharedMethods.GoogleOAuthHelper.vb - OAuth2 token and JWT-bearer helpers for Google APIs.
-'   SharedMethods.Http.vb            - Shared HTTP request, retry, timeout, and transport helpers.
+'   SharedMethods.Http.vb            - Shared HttpClient/WinHTTP transport abstraction, fallback selection, request bodies, compression/timeouts, and response decoding.
 '   SharedMethods.MainLLM.vb         - Primary LLM invocation pipeline and response handling.
 '   SharedMethods.MCP.vb             - MCP transport runtime helpers for handshake, SSE, and tool calls.
 '   SharedMethods.MCPOAuth.vb        - OAuth helpers for MCP-protected services.
@@ -270,7 +286,7 @@
 '   Form1.vb                         - Main Word chat UI (`frmAIChat`) with markdown rendering and tooling support.
 '   LogWindow.vb                     - Word-local logging/review window.
 '   ThisAddIn.vb                     - Word VSTO entry point, startup/shutdown sequencing, listeners, and COM exposure.
-'   ThisAddIn.AgentHost.vb           - Word implementation of `ISubAgentHost`.
+'   ThisAddIn.AgentHost.vb           - Word ISubAgentHost implementation with explicit task/artifact contracts, narrowed tools, special-model scope and isolated tooling loop.
 '   ThisAddIn.AssembleDocuments.vb   - Multi-document assembly and composition helpers.
 '   ThisAddIn.Commands.vb            - Ribbon and context-menu command handlers for Word workflows.
 '   ThisAddIn.Commands.Freestyle.vb  - Freeform prompt execution and content-generation flows.
@@ -304,10 +320,10 @@
 '   ThisAddIn.Processing.Tooling.Selection.vb - Selection/document context capture for tooling requests.
 '   ThisAddIn.Processing.Tooling.Sources.vb - Source formatting, provenance packaging, and grounding helpers.
 '   ThisAddIn.Processing.Tooling.ToolExecution.vb - Internal and external tool dispatch orchestration.
-'   ThisAddIn.Processing.Tooling.ToolExecutionContext.vb - Per-session tooling state, sequencing, and guards.
+'   ThisAddIn.Processing.Tooling.ToolExecutionContext.vb - Per-run registries, lazy/capability routing, responses, sequencing, fidelity, workflow and finalization state.
 '   ThisAddIn.Processing.Tooling.ToolResponse.vb - Tool-response shaping, post-processing, and continuation helpers.
 '   ThisAddIn.Processing.Tooling.Tools.vb - Word-specific tool catalog construction and registration helpers.
-'   ThisAddIn.Processing.Tooling.UserRequestResolution.vb - User-intent resolution and request classification.
+'   ThisAddIn.Processing.Tooling.UserRequestResolution.vb - Word bootstrap preflight for authoritative request, language, memory grounding and initial capability route.
 '   ThisAddIn.Processing.Tooling.vb   - Top-level orchestration for the Word tooling loop.
 '   ThisAddIn.Processing.vb           - Main selection-processing pipeline and batch file processing.
 '   ThisAddIn.Properties.vb           - SharedContext bridge and Word-side configuration properties.
@@ -370,7 +386,7 @@
 '   ThisAddIn.AutoPilot.AudioBook.vb - AutoPilot tool for generating audiobook/podcast audio from mail or attachments.
 '   ThisAddIn.AutoPilot.Cleanup.vb   - Cleanup and retention helpers for AutoPilot-processed mail threads.
 '   ThisAddIn.AutoPilot.CommentProcessor.vb - Adds Word comment bubbles to DOCX via OpenXML.
-'   ThisAddIn.AutoPilot.CompleteTables.vb - AutoPilot helpers for table-completion and structured attachment output.
+'   ThisAddIn.Autopilot.CompleteTables.vb - AutoPilot helpers for table-completion and structured attachment output.
 '   ThisAddIn.AutoPilot.Config.vb    - AutoPilot configuration data class and startup dialog logic.
 '   ThisAddIn.AutoPilot.DocProcessor.vb - OpenXML attachment processor for DOCX, PPTX, and XLSX files.
 '   ThisAddIn.AutoPilot.PDFCommentProcessor.vb - Adds PDF highlight/comment annotations using PdfPig/PDFsharp.
@@ -378,10 +394,12 @@
 '   ThisAddIn.AutoPilot.RegistryBackup.vb - Backup and restore helpers for AutoPilot persisted state.
 '   ThisAddIn.AutoPilot.Scheduler.vb - Scheduled-task store, recurrence logic, and due-task execution.
 '   ThisAddIn.AutoPilot.SenderToolPolicy.vb - Sender-based tool-policy rules for AutoPilot execution.
+'   ThisAddIn.AutoPilot.ThreadRetention.vb - Sender/conversation-scoped retention of inbound attachments for AutoPilot follow-up continuity.
 '   ThisAddIn.AutoPilot.Tools.DataCollector.vb - Structured data-collection helpers for AutoPilot tool runs.
-'   ThisAddIn.AutoPIlot.Tools.Office.Interop.vb - Interop-based Office host helpers for AutoPilot tools.
-'   ThisAddIn.AutoPIlot.Tools.Office.vb - OpenXML and Office-document AutoPilot tool helpers.
-'   ThisAddIn.AutoPilot.Tools.Office.OpenXmlTemplate.vb - OOXML-only slot-bound Word template renderer.
+'   ThisAddIn.AutoPilot.Tools.Office.Interop.vb - Explicit Excel COM compatibility boundary for live workbook inspection and updates.
+'   ThisAddIn.AutoPIlot.Tools.Office.vb - Office creation/conversion and design routing; Word structured/generic creation is OOXML-first with bounded legacy compatibility paths.
+'   ThisAddIn.AutoPilot.Tools.Office.OpenXmlTemplate.vb - OOXML-only structured/generic Word renderer: slots, Markdown blocks, native styles/numbering, list/table layout and output validation.
+'   ThisAddIn.AutoPilot.Tools.Office.OpenXmlVisuals.vb - Post-body OOXML visual pass for native charts, DrawingML diagrams/images and validated visual anchors without Office COM.
 '   ThisAddIn.AutoPIlot.Tools.Other.vb - Miscellaneous file, system, and media AutoPilot tool helpers.
 '   ThisAddIn.AutoPIlot.Tools.PDF.vb - PDF-specific AutoPilot tool helpers.
 '   ThisAddIn.AutoPIlot.Tools.vb     - Top-level AutoPilot tool surface and dispatch entry points.
@@ -404,12 +422,13 @@
 '   ThisAddIn.Tooling.M365.vb        - Outlook host adapter for shared Microsoft 365 tools.
 '   ThisAddIn.Tooling.Memory.vb      - Memory-grounding mode resolution and classification.
 '   ThisAddIn.Tooling.Parameterhandling.vb - Tool argument normalization and coercion helpers.
+'   ThisAddIn.Tooling.PythonExecute.vb - Outlook host adapter for shared `python_execute`, including staging, host-service bridging, and output publication.
 '   ThisAddIn.Tooling.PromptBuilding.vb - Prompt assembly and request-shaping helpers.
 '   ThisAddIn.Tooling.Sources.vb     - Source naming, discovery, fuzzy matching, and trigger-building helpers.
 '   ThisAddIn.Tooling.ToolExecution.vb - Internal and external tool dispatch orchestration.
-'   ThisAddIn.Tooling.ToolExecutionContext.vb - Per-run tooling state, sequencing, retries, and workflow metadata.
+'   ThisAddIn.Tooling.ToolExecutionContext.vb - Outlook per-run registries, lazy/capability routing, responses, failure/retry guards, sequencing, workflow and finalization state.
 '   ThisAddIn.Tooling.ToolResponse.vb - Tool-response shaping, post-processing, and continuation helpers.
-'   ThisAddIn.Tooling.Tools.vb       - Outlook-specific tool catalog construction and registration helpers.
+'   ThisAddIn.Tooling.Tools.vb       - Outlook Local Chat host-tool catalog/adapters plus web retrieval, WebView2 and reflection support utilities.
 '   ThisAddIn.Tooling.UserRequestResolution.vb - User-intent resolution and tooling-mode classification.
 '   ThisAddIn.Tooling.vb             - Top-level orchestration for the Outlook tooling loop.
 '   ThisAddIn.VarHelpers.vb          - Variable and interaction helpers for compose-editor comparison and diff flows.
@@ -425,10 +444,11 @@
 ' =============================================================================
 '
 ' - Knowledge Store components are shared primarily by Word and Outlook.
-' - The agent/tooling layer is shared and then adapted separately by Word and Outlook hosts.
+' - The agent/tooling layer is shared and then adapted by the hosts that expose tooling workflows; Word and Outlook carry the broadest host adapters, while Excel remains focused on worksheet/file workflows.
 ' - Excel remains the lightest host and focuses mainly on worksheet and file-processing workflows.
+' - The checked source package contains all three VSTO host projects: Red Ink for Word, Red Ink for Outlook, and Red Ink for Excel.
 ' - Outlook currently has the broadest automation surface because it combines mail processing, AutoPilot, web UI, M365, and Knowledge Store wiring.
 ' - Several filenames intentionally retain legacy casing or punctuation, including
 '   `ThisAddIn.AutoPIlot.*`, `ThisAddIn.WordHelpers,ImageGeneration.vb`, and
-'   some headers whose internal `' File:` banner differs slightly from the actual filename.
+'   historical source files whose casing is tolerated by the Windows/VB build.
 '

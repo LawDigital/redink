@@ -1,6 +1,18 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
+' =============================================================================
+' File: Ribbon1.vb
+' Purpose:
+'   Outlook Ribbon callback surface for mail-processing, search, settings,
+'   AutoPilot, and other user-invoked Red Ink workflows.
+'
+' Architecture:
+'   Thin VSTO UI adapter over ThisAddIn services. Ribbon1.Designer.vb owns the
+'   generated controls; this file owns callbacks, dynamic visibility, theme-aware
+'   icons, and routing from Ribbon actions into host workflows.
+' =============================================================================
+
 Imports System.Diagnostics
 Imports Microsoft.Office.Tools.Ribbon
 Imports Microsoft.Win32

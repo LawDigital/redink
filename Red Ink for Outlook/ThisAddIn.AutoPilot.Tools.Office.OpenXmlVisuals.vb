@@ -4,18 +4,18 @@
 ' =============================================================================
 ' File: ThisAddIn.AutoPilot.Tools.Office.OpenXmlVisuals.vb
 ' Purpose:
-'   Deterministic native Word visual renderer for create_word_document.
+'   Deterministic native OOXML visual renderer for create_word_document output.
 '
-'   Visuals are written directly into the DOCX Open Packaging Convention package
-'   after Word has created and formatted the text document. No Word/Excel COM
-'   automation is used for chart or diagram creation in this file.
-'
-'   - Quantitative graphics are native Office chart parts with an embedded XLSX
-'     workbook and cached chart values.
-'   - Diagrams are native editable DrawingML WordprocessingCanvas shapes.
-'   - Both inline and floating/anchored placement are supported at OOXML level.
-'   - Every visual carries a stable "RedInk Visual <id>" docPr marker so saved
-'     package validation can verify the exact requested objects.
+' Architecture / Function:
+'   - Runs after the base DOCX body has been produced (by the OOXML template/generic
+'     renderer or another supported path) and replaces [[visual:ID]] anchors in-package.
+'   - Quantitative charts are native Office chart parts with embedded workbook/cache data;
+'     diagrams use editable DrawingML shapes; supported images are embedded as package parts.
+'   - Supports inline/floating placement without starting Word or Excel and preserves the
+'     surrounding template/body styles; visuals intentionally do not inherit table/paragraph
+'     auto-indent rules unless their own placement contract requests it.
+'   - Assigns stable RedInk visual identifiers and validates requested visual objects in
+'     the saved package so missing/partial rendering is not silently accepted.
 ' =============================================================================
 
 Option Explicit On

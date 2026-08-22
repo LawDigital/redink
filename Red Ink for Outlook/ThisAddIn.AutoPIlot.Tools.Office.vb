@@ -4,58 +4,22 @@
 ' =============================================================================
 ' File: ThisAddIn.AutoPilot.Tools.Office.vb
 ' Purpose:
-'   Defines and executes AutoPilot internal tools for Office document operations
-'   within Outlook AutoPilot Chat-Agent runs, including Word, Excel, and
-'   PowerPoint document creation and conversion workflows.
+'   Main AutoPilot Office-tool implementation layer for creating and converting Word,
+'   Excel and PowerPoint artifacts and for resolving configured Office design resources.
 '
-' Tools Provided:
-'   - create_word_document: Creates Word documents (.docx) with text, tables,
-'     images, and advanced formatting
-'   - comment_word_document: Adds review comment bubbles to Word attachments
-'   - create_excel_spreadsheet: Creates Excel workbooks (.xlsx/.xlsm) with
-'     sheets, cells, charts, data validation, formulas, and optional VBA
-'   - create_powerpoint: Creates PowerPoint presentations (.pptx) with slides,
-'     text, images, and template support
-'   - word_to_pdf: Converts Word documents to PDF format
-'   - pdf_to_word: Converts PDF documents to editable Word format
-'
-' Tool Interface Architecture:
-'   - Registration:
-'       * Tools are exposed as `ModelConfig` entries (`Tool=True`, `ToolOnly=True`)
-'         so they participate in the same tool-calling pipeline as external tools.
-'       * Tool metadata (`ToolDefinition`, `ToolInstructionsPrompt`) is generated
-'         inline and consumed by `ExecuteToolCall` / `ExecuteToolingLoop`.
-'   - Dispatch:
-'       * `TryExecuteAutoPilotTool` routes parsed tool calls to strongly scoped
-'         executor methods (`ExecuteCreateWordDocTool`, `ExecuteCreateExcelTool`,
-'         etc.) and returns `ToolResponse` payloads.
-'   - Session scope:
-'       * All tools use AutoPilot session state from `ThisAddIn.Autopilot.vb`:
-'           - `_apCurrentAttachments`: attachment registry for input/output lookups
-'           - `_apCurrentTempDir`: per-mail temp directory for file creation
-'           - `_apCurrentMailInfo`: metadata about the current email session
-'       * Supports tool chaining via output registration (`OutputFiles`) and
-'         attachment lookup via `FindAttachment` (original + prior tool outputs).
-'   - UI interaction:
-'       * Switches to UI thread via `SwitchToUi` for COM-based Office operations.
-'       * Late binding avoids hard PIA references where feasible (PowerPoint).
-'   - Error handling:
-'       * Returns structured `ToolResponse` with success flag, message, and
-'         error details. File operations include collision prevention and
-'         cleanup of temporary resources.
-'   - Logging and UX:
-'       * Emits execution traces to tooling context (`context.Log`) and
-'         AutoPilot dashboard (`ApDashboardLog`) with concise status summaries.
-'
-' Security & Safety:
-'   - Path containment:
-'       * All tool outputs are created in `_apCurrentTempDir` and re-used only
-'         via resolved attachment/output references.
-'   - File validation:
-'       * Size checks prevent oversized attachments from processing.
-'       * Extension validation ensures correct file type handling.
-'       * Filename collision prevention via counter-based renaming.
-'
+' Architecture / Function:
+'   - Resolves active design-set catalogs, design metadata, carriers, guidance and style
+'     policies before document generation; explicit document type has routing priority,
+'     then language, then configured defaults.
+'   - Word creation is OOXML-first: slot-bound DOCX designs and generic no-template Word
+'     documents are generated without starting Word. Legacy non-slot carriers remain a
+'     bounded compatibility path; live Excel workbook tools are isolated in Office.Interop.
+'   - Structured Word generation delegates package mutation to OpenXmlTemplate and visual
+'     insertion to OpenXmlVisuals, preserving native styles/numbering and validating output.
+'   - PowerPoint/Excel creation and conversion keep their existing dedicated paths while
+'     artifact registration, path containment, retry fidelity and logging stay common.
+'   - Generic presentation parameters must not silently override a structured design's
+'     native document structure.
 ' =============================================================================
 
 

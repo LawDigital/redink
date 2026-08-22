@@ -1,6 +1,18 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
+' =============================================================================
+' File: Ribbon1.vb
+' Purpose:
+'   Word Ribbon callback surface: routes user commands to ThisAddIn workflows,
+'   manages model/menu state, and applies feature/configuration visibility.
+'
+' Architecture:
+'   Thin VSTO UI adapter over the Word add-in services. Control layout is generated
+'   in Ribbon1.Designer.vb; this file owns callbacks, dynamic menus, theme-aware
+'   icons, and visibility/availability policy.
+' =============================================================================
+
 Imports System.Diagnostics
 Imports Microsoft.Office.Tools.Ribbon
 Imports Microsoft.Win32

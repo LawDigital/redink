@@ -3,40 +3,19 @@
 '
 ' =============================================================================
 ' File: ThisAddIn.Tooling.ToolExecutionContext.vb
-' Purpose: Encapsulates per-run tooling state, execution tracking, logging, and workflow metadata.
-'          Serves as central context object passed through entire tooling loop lifecycle.
+' Purpose:
+'   Mutable per-run state object for Outlook Local Chat/AutoPilot tooling loops, carrying
+'   tool availability, execution history, sequencing, retry and diagnostic state.
 '
-' Data Structure:
-'  - Tool & Registry State:
-'      - SelectedTools: ModelConfig instances for this session.
-'      - AllowedToolRegistry/AuthoritativeToolRegistry: Tool availability constraints.
-'      - AuthoritativeToolRegistrySnapshot: Parent registry snapshot for sub-agents.
-'      - LazyToolLoadingEnabled: Lightweight index initially exposed to model.
-'  - Execution Tracking:
-'      - AllToolResponses: All ToolResponse objects (success and failure) for session.
-'      - CurrentIteration/MaxIterations: Loop counters and abort thresholds.
-'      - IsCancelled: UI-driven cancellation flag.
-'  - Failure Management:
-'      - FailedToolCallCounts: Per-tool failure counter (OrdinalIgnoreCase).
-'      - DuplicateFailureAbortThreshold: Abort when same tool fails N times.
-'      - ConsecutiveFailedToolName/Count/AbortThreshold: Abort on N consecutive failures.
-'      - LastToolExecutionSignature/RepeatCount/DuplicateToolExecutionAbortThreshold: Detect duplicate-tool loops.
-'  - Logging & UI:
-'      - LogEntries: In-memory timestamped log lines.
-'      - LogWindowForm: Optional UI window for user-visible progress.
-'      - ExternalLogSink: Optional callback for external log forwarding.
-'      - Log(message, level): Central log method routing to file, UI, and external sinks.
-'  - Workflow & Sequencing:
-'      - WorkflowId/RuntimeState: Workflow metadata for continuity logging.
-'      - LatestUserRequestRaw/HostTaskSummary: User request and task context.
-'      - SequencingState: Tool call sequencing decisions (memory grounding, tool priority).
-'      - RunId: Unique run identifier (GUID without hyphens).
-'  - Sub-Agent Tracking:
-'      - SubAgentInvocationCount: Total sub-agent invocation counter.
-'      - SubAgentInvocationCountsByAgent: Per-agent invocation counter dict.
-'  - State Finalization:
-'      - FinalizationBlocked: Prevents early completion.
-'      - FinalizationBlockedReason: Human-readable explanation for block.
+' Architecture / Function:
+'   - Holds selected/authoritative registries, lazy tool loading and top-level capability
+'     routing state together with iteration, cancellation and ToolResponse history.
+'   - Tracks duplicate/consecutive failures, finalization blocks, workflow continuity,
+'     memory grounding, explicit operations/sub-agent tasks and deliverable requirements.
+'   - Persists fidelity-critical choices such as required PowerPoint design/template data
+'     across retries so recovery cannot silently change an explicitly selected design.
+'   - Centralizes structured logging/UI sinks and run metadata; execution remains in the
+'     ToolExecution/AutoPilot tool modules and shared AgentToolRouter.
 ' =============================================================================
 
 Option Explicit On

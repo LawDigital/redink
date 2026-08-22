@@ -3,19 +3,20 @@
 '
 ' =============================================================================
 ' File: AgentToolRouter.vb
-' Purpose: Centralized dispatch for the agent-layer tools so call-site wiring in
-'          the existing tooling loops is a single line: TryHandleAsync(...).
-'          Returns tool response string when handled, Nothing if not recognized.
+' Purpose:
+'   Host-neutral dispatch boundary for shared agent/tooling capabilities. It accepts
+'   an already-authorized tool name plus normalized arguments and delegates execution
+'   to the owning shared tool implementation, returning Nothing only when the tool is
+'   outside this shared layer.
 '
-' Tools Routed:
-'  - memory_put / memory_get / memory_list / memory_delete (SessionMemory)
-'  - skill_use (SkillInvokeTool)
-'  - agent_<name> (SubAgentRunner for sub-agent delegation)
-'  - text_* tools (TextTools for plain file operations)
-'  - file_* tools (FileTools for binary-safe file/directory operations)
-'  - workspace_* tools (WorkspaceTools for workspace-scoped operations)
-'  - word_* / worddoc_* tools (Word document operations)
-'  - js_run (WebView2 JavaScript sandbox)
+' Architecture / Function:
+'   - Routes memory, text/file/workspace, skill/sub-agent, Word-document, JavaScript,
+'     browser, context, Python and related shared tools without duplicating host logic.
+'   - Relies on PathPolicy, host interfaces (ISubAgentHost/IWordDocumentHost) and the
+'     individual tool classes for capability checks, containment and execution rules.
+'   - Is an execution router, not a discovery/authorization source: ToolRegistry,
+'     ToolRegistryBuilder and HostToolRegistration determine what may be exposed.
+'   - Keeps Word/Outlook/Excel tooling loops symmetrical by centralizing common dispatch.
 ' =============================================================================
 
 Option Strict On

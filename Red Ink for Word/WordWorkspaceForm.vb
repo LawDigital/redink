@@ -2,8 +2,17 @@
 
 ' =============================================================================
 ' File: WordWorkspaceForm.vb
-' PURPOSE
-'   Manage the Word agent workspace folder and permissions. The agent writes files there.
+' Purpose:
+'   Modal Word UI for selecting the connected agent workspace and configuring the
+'   workspace permissions exposed to shared workspace/file tools.
+'
+' Architecture / Function:
+'   - Reads/writes WorkspaceState for host key "word" rather than performing file-tool
+'     operations itself.
+'   - Lets the user persist a root and independently grant read, write, move/copy/rename,
+'     delete, hidden-file and active-document-write capabilities.
+'   - Uses PathPolicy/WorkspaceState as the enforcement source; the dialog is only the
+'     configuration surface and never grants access outside the resolved workspace root.
 ' =============================================================================
 
 Option Strict On
