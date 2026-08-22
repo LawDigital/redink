@@ -8401,6 +8401,80 @@ Partial Public Class ThisAddIn
         Return New Newtonsoft.Json.Linq.JArray()
     End Function
 
+    Private Shared Function GetAutoPilotWordFootnotes(args As Dictionary(Of String, Object)) As Newtonsoft.Json.Linq.JArray
+        If args Is Nothing OrElse Not args.ContainsKey("footnotes") OrElse args("footnotes") Is Nothing Then
+            Return New Newtonsoft.Json.Linq.JArray()
+        End If
+
+        Try
+            Dim token As Newtonsoft.Json.Linq.JToken = TryCast(args("footnotes"), Newtonsoft.Json.Linq.JToken)
+            If token Is Nothing Then
+                token = Newtonsoft.Json.Linq.JToken.FromObject(args("footnotes"))
+            End If
+            If token IsNot Nothing AndAlso token.Type = Newtonsoft.Json.Linq.JTokenType.Array Then
+                Return DirectCast(token, Newtonsoft.Json.Linq.JArray)
+            End If
+        Catch
+        End Try
+
+        Return New Newtonsoft.Json.Linq.JArray()
+    End Function
+
+    Private Shared Function ValidateAutoPilotWordFootnoteContract(
+            markdownContent As System.String,
+            footnotes As Newtonsoft.Json.Linq.JArray,
+            ByRef validationError As System.String) As System.Boolean
+
+        validationError = System.String.Empty
+        If footnotes Is Nothing Then footnotes = New Newtonsoft.Json.Linq.JArray()
+
+        Dim ids As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
+        For Each token As Newtonsoft.Json.Linq.JToken In footnotes
+            If token Is Nothing OrElse token.Type <> Newtonsoft.Json.Linq.JTokenType.Object Then
+                validationError = "Every create_word_document footnotes entry must be an object."
+                Return False
+            End If
+
+            Dim footnote As Newtonsoft.Json.Linq.JObject = DirectCast(token, Newtonsoft.Json.Linq.JObject)
+            Dim id As System.String = If(CStr(footnote("id")), System.String.Empty).Trim()
+            Dim text As System.String = If(CStr(footnote("text")), System.String.Empty)
+            If System.String.IsNullOrWhiteSpace(id) OrElse
+               Not System.Text.RegularExpressions.Regex.IsMatch(id, "^[A-Za-z0-9_.-]{1,64}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant) Then
+                validationError = "Every create_word_document footnote requires a valid id."
+                Return False
+            End If
+            If System.String.IsNullOrWhiteSpace(text) Then
+                validationError = "Footnote '" & id & "' requires non-empty text."
+                Return False
+            End If
+            If Not ids.Add(id) Then
+                validationError = "Duplicate create_word_document footnote id '" & id & "' is not allowed."
+                Return False
+            End If
+
+            Dim placeholder As System.String = "[[footnote:" & id & "]]"
+            Dim placeholderCount As System.Int32 = CountOrdinalOccurrences(If(markdownContent, System.String.Empty), placeholder)
+            If placeholderCount <> 1 Then
+                validationError = "Footnote '" & id & "' requires exactly one " & placeholder & " marker in markdown_content; found " & placeholderCount.ToString(System.Globalization.CultureInfo.InvariantCulture) & "."
+                Return False
+            End If
+        Next
+
+        Dim placeholderMatches As System.Text.RegularExpressions.MatchCollection = System.Text.RegularExpressions.Regex.Matches(
+            If(markdownContent, System.String.Empty),
+            "\[\[footnote:([A-Za-z0-9_.-]{1,64})\]\]",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+        For Each placeholderMatch As System.Text.RegularExpressions.Match In placeholderMatches
+            Dim placeholderId As System.String = placeholderMatch.Groups(1).Value
+            If Not ids.Contains(placeholderId) Then
+                validationError = "markdown_content contains [[footnote:" & placeholderId & "]] but no matching footnotes entry."
+                Return False
+            End If
+        Next
+
+        Return True
+    End Function
+
     Private Shared Function ContainsLikelyWordPseudoGraphic(markdownContent As String) As Boolean
         If String.IsNullOrWhiteSpace(markdownContent) Then Return False
 
@@ -11374,6 +11448,15 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
+            Dim footnotes As Newtonsoft.Json.Linq.JArray = GetAutoPilotWordFootnotes(toolCall.Arguments)
+            Dim footnoteContractError As System.String = System.String.Empty
+            If Not ValidateAutoPilotWordFootnoteContract(markdownContent, footnotes, footnoteContractError) Then
+                response.Success = False
+                response.ErrorMessage = footnoteContractError
+                response.Response = response.ErrorMessage
+                Return response
+            End If
+
             Dim visuals As Newtonsoft.Json.Linq.JArray = GetAutoPilotWordVisuals(toolCall.Arguments)
             Dim visualContractError As System.String = System.String.Empty
             If Not ValidateAutoPilotWordVisualContract(markdownContent, visuals, context, visualContractError) Then
@@ -11611,6 +11694,15 @@ Partial Public Class ThisAddIn
                                            End Function)
             End If
 
+            Dim insertedFootnoteCount As System.Int32 = 0
+            If success AndAlso File.Exists(outputPath) AndAlso footnotes.Count > 0 Then
+                Dim footnoteInsertionError As System.String = System.String.Empty
+                If Not InsertAutoPilotWordFootnotesOpenXml(outputPath, footnotes, insertedFootnoteCount, footnoteInsertionError) Then
+                    success = False
+                    creationError = footnoteInsertionError
+                End If
+            End If
+
             If success AndAlso File.Exists(outputPath) AndAlso visuals.Count > 0 Then
                 If Not InsertAutoPilotWordVisualsOpenXml(outputPath, visuals, fontName:=GetArgString(toolCall.Arguments, "base_font_name"), accentHexRaw:=GetArgString(toolCall.Arguments, "accent_color"), embeddedCount:=embeddedVisualCount, warnings:=visualWarnings) Then
                     success = False
@@ -11629,6 +11721,11 @@ Partial Public Class ThisAddIn
 
                 response.Success = True
                 Dim designSummary As String = BuildDesignExecutionNote(design)
+                Dim footnoteSummary As System.String = System.String.Empty
+                If footnotes.Count > 0 Then
+                    footnoteSummary = " Inserted " & insertedFootnoteCount.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                      "/" & footnotes.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) & " native Word footnote(s)."
+                End If
                 Dim visualSummary As String = String.Empty
                 If visuals.Count > 0 Then
                     visualSummary = $" Embedded {embeddedVisualCount}/{visuals.Count} requested visual(s)."
@@ -11636,7 +11733,7 @@ Partial Public Class ThisAddIn
                         visualSummary &= " Visual warnings: " & String.Join(" | ", visualWarnings)
                     End If
                 End If
-                response.Response = $"Word document created: {fileName} ({New FileInfo(outputPath).Length / 1024:F0} KB). The file will be attached to the reply.{designSummary}{templateBindingSummary}{visualSummary}"
+                response.Response = $"Word document created: {fileName} ({New FileInfo(outputPath).Length / 1024:F0} KB). The file will be attached to the reply.{designSummary}{templateBindingSummary}{footnoteSummary}{visualSummary}"
                 ApDashboardLog($"✓ Word document created: {fileName}", "info")
             Else
                 response.Success = False

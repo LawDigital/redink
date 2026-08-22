@@ -19,8 +19,8 @@
 '  - Unzips package parts, extracts processable text units, batches content for LLM,
 '    parses structured responses, writes updates back to XML parts, then repacks.
 '  - DOCX paragraph/run model:
-'      * Preserves run boundaries via `|` marker where applicable.
-'      * Preserves footnote/endnote/field boundary anchors via `‖` marker.
+'      * Preserves real formatting-group boundaries via `|` markers where applicable.
+'      * Preserves footnote/endnote/field/manual-break boundary anchors via `‖` marker.
 '      * Reapplies text proportionally when exact marker alignment is unavailable.
 '  - Sub-part coverage:
 '      * DOCX: `document.xml`, headers, footers, comments, footnotes, endnotes.
@@ -87,7 +87,7 @@ Partial Public Class ThisAddIn
     Private Const AP_RunBoundaryMarker As String = "|"
 
     ''' <summary>
-    ''' Marker inserted at footnote/endnote reference boundaries in text sent to the LLM.
+    ''' Marker inserted at protected structural boundaries in text sent to the LLM.
     ''' U+2016 DOUBLE VERTICAL LINE — virtually never appears in legal documents.
     ''' </summary>
     Private Const AP_NoteRefMarker As String = "‖"
@@ -123,6 +123,7 @@ Partial Public Class ThisAddIn
         Public Property TextNode As System.Xml.XmlNode
         Public Property OriginalText As String
         Public Property HasNoteReferenceBefore As Boolean
+        Public Property FormattingKey As String
     End Class
 
     ''' <summary>
@@ -133,13 +134,87 @@ Partial Public Class ThisAddIn
         Public Property TextRuns As List(Of APTextRunInfo)
         Public Property FullText As String
 
-        ''' Builds text with | markers between formatting runs for boundary-preserving reapplication.
+        ''' Builds text with | markers only between real formatting groups.
         Public Property MarkerText As String
 
         Public Property TranslatedText As String
         Public Property IsEmpty As Boolean
     End Class
 
+
+    ''' <summary>
+    ''' Returns a stable run-formatting key for DOCX/PPTX text. Adjacent runs with the same
+    ''' key can be treated as one formatting group without exposing Office run fragmentation.
+    ''' </summary>
+    Private Shared Function APGetRunFormattingKey(textNode As System.Xml.XmlNode) As String
+        If textNode Is Nothing Then Return ""
+
+        Dim runNode As System.Xml.XmlNode = textNode.ParentNode
+        While runNode IsNot Nothing AndAlso runNode.LocalName <> "r"
+            runNode = runNode.ParentNode
+        End While
+        If runNode Is Nothing Then Return ""
+
+        Dim sb As New System.Text.StringBuilder()
+        For Each child As System.Xml.XmlNode In runNode.ChildNodes
+            If child.NodeType = System.Xml.XmlNodeType.Element AndAlso child.LocalName = "rPr" Then
+                sb.Append(child.OuterXml)
+                Exit For
+            End If
+        Next
+
+        Dim ancestor As System.Xml.XmlNode = runNode.ParentNode
+        While ancestor IsNot Nothing AndAlso ancestor.LocalName <> "p"
+            If ancestor.NodeType = System.Xml.XmlNodeType.Element Then
+                sb.Append("|scope:")
+                sb.Append(ancestor.LocalName)
+                sb.Append(":")
+                sb.Append(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(ancestor).ToString())
+            End If
+            ancestor = ancestor.ParentNode
+        End While
+
+        Return sb.ToString()
+    End Function
+
+    Private Shared Function APBuildFormattingGroups(
+        textRuns As List(Of APTextRunInfo),
+        Optional runIndices As List(Of Integer) = Nothing) As List(Of List(Of Integer))
+
+        Dim groups As New List(Of List(Of Integer))()
+        If textRuns Is Nothing OrElse textRuns.Count = 0 Then Return groups
+
+        Dim indices As New List(Of Integer)()
+        If runIndices Is Nothing Then
+            For i As Integer = 0 To textRuns.Count - 1
+                indices.Add(i)
+            Next
+        Else
+            indices.AddRange(runIndices)
+        End If
+
+        Dim currentGroup As List(Of Integer) = Nothing
+        Dim previousKey As String = Nothing
+        Dim havePrevious As Boolean = False
+
+        For Each runIdx As Integer In indices
+            If runIdx < 0 OrElse runIdx >= textRuns.Count Then Continue For
+            Dim run As APTextRunInfo = textRuns(runIdx)
+            If run Is Nothing OrElse String.IsNullOrEmpty(run.OriginalText) Then Continue For
+
+            Dim currentKey As String = If(run.FormattingKey, "")
+            If Not havePrevious OrElse Not String.Equals(previousKey, currentKey, StringComparison.Ordinal) Then
+                currentGroup = New List(Of Integer)()
+                groups.Add(currentGroup)
+            End If
+
+            currentGroup.Add(runIdx)
+            previousKey = currentKey
+            havePrevious = True
+        Next
+
+        Return groups
+    End Function
 
 
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -288,7 +363,7 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Extracts paragraphs and their text runs from the given document.
-    ''' Detects footnote/endnote references AND complex field boundaries (cross-references,
+    ''' Detects footnote/endnote references, manual line breaks, AND complex field boundaries (cross-references,
     ''' merge fields, etc.) so that text redistribution never shifts content across them.
     ''' </summary>
     Private Function APExtractParagraphs(xmlDoc As System.Xml.XmlDocument,
@@ -384,6 +459,31 @@ Partial Public Class ThisAddIn
                 Next
             End If
 
+            ' Protect manual Word line breaks (w:br / w:cr) as structural boundaries.
+            ' The Outlook tool preserves formatting by default; these anchors also prevent
+            ' otherwise-valid text redistribution from moving words across a manual break.
+            Dim manualBreakBeforeTextNodes As New HashSet(Of System.Xml.XmlNode)()
+            Dim orderedTextAndBreakNodes As System.Xml.XmlNodeList =
+                paraNode.SelectNodes(".//w:t | .//w:br | .//w:cr", nsMgr)
+            Dim havePreviousProcessableText As Boolean = False
+            Dim manualBreakPending As Boolean = False
+
+            For Each orderedNode As System.Xml.XmlNode In orderedTextAndBreakNodes
+                If orderedNode.LocalName = "br" OrElse orderedNode.LocalName = "cr" Then
+                    If havePreviousProcessableText Then manualBreakPending = True
+                    Continue For
+                End If
+
+                If orderedNode.LocalName = "t" Then
+                    If refNodes.Contains(orderedNode) Then Continue For
+                    If manualBreakPending Then
+                        manualBreakBeforeTextNodes.Add(orderedNode)
+                    End If
+                    havePreviousProcessableText = True
+                    manualBreakPending = False
+                End If
+            Next
+
             Dim textNodes = paraNode.SelectNodes(".//w:t", nsMgr)
             Dim fullTextBuilder As New StringBuilder()
 
@@ -394,7 +494,8 @@ Partial Public Class ThisAddIn
 
                 ' Check if a footnoteReference/endnoteReference run OR a fldChar run
                 ' sits between the previous text run and this one
-                Dim hasNoteRefBefore As Boolean = False
+                Dim hasNoteRefBefore As Boolean =
+                    paraInfo.TextRuns.Count > 0 AndAlso manualBreakBeforeTextNodes.Contains(textNode)
                 If paraInfo.TextRuns.Count > 0 AndAlso (bodyRefRunNodes.Count > 0 OrElse fldCharRuns.Count > 0) Then
                     Dim thisRun As System.Xml.XmlNode = textNode.ParentNode
                     Dim prevEl As System.Xml.XmlNode = thisRun.PreviousSibling
@@ -423,7 +524,8 @@ Partial Public Class ThisAddIn
                 paraInfo.TextRuns.Add(New APTextRunInfo() With {
                     .TextNode = textNode,
                     .OriginalText = text,
-                    .HasNoteReferenceBefore = hasNoteRefBefore
+                    .HasNoteReferenceBefore = hasNoteRefBefore,
+                    .FormattingKey = APGetRunFormattingKey(textNode)
                 })
                 ' Insert note-reference marker into FullText at the boundary
                 If hasNoteRefBefore Then
@@ -452,47 +554,48 @@ Partial Public Class ThisAddIn
 
 
     ''' <summary>
-    ''' Builds text with | markers between formatting runs for boundary-preserving reapplication.
+    ''' Builds text with | markers only between real formatting groups.
     ''' Only inserts markers between non-empty runs where formatting actually changes.
-    ''' Also preserves ‖ (note-reference) markers at footnote/endnote boundaries.
+    ''' Also preserves ‖ markers at protected structural boundaries (notes, fields, manual breaks).
     ''' </summary>
     Private Shared Function APBuildMarkerAnnotatedText(textRuns As List(Of APTextRunInfo)) As String
         If textRuns Is Nothing OrElse textRuns.Count <= 1 Then Return Nothing
 
         Dim sb As New StringBuilder()
         Dim markerCount As Integer = 0
+        Dim previousFormattingKey As String = Nothing
+        Dim havePreviousVisibleRun As Boolean = False
+        Dim hardBoundarySincePreviousVisibleRun As Boolean = False
 
         For i As Integer = 0 To textRuns.Count - 1
-            Dim runText As String = textRuns(i).OriginalText
+            Dim run As APTextRunInfo = textRuns(i)
+            Dim runText As String = If(run.OriginalText, "")
 
-            ' Insert ‖ marker BEFORE the | marker if this run has a note reference before it.
-            ' The ‖ must appear in the text sent to the LLM so it can preserve it.
-            If textRuns(i).HasNoteReferenceBefore Then
+            If run.HasNoteReferenceBefore Then
                 sb.Append(AP_NoteRefMarker)
+                hardBoundarySincePreviousVisibleRun = True
             End If
 
-            ' Insert marker between runs, but only when both sides are non-empty
-            ' (empty runs don't carry visible formatting, so a marker would be misleading)
-            If i > 0 AndAlso runText.Length > 0 Then
-                Dim prevNonEmpty As Boolean = False
-                For j As Integer = i - 1 To 0 Step -1
-                    If textRuns(j).OriginalText.Length > 0 Then
-                        prevNonEmpty = True
-                        Exit For
-                    End If
-                Next
-                If prevNonEmpty Then
+            If runText.Length > 0 Then
+                Dim currentFormattingKey As String = If(run.FormattingKey, "")
+
+                If havePreviousVisibleRun AndAlso
+                   Not hardBoundarySincePreviousVisibleRun AndAlso
+                   Not String.Equals(previousFormattingKey, currentFormattingKey, StringComparison.Ordinal) Then
                     sb.Append(AP_RunBoundaryMarker)
                     markerCount += 1
                 End If
-            End If
 
-            sb.Append(runText)
+                sb.Append(runText)
+                previousFormattingKey = currentFormattingKey
+                havePreviousVisibleRun = True
+                hardBoundarySincePreviousVisibleRun = False
+            Else
+                sb.Append(runText)
+            End If
         Next
 
-        ' If no markers were inserted, there's no benefit to using marker mode
         If markerCount = 0 Then Return Nothing
-
         Return sb.ToString()
     End Function
 
@@ -593,7 +696,7 @@ Partial Public Class ThisAddIn
         If hasNoteRefMarkers Then
             systemPrompt &= vbCrLf &
             $"{ruleNum}. Some paragraphs contain the character ‖ (double vertical line). " &
-            "This marks the position of a footnote or endnote reference. " &
+            "This marks a protected structural boundary such as a footnote/endnote reference, field boundary, or manual Word line break. " &
             "CRITICAL: Keep each ‖ at EXACTLY the same position relative to the surrounding words. " &
             "Do NOT move, add, or remove any ‖ characters."
             ruleNum += 1
@@ -765,12 +868,12 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Applies translated text back into the XML text nodes.
-    ''' Partitions runs at footnote/endnote reference boundaries so that text
+    ''' Partitions runs at protected structural boundaries so that text
     ''' redistribution never moves content across a reference anchor.
     ''' When the LLM preserves ‖ markers, splits directly at their position (they are
     ''' authoritative). Falls back to anchor + word-boundary logic only when ‖ markers
     ''' are missing. The ‖ character is purely a positional placeholder — it indicates
-    ''' where a footnote/endnote/field reference sits but does not create an additional
+    ''' where a footnote/endnote/field reference or manual line break sits but does not create an additional
     ''' formatting split beyond the existing run partition.
     ''' </summary>
     Private Sub APApplyTranslations(paragraphs As List(Of APParagraphInfo))
@@ -791,12 +894,11 @@ Partial Public Class ThisAddIn
                 Continue For
             End If
 
-            ' ─── Check if any note-reference boundaries exist ───
+            ' ─── Check if any protected structural boundaries exist ───
             Dim hasNoteRefBoundaries As Boolean = para.TextRuns.Any(Function(r) r.HasNoteReferenceBefore)
 
-            ' Try marker-based distribution if formatting markers were used
-            ' BUT only when NO footnote boundaries exist — otherwise the | markers
-            ' are unaware of footnote positions and will shift text across them.
+            ' Fast path for paragraphs without note/field/manual-break anchors. Paragraphs with anchors
+            ' are handled below segment-by-segment, where formatting markers can also be used safely.
             If Not hasNoteRefBoundaries Then
                 If APTryApplyMarkerBasedDistribution(para, translatedText) Then
                     Continue For
@@ -807,11 +909,10 @@ Partial Public Class ThisAddIn
                 Continue For
             End If
 
-            ' ─── From here: paragraph HAS footnote/endnote reference boundaries ───
-            ' Strip formatting markers — the ‖ partitioning handles distribution
-            translatedText = translatedText.Replace(AP_RunBoundaryMarker, "")
+            ' ─── From here: paragraph HAS protected structural boundaries ───
+            ' Keep formatting markers until each note-delimited segment is applied.
 
-            ' Partition runs into segments at note-reference boundaries
+            ' Partition runs into segments at protected structural boundaries
             Dim segments As New List(Of List(Of Integer))()
             Dim currentSegment As New List(Of Integer)()
 
@@ -826,6 +927,7 @@ Partial Public Class ThisAddIn
 
             ' Safety: if partitioning produced only 1 segment, fall back to proportional
             If segments.Count <= 1 Then
+                translatedText = translatedText.Replace(AP_RunBoundaryMarker, "")
                 translatedText = translatedText.Replace(AP_NoteRefMarker, "")
                 APDistributeProportional(para, translatedText)
                 Continue For
@@ -872,6 +974,7 @@ Partial Public Class ThisAddIn
             If segmentTexts Is Nothing Then
                 ' ─── Fallback: anchor-based splitting (no ‖ or wrong count) ───
                 Debug.WriteLine($"Note-ref marker mismatch for paragraph {para.Index}: expected {expectedNoteRefCount}, got {actualNoteRefCount}. Using anchor fallback.")
+                translatedText = translatedText.Replace(AP_RunBoundaryMarker, "")
                 translatedText = translatedText.Replace(AP_NoteRefMarker, "")
 
                 Dim totalOrigLen As Integer = para.FullText.Replace(AP_NoteRefMarker, "").Length
@@ -942,6 +1045,11 @@ Partial Public Class ThisAddIn
             For segIdx As Integer = 0 To segments.Count - 1
                 Dim segText As String = segmentTexts(segIdx)
                 Dim segRunIndices As List(Of Integer) = segments(segIdx)
+
+                If APTryApplyMarkerBasedDistributionToRuns(para, segRunIndices, segText) Then
+                    Continue For
+                End If
+                segText = segText.Replace(AP_RunBoundaryMarker, "")
 
                 If segRunIndices.Count = 1 Then
                     APSetTextNode(para.TextRuns(segRunIndices(0)).TextNode, segText)
@@ -1207,58 +1315,133 @@ Partial Public Class ThisAddIn
     ''' and assign each segment to the corresponding run. Returns True if successful.
     ''' </summary>
     Private Function APTryApplyMarkerBasedDistribution(para As APParagraphInfo, translatedText As String) As Boolean
-        ' Only applicable if the paragraph was sent with markers
-        If para.MarkerText Is Nothing Then Return False
+        If para Is Nothing OrElse para.TextRuns Is Nothing Then Return False
 
-        ' Count expected markers from the original marker text
-        Dim expectedMarkers As Integer = 0
-        For Each ch As Char In para.MarkerText
-            If ch = AP_RunBoundaryMarker(0) Then expectedMarkers += 1
-        Next
-
-        If expectedMarkers = 0 Then Return False
-
-        ' Count actual markers in translated text
-        Dim actualMarkers = translatedText.Count(Function(c) c = AP_RunBoundaryMarker(0))
-        If actualMarkers <> expectedMarkers Then
-            Debug.WriteLine($"Marker count mismatch for paragraph {para.Index}: expected {expectedMarkers}, got {actualMarkers}. Falling back to proportional.")
-            Return False
-        End If
-
-        ' Split on the marker
-        Dim segments = translatedText.Split(New String() {AP_RunBoundaryMarker}, StringSplitOptions.None)
-
-        ' Map segments back to non-empty runs
-        Dim nonEmptyRunIndices As New List(Of Integer)()
+        Dim runIndices As New List(Of Integer)()
         For i As Integer = 0 To para.TextRuns.Count - 1
-            If para.TextRuns(i).OriginalText.Length > 0 Then
-                nonEmptyRunIndices.Add(i)
-            End If
+            runIndices.Add(i)
         Next
 
-        If segments.Length <> nonEmptyRunIndices.Count Then
-            Debug.WriteLine($"Segment count {segments.Length} <> non-empty run count {nonEmptyRunIndices.Count} for paragraph {para.Index}. Falling back.")
+        Return APTryApplyMarkerBasedDistributionToRuns(para, runIndices, translatedText)
+    End Function
+
+    Private Function APTryApplyMarkerBasedDistributionToRuns(
+        para As APParagraphInfo,
+        runIndices As List(Of Integer),
+        translatedText As String) As Boolean
+
+        If para Is Nothing OrElse para.TextRuns Is Nothing OrElse runIndices Is Nothing Then Return False
+
+        Dim groups As List(Of List(Of Integer)) = APBuildFormattingGroups(para.TextRuns, runIndices)
+        If groups.Count = 0 Then Return False
+
+        Dim expectedMarkers As Integer = groups.Count - 1
+        Dim actualMarkers As Integer = translatedText.Count(Function(c) c = AP_RunBoundaryMarker(0))
+        If actualMarkers <> expectedMarkers Then
+            Debug.WriteLine($"Formatting marker mismatch for paragraph {para.Index}: expected {expectedMarkers}, got {actualMarkers}. Falling back.")
             Return False
         End If
 
-        ' Apply segments to non-empty runs, clear empty runs
-        Dim segmentIdx As Integer = 0
-        For runIdx As Integer = 0 To para.TextRuns.Count - 1
-            Dim run = para.TextRuns(runIdx)
-            If run.OriginalText.Length = 0 Then
-                APSetTextNode(run.TextNode, "")
-            Else
-                If segmentIdx < segments.Length Then
-                    APSetTextNode(run.TextNode, segments(segmentIdx))
-                    segmentIdx += 1
-                Else
-                    APSetTextNode(run.TextNode, "")
-                End If
-            End If
+        Dim segments As String() = translatedText.Split(New String() {AP_RunBoundaryMarker}, StringSplitOptions.None)
+        If segments.Length <> groups.Count Then Return False
+
+        For groupIdx As Integer = 0 To groups.Count - 1
+            APDistributeTextAcrossRuns(para, groups(groupIdx), segments(groupIdx))
         Next
 
         Return True
     End Function
+
+    Private Sub APDistributeTextAcrossRuns(
+        para As APParagraphInfo,
+        runIndices As List(Of Integer),
+        text As String)
+
+        If runIndices Is Nothing OrElse runIndices.Count = 0 Then Return
+
+        If runIndices.Count = 1 Then
+            APSetTextNode(para.TextRuns(runIndices(0)).TextNode, text)
+            Return
+        End If
+
+        Dim totalOrigLen As Integer = 0
+        For Each runIdx As Integer In runIndices
+            totalOrigLen += para.TextRuns(runIdx).OriginalText.Length
+        Next
+
+        If totalOrigLen <= 0 Then
+            APSetTextNode(para.TextRuns(runIndices(0)).TextNode, text)
+            For i As Integer = 1 To runIndices.Count - 1
+                APSetTextNode(para.TextRuns(runIndices(i)).TextNode, "")
+            Next
+            Return
+        End If
+
+        Dim translatedLen As Integer = text.Length
+        Dim currentPos As Integer = 0
+        Dim cumulativeOriginal As Integer = 0
+
+        For groupRunPos As Integer = 0 To runIndices.Count - 1
+            Dim runIdx As Integer = runIndices(groupRunPos)
+            Dim run As APTextRunInfo = para.TextRuns(runIdx)
+            cumulativeOriginal += run.OriginalText.Length
+
+            If groupRunPos = runIndices.Count - 1 Then
+                Dim remaining As String = If(currentPos < translatedLen, text.Substring(currentPos), "")
+                APSetTextNode(run.TextNode, remaining)
+                Continue For
+            End If
+
+            Dim targetEndPos As Integer = CInt(Math.Round((cumulativeOriginal / CDbl(totalOrigLen)) * translatedLen))
+            targetEndPos = Math.Min(targetEndPos, translatedLen)
+
+            If targetEndPos <= currentPos Then
+                APSetTextNode(run.TextNode, "")
+                Continue For
+            End If
+
+            Dim endPos As Integer = targetEndPos
+            Dim foundSpace As Boolean = False
+
+            If endPos < translatedLen AndAlso endPos > currentPos Then
+                If text(endPos) = " "c Then
+                    endPos += 1
+                    foundSpace = True
+                Else
+                    Dim searchMax As Integer = Math.Min(endPos + 15, translatedLen - 1)
+                    For searchPos As Integer = endPos To searchMax
+                        If text(searchPos) = " "c Then
+                            endPos = searchPos + 1
+                            foundSpace = True
+                            Exit For
+                        End If
+                    Next
+
+                    If Not foundSpace Then
+                        For searchPos As Integer = endPos - 1 To currentPos Step -1
+                            If text(searchPos) = " "c Then
+                                endPos = searchPos + 1
+                                foundSpace = True
+                                Exit For
+                            End If
+                        Next
+                    End If
+
+                    If Not foundSpace Then
+                        Dim wordEnd As Integer = endPos
+                        While wordEnd < translatedLen AndAlso text(wordEnd) <> " "c
+                            wordEnd += 1
+                        End While
+                        endPos = wordEnd
+                    End If
+                End If
+            End If
+
+            endPos = Math.Min(endPos, translatedLen)
+            APSetTextNode(run.TextNode, text.Substring(currentPos, endPos - currentPos))
+            currentPos = endPos
+        Next
+    End Sub
 
     ''' <summary>
     ''' Sets a w:t text node and ensures xml:space="preserve" when needed.
@@ -1809,7 +1992,8 @@ Partial Public Class ThisAddIn
                 paraInfo.TextRuns.Add(New APTextRunInfo() With {
                     .TextNode = textNode,
                     .OriginalText = text,
-                    .HasNoteReferenceBefore = False  ' PPTX doesn't have footnote references
+                    .HasNoteReferenceBefore = False,  ' PPTX doesn't have footnote references
+                    .FormattingKey = APGetRunFormattingKey(textNode)
                 })
 
                 fullTextBuilder.Append(text)

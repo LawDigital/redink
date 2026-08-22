@@ -17,7 +17,8 @@
 '     effective text indent of the preceding generated paragraph.
 '   - Validates required slots, supported structural levels, referenced styles and final
 '     package content before success; unsupported structure fails rather than degrading.
-'   - Visual placeholders remain stable anchors for the subsequent OpenXmlVisuals pass.
+'   - Footnote placeholders are converted after document creation into native Word footnote
+'     references/parts; visual placeholders remain stable anchors for OpenXmlVisuals.
 ' =============================================================================
 
 Option Explicit On
@@ -759,6 +760,407 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
+
+    Private Shared Sub SetAutoPilotWordOpenXmlSimpleTextValue(
+            textNode As System.Xml.Linq.XElement,
+            value As System.String)
+
+        If textNode Is Nothing Then Return
+        textNode.Value = If(value, System.String.Empty)
+        If textNode.Value.Length > 0 AndAlso
+           (System.Char.IsWhiteSpace(textNode.Value(0)) OrElse System.Char.IsWhiteSpace(textNode.Value(textNode.Value.Length - 1))) Then
+            textNode.SetAttributeValue(AutoPilotWordXmlNs + "space", "preserve")
+        Else
+            textNode.SetAttributeValue(AutoPilotWordXmlNs + "space", Nothing)
+        End If
+    End Sub
+
+    Private Shared Function CreateAutoPilotWordFootnoteReferenceRun(
+            footnoteId As System.Int32,
+            hasFootnoteReferenceStyle As System.Boolean) As System.Xml.Linq.XElement
+
+        Dim run As New System.Xml.Linq.XElement(AutoPilotWordMainNs + "r")
+        Dim runProperties As New System.Xml.Linq.XElement(AutoPilotWordMainNs + "rPr")
+        If hasFootnoteReferenceStyle Then
+            runProperties.Add(New System.Xml.Linq.XElement(
+                AutoPilotWordMainNs + "rStyle",
+                New System.Xml.Linq.XAttribute(AutoPilotWordMainNs + "val", "FootnoteReference")))
+        Else
+            runProperties.Add(New System.Xml.Linq.XElement(
+                AutoPilotWordMainNs + "vertAlign",
+                New System.Xml.Linq.XAttribute(AutoPilotWordMainNs + "val", "superscript")))
+        End If
+        run.Add(runProperties)
+        run.Add(New System.Xml.Linq.XElement(
+            AutoPilotWordMainNs + "footnoteReference",
+            New System.Xml.Linq.XAttribute(AutoPilotWordMainNs + "id", footnoteId.ToString(System.Globalization.CultureInfo.InvariantCulture))))
+        Return run
+    End Function
+
+    Private Shared Function CreateAutoPilotWordFootnoteBodyRun(
+            hasFootnoteReferenceStyle As System.Boolean) As System.Xml.Linq.XElement
+
+        Dim run As New System.Xml.Linq.XElement(AutoPilotWordMainNs + "r")
+        Dim runProperties As New System.Xml.Linq.XElement(AutoPilotWordMainNs + "rPr")
+        If hasFootnoteReferenceStyle Then
+            runProperties.Add(New System.Xml.Linq.XElement(
+                AutoPilotWordMainNs + "rStyle",
+                New System.Xml.Linq.XAttribute(AutoPilotWordMainNs + "val", "FootnoteReference")))
+        Else
+            runProperties.Add(New System.Xml.Linq.XElement(
+                AutoPilotWordMainNs + "vertAlign",
+                New System.Xml.Linq.XAttribute(AutoPilotWordMainNs + "val", "superscript")))
+        End If
+        run.Add(runProperties)
+        run.Add(New System.Xml.Linq.XElement(AutoPilotWordMainNs + "footnoteRef"))
+        Return run
+    End Function
+
+    Private Shared Function CreateAutoPilotWordFootnoteTextRun(
+            text As System.String) As System.Xml.Linq.XElement
+
+        Dim run As New System.Xml.Linq.XElement(AutoPilotWordMainNs + "r")
+        Dim normalized As System.String = If(text, System.String.Empty).Replace(vbCrLf, vbLf).Replace(vbCr, vbLf)
+        Dim parts() As System.String = normalized.Split(ControlChars.Lf)
+        For index As System.Int32 = 0 To parts.Length - 1
+            If index > 0 Then run.Add(New System.Xml.Linq.XElement(AutoPilotWordMainNs + "br"))
+            Dim textNode As New System.Xml.Linq.XElement(AutoPilotWordMainNs + "t")
+            SetAutoPilotWordOpenXmlSimpleTextValue(textNode, parts(index))
+            run.Add(textNode)
+        Next
+        If Not run.Elements().Any() Then
+            run.Add(New System.Xml.Linq.XElement(AutoPilotWordMainNs + "t", System.String.Empty))
+        End If
+        Return run
+    End Function
+
+    Private Shared Function CreateAutoPilotWordFootnoteElement(
+            footnoteId As System.Int32,
+            text As System.String,
+            hasFootnoteReferenceStyle As System.Boolean,
+            hasFootnoteTextStyle As System.Boolean) As System.Xml.Linq.XElement
+
+        Dim paragraph As New System.Xml.Linq.XElement(AutoPilotWordMainNs + "p")
+        If hasFootnoteTextStyle Then
+            paragraph.Add(New System.Xml.Linq.XElement(
+                AutoPilotWordMainNs + "pPr",
+                New System.Xml.Linq.XElement(
+                    AutoPilotWordMainNs + "pStyle",
+                    New System.Xml.Linq.XAttribute(AutoPilotWordMainNs + "val", "FootnoteText"))))
+        End If
+        paragraph.Add(CreateAutoPilotWordFootnoteBodyRun(hasFootnoteReferenceStyle))
+        paragraph.Add(New System.Xml.Linq.XElement(
+            AutoPilotWordMainNs + "r",
+            New System.Xml.Linq.XElement(AutoPilotWordMainNs + "tab")))
+        paragraph.Add(CreateAutoPilotWordFootnoteTextRun(text))
+
+        Return New System.Xml.Linq.XElement(
+            AutoPilotWordMainNs + "footnote",
+            New System.Xml.Linq.XAttribute(AutoPilotWordMainNs + "id", footnoteId.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+            paragraph)
+    End Function
+
+    Private Shared Function CreateAutoPilotWordFootnotesPart() As System.Xml.Linq.XDocument
+        Dim root As New System.Xml.Linq.XElement(AutoPilotWordMainNs + "footnotes")
+        root.Add(New System.Xml.Linq.XElement(
+            AutoPilotWordMainNs + "footnote",
+            New System.Xml.Linq.XAttribute(AutoPilotWordMainNs + "type", "separator"),
+            New System.Xml.Linq.XAttribute(AutoPilotWordMainNs + "id", "-1"),
+            New System.Xml.Linq.XElement(
+                AutoPilotWordMainNs + "p",
+                New System.Xml.Linq.XElement(
+                    AutoPilotWordMainNs + "r",
+                    New System.Xml.Linq.XElement(AutoPilotWordMainNs + "separator")))))
+        root.Add(New System.Xml.Linq.XElement(
+            AutoPilotWordMainNs + "footnote",
+            New System.Xml.Linq.XAttribute(AutoPilotWordMainNs + "type", "continuationSeparator"),
+            New System.Xml.Linq.XAttribute(AutoPilotWordMainNs + "id", "0"),
+            New System.Xml.Linq.XElement(
+                AutoPilotWordMainNs + "p",
+                New System.Xml.Linq.XElement(
+                    AutoPilotWordMainNs + "r",
+                    New System.Xml.Linq.XElement(AutoPilotWordMainNs + "continuationSeparator")))))
+        Return New System.Xml.Linq.XDocument(New System.Xml.Linq.XDeclaration("1.0", "UTF-8", "yes"), root)
+    End Function
+
+    Private Shared Function ReplaceAutoPilotWordFootnotePlaceholderInParagraph(
+            paragraph As System.Xml.Linq.XElement,
+            placeholder As System.String,
+            footnoteId As System.Int32,
+            hasFootnoteReferenceStyle As System.Boolean) As System.Int32
+
+        If paragraph Is Nothing OrElse System.String.IsNullOrEmpty(placeholder) Then Return 0
+
+        Dim textNodes As System.Collections.Generic.List(Of System.Xml.Linq.XElement) =
+            paragraph.Descendants(AutoPilotWordMainNs + "t").ToList()
+        If textNodes.Count = 0 Then Return 0
+
+        Dim fullText As New System.Text.StringBuilder()
+        Dim starts As New System.Collections.Generic.List(Of System.Int32)()
+        For Each textNode As System.Xml.Linq.XElement In textNodes
+            starts.Add(fullText.Length)
+            fullText.Append(If(textNode.Value, System.String.Empty))
+        Next
+
+        Dim whole As System.String = fullText.ToString()
+        Dim matchStart As System.Int32 = whole.IndexOf(placeholder, System.StringComparison.Ordinal)
+        If matchStart < 0 Then Return 0
+        Dim matchEndExclusive As System.Int32 = matchStart + placeholder.Length
+
+        Dim firstIndex As System.Int32 = -1
+        Dim lastIndex As System.Int32 = -1
+        For index As System.Int32 = 0 To textNodes.Count - 1
+            Dim nodeStart As System.Int32 = starts(index)
+            Dim nodeEnd As System.Int32 = nodeStart + If(textNodes(index).Value, System.String.Empty).Length
+            If firstIndex < 0 AndAlso matchStart < nodeEnd AndAlso matchEndExclusive > nodeStart Then firstIndex = index
+            If matchEndExclusive > nodeStart AndAlso matchStart < nodeEnd Then lastIndex = index
+        Next
+        If firstIndex < 0 OrElse lastIndex < 0 Then Return 0
+
+        Dim firstNode As System.Xml.Linq.XElement = textNodes(firstIndex)
+        Dim lastNode As System.Xml.Linq.XElement = textNodes(lastIndex)
+        Dim firstStart As System.Int32 = starts(firstIndex)
+        Dim lastStart As System.Int32 = starts(lastIndex)
+        Dim firstValue As System.String = If(firstNode.Value, System.String.Empty)
+        Dim lastValue As System.String = If(lastNode.Value, System.String.Empty)
+        Dim prefixLength As System.Int32 = System.Math.Max(0, matchStart - firstStart)
+        Dim suffixOffset As System.Int32 = System.Math.Max(0, matchEndExclusive - lastStart)
+        Dim prefix As System.String = firstValue.Substring(0, System.Math.Min(prefixLength, firstValue.Length))
+        Dim suffix As System.String = If(suffixOffset <= lastValue.Length, lastValue.Substring(suffixOffset), System.String.Empty)
+
+        Dim firstRun As System.Xml.Linq.XElement = firstNode.Ancestors(AutoPilotWordMainNs + "r").FirstOrDefault()
+        If firstRun Is Nothing Then Return 0
+
+        SetAutoPilotWordOpenXmlSimpleTextValue(firstNode, prefix)
+        If firstIndex <> lastIndex Then
+            For index As System.Int32 = firstIndex + 1 To lastIndex - 1
+                SetAutoPilotWordOpenXmlSimpleTextValue(textNodes(index), System.String.Empty)
+            Next
+            SetAutoPilotWordOpenXmlSimpleTextValue(lastNode, suffix)
+        End If
+
+        Dim referenceRun As System.Xml.Linq.XElement =
+            CreateAutoPilotWordFootnoteReferenceRun(footnoteId, hasFootnoteReferenceStyle)
+        firstRun.AddAfterSelf(referenceRun)
+
+        If firstIndex = lastIndex AndAlso Not System.String.IsNullOrEmpty(suffix) Then
+            Dim suffixRun As New System.Xml.Linq.XElement(AutoPilotWordMainNs + "r")
+            Dim sourceRunProperties As System.Xml.Linq.XElement = firstRun.Element(AutoPilotWordMainNs + "rPr")
+            If sourceRunProperties IsNot Nothing Then suffixRun.Add(New System.Xml.Linq.XElement(sourceRunProperties))
+            Dim suffixText As New System.Xml.Linq.XElement(AutoPilotWordMainNs + "t")
+            SetAutoPilotWordOpenXmlSimpleTextValue(suffixText, suffix)
+            suffixRun.Add(suffixText)
+            referenceRun.AddAfterSelf(suffixRun)
+        End If
+
+        Return 1
+    End Function
+
+    Private Shared Function EnsureAutoPilotWordFootnoteRelationship(
+            archive As System.IO.Compression.ZipArchive,
+            ByRef relationshipError As System.String) As System.Boolean
+
+        relationshipError = System.String.Empty
+        Const relEntryName As System.String = "word/_rels/document.xml.rels"
+        Dim relNs As System.Xml.Linq.XNamespace = "http://schemas.openxmlformats.org/package/2006/relationships"
+        Dim relsXml As System.Xml.Linq.XDocument = LoadAutoPilotWordOpenXmlEntry(archive, relEntryName)
+        If relsXml Is Nothing OrElse relsXml.Root Is Nothing Then
+            relsXml = New System.Xml.Linq.XDocument(
+                New System.Xml.Linq.XDeclaration("1.0", "UTF-8", "yes"),
+                New System.Xml.Linq.XElement(relNs + "Relationships"))
+        End If
+
+        Dim footnoteRelationshipType As System.String =
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes"
+        If Not relsXml.Root.Elements(relNs + "Relationship").Any(
+            Function(rel As System.Xml.Linq.XElement)
+                Return System.String.Equals(
+                    If(rel.Attribute("Type"), New System.Xml.Linq.XAttribute("Type", System.String.Empty)).Value,
+                    footnoteRelationshipType,
+                    System.StringComparison.OrdinalIgnoreCase)
+            End Function) Then
+
+            Dim maxRelationshipNumber As System.Int32 = 0
+            For Each rel As System.Xml.Linq.XElement In relsXml.Root.Elements(relNs + "Relationship")
+                Dim idAttribute As System.Xml.Linq.XAttribute = rel.Attribute("Id")
+                If idAttribute Is Nothing Then Continue For
+                Dim match As System.Text.RegularExpressions.Match = System.Text.RegularExpressions.Regex.Match(
+                    idAttribute.Value,
+                    "^rId([0-9]+)$",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+                Dim parsed As System.Int32 = 0
+                If match.Success AndAlso System.Int32.TryParse(match.Groups(1).Value, parsed) Then
+                    maxRelationshipNumber = System.Math.Max(maxRelationshipNumber, parsed)
+                End If
+            Next
+            relsXml.Root.Add(New System.Xml.Linq.XElement(
+                relNs + "Relationship",
+                New System.Xml.Linq.XAttribute("Id", "rId" & (maxRelationshipNumber + 1).ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                New System.Xml.Linq.XAttribute("Type", footnoteRelationshipType),
+                New System.Xml.Linq.XAttribute("Target", "footnotes.xml")))
+        End If
+
+        SaveAutoPilotWordOpenXmlEntry(archive, relEntryName, relsXml)
+        Return True
+    End Function
+
+    Private Shared Function EnsureAutoPilotWordFootnoteContentType(
+            archive As System.IO.Compression.ZipArchive,
+            ByRef contentTypeError As System.String) As System.Boolean
+
+        contentTypeError = System.String.Empty
+        Const entryName As System.String = "[Content_Types].xml"
+        Dim contentTypesNs As System.Xml.Linq.XNamespace = "http://schemas.openxmlformats.org/package/2006/content-types"
+        Dim contentTypesXml As System.Xml.Linq.XDocument = LoadAutoPilotWordOpenXmlEntry(archive, entryName)
+        If contentTypesXml Is Nothing OrElse contentTypesXml.Root Is Nothing Then
+            contentTypeError = "The generated DOCX has no readable [Content_Types].xml part."
+            Return False
+        End If
+
+        If Not contentTypesXml.Root.Elements(contentTypesNs + "Override").Any(
+            Function(item As System.Xml.Linq.XElement)
+                Return System.String.Equals(
+                    If(item.Attribute("PartName"), New System.Xml.Linq.XAttribute("PartName", System.String.Empty)).Value,
+                    "/word/footnotes.xml",
+                    System.StringComparison.OrdinalIgnoreCase)
+            End Function) Then
+
+            contentTypesXml.Root.Add(New System.Xml.Linq.XElement(
+                contentTypesNs + "Override",
+                New System.Xml.Linq.XAttribute("PartName", "/word/footnotes.xml"),
+                New System.Xml.Linq.XAttribute("ContentType", "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml")))
+        End If
+
+        SaveAutoPilotWordOpenXmlEntry(archive, entryName, contentTypesXml)
+        Return True
+    End Function
+
+    Private Shared Function InsertAutoPilotWordFootnotesOpenXml(
+            outputPath As System.String,
+            footnotes As Newtonsoft.Json.Linq.JArray,
+            ByRef insertedCount As System.Int32,
+            ByRef insertionError As System.String) As System.Boolean
+
+        insertedCount = 0
+        insertionError = System.String.Empty
+        If footnotes Is Nothing OrElse footnotes.Count = 0 Then Return True
+        If System.String.IsNullOrWhiteSpace(outputPath) OrElse Not System.IO.File.Exists(outputPath) Then
+            insertionError = "Cannot insert Word footnotes because the generated DOCX was not found."
+            Return False
+        End If
+
+        Try
+            Using fileStream As New System.IO.FileStream(outputPath, System.IO.FileMode.Open, System.IO.FileAccess.ReadWrite, System.IO.FileShare.None)
+                Using archive As New System.IO.Compression.ZipArchive(fileStream, System.IO.Compression.ZipArchiveMode.Update, leaveOpen:=False)
+                    Dim documentXml As System.Xml.Linq.XDocument = LoadAutoPilotWordOpenXmlEntry(archive, "word/document.xml")
+                    If documentXml Is Nothing OrElse documentXml.Root Is Nothing Then
+                        insertionError = "Cannot insert Word footnotes because word/document.xml is missing."
+                        Return False
+                    End If
+
+                    Dim stylesXml As System.Xml.Linq.XDocument = LoadAutoPilotWordOpenXmlEntry(archive, "word/styles.xml")
+                    Dim hasFootnoteReferenceStyle As System.Boolean = False
+                    Dim hasFootnoteTextStyle As System.Boolean = False
+                    If stylesXml IsNot Nothing AndAlso stylesXml.Root IsNot Nothing Then
+                        hasFootnoteReferenceStyle = stylesXml.Descendants(AutoPilotWordMainNs + "style").Any(
+                            Function(style As System.Xml.Linq.XElement)
+                                Dim styleId As System.Xml.Linq.XAttribute = style.Attribute(AutoPilotWordMainNs + "styleId")
+                                Return styleId IsNot Nothing AndAlso System.String.Equals(styleId.Value, "FootnoteReference", System.StringComparison.OrdinalIgnoreCase)
+                            End Function)
+                        hasFootnoteTextStyle = stylesXml.Descendants(AutoPilotWordMainNs + "style").Any(
+                            Function(style As System.Xml.Linq.XElement)
+                                Dim styleId As System.Xml.Linq.XAttribute = style.Attribute(AutoPilotWordMainNs + "styleId")
+                                Return styleId IsNot Nothing AndAlso System.String.Equals(styleId.Value, "FootnoteText", System.StringComparison.OrdinalIgnoreCase)
+                            End Function)
+                    End If
+
+                    Dim footnotesXml As System.Xml.Linq.XDocument = LoadAutoPilotWordOpenXmlEntry(archive, "word/footnotes.xml")
+                    If footnotesXml Is Nothing OrElse footnotesXml.Root Is Nothing Then footnotesXml = CreateAutoPilotWordFootnotesPart()
+
+                    Dim maxFootnoteId As System.Int32 = 0
+                    For Each existing As System.Xml.Linq.XElement In footnotesXml.Root.Elements(AutoPilotWordMainNs + "footnote")
+                        Dim idAttribute As System.Xml.Linq.XAttribute = existing.Attribute(AutoPilotWordMainNs + "id")
+                        Dim parsed As System.Int32 = 0
+                        If idAttribute IsNot Nothing AndAlso System.Int32.TryParse(idAttribute.Value, parsed) AndAlso parsed > 0 Then
+                            maxFootnoteId = System.Math.Max(maxFootnoteId, parsed)
+                        End If
+                    Next
+
+                    For Each token As Newtonsoft.Json.Linq.JToken In footnotes
+                        Dim item As Newtonsoft.Json.Linq.JObject = DirectCast(token, Newtonsoft.Json.Linq.JObject)
+                        Dim id As System.String = If(CStr(item("id")), System.String.Empty).Trim()
+                        Dim text As System.String = If(CStr(item("text")), System.String.Empty)
+                        maxFootnoteId += 1
+
+                        Dim placeholder As System.String = "[[footnote:" & id & "]]"
+                        Dim replacedForFootnote As System.Int32 = 0
+                        For Each paragraph As System.Xml.Linq.XElement In documentXml.Descendants(AutoPilotWordMainNs + "p").ToList()
+                            replacedForFootnote += ReplaceAutoPilotWordFootnotePlaceholderInParagraph(
+                                paragraph,
+                                placeholder,
+                                maxFootnoteId,
+                                hasFootnoteReferenceStyle)
+                        Next
+                        If replacedForFootnote <> 1 Then
+                            insertionError = "Native Word footnote marker " & placeholder & " was expected exactly once after document rendering; found " &
+                                             replacedForFootnote.ToString(System.Globalization.CultureInfo.InvariantCulture) & "."
+                            Return False
+                        End If
+
+                        footnotesXml.Root.Add(CreateAutoPilotWordFootnoteElement(
+                            maxFootnoteId,
+                            text,
+                            hasFootnoteReferenceStyle,
+                            hasFootnoteTextStyle))
+                        insertedCount += 1
+                    Next
+
+                    Dim relationshipError As System.String = System.String.Empty
+                    If Not EnsureAutoPilotWordFootnoteRelationship(archive, relationshipError) Then
+                        insertionError = relationshipError
+                        Return False
+                    End If
+                    Dim contentTypeError As System.String = System.String.Empty
+                    If Not EnsureAutoPilotWordFootnoteContentType(archive, contentTypeError) Then
+                        insertionError = contentTypeError
+                        Return False
+                    End If
+
+                    SaveAutoPilotWordOpenXmlEntry(archive, "word/document.xml", documentXml)
+                    SaveAutoPilotWordOpenXmlEntry(archive, "word/footnotes.xml", footnotesXml)
+                End Using
+            End Using
+
+            Using validationStream As New System.IO.FileStream(outputPath, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read)
+                Using validationArchive As New System.IO.Compression.ZipArchive(validationStream, System.IO.Compression.ZipArchiveMode.Read, leaveOpen:=False)
+                    Dim validationDocument As System.Xml.Linq.XDocument = LoadAutoPilotWordOpenXmlEntry(validationArchive, "word/document.xml")
+                    Dim validationFootnotes As System.Xml.Linq.XDocument = LoadAutoPilotWordOpenXmlEntry(validationArchive, "word/footnotes.xml")
+                    If validationDocument Is Nothing OrElse validationFootnotes Is Nothing Then
+                        insertionError = "Native Word footnote validation failed because the saved DOCX is missing its document or footnotes part."
+                        Return False
+                    End If
+                    Dim referenceCount As System.Int32 = validationDocument.Descendants(AutoPilotWordMainNs + "footnoteReference").Count()
+                    If referenceCount < insertedCount Then
+                        insertionError = "Native Word footnote validation failed: saved reference count is lower than the inserted footnote count."
+                        Return False
+                    End If
+                    For Each paragraph As System.Xml.Linq.XElement In validationDocument.Descendants(AutoPilotWordMainNs + "p")
+                        Dim paragraphText As System.String = GetAutoPilotWordOpenXmlParagraphText(paragraph)
+                        If paragraphText.IndexOf("[[footnote:", System.StringComparison.OrdinalIgnoreCase) >= 0 Then
+                            insertionError = "Native Word footnote validation failed because an unresolved [[footnote:...]] marker remains in the saved document."
+                            Return False
+                        End If
+                    Next
+                End Using
+            End Using
+
+            Return True
+        Catch ex As System.Exception
+            insertionError = "Native OOXML Word footnote insertion failed: " & ex.Message
+            Return False
+        End Try
+    End Function
+
     Private Shared Sub NormalizeAutoPilotWordOpenXmlFieldUpdateState(
             archive As System.IO.Compression.ZipArchive,
             storyXml As System.Collections.Generic.IDictionary(Of System.String, System.Xml.Linq.XDocument))
@@ -935,6 +1337,19 @@ Partial Public Class ThisAddIn
             New System.Xml.Linq.XElement(w + "basedOn", New System.Xml.Linq.XAttribute(w + "val", "Normal")),
             New System.Xml.Linq.XElement(w + "next", New System.Xml.Linq.XAttribute(w + "val", "Normal")),
             New System.Xml.Linq.XElement(w + "rPr", New System.Xml.Linq.XElement(w + "b"), New System.Xml.Linq.XElement(w + "color", New System.Xml.Linq.XAttribute(w + "val", accent)), New System.Xml.Linq.XElement(w + "sz", New System.Xml.Linq.XAttribute(w + "val", "40")))))
+
+        Dim footnoteHalfPoints As System.String = System.Math.Max(16, halfPoints - 2).ToString(System.Globalization.CultureInfo.InvariantCulture)
+        styles.Add(New System.Xml.Linq.XElement(w + "style", New System.Xml.Linq.XAttribute(w + "type", "paragraph"), New System.Xml.Linq.XAttribute(w + "styleId", "FootnoteText"),
+            New System.Xml.Linq.XElement(w + "name", New System.Xml.Linq.XAttribute(w + "val", "footnote text")),
+            New System.Xml.Linq.XElement(w + "basedOn", New System.Xml.Linq.XAttribute(w + "val", "Normal")),
+            New System.Xml.Linq.XElement(w + "next", New System.Xml.Linq.XAttribute(w + "val", "FootnoteText")),
+            New System.Xml.Linq.XElement(w + "pPr", New System.Xml.Linq.XElement(w + "spacing", New System.Xml.Linq.XAttribute(w + "after", "0"))),
+            New System.Xml.Linq.XElement(w + "rPr",
+                New System.Xml.Linq.XElement(w + "sz", New System.Xml.Linq.XAttribute(w + "val", footnoteHalfPoints)),
+                New System.Xml.Linq.XElement(w + "szCs", New System.Xml.Linq.XAttribute(w + "val", footnoteHalfPoints)))))
+        styles.Add(New System.Xml.Linq.XElement(w + "style", New System.Xml.Linq.XAttribute(w + "type", "character"), New System.Xml.Linq.XAttribute(w + "styleId", "FootnoteReference"),
+            New System.Xml.Linq.XElement(w + "name", New System.Xml.Linq.XAttribute(w + "val", "footnote reference")),
+            New System.Xml.Linq.XElement(w + "rPr", New System.Xml.Linq.XElement(w + "vertAlign", New System.Xml.Linq.XAttribute(w + "val", "superscript")))))
 
         For level As System.Int32 = 1 To 3
             styles.Add(New System.Xml.Linq.XElement(w + "style", New System.Xml.Linq.XAttribute(w + "type", "paragraph"), New System.Xml.Linq.XAttribute(w + "styleId", "GenericBullet" & level.ToString(System.Globalization.CultureInfo.InvariantCulture)),
