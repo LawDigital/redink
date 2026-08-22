@@ -722,7 +722,11 @@ Namespace AgentsXX
                 "## Word body styles",
                 "- paragraph: Body Style",
                 "- heading1: Heading One",
-                "- bullet1: Bullet One"
+                "- bullet1: Bullet One",
+                "- quote1: Quote One",
+                "",
+                "## Word authoring guidance",
+                "- Use plain paragraphs for ordinary prose."
             })
 
             Dim contract As Agents.WordTemplateBindingContract = Nothing
@@ -736,8 +740,10 @@ Namespace AgentsXX
             AssertEqual("markdown", contract.Slots(1).ContentMode, "markdown_content content mode should default to markdown.")
             AssertEqual("Person or group to whom the document is addressed.", contract.Slots(0).Purpose, "Slot purpose mismatch.")
             AssertTrue(contract.BuildPromptSummary().IndexOf("Person or group", System.StringComparison.OrdinalIgnoreCase) >= 0, "Prompt summary should expose slot purpose.")
-            AssertEqual(3, contract.BodyStyles.Count, "Unexpected property-list body-style count.")
+            AssertEqual(4, contract.BodyStyles.Count, "Unexpected property-list body-style count.")
             AssertEqual("Body Style", contract.BuildNativeParagraphStyleMap()("paragraph"), "Paragraph native style mapping mismatch.")
+            AssertEqual("Quote One", contract.BuildNativeParagraphStyleMap()("quote1"), "Quote native style mapping mismatch.")
+            AssertTrue(contract.BuildPromptSummary().IndexOf("plain paragraphs", System.StringComparison.OrdinalIgnoreCase) >= 0, "Prompt summary should expose Word authoring guidance.")
         End Sub
 
         Private Shared Sub TestWordTemplateContractNormalizesQuotedValues()

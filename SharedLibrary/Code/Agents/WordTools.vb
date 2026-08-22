@@ -2551,7 +2551,7 @@ Namespace Agents
                 .ToolPriority = 888,
                 .ToolErrorHandling = "skip",
                 .ModelDescription = "Word (apply template)",
-                .CapabilityTags = "artifact_generation",
+                .CapabilityTags = "artifact_generation,explicit_operation",
                 .ToolDefinition = "{""name"":""" & ToolApplyTemplate & """,""description"":""Clone a .docx template from a skill's references/ directory to a new file in the default writable root (the connected workspace, otherwise the current session's staging/working area) and substitute {{placeholders}} from the 'substitutions' object. Optional explicit artifact fields can register the resulting single file without changing legacy calls."",""parameters"":{""type"":""object"",""properties"":{""skill"":{""type"":""string"",""description"":""Skill name.""},""template"":{""type"":""string"",""description"":""Path relative to the skill's references/ directory.""},""output_name"":{""type"":""string"",""description"":""Suggested output filename (default 'from_template.docx').""},""substitutions"":{""type"":""object"",""description"":""Object of {placeholderName: value}; each key K becomes the literal '{{K}}' in the template.""},""artifact_id"":{""type"":""string""},""logical_deliverable_id"":{""type"":""string""},""output_slot_id"":{""type"":""string""},""supersedes_artifact_id"":{""type"":""string""},""artifact_state"":{""type"":""string"",""enum"":[""working"",""intermediate"",""final""]},""artifact_delivery_intent"":{""type"":""string"",""enum"":[""none"",""deliver_to_user"",""persist_only"",""deliver_and_persist""]},""storage_kind"":{""type"":""string"",""enum"":[""session_staging"",""connected_workspace"",""host_managed"",""unknown""]},""expected_artifacts"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{""logical_deliverable_id"":{""type"":""string""},""output_slot_id"":{""type"":""string""}},""required"":[""logical_deliverable_id"",""output_slot_id""]}}},""required"":[""skill"",""template""]}}",
                 .ToolInstructionsPrompt = ToolApplyTemplate & ": Instantiate a Word template from a skill's references/ directory. For an explicit artifact, preserve the caller-supplied opaque IDs and declare artifact_state/artifact_delivery_intent; a user-facing Final also requires the complete expected_artifacts set."
             }
@@ -2564,6 +2564,7 @@ Namespace Agents
                 .ToolPriority = 889,
                 .ToolErrorHandling = "skip",
                 .ModelDescription = "Word (save as)",
+                .CapabilityTags = "explicit_operation",
                 .ToolDefinition =
                     "{""name"":""" & ToolSaveAs & """," &
                     """description"":""Copy a .docx to a new path inside the default writable root. artifact_id, logical_deliverable_id, output_slot_id, and expected_artifacts are required explicit orchestration fields. supersedes_artifact_id and storage_kind are optional explicit metadata; no artifact identity is inferred from filenames or paths.""," &

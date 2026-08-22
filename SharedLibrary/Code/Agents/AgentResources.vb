@@ -899,8 +899,9 @@ Namespace Agents
     ''' <summary>
     ''' Parsed Word-template contract from a same-basename Markdown companion file.
     ''' Ordinary prose in the guide stays human guidance. Machine-readable mappings live under
-    ''' "## Word template slots" and "## Word body styles". Property lists are the authoring format;
-    ''' legacy Markdown tables remain accepted as backward-compatible input.
+    ''' "## Word template slots", "## Word body styles", "## Word native styles",
+    ''' "## Word rendering rules", and the concise model-facing "## Word authoring guidance".
+    ''' Property lists are the authoring format; legacy Markdown tables remain accepted as backward-compatible input.
     ''' </summary>
     Public Class WordTemplateBindingContract
         Public Property GuidancePath As String
@@ -909,6 +910,7 @@ Namespace Agents
         Public Property BodyStyles As New System.Collections.Generic.List(Of WordTemplateBodyStyleDefinition)()
         Public Property NativeStyles As New System.Collections.Generic.List(Of WordTemplateBodyStyleDefinition)()
         Public Property HeadingNumberingMode As String = ""
+        Public Property AuthoringGuidance As New System.Collections.Generic.List(Of String)()
 
         Public ReadOnly Property HasSlots As Boolean
             Get
@@ -928,6 +930,12 @@ Namespace Agents
             End Get
         End Property
 
+        Public ReadOnly Property HasAuthoringGuidance As Boolean
+            Get
+                Return AuthoringGuidance IsNot Nothing AndAlso AuthoringGuidance.Count > 0
+            End Get
+        End Property
+
         Public Function BuildNativeParagraphStyleMap() As System.Collections.Generic.Dictionary(Of String, String)
             Dim result As New System.Collections.Generic.Dictionary(Of String, String)(System.StringComparer.OrdinalIgnoreCase)
             If BodyStyles Is Nothing Then Return result
@@ -944,7 +952,7 @@ Namespace Agents
         End Function
 
         Public Function BuildPromptSummary() As String
-            If Not HasSlots AndAlso Not HasBodyStyles AndAlso Not HasNativeStyles AndAlso System.String.IsNullOrWhiteSpace(HeadingNumberingMode) Then Return ""
+            If Not HasSlots AndAlso Not HasBodyStyles AndAlso Not HasNativeStyles AndAlso Not HasAuthoringGuidance AndAlso System.String.IsNullOrWhiteSpace(HeadingNumberingMode) Then Return ""
 
             Dim bodySlots As New System.Collections.Generic.List(Of String)()
             Dim requiredFields As New System.Collections.Generic.List(Of String)()
@@ -999,6 +1007,9 @@ Namespace Agents
                 Next
                 If nativeParts.Count > 0 Then parts.Add("available native styles: " & System.String.Join(", ", nativeParts))
             End If
+            If HasAuthoringGuidance Then
+                parts.Add("authoring guidance: " & System.String.Join(" ", AuthoringGuidance.Where(Function(item As String) Not System.String.IsNullOrWhiteSpace(item))))
+            End If
             Return System.String.Join("; ", parts)
         End Function
 
@@ -1022,7 +1033,7 @@ Namespace Agents
             System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant)
 
         Private Shared ReadOnly BodyStyleSemanticRegex As New System.Text.RegularExpressions.Regex(
-            "^(paragraph|heading[1-6]|bullet[1-9]|numbered[1-9])$",
+            "^(paragraph|heading[1-6]|bullet[1-9]|numbered[1-9]|quote[1-9])$",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant)
 
         Private Sub New()
@@ -1108,6 +1119,7 @@ Namespace Agents
                     If validationError <> "" Then Return False
                     MergeStyleDefinitions(merged.NativeStyles, policyContract.NativeStyles, stylePolicyPath, validationError, allowOverride:=False)
                     If validationError <> "" Then Return False
+                    MergeAuthoringGuidance(merged.AuthoringGuidance, policyContract.AuthoringGuidance)
                     If Not System.String.IsNullOrWhiteSpace(policyContract.HeadingNumberingMode) Then merged.HeadingNumberingMode = policyContract.HeadingNumberingMode
                 End If
             End If
@@ -1129,6 +1141,7 @@ Namespace Agents
                     If validationError <> "" Then Return False
                     MergeStyleDefinitions(merged.NativeStyles, guideContract.NativeStyles, guidancePath, validationError, allowOverride:=True)
                     If validationError <> "" Then Return False
+                    MergeAuthoringGuidance(merged.AuthoringGuidance, guideContract.AuthoringGuidance)
                     If Not System.String.IsNullOrWhiteSpace(guideContract.HeadingNumberingMode) Then merged.HeadingNumberingMode = guideContract.HeadingNumberingMode
                 End If
             End If
@@ -1137,10 +1150,25 @@ Namespace Agents
                 If Not TryValidateTemplateCarrierSlots(templatePath, merged, validationError) Then Return False
             End If
 
-            If Not merged.HasSlots AndAlso Not merged.HasBodyStyles AndAlso Not merged.HasNativeStyles Then Return True
+            If Not merged.HasSlots AndAlso Not merged.HasBodyStyles AndAlso Not merged.HasNativeStyles AndAlso Not merged.HasAuthoringGuidance Then Return True
             contract = merged
             Return True
         End Function
+
+        Private Shared Sub MergeAuthoringGuidance(target As System.Collections.Generic.List(Of String),
+                                                        source As System.Collections.Generic.IEnumerable(Of String))
+            If target Is Nothing OrElse source Is Nothing Then Return
+            For Each item As String In source
+                Dim normalized As String = If(item, "").Replace(vbCr, " ").Replace(vbLf, " ").Trim()
+                Do While normalized.Contains("  ")
+                    normalized = normalized.Replace("  ", " ")
+                Loop
+                If normalized = "" Then Continue For
+                If Not target.Any(Function(existing As String) System.String.Equals(existing, normalized, System.StringComparison.OrdinalIgnoreCase)) Then
+                    target.Add(normalized)
+                End If
+            Next
+        End Sub
 
         Private Shared Sub MergeStyleDefinitions(target As System.Collections.Generic.List(Of WordTemplateBodyStyleDefinition),
                                                   source As System.Collections.Generic.IEnumerable(Of WordTemplateBodyStyleDefinition),
@@ -1294,8 +1322,13 @@ Namespace Agents
                 If Not TryParseRenderingRulesSection(lines, renderingRulesSectionIndex, guidancePath, parsed, validationError) Then Return False
             End If
 
+            Dim authoringGuidanceSectionIndex As Integer = FindSectionIndex(lines, "## Word authoring guidance")
+            If authoringGuidanceSectionIndex >= 0 Then
+                If Not TryParseAuthoringGuidanceSection(lines, authoringGuidanceSectionIndex, guidancePath, parsed, validationError) Then Return False
+            End If
+
             ' Prose-only companion guides remain valid and preserve the legacy style-carrier path.
-            If Not parsed.HasSlots AndAlso Not parsed.HasBodyStyles AndAlso Not parsed.HasNativeStyles AndAlso System.String.IsNullOrWhiteSpace(parsed.HeadingNumberingMode) Then Return True
+            If Not parsed.HasSlots AndAlso Not parsed.HasBodyStyles AndAlso Not parsed.HasNativeStyles AndAlso Not parsed.HasAuthoringGuidance AndAlso System.String.IsNullOrWhiteSpace(parsed.HeadingNumberingMode) Then Return True
 
             contract = parsed
             Return True
@@ -1541,7 +1574,7 @@ Namespace Agents
                 Dim semantic As String = NormalizeBodyStyleSemantic(key)
                 Dim styleName As String = NormalizeCell(value)
                 If semantic = "" OrElse Not BodyStyleSemanticRegex.IsMatch(semantic) Then
-                    validationError = $"Invalid Word body-style semantic '{key}' in '{System.IO.Path.GetFileName(guidancePath)}'. Use paragraph, heading1..heading6, bullet1..bullet9, or numbered1..numbered9."
+                    validationError = $"Invalid Word body-style semantic '{key}' in '{System.IO.Path.GetFileName(guidancePath)}'. Use paragraph, heading1..heading6, bullet1..bullet9, numbered1..numbered9, or quote1..quote9."
                     Return False
                 End If
                 If System.String.IsNullOrWhiteSpace(styleName) OrElse styleName.Length > 128 Then
@@ -1598,6 +1631,38 @@ Namespace Agents
                         Return False
                 End Select
             Next
+            Return True
+        End Function
+
+        Private Shared Function TryParseAuthoringGuidanceSection(lines() As String,
+                                                                  sectionIndex As Integer,
+                                                                  guidancePath As String,
+                                                                  parsed As WordTemplateBindingContract,
+                                                                  ByRef validationError As String) As Boolean
+            Dim sectionEnd As Integer = FindSectionEndIndex(lines, sectionIndex)
+            Dim seen As New System.Collections.Generic.HashSet(Of String)(System.StringComparer.OrdinalIgnoreCase)
+
+            For i As Integer = sectionIndex + 1 To sectionEnd - 1
+                Dim raw As String = If(lines(i), "")
+                Dim trimmed As String = raw.Trim()
+                If trimmed = "" Then Continue For
+                If Not trimmed.StartsWith("-", System.StringComparison.Ordinal) Then
+                    validationError = $"Invalid Word authoring guidance in '{System.IO.Path.GetFileName(guidancePath)}' at line {i + 1}. Use one concise '- ...' rule per line."
+                    Return False
+                End If
+
+                Dim rule As String = NormalizeCell(trimmed.Substring(1).Trim())
+                If System.String.IsNullOrWhiteSpace(rule) OrElse rule.Length > 768 Then
+                    validationError = $"Invalid Word authoring guidance rule in '{System.IO.Path.GetFileName(guidancePath)}' at line {i + 1}."
+                    Return False
+                End If
+                If seen.Add(rule) Then parsed.AuthoringGuidance.Add(rule)
+            Next
+
+            If parsed.AuthoringGuidance.Count = 0 Then
+                validationError = $"The '## Word authoring guidance' section in '{System.IO.Path.GetFileName(guidancePath)}' contains no rules."
+                Return False
+            End If
             Return True
         End Function
 
@@ -1832,7 +1897,7 @@ Namespace Agents
                 If semantic = "" AndAlso styleName = "" Then Continue For
 
                 If semantic = "" OrElse Not BodyStyleSemanticRegex.IsMatch(semantic) Then
-                    validationError = $"Invalid Word body-style semantic '{NormalizeCell(cells(semanticColumn))}' in '{System.IO.Path.GetFileName(guidancePath)}'. Use paragraph, heading1..heading6, bullet1..bullet9, or numbered1..numbered9."
+                    validationError = $"Invalid Word body-style semantic '{NormalizeCell(cells(semanticColumn))}' in '{System.IO.Path.GetFileName(guidancePath)}'. Use paragraph, heading1..heading6, bullet1..bullet9, numbered1..numbered9, or quote1..quote9."
                     Return False
                 End If
                 If System.String.IsNullOrWhiteSpace(styleName) OrElse styleName.Length > 128 Then
@@ -2072,7 +2137,7 @@ Namespace Agents
                     Dim contract As WordTemplateBindingContract = Nothing
                     Dim contractError As String = ""
                     If WordTemplateBindingContractParser.TryLoadForDesign(d, d.Word, templatePath, contract, contractError) Then
-                        If contract IsNot Nothing AndAlso (contract.HasSlots OrElse contract.HasBodyStyles OrElse contract.HasNativeStyles) Then
+                        If contract IsNot Nothing AndAlso (contract.HasSlots OrElse contract.HasBodyStyles OrElse contract.HasNativeStyles OrElse contract.HasAuthoringGuidance) Then
                             Dim summary As String = contract.BuildPromptSummary()
                             If summary <> "" Then wordContractNote = "; Word contract: " & summary
                         End If

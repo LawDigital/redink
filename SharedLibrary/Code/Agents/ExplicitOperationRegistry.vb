@@ -470,4 +470,173 @@ Namespace Agents
             If Not target.Any(Function(x As String) System.String.Equals(x, id, System.StringComparison.Ordinal)) Then target.Add(id)
         End Sub
     End Class
+
+    ''' <summary>
+    ''' Capability-driven orchestration contract for tools whose successful physical
+    ''' execution completes one explicitly identified logical operation.
+    '''
+    ''' The operation id is model/host orchestration metadata only. It is injected into
+    ''' the model-facing schema for tools carrying <see cref="CapabilityTag"/>, but is
+    ''' removed again before the underlying tool implementation is called. This keeps
+    ''' existing tool transports and implementations unchanged.
+    ''' </summary>
+    Public NotInheritable Class ExplicitOperationToolContract
+        Public Const CapabilityTag As System.String = "explicit_operation"
+
+        Private Const GuidanceMarker As System.String = "EXPLICIT OPERATION RULE:"
+
+        Private Sub New()
+        End Sub
+
+        Public Shared Function HasCapability(tool As SharedLibrary.ModelConfig) As Boolean
+            If tool Is Nothing Then Return False
+            Return HasCapabilityTag(tool.CapabilityTags, CapabilityTag)
+        End Function
+
+        Public Shared Function HasCapabilityTag(capabilityTags As System.String,
+                                                requiredTag As System.String) As Boolean
+            Dim wanted As System.String = If(requiredTag, "").Trim()
+            If wanted = "" OrElse System.String.IsNullOrWhiteSpace(capabilityTags) Then Return False
+
+            Dim normalized As System.String = capabilityTags.Replace(";", ",").Replace(" ", ",")
+            For Each rawTag As System.String In normalized.Split(New System.Char() {","c}, System.StringSplitOptions.RemoveEmptyEntries)
+                If System.String.Equals(rawTag.Trim(), wanted, System.StringComparison.OrdinalIgnoreCase) Then
+                    Return True
+                End If
+            Next
+
+            Return False
+        End Function
+
+        ''' <summary>
+        ''' Adds the orchestration-only operation_id to the model-facing canonical schema.
+        ''' Idempotent and intentionally driven only by CapabilityTags.
+        ''' </summary>
+        Public Shared Function ApplyToModelConfig(tool As SharedLibrary.ModelConfig) As SharedLibrary.ModelConfig
+            If tool Is Nothing OrElse Not HasCapability(tool) Then Return tool
+            If System.String.IsNullOrWhiteSpace(tool.ToolDefinition) Then Return tool
+
+            Try
+                Dim root As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(tool.ToolDefinition)
+                Dim parameters As Newtonsoft.Json.Linq.JObject = TryCast(root("parameters"), Newtonsoft.Json.Linq.JObject)
+                If parameters Is Nothing Then
+                    parameters = New Newtonsoft.Json.Linq.JObject()
+                    parameters("type") = "object"
+                    root("parameters") = parameters
+                End If
+
+                Dim properties As Newtonsoft.Json.Linq.JObject = TryCast(parameters("properties"), Newtonsoft.Json.Linq.JObject)
+                If properties Is Nothing Then
+                    properties = New Newtonsoft.Json.Linq.JObject()
+                    parameters("properties") = properties
+                End If
+
+                If properties("operation_id") Is Nothing Then
+                    properties("operation_id") =
+                        New Newtonsoft.Json.Linq.JObject(
+                            New Newtonsoft.Json.Linq.JProperty("type", "string"),
+                            New Newtonsoft.Json.Linq.JProperty(
+                                "description",
+                                "Opaque stable id for this logical operation. Reuse exactly for retries or reformulations of the same operation; use a new id only for a genuinely distinct operation."))
+                End If
+
+                Dim required As Newtonsoft.Json.Linq.JArray = TryCast(parameters("required"), Newtonsoft.Json.Linq.JArray)
+                If required Is Nothing Then
+                    required = New Newtonsoft.Json.Linq.JArray()
+                    parameters("required") = required
+                End If
+
+                Dim hasRequiredOperationId As Boolean =
+                    required.Any(
+                        Function(token As Newtonsoft.Json.Linq.JToken)
+                            Return System.String.Equals(
+                                If(token Is Nothing, "", token.ToString()),
+                                "operation_id",
+                                System.StringComparison.OrdinalIgnoreCase)
+                        End Function)
+
+                If Not hasRequiredOperationId Then
+                    required.Add("operation_id")
+                End If
+
+                tool.ToolDefinition = root.ToString(Newtonsoft.Json.Formatting.None)
+
+                Dim guidance As System.String =
+                    " " & GuidanceMarker &
+                    " operation_id is required and identifies one logical operation, not a tool type or file type. " &
+                    "Reuse the same operation_id for retries or reformulations of that same operation. " &
+                    "Use a new operation_id only for a genuinely distinct operation, even when it uses the same tool. " &
+                    "After that operation succeeds, do not call it again merely to recreate another version unless the user requested a distinct additional operation."
+
+                If System.String.IsNullOrWhiteSpace(tool.ToolInstructionsPrompt) Then
+                    tool.ToolInstructionsPrompt = If(tool.ToolName, "") & ":" & guidance
+                ElseIf tool.ToolInstructionsPrompt.IndexOf(GuidanceMarker, System.StringComparison.Ordinal) < 0 Then
+                    tool.ToolInstructionsPrompt &= guidance
+                End If
+            Catch ex As System.Exception
+                ' Schema augmentation must never make an otherwise valid tool unavailable.
+            End Try
+
+            Return tool
+        End Function
+
+        ''' <summary>
+        ''' Returns a copy of the arguments for physical execution. For participating
+        ''' tools, operation_id is intentionally stripped because it belongs to the
+        ''' orchestration layer and must not change existing tool transports/contracts.
+        ''' </summary>
+        Public Shared Function BuildExecutionArguments(
+            tool As SharedLibrary.ModelConfig,
+            arguments As System.Collections.Generic.IDictionary(Of System.String, Object)) As System.Collections.Generic.Dictionary(Of System.String, Object)
+
+            Dim result As New System.Collections.Generic.Dictionary(Of System.String, Object)(System.StringComparer.OrdinalIgnoreCase)
+
+            If arguments IsNot Nothing Then
+                For Each pair As System.Collections.Generic.KeyValuePair(Of System.String, Object) In arguments
+                    result(pair.Key) = pair.Value
+                Next
+            End If
+
+            If HasCapability(tool) Then
+                result.Remove("operation_id")
+            End If
+
+            Return result
+        End Function
+
+        Public Shared Function TryGetTopLevelOperationId(
+            arguments As System.Collections.Generic.IDictionary(Of System.String, Object),
+            ByRef operationId As System.String) As Boolean
+
+            operationId = ""
+            If arguments Is Nothing Then Return False
+
+            Dim raw As Object = Nothing
+            If Not arguments.TryGetValue("operation_id", raw) OrElse raw Is Nothing Then Return False
+
+            operationId = raw.ToString().Trim()
+            Return operationId <> ""
+        End Function
+
+        ''' <summary>
+        ''' Marks a capability-tagged top-level operation as succeeded after the host has
+        ''' received a successful non-zero-change tool result. Structured mutation tools
+        ''' that already use per-task applied semantics remain governed by ApplyToolResult.
+        ''' </summary>
+        Public Shared Sub MarkSucceededAfterSuccessfulExecution(
+            tool As SharedLibrary.ModelConfig,
+            arguments As System.Collections.Generic.IDictionary(Of System.String, Object),
+            responseText As System.String,
+            registry As ExplicitOperationRegistry)
+
+            If registry Is Nothing OrElse Not HasCapability(tool) Then Return
+            If ToolCallSequencing.IsZeroChangeOperationResult(responseText) Then Return
+
+            Dim operationId As System.String = ""
+            If TryGetTopLevelOperationId(arguments, operationId) Then
+                registry.MarkSucceeded(operationId)
+            End If
+        End Sub
+    End Class
+
 End Namespace

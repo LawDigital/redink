@@ -296,6 +296,70 @@ Partial Public Class ThisAddIn
         Return True
     End Function
 
+    Private Shared Function BuildAutoPilotWordOpenXmlNativeNumberingStyleMap(
+            archive As System.IO.Compression.ZipArchive,
+            ByRef nativeNumberingByStyleId As System.Collections.Generic.Dictionary(Of System.String, System.Boolean),
+            ByRef validationError As System.String) As System.Boolean
+
+        Dim resolved As New System.Collections.Generic.Dictionary(Of System.String, System.Boolean)(System.StringComparer.OrdinalIgnoreCase)
+        nativeNumberingByStyleId = resolved
+        validationError = System.String.Empty
+
+        Dim stylesXml As System.Xml.Linq.XDocument = LoadAutoPilotWordOpenXmlEntry(archive, "word/styles.xml")
+        If stylesXml Is Nothing OrElse stylesXml.Root Is Nothing Then Return True
+
+        Dim stylesById As New System.Collections.Generic.Dictionary(Of System.String, System.Xml.Linq.XElement)(System.StringComparer.OrdinalIgnoreCase)
+        For Each style As System.Xml.Linq.XElement In stylesXml.Descendants(AutoPilotWordMainNs + "style")
+            Dim typeAttribute As System.Xml.Linq.XAttribute = style.Attribute(AutoPilotWordMainNs + "type")
+            If typeAttribute Is Nothing OrElse Not System.String.Equals(typeAttribute.Value, "paragraph", System.StringComparison.OrdinalIgnoreCase) Then Continue For
+            Dim idAttribute As System.Xml.Linq.XAttribute = style.Attribute(AutoPilotWordMainNs + "styleId")
+            If idAttribute Is Nothing OrElse System.String.IsNullOrWhiteSpace(idAttribute.Value) Then Continue For
+            stylesById(idAttribute.Value) = style
+        Next
+
+        Dim resolving As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+        Dim resolveNativeNumbering As System.Func(Of System.String, System.Boolean) = Nothing
+        resolveNativeNumbering = Function(styleId As System.String) As System.Boolean
+                                     If System.String.IsNullOrWhiteSpace(styleId) Then Return False
+                                     If resolved.ContainsKey(styleId) Then Return resolved(styleId)
+                                     If resolving.Contains(styleId) Then Return False
+                                     resolving.Add(styleId)
+                                     Try
+                                         If Not stylesById.ContainsKey(styleId) Then
+                                             resolved(styleId) = False
+                                             Return False
+                                         End If
+
+                                         Dim style As System.Xml.Linq.XElement = stylesById(styleId)
+                                         Dim pPr As System.Xml.Linq.XElement = style.Element(AutoPilotWordMainNs + "pPr")
+                                         Dim numPr As System.Xml.Linq.XElement = If(pPr Is Nothing, Nothing, pPr.Element(AutoPilotWordMainNs + "numPr"))
+                                         If numPr IsNot Nothing Then
+                                             Dim numIdElement As System.Xml.Linq.XElement = numPr.Element(AutoPilotWordMainNs + "numId")
+                                             Dim numIdAttribute As System.Xml.Linq.XAttribute = If(numIdElement Is Nothing, Nothing, numIdElement.Attribute(AutoPilotWordMainNs + "val"))
+                                             If numIdAttribute IsNot Nothing Then
+                                                 Dim hasNative As System.Boolean = Not System.String.IsNullOrWhiteSpace(numIdAttribute.Value) AndAlso
+                                                                                  Not System.String.Equals(numIdAttribute.Value, "0", System.StringComparison.OrdinalIgnoreCase)
+                                                 resolved(styleId) = hasNative
+                                                 Return hasNative
+                                             End If
+                                         End If
+
+                                         Dim basedOn As System.Xml.Linq.XElement = style.Element(AutoPilotWordMainNs + "basedOn")
+                                         Dim basedOnAttribute As System.Xml.Linq.XAttribute = If(basedOn Is Nothing, Nothing, basedOn.Attribute(AutoPilotWordMainNs + "val"))
+                                         Dim inherited As System.Boolean = basedOnAttribute IsNot Nothing AndAlso resolveNativeNumbering(basedOnAttribute.Value)
+                                         resolved(styleId) = inherited
+                                         Return inherited
+                                     Finally
+                                         resolving.Remove(styleId)
+                                     End Try
+                                 End Function
+
+        For Each styleId As System.String In stylesById.Keys.ToList()
+            resolveNativeNumbering(styleId)
+        Next
+        Return True
+    End Function
+
     Private Shared Function GetAutoPilotWordRenderedParagraphLeftIndent(
             output As System.Collections.Generic.IList(Of System.Xml.Linq.XElement),
             indentByStyleId As System.Collections.Generic.IDictionary(Of System.String, System.Int32)) As System.Int32
@@ -419,7 +483,7 @@ Partial Public Class ThisAddIn
         Dim visibleText As System.String = HtmlAgilityPack.HtmlEntity.DeEntitize(node.InnerText)
         Dim match As System.Text.RegularExpressions.Match = System.Text.RegularExpressions.Regex.Match(
             visibleText,
-            "^\s*(?:(?:(?:[IVXLCDM]+|[A-Z]|\d+(?:\.\d+)*)[\.\)]|\([ivxlcdm]+\))\s+)+",
+            "^\s*(?:(?:(?:[IVXLCDM]+|[A-Z]|\d+(?:\.\d+)*)[\.\)]|\([ivxlcdm]+\)|\d+(?:\.\d+)+)\s+)+",
             System.Text.RegularExpressions.RegexOptions.CultureInvariant)
         If Not match.Success OrElse match.Length <= 0 Then Return
 
@@ -468,10 +532,20 @@ Partial Public Class ThisAddIn
             output As System.Collections.Generic.List(Of System.Xml.Linq.XElement),
             listNode As HtmlAgilityPack.HtmlNode,
             level As System.Int32,
-            semanticStyleIds As System.Collections.Generic.IDictionary(Of System.String, System.String))
+            semanticStyleIds As System.Collections.Generic.IDictionary(Of System.String, System.String),
+            nativeNumberingByStyleId As System.Collections.Generic.IDictionary(Of System.String, System.Boolean))
 
         If output Is Nothing OrElse listNode Is Nothing Then Return
         Dim prefix As System.String = If(System.String.Equals(listNode.Name, "ol", System.StringComparison.OrdinalIgnoreCase), "numbered", "bullet")
+        Dim semantic As System.String = prefix & level.ToString(System.Globalization.CultureInfo.InvariantCulture)
+        Dim usesNativeNumbering As System.Boolean = False
+        If System.String.Equals(prefix, "numbered", System.StringComparison.OrdinalIgnoreCase) AndAlso
+           semanticStyleIds IsNot Nothing AndAlso semanticStyleIds.ContainsKey(semantic) Then
+            Dim styleId As System.String = semanticStyleIds(semantic)
+            usesNativeNumbering = nativeNumberingByStyleId IsNot Nothing AndAlso
+                                  nativeNumberingByStyleId.ContainsKey(styleId) AndAlso
+                                  nativeNumberingByStyleId(styleId)
+        End If
 
         Dim itemOrdinal As System.Int32 = 0
         For Each item As HtmlAgilityPack.HtmlNode In listNode.ChildNodes.Where(
@@ -479,7 +553,7 @@ Partial Public Class ThisAddIn
 
             itemOrdinal += 1
             Dim inlineHost As HtmlAgilityPack.HtmlNode = HtmlAgilityPack.HtmlNode.CreateNode("<span></span>")
-            If System.String.Equals(prefix, "numbered", System.StringComparison.OrdinalIgnoreCase) Then
+            If System.String.Equals(prefix, "numbered", System.StringComparison.OrdinalIgnoreCase) AndAlso Not usesNativeNumbering Then
                 Dim numberPrefix As HtmlAgilityPack.HtmlNode = HtmlAgilityPack.HtmlNode.CreateNode("<span></span>")
                 numberPrefix.InnerHtml = HtmlAgilityPack.HtmlEntity.Entitize(itemOrdinal.ToString(System.Globalization.CultureInfo.InvariantCulture) & ". ")
                 inlineHost.AppendChild(numberPrefix)
@@ -501,14 +575,35 @@ Partial Public Class ThisAddIn
 
             output.Add(CreateAutoPilotWordOpenXmlParagraph(
                 inlineHost,
-                prefix & level.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                semantic,
                 semanticStyleIds,
                 False))
 
             For Each nested As HtmlAgilityPack.HtmlNode In item.ChildNodes.Where(
                 Function(candidate As HtmlAgilityPack.HtmlNode) candidate.NodeType = HtmlAgilityPack.HtmlNodeType.Element AndAlso (System.String.Equals(candidate.Name, "ul", System.StringComparison.OrdinalIgnoreCase) OrElse System.String.Equals(candidate.Name, "ol", System.StringComparison.OrdinalIgnoreCase)))
-                AppendAutoPilotWordOpenXmlList(output, nested, level + 1, semanticStyleIds)
+                AppendAutoPilotWordOpenXmlList(output, nested, level + 1, semanticStyleIds, nativeNumberingByStyleId)
             Next
+        Next
+    End Sub
+
+    Private Shared Sub AppendAutoPilotWordOpenXmlBlockQuote(
+            output As System.Collections.Generic.List(Of System.Xml.Linq.XElement),
+            blockQuoteNode As HtmlAgilityPack.HtmlNode,
+            level As System.Int32,
+            semanticStyleIds As System.Collections.Generic.IDictionary(Of System.String, System.String))
+
+        If output Is Nothing OrElse blockQuoteNode Is Nothing Then Return
+        Dim semantic As System.String = "quote" & level.ToString(System.Globalization.CultureInfo.InvariantCulture)
+        If semanticStyleIds Is Nothing OrElse Not semanticStyleIds.ContainsKey(semantic) Then semantic = "paragraph"
+
+        For Each child As HtmlAgilityPack.HtmlNode In blockQuoteNode.ChildNodes.Where(
+            Function(candidate As HtmlAgilityPack.HtmlNode) candidate.NodeType = HtmlAgilityPack.HtmlNodeType.Element)
+            If System.String.Equals(child.Name, "blockquote", System.StringComparison.OrdinalIgnoreCase) Then
+                AppendAutoPilotWordOpenXmlBlockQuote(output, child, level + 1, semanticStyleIds)
+            ElseIf System.String.Equals(child.Name, "p", System.StringComparison.OrdinalIgnoreCase) OrElse
+                   System.String.Equals(child.Name, "pre", System.StringComparison.OrdinalIgnoreCase) Then
+                output.Add(CreateAutoPilotWordOpenXmlParagraph(child, semantic, semanticStyleIds, False))
+            End If
         Next
     End Sub
 
@@ -595,6 +690,19 @@ Partial Public Class ThisAddIn
                     validationError = "The selected Word style policy does not permit Markdown " & semantic & ". Use only the list levels declared by the design."
                     Return False
                 End If
+            ElseIf name = "blockquote" AndAlso semanticStyleIds.Keys.Any(
+                Function(key As System.String) System.Text.RegularExpressions.Regex.IsMatch(If(key, System.String.Empty), "^quote[1-9]$", System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant)) Then
+                Dim depth As System.Int32 = 1
+                Dim ancestor As HtmlAgilityPack.HtmlNode = node.ParentNode
+                Do While ancestor IsNot Nothing
+                    If ancestor.NodeType = HtmlAgilityPack.HtmlNodeType.Element AndAlso System.String.Equals(ancestor.Name, "blockquote", System.StringComparison.OrdinalIgnoreCase) Then depth += 1
+                    ancestor = ancestor.ParentNode
+                Loop
+                Dim semantic As System.String = "quote" & depth.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                If Not semanticStyleIds.ContainsKey(semantic) Then
+                    validationError = "The selected Word style policy does not permit Markdown " & semantic & ". Use only the quote levels declared by the design."
+                    Return False
+                End If
             End If
         Next
         Return True
@@ -606,7 +714,8 @@ Partial Public Class ThisAddIn
             tableStyleId As System.String,
             headingNumberingMode As System.String,
             ByRef renderingError As System.String,
-            Optional styleLeftIndentById As System.Collections.Generic.IDictionary(Of System.String, System.Int32) = Nothing) As System.Collections.Generic.List(Of System.Xml.Linq.XElement)
+            Optional styleLeftIndentById As System.Collections.Generic.IDictionary(Of System.String, System.Int32) = Nothing,
+            Optional nativeNumberingByStyleId As System.Collections.Generic.IDictionary(Of System.String, System.Boolean) = Nothing) As System.Collections.Generic.List(Of System.Xml.Linq.XElement)
 
         renderingError = System.String.Empty
         Dim output As New System.Collections.Generic.List(Of System.Xml.Linq.XElement)()
@@ -631,14 +740,12 @@ Partial Public Class ThisAddIn
                     Dim isVisualMarker As System.Boolean = System.Text.RegularExpressions.Regex.IsMatch(visibleText, "^\[\[visual:[^\]]+\]\]$", System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant)
                     output.Add(CreateAutoPilotWordOpenXmlParagraph(node, "paragraph", semanticStyleIds, isVisualMarker))
                 ElseIf name = "ul" OrElse name = "ol" Then
-                    AppendAutoPilotWordOpenXmlList(output, node, 1, semanticStyleIds)
+                    AppendAutoPilotWordOpenXmlList(output, node, 1, semanticStyleIds, nativeNumberingByStyleId)
                 ElseIf name = "table" Then
                     Dim tableIndent As System.Int32 = GetAutoPilotWordRenderedParagraphLeftIndent(output, styleLeftIndentById)
                     output.Add(CreateAutoPilotWordOpenXmlTable(node, tableStyleId, tableIndent))
                 ElseIf name = "blockquote" Then
-                    For Each child As HtmlAgilityPack.HtmlNode In node.ChildNodes.Where(Function(candidate As HtmlAgilityPack.HtmlNode) candidate.NodeType = HtmlAgilityPack.HtmlNodeType.Element)
-                        output.Add(CreateAutoPilotWordOpenXmlParagraph(child, "paragraph", semanticStyleIds, False))
-                    Next
+                    AppendAutoPilotWordOpenXmlBlockQuote(output, node, 1, semanticStyleIds)
                 ElseIf name = "pre" Then
                     output.Add(CreateAutoPilotWordOpenXmlParagraph(node, "paragraph", semanticStyleIds, False))
                 End If
@@ -1007,6 +1114,13 @@ Partial Public Class ThisAddIn
                         Return False
                     End If
 
+                    Dim nativeNumberingByStyleId As System.Collections.Generic.Dictionary(Of System.String, System.Boolean) = Nothing
+                    Dim nativeNumberingMapError As System.String = System.String.Empty
+                    If Not BuildAutoPilotWordOpenXmlNativeNumberingStyleMap(archive, nativeNumberingByStyleId, nativeNumberingMapError) Then
+                        creationError = nativeNumberingMapError
+                        Return False
+                    End If
+
                     Dim semanticStyleIds As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.OrdinalIgnoreCase)
                     For Each definition As SharedLibrary.Agents.WordTemplateBodyStyleDefinition In contract.BodyStyles
                         If definition Is Nothing Then Continue For
@@ -1066,7 +1180,7 @@ Partial Public Class ThisAddIn
 
                         Dim renderingError As System.String = System.String.Empty
                         Dim rendered As System.Collections.Generic.List(Of System.Xml.Linq.XElement) = RenderAutoPilotWordMarkdownOpenXml(
-                            GetAutoPilotWordTemplateSlotValue(slot, templateFields, markdownContent), semanticStyleIds, tableStyleId, contract.HeadingNumberingMode, renderingError, styleLeftIndentById)
+                            GetAutoPilotWordTemplateSlotValue(slot, templateFields, markdownContent), semanticStyleIds, tableStyleId, contract.HeadingNumberingMode, renderingError, styleLeftIndentById, nativeNumberingByStyleId)
                         If rendered Is Nothing Then
                             creationError = renderingError
                             Return False

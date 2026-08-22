@@ -111,6 +111,7 @@ Namespace SharedLibrary
                 mc.ToolAPICall = GetConfigString(configDict, "ToolAPICall")
                 mc.ToolErrorHandling = GetConfigString(configDict, "ToolErrorHandling", "skip")
                 mc.ToolParameterDefaults = GetConfigString(configDict, "ToolParameterDefaults")
+                mc.CapabilityTags = GetConfigString(configDict, "CapabilityTags")
 
                 mc.ToolPriority = GetConfigInt(configDict, "ToolPriority", 100)
 

@@ -2750,7 +2750,8 @@ Partial Public Class ThisAddIn
     toolPriority As Integer,
     toolErrorHandling As String,
     toolInstructionsPrompt As String,
-    toolDefinition As Object) As ModelConfig
+    toolDefinition As Object,
+    Optional capabilityTags As String = Nothing) As ModelConfig
 
         Return New ModelConfig() With {
             .ToolOnly = True,
@@ -2760,7 +2761,8 @@ Partial Public Class ThisAddIn
             .ToolPriority = toolPriority,
             .ToolErrorHandling = toolErrorHandling,
             .ToolInstructionsPrompt = toolInstructionsPrompt,
-            .ToolDefinition = JsonConvert.SerializeObject(toolDefinition, Formatting.None)
+            .ToolDefinition = JsonConvert.SerializeObject(toolDefinition, Formatting.None),
+            .CapabilityTags = capabilityTags
         }
     End Function
 
@@ -2982,7 +2984,8 @@ Partial Public Class ThisAddIn
                     },
                     .required = New String() {"output_format"}
                 }
-            }))
+            },
+            "explicit_operation"))
     End Sub
 
 

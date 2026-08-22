@@ -414,6 +414,29 @@ Namespace SharedLibrary
                     Next
                 End If
 
+                Dim hasQuoteStyle As Boolean = paragraphStyleMap.Keys.Any(
+                    Function(key As String) System.Text.RegularExpressions.Regex.IsMatch(If(key, ""), "^quote[1-9]$", System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant))
+                If hasQuoteStyle Then
+                    Dim blockQuotes As HtmlAgilityPack.HtmlNodeCollection = htmlDoc.DocumentNode.SelectNodes("//blockquote")
+                    If blockQuotes IsNot Nothing Then
+                        For Each blockQuote As HtmlAgilityPack.HtmlNode In blockQuotes
+                            If HtmlNodeHasAncestor(blockQuote, "table") Then Continue For
+                            Dim level As Integer = 1
+                            Dim ancestor As HtmlAgilityPack.HtmlNode = blockQuote.ParentNode
+                            While ancestor IsNot Nothing
+                                If ancestor.Name.Equals("blockquote", System.StringComparison.OrdinalIgnoreCase) Then level += 1
+                                ancestor = ancestor.ParentNode
+                            End While
+
+                            Dim semantic As String = "quote" & level.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                            If Not paragraphStyleMap.ContainsKey(semantic) Then
+                                validationError = "The selected Word design does not permit block-quote nesting level " & level.ToString(System.Globalization.CultureInfo.InvariantCulture) & ". Allowed quote levels are: " & BuildMappedStyleLevelList(paragraphStyleMap, "quote") & "."
+                                Return False
+                            End If
+                        Next
+                    End If
+                End If
+
                 Return True
             Catch ex As System.Exception
                 validationError = "Markdown body-style validation failed: " & ex.Message

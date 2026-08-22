@@ -253,6 +253,7 @@ Partial Public Class ThisAddIn
         ' ── merge_pdfs ──
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_MergePdfs,
+            .CapabilityTags = "explicit_operation",
             .ModelDescription = "Merge PDFs (built-in)",
             .ToolInstructionsPrompt =
                 AP_Tool_MergePdfs & ": Merges multiple PDF attachments into a single PDF file.",
@@ -364,6 +365,7 @@ Partial Public Class ThisAddIn
         ' ── compare_word_documents ── 
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_CompareWordDocs,
+            .CapabilityTags = "explicit_operation",
             .ModelDescription = "Compare two Word documents (built-in)",
             .ToolInstructionsPrompt =
                 AP_Tool_CompareWordDocs & ": Compares exactly two Word document (.doc/.docx) attachments using Word's " &
@@ -426,6 +428,7 @@ Partial Public Class ThisAddIn
         ' ── create_pdf_from_text ──
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_CreatePdfFromText,
+            .CapabilityTags = "explicit_operation",
             .ModelDescription = "Create PDF from Text (built-in)",
             .ToolInstructionsPrompt =
                 AP_Tool_CreatePdfFromText & ": Creates a PDF document from provided text content. " &
@@ -573,6 +576,7 @@ Partial Public Class ThisAddIn
         ' ── split_pdf ──
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_SplitPdf,
+            .CapabilityTags = "explicit_operation",
             .ModelDescription = "Split PDF (built-in)",
             .ToolInstructionsPrompt =
                 AP_Tool_SplitPdf & ": Extracts a range of pages from a PDF attachment into a new PDF.",
@@ -590,6 +594,7 @@ Partial Public Class ThisAddIn
         ' ── add_pdf_watermark ──
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_AddPdfWatermark,
+            .CapabilityTags = "explicit_operation",
             .ModelDescription = "Add PDF Watermark (built-in)",
             .ToolInstructionsPrompt =
                 AP_Tool_AddPdfWatermark & ": Adds a diagonal text watermark to every page of a PDF attachment.",
@@ -606,6 +611,7 @@ Partial Public Class ThisAddIn
         ' ── word_to_pdf ──
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_WordToPdf,
+            .CapabilityTags = "explicit_operation",
             .ModelDescription = "Convert Word to PDF (built-in)",
             .ToolInstructionsPrompt =
                 AP_Tool_WordToPdf & ": Converts a Word document (.doc/.docx) attachment to PDF format using Word.",
@@ -649,6 +655,7 @@ Partial Public Class ThisAddIn
         ' ── pdf_to_word ──
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_PdfToWord,
+            .CapabilityTags = "explicit_operation",
             .ModelDescription = "Convert PDF to Word (built-in)",
             .ToolInstructionsPrompt =
                 AP_Tool_PdfToWord & ": Converts a PDF attachment to a Word document (.docx) using Word's built-in PDF import. " &
@@ -680,6 +687,7 @@ Partial Public Class ThisAddIn
         ' ── create_word_document ──
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_CreateWordDoc,
+            .CapabilityTags = "explicit_operation",
             .ModelDescription = "Create Executive Word Document (built-in)",
             .ToolInstructionsPrompt =
                 AP_Tool_CreateWordDoc & ": Creates a polished executive Word document (.docx) from Markdown. " &
@@ -759,6 +767,7 @@ Partial Public Class ThisAddIn
         ' ── create_excel_spreadsheet ──
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_CreateExcel,
+            .CapabilityTags = "explicit_operation",
             .ModelDescription = "Create Professional Excel Workbook (built-in)",
             .ToolInstructionsPrompt =
                 AP_Tool_CreateExcel & ": Creates a product-quality Excel workbook (.xlsx/.xlsm). Use this for tables, trackers, budgets, models, dashboards, analyses, schedules, and structured datasets. " &
@@ -825,6 +834,7 @@ Partial Public Class ThisAddIn
         ' ── create_powerpoint ──
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_CreatePowerPoint,
+            .CapabilityTags = "explicit_operation",
             .ModelDescription = "Create Executive PowerPoint (built-in)",
             .ToolInstructionsPrompt =
                 AP_Tool_CreatePowerPoint & ": Creates a polished executive PowerPoint deck. Keep one clear message per slide, use concise action-oriented titles, and keep narrative content short enough for presentation-sized typography. " &
@@ -871,6 +881,7 @@ Partial Public Class ThisAddIn
         ' ── create_code_file ──
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_CreateCodeFile,
+            .CapabilityTags = "explicit_operation",
             .ModelDescription = "Create Code/Script File (built-in)",
             .ToolInstructionsPrompt =
                 AP_Tool_CreateCodeFile & ": Creates a new code, script, or data file with the specified content. " &
@@ -970,6 +981,7 @@ Partial Public Class ThisAddIn
         ' ── redact_pdf ──
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_RedactPdf,
+            .CapabilityTags = "explicit_operation",
             .ModelDescription = "Redact PDF Document (built-in)",
             .ToolInstructionsPrompt =
                 AP_Tool_RedactPdf & ": Redacts a PDF document by identifying text that matches the given instruction " &
@@ -1012,6 +1024,7 @@ Partial Public Class ThisAddIn
         ' ── overlay_pdf ──
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_OverlayPdf,
+            .CapabilityTags = "explicit_operation",
             .ModelDescription = "Overlay text and images on PDF pages (built-in)",
             .ToolInstructionsPrompt =
                 AP_Tool_OverlayPdf & ": Places text labels and/or images at precise positions on PDF pages. " &
@@ -1071,6 +1084,7 @@ Partial Public Class ThisAddIn
 
             tools.Add(New ModelConfig() With {
                 .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_CreateAudioFile,
+                .CapabilityTags = "explicit_operation",
                 .ModelDescription = "Create Audio File — Podcast or Audiobook (built-in)",
                 .ToolInstructionsPrompt =
                 AP_Tool_CreateAudioFile & ": Generates an MP3 audio file from text content using text-to-speech. " &
@@ -1163,6 +1177,7 @@ Partial Public Class ThisAddIn
 
             tools.Add(New ModelConfig() With {
                 .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_GenerateImage,
+                .CapabilityTags = "explicit_operation",
                 .ModelDescription = "Generate Image (built-in)",
                 .ToolInstructionsPrompt =
                     AP_Tool_GenerateImage & ": Generates an image from a text description using an image generation model. " &

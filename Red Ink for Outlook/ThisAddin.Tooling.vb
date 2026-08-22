@@ -2429,7 +2429,17 @@ Partial Public Class ThisAddIn
                                     tc.ToolName,
                                     legacyCompatibilityRoots)
 
-                            toolResponse = Await ExecuteToolCall(tc, toolConfig, context, cancellationToken)
+                            Dim executionToolCall As ToolCall = tc
+                            If SharedLibrary.Agents.ExplicitOperationToolContract.HasCapability(toolConfig) Then
+                                executionToolCall = New ToolCall() With {
+                                    .CallId = tc.CallId,
+                                    .ToolName = tc.ToolName,
+                                    .Arguments = SharedLibrary.Agents.ExplicitOperationToolContract.BuildExecutionArguments(toolConfig, tc.Arguments),
+                                    .RawJson = tc.RawJson
+                                }
+                            End If
+
+                            toolResponse = Await ExecuteToolCall(executionToolCall, toolConfig, context, cancellationToken)
 
                             If toolResponse IsNot Nothing AndAlso
                                toolResponse.Success AndAlso
@@ -2456,6 +2466,11 @@ Partial Public Class ThisAddIn
                                             tc.Arguments,
                                             toolResponse.Response,
                                             ToolExecutionContext.ZeroChangeOperationAbortThreshold)
+                                        SharedLibrary.Agents.ExplicitOperationToolContract.MarkSucceededAfterSuccessfulExecution(
+                                            toolConfig,
+                                            tc.Arguments,
+                                            toolResponse.Response,
+                                            context.SequencingState.OperationRegistry)
                                     End If
 
                                     toolResponse.Success = False
@@ -2583,6 +2598,11 @@ Partial Public Class ThisAddIn
                                         tc.Arguments,
                                         toolResponse.Response,
                                         ToolExecutionContext.ZeroChangeOperationAbortThreshold)
+                                    SharedLibrary.Agents.ExplicitOperationToolContract.MarkSucceededAfterSuccessfulExecution(
+                                        toolConfig,
+                                        tc.Arguments,
+                                        toolResponse.Response,
+                                        context.SequencingState.OperationRegistry)
                                 End If
 
                                 ' Transport success is not logical operation success. Zero-change mutation
@@ -4317,6 +4337,8 @@ Partial Public Class ThisAddIn
                    normalizedToolName &
                    "' was not exposed with its full schema at the start of the previous assistant turn. " &
                    "It has now been loaded and is exposed in THIS turn. " &
+                   "Reconstruct the call from the full schema exposed in THIS turn; do not replay the previous argument object unchanged. " &
+                   "Supply every parameter marked required by the current schema. " &
                    "If you still need that tool, call '" & normalizedToolName & "' now through the native tool-calling mechanism. " &
                    "Do NOT call tool_loader for this tool again. " &
                    "Do NOT postpone this tool call to a later turn. " &
