@@ -18,7 +18,8 @@
 '   - Validates required slots, supported structural levels, referenced styles and final
 '     package content before success; unsupported structure fails rather than degrading.
 '   - Footnote placeholders are converted after document creation into native Word footnote
-'     references/parts; visual placeholders remain stable anchors for OpenXmlVisuals.
+'     references/parts; cross-reference markers become native bookmarks/REF fields; visual
+'     placeholders remain stable anchors for OpenXmlVisuals.
 ' =============================================================================
 
 Option Explicit On
@@ -709,6 +710,22 @@ Partial Public Class ThisAddIn
         Return True
     End Function
 
+    Private Shared Function NormalizeAutoPilotWordCrossReferenceAnchorBlocks(markdownContent As System.String) As System.String
+        Dim normalized As System.String = If(markdownContent, System.String.Empty).Replace(vbCrLf, vbLf).Replace(vbCr, vbLf)
+        If normalized.IndexOf("[[anchor:", System.StringComparison.OrdinalIgnoreCase) < 0 Then Return normalized
+
+        ' [[anchor:ID]] is a structural renderer marker, not visible prose. Markdig treats a
+        ' single newline before ordinary prose as a soft line break (rendered as <br> in our
+        ' pipeline), which would merge the marker into the target Word paragraph. Force only
+        ' these marker lines to end their Markdown block so headings and ordinary paragraphs
+        ' produce the same deterministic marker-paragraph shape for the OOXML post-processor.
+        Return System.Text.RegularExpressions.Regex.Replace(
+            normalized,
+            "(?m)^([ \t]*\[\[anchor:[A-Za-z0-9_.-]{1,64}\]\][ \t]*)\n(?![ \t]*\n)",
+            "$1" & vbLf & vbLf,
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+    End Function
+
     Private Shared Function RenderAutoPilotWordMarkdownOpenXml(
             markdownContent As System.String,
             semanticStyleIds As System.Collections.Generic.IDictionary(Of System.String, System.String),
@@ -723,7 +740,8 @@ Partial Public Class ThisAddIn
 
         Try
             Dim pipeline As Markdig.MarkdownPipeline = SharedLibrary.SharedLibrary.SharedMethods.CreateMarkdownHtmlPipeline(useSoftlineBreakAsHardlineBreak:=True)
-            Dim html As System.String = Markdig.Markdown.ToHtml(SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(If(markdownContent, System.String.Empty)), pipeline)
+            Dim markdownForRendering As System.String = NormalizeAutoPilotWordCrossReferenceAnchorBlocks(markdownContent)
+            Dim html As System.String = Markdig.Markdown.ToHtml(SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(markdownForRendering), pipeline)
             Dim htmlDoc As New HtmlAgilityPack.HtmlDocument()
             htmlDoc.LoadHtml(html)
             SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdigHtmlBlockBoundaryWhitespace(htmlDoc)
@@ -1161,15 +1179,405 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
+    Private Shared Function BuildAutoPilotWordCrossReferenceBookmarkName(
+            anchorId As System.String,
+            usedNames As System.Collections.Generic.HashSet(Of System.String)) As System.String
+
+        Dim normalized As System.String = System.Text.RegularExpressions.Regex.Replace(
+            If(anchorId, System.String.Empty),
+            "[^A-Za-z0-9_]",
+            "_",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+        If System.String.IsNullOrWhiteSpace(normalized) Then normalized = "anchor"
+
+        Dim baseName As System.String = "_RI_" & normalized
+        If baseName.Length > 40 Then baseName = baseName.Substring(0, 40)
+        Dim candidate As System.String = baseName
+        Dim suffixIndex As System.Int32 = 2
+        While usedNames IsNot Nothing AndAlso usedNames.Contains(candidate)
+            Dim suffix As System.String = "_" & suffixIndex.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            Dim keep As System.Int32 = System.Math.Max(1, 40 - suffix.Length)
+            candidate = baseName.Substring(0, System.Math.Min(baseName.Length, keep)) & suffix
+            suffixIndex += 1
+        End While
+        If usedNames IsNot Nothing Then usedNames.Add(candidate)
+        Return candidate
+    End Function
+
+    Private Shared Function CreateAutoPilotWordCrossReferenceFieldRuns(
+            bookmarkName As System.String,
+            fieldSwitch As System.String,
+            cacheText As System.String,
+            sourceRunProperties As System.Xml.Linq.XElement) As System.Collections.Generic.List(Of System.Xml.Linq.XElement)
+
+        Dim result As New System.Collections.Generic.List(Of System.Xml.Linq.XElement)()
+        Dim instruction As System.String = " REF " & bookmarkName
+        If Not System.String.IsNullOrWhiteSpace(fieldSwitch) Then instruction &= " " & fieldSwitch.Trim()
+        instruction &= " "
+
+        Dim beginRun As New System.Xml.Linq.XElement(AutoPilotWordMainNs + "r")
+        If sourceRunProperties IsNot Nothing Then beginRun.Add(New System.Xml.Linq.XElement(sourceRunProperties))
+        beginRun.Add(New System.Xml.Linq.XElement(
+            AutoPilotWordMainNs + "fldChar",
+            New System.Xml.Linq.XAttribute(AutoPilotWordMainNs + "fldCharType", "begin")))
+        result.Add(beginRun)
+
+        Dim instructionRun As New System.Xml.Linq.XElement(AutoPilotWordMainNs + "r")
+        If sourceRunProperties IsNot Nothing Then instructionRun.Add(New System.Xml.Linq.XElement(sourceRunProperties))
+        instructionRun.Add(New System.Xml.Linq.XElement(
+            AutoPilotWordMainNs + "instrText",
+            New System.Xml.Linq.XAttribute(AutoPilotWordXmlNs + "space", "preserve"),
+            instruction))
+        result.Add(instructionRun)
+
+        Dim separatorRun As New System.Xml.Linq.XElement(AutoPilotWordMainNs + "r")
+        If sourceRunProperties IsNot Nothing Then separatorRun.Add(New System.Xml.Linq.XElement(sourceRunProperties))
+        separatorRun.Add(New System.Xml.Linq.XElement(
+            AutoPilotWordMainNs + "fldChar",
+            New System.Xml.Linq.XAttribute(AutoPilotWordMainNs + "fldCharType", "separate")))
+        result.Add(separatorRun)
+
+        Dim valueRun As New System.Xml.Linq.XElement(AutoPilotWordMainNs + "r")
+        If sourceRunProperties IsNot Nothing Then valueRun.Add(New System.Xml.Linq.XElement(sourceRunProperties))
+        Dim valueText As New System.Xml.Linq.XElement(AutoPilotWordMainNs + "t")
+        SetAutoPilotWordOpenXmlSimpleTextValue(valueText, If(cacheText, System.String.Empty))
+        valueRun.Add(valueText)
+        result.Add(valueRun)
+
+        Dim endRun As New System.Xml.Linq.XElement(AutoPilotWordMainNs + "r")
+        If sourceRunProperties IsNot Nothing Then endRun.Add(New System.Xml.Linq.XElement(sourceRunProperties))
+        endRun.Add(New System.Xml.Linq.XElement(
+            AutoPilotWordMainNs + "fldChar",
+            New System.Xml.Linq.XAttribute(AutoPilotWordMainNs + "fldCharType", "end")))
+        result.Add(endRun)
+
+        Return result
+    End Function
+
+    Private Shared Function ReplaceAutoPilotWordCrossReferencePlaceholderInParagraph(
+            paragraph As System.Xml.Linq.XElement,
+            placeholder As System.String,
+            bookmarkName As System.String,
+            mode As System.String) As System.Int32
+
+        If paragraph Is Nothing OrElse System.String.IsNullOrWhiteSpace(placeholder) OrElse System.String.IsNullOrWhiteSpace(bookmarkName) Then Return 0
+
+        Dim textNodes As System.Collections.Generic.List(Of System.Xml.Linq.XElement) =
+            paragraph.Descendants(AutoPilotWordMainNs + "t").ToList()
+        If textNodes.Count = 0 Then Return 0
+
+        Dim fullText As New System.Text.StringBuilder()
+        Dim starts As New System.Collections.Generic.List(Of System.Int32)()
+        For Each textNode As System.Xml.Linq.XElement In textNodes
+            starts.Add(fullText.Length)
+            fullText.Append(If(textNode.Value, System.String.Empty))
+        Next
+
+        Dim whole As System.String = fullText.ToString()
+        Dim matchStart As System.Int32 = whole.IndexOf(placeholder, System.StringComparison.Ordinal)
+        If matchStart < 0 Then Return 0
+        Dim matchEndExclusive As System.Int32 = matchStart + placeholder.Length
+
+        Dim firstIndex As System.Int32 = -1
+        Dim lastIndex As System.Int32 = -1
+        For index As System.Int32 = 0 To textNodes.Count - 1
+            Dim nodeStart As System.Int32 = starts(index)
+            Dim nodeEnd As System.Int32 = nodeStart + If(textNodes(index).Value, System.String.Empty).Length
+            If firstIndex < 0 AndAlso matchStart < nodeEnd AndAlso matchEndExclusive > nodeStart Then firstIndex = index
+            If matchEndExclusive > nodeStart AndAlso matchStart < nodeEnd Then lastIndex = index
+        Next
+        If firstIndex < 0 OrElse lastIndex < 0 Then Return 0
+
+        Dim firstNode As System.Xml.Linq.XElement = textNodes(firstIndex)
+        Dim lastNode As System.Xml.Linq.XElement = textNodes(lastIndex)
+        Dim firstStart As System.Int32 = starts(firstIndex)
+        Dim lastStart As System.Int32 = starts(lastIndex)
+        Dim firstValue As System.String = If(firstNode.Value, System.String.Empty)
+        Dim lastValue As System.String = If(lastNode.Value, System.String.Empty)
+        Dim prefixLength As System.Int32 = System.Math.Max(0, matchStart - firstStart)
+        Dim suffixOffset As System.Int32 = System.Math.Max(0, matchEndExclusive - lastStart)
+        Dim prefix As System.String = firstValue.Substring(0, System.Math.Min(prefixLength, firstValue.Length))
+        Dim suffix As System.String = If(suffixOffset <= lastValue.Length, lastValue.Substring(suffixOffset), System.String.Empty)
+
+        Dim firstRun As System.Xml.Linq.XElement = firstNode.Ancestors(AutoPilotWordMainNs + "r").FirstOrDefault()
+        If firstRun Is Nothing Then Return 0
+        Dim sourceRunProperties As System.Xml.Linq.XElement = firstRun.Element(AutoPilotWordMainNs + "rPr")
+
+        SetAutoPilotWordOpenXmlSimpleTextValue(firstNode, prefix)
+        If firstIndex <> lastIndex Then
+            For index As System.Int32 = firstIndex + 1 To lastIndex - 1
+                SetAutoPilotWordOpenXmlSimpleTextValue(textNodes(index), System.String.Empty)
+            Next
+            SetAutoPilotWordOpenXmlSimpleTextValue(lastNode, suffix)
+        End If
+
+        Const unresolvedCache As System.String = "⟦REF⟧"
+        Dim inserted As New System.Collections.Generic.List(Of System.Xml.Linq.XElement)()
+        Dim normalizedMode As System.String = If(mode, System.String.Empty).Trim().ToLowerInvariant()
+        If normalizedMode = "text" Then
+            inserted.AddRange(CreateAutoPilotWordCrossReferenceFieldRuns(bookmarkName, System.String.Empty, unresolvedCache, sourceRunProperties))
+        ElseIf normalizedMode = "full" Then
+            inserted.AddRange(CreateAutoPilotWordCrossReferenceFieldRuns(bookmarkName, "\w", unresolvedCache, sourceRunProperties))
+            Dim spacer As New System.Xml.Linq.XElement(AutoPilotWordMainNs + "r")
+            If sourceRunProperties IsNot Nothing Then spacer.Add(New System.Xml.Linq.XElement(sourceRunProperties))
+            Dim spacerText As New System.Xml.Linq.XElement(AutoPilotWordMainNs + "t")
+            SetAutoPilotWordOpenXmlSimpleTextValue(spacerText, " ")
+            spacer.Add(spacerText)
+            inserted.Add(spacer)
+            inserted.AddRange(CreateAutoPilotWordCrossReferenceFieldRuns(bookmarkName, System.String.Empty, unresolvedCache, sourceRunProperties))
+        Else
+            ' Use Word's full-context paragraph number. For a single-level Randziffer this
+            ' is the same visible value as \n; for a multi-level heading it yields e.g. I.A.
+            inserted.AddRange(CreateAutoPilotWordCrossReferenceFieldRuns(bookmarkName, "\w", unresolvedCache, sourceRunProperties))
+        End If
+
+        Dim insertionAnchor As System.Xml.Linq.XElement = firstRun
+        For Each element As System.Xml.Linq.XElement In inserted
+            insertionAnchor.AddAfterSelf(element)
+            insertionAnchor = element
+        Next
+
+        If firstIndex = lastIndex AndAlso Not System.String.IsNullOrEmpty(suffix) Then
+            Dim suffixRun As New System.Xml.Linq.XElement(AutoPilotWordMainNs + "r")
+            If sourceRunProperties IsNot Nothing Then suffixRun.Add(New System.Xml.Linq.XElement(sourceRunProperties))
+            Dim suffixText As New System.Xml.Linq.XElement(AutoPilotWordMainNs + "t")
+            SetAutoPilotWordOpenXmlSimpleTextValue(suffixText, suffix)
+            suffixRun.Add(suffixText)
+            insertionAnchor.AddAfterSelf(suffixRun)
+        End If
+
+        Return 1
+    End Function
+
+    Private Shared Function NormalizeAutoPilotWordOpenXmlFieldUpdateStateOnDisk(
+            outputPath As System.String,
+            ByRef normalizationError As System.String) As System.Boolean
+
+        normalizationError = System.String.Empty
+        Try
+            Using packageStream As New System.IO.FileStream(outputPath, System.IO.FileMode.Open, System.IO.FileAccess.ReadWrite, System.IO.FileShare.None)
+                Using archive As New System.IO.Compression.ZipArchive(packageStream, System.IO.Compression.ZipArchiveMode.Update, leaveOpen:=False)
+                    Dim storyXml As New System.Collections.Generic.Dictionary(Of System.String, System.Xml.Linq.XDocument)(System.StringComparer.OrdinalIgnoreCase)
+                    For Each entryName As System.String In GetAutoPilotWordOpenXmlStoryEntryNames(archive)
+                        Dim xml As System.Xml.Linq.XDocument = LoadAutoPilotWordOpenXmlEntry(archive, entryName)
+                        If xml IsNot Nothing Then storyXml(entryName) = xml
+                    Next
+                    NormalizeAutoPilotWordOpenXmlFieldUpdateState(archive, storyXml)
+                    For Each pair As System.Collections.Generic.KeyValuePair(Of System.String, System.Xml.Linq.XDocument) In storyXml
+                        SaveAutoPilotWordOpenXmlEntry(archive, pair.Key, pair.Value)
+                    Next
+                End Using
+            End Using
+            Return True
+        Catch ex As System.Exception
+            normalizationError = "Could not normalize Word field-update state: " & ex.Message
+            Return False
+        End Try
+    End Function
+
+    Private Shared Function InsertAutoPilotWordCrossReferencesOpenXml(
+            outputPath As System.String,
+            ByRef insertedAnchorCount As System.Int32,
+            ByRef insertedReferenceCount As System.Int32,
+            ByRef insertionError As System.String) As System.Boolean
+
+        insertedAnchorCount = 0
+        insertedReferenceCount = 0
+        insertionError = System.String.Empty
+        If System.String.IsNullOrWhiteSpace(outputPath) OrElse Not System.IO.File.Exists(outputPath) Then
+            insertionError = "Cannot insert Word cross-references because the generated DOCX was not found."
+            Return False
+        End If
+
+        Try
+            Using packageStream As New System.IO.FileStream(outputPath, System.IO.FileMode.Open, System.IO.FileAccess.ReadWrite, System.IO.FileShare.None)
+                Using archive As New System.IO.Compression.ZipArchive(packageStream, System.IO.Compression.ZipArchiveMode.Update, leaveOpen:=False)
+                    Dim documentXml As System.Xml.Linq.XDocument = LoadAutoPilotWordOpenXmlEntry(archive, "word/document.xml")
+                    If documentXml Is Nothing OrElse documentXml.Root Is Nothing Then
+                        insertionError = "Cannot insert Word cross-references because word/document.xml is missing."
+                        Return False
+                    End If
+
+                    Dim paragraphs As System.Collections.Generic.List(Of System.Xml.Linq.XElement) = documentXml.Descendants(AutoPilotWordMainNs + "p").ToList()
+                    Dim anchorRegex As New System.Text.RegularExpressions.Regex(
+                        "^\s*\[\[anchor:([A-Za-z0-9_.-]{1,64})\]\]\s*$",
+                        System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+                    Dim referenceRegex As New System.Text.RegularExpressions.Regex(
+                        "\[\[ref:([A-Za-z0-9_.-]{1,64}):(number|text|full)\]\]",
+                        System.Text.RegularExpressions.RegexOptions.CultureInvariant Or System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+
+                    Dim maxBookmarkId As System.Int32 = 0
+                    Dim usedBookmarkNames As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+                    For Each bookmarkStart As System.Xml.Linq.XElement In documentXml.Descendants(AutoPilotWordMainNs + "bookmarkStart")
+                        Dim idAttribute As System.Xml.Linq.XAttribute = bookmarkStart.Attribute(AutoPilotWordMainNs + "id")
+                        Dim parsedId As System.Int32
+                        If idAttribute IsNot Nothing AndAlso System.Int32.TryParse(idAttribute.Value, parsedId) Then maxBookmarkId = System.Math.Max(maxBookmarkId, parsedId)
+                        Dim nameAttribute As System.Xml.Linq.XAttribute = bookmarkStart.Attribute(AutoPilotWordMainNs + "name")
+                        If nameAttribute IsNot Nothing AndAlso Not System.String.IsNullOrWhiteSpace(nameAttribute.Value) Then usedBookmarkNames.Add(nameAttribute.Value)
+                    Next
+
+                    Dim bookmarksByAnchor As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.Ordinal)
+                    Dim anchorParagraphs As New System.Collections.Generic.List(Of System.Xml.Linq.XElement)()
+                    For paragraphIndex As System.Int32 = 0 To paragraphs.Count - 1
+                        Dim markerParagraph As System.Xml.Linq.XElement = paragraphs(paragraphIndex)
+                        Dim markerMatch As System.Text.RegularExpressions.Match = anchorRegex.Match(GetAutoPilotWordOpenXmlParagraphText(markerParagraph))
+                        If Not markerMatch.Success Then Continue For
+
+                        Dim anchorId As System.String = markerMatch.Groups(1).Value
+                        If bookmarksByAnchor.ContainsKey(anchorId) Then
+                            insertionError = "Duplicate Word cross-reference anchor '" & anchorId & "' was found after rendering."
+                            Return False
+                        End If
+
+                        Dim targetParagraph As System.Xml.Linq.XElement = Nothing
+                        For targetIndex As System.Int32 = paragraphIndex + 1 To paragraphs.Count - 1
+                            Dim candidate As System.Xml.Linq.XElement = paragraphs(targetIndex)
+                            Dim candidateText As System.String = GetAutoPilotWordOpenXmlParagraphText(candidate)
+                            If anchorRegex.IsMatch(candidateText) Then Continue For
+                            If System.String.IsNullOrWhiteSpace(candidateText) Then Continue For
+                            targetParagraph = candidate
+                            Exit For
+                        Next
+                        If targetParagraph Is Nothing Then
+                            insertionError = "Word cross-reference anchor '" & anchorId & "' has no following target paragraph or heading."
+                            Return False
+                        End If
+
+                        maxBookmarkId += 1
+                        Dim bookmarkName As System.String = BuildAutoPilotWordCrossReferenceBookmarkName(anchorId, usedBookmarkNames)
+                        Dim bookmarkStart As New System.Xml.Linq.XElement(
+                            AutoPilotWordMainNs + "bookmarkStart",
+                            New System.Xml.Linq.XAttribute(AutoPilotWordMainNs + "id", maxBookmarkId.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                            New System.Xml.Linq.XAttribute(AutoPilotWordMainNs + "name", bookmarkName))
+                        Dim bookmarkEnd As New System.Xml.Linq.XElement(
+                            AutoPilotWordMainNs + "bookmarkEnd",
+                            New System.Xml.Linq.XAttribute(AutoPilotWordMainNs + "id", maxBookmarkId.ToString(System.Globalization.CultureInfo.InvariantCulture)))
+
+                        Dim targetContent As System.Collections.Generic.List(Of System.Xml.Linq.XElement) = targetParagraph.Elements().Where(
+                            Function(element As System.Xml.Linq.XElement) element.Name <> AutoPilotWordMainNs + "pPr").ToList()
+                        If targetContent.Count > 0 Then
+                            targetContent(0).AddBeforeSelf(bookmarkStart)
+                            targetContent(targetContent.Count - 1).AddAfterSelf(bookmarkEnd)
+                        Else
+                            targetParagraph.Add(bookmarkStart)
+                            targetParagraph.Add(bookmarkEnd)
+                        End If
+
+                        bookmarksByAnchor(anchorId) = bookmarkName
+                        anchorParagraphs.Add(markerParagraph)
+                        insertedAnchorCount += 1
+                    Next
+
+                    For Each markerParagraph As System.Xml.Linq.XElement In anchorParagraphs
+                        markerParagraph.Remove()
+                    Next
+
+                    For Each paragraph As System.Xml.Linq.XElement In documentXml.Descendants(AutoPilotWordMainNs + "p").ToList()
+                        Do
+                            Dim paragraphText As System.String = GetAutoPilotWordOpenXmlParagraphText(paragraph)
+                            Dim referenceMatch As System.Text.RegularExpressions.Match = referenceRegex.Match(paragraphText)
+                            If Not referenceMatch.Success Then Exit Do
+
+                            Dim anchorId As System.String = referenceMatch.Groups(1).Value
+                            Dim mode As System.String = referenceMatch.Groups(2).Value
+                            Dim bookmarkName As System.String = Nothing
+                            If Not bookmarksByAnchor.TryGetValue(anchorId, bookmarkName) Then
+                                insertionError = "Word cross-reference [[ref:" & anchorId & ":" & mode & "]] has no matching [[anchor:" & anchorId & "]] target."
+                                Return False
+                            End If
+
+                            Dim replaced As System.Int32 = ReplaceAutoPilotWordCrossReferencePlaceholderInParagraph(
+                                paragraph,
+                                referenceMatch.Value,
+                                bookmarkName,
+                                mode)
+                            If replaced <> 1 Then
+                                insertionError = "Word cross-reference marker '" & referenceMatch.Value & "' could not be replaced deterministically."
+                                Return False
+                            End If
+                            insertedReferenceCount += 1
+                        Loop
+                    Next
+
+                    Dim unresolvedText As System.String = System.String.Join(
+                        System.Environment.NewLine,
+                        documentXml.Descendants(AutoPilotWordMainNs + "p").Select(
+                            Function(paragraph As System.Xml.Linq.XElement) GetAutoPilotWordOpenXmlParagraphText(paragraph)))
+                    If unresolvedText.IndexOf("[[anchor:", System.StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+                       unresolvedText.IndexOf("[[ref:", System.StringComparison.OrdinalIgnoreCase) >= 0 Then
+                        insertionError = "The generated Word document still contains unresolved cross-reference markers."
+                        Return False
+                    End If
+
+                    Dim storyXml As New System.Collections.Generic.Dictionary(Of System.String, System.Xml.Linq.XDocument)(System.StringComparer.OrdinalIgnoreCase) From {
+                        {"word/document.xml", documentXml}
+                    }
+                    NormalizeAutoPilotWordOpenXmlFieldUpdateState(archive, storyXml)
+                    SaveAutoPilotWordOpenXmlEntry(archive, "word/document.xml", documentXml)
+                End Using
+            End Using
+
+            Return True
+        Catch ex As System.Exception
+            insertionError = "Native OOXML Word cross-reference insertion failed: " & ex.Message
+            Return False
+        End Try
+    End Function
+
+    Private Shared Function ValidateAutoPilotWordCrossReferenceRefreshOpenXml(
+            outputPath As System.String,
+            expectedReferenceCount As System.Int32,
+            ByRef validationError As System.String) As System.Boolean
+
+        validationError = System.String.Empty
+        If expectedReferenceCount <= 0 Then Return True
+        Try
+            Using packageStream As New System.IO.FileStream(outputPath, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read)
+                Using archive As New System.IO.Compression.ZipArchive(packageStream, System.IO.Compression.ZipArchiveMode.Read, leaveOpen:=False)
+                    Dim documentXml As System.Xml.Linq.XDocument = LoadAutoPilotWordOpenXmlEntry(archive, "word/document.xml")
+                    If documentXml Is Nothing OrElse documentXml.Root Is Nothing Then
+                        validationError = "Word cross-reference validation failed because word/document.xml is missing."
+                        Return False
+                    End If
+
+                    Dim refInstructionCount As System.Int32 = documentXml.Descendants(AutoPilotWordMainNs + "instrText").Count(
+                        Function(instruction As System.Xml.Linq.XElement) instruction.Value.IndexOf(" REF _RI_", System.StringComparison.OrdinalIgnoreCase) >= 0)
+                    If refInstructionCount < expectedReferenceCount Then
+                        validationError = "Word cross-reference validation failed because fewer native REF fields were persisted than requested."
+                        Return False
+                    End If
+
+                    Dim visibleText As System.String = System.String.Join(
+                        System.Environment.NewLine,
+                        documentXml.Descendants(AutoPilotWordMainNs + "p").Select(
+                            Function(paragraph As System.Xml.Linq.XElement) GetAutoPilotWordOpenXmlParagraphText(paragraph)))
+                    If visibleText.IndexOf("⟦REF⟧", System.StringComparison.Ordinal) >= 0 Then
+                        validationError = "Word cross-reference field refresh did not replace every unresolved REF cache placeholder."
+                        Return False
+                    End If
+
+                    Dim settingsXml As System.Xml.Linq.XDocument = LoadAutoPilotWordOpenXmlEntry(archive, "word/settings.xml")
+                    If settingsXml IsNot Nothing AndAlso settingsXml.Root IsNot Nothing AndAlso settingsXml.Root.Elements(AutoPilotWordMainNs + "updateFields").Any() Then
+                        validationError = "The generated Word package requests automatic field updates on open after cross-reference refresh."
+                        Return False
+                    End If
+                End Using
+            End Using
+            Return True
+        Catch ex As System.Exception
+            validationError = "Word cross-reference refresh validation failed: " & ex.Message
+            Return False
+        End Try
+    End Function
+
     Private Shared Sub NormalizeAutoPilotWordOpenXmlFieldUpdateState(
             archive As System.IO.Compression.ZipArchive,
             storyXml As System.Collections.Generic.IDictionary(Of System.String, System.Xml.Linq.XDocument))
 
-        ' OOXML-only creation must never force Word to update fields on open.
-        ' Forcing updateFields/dirty causes Word to display link/field update prompts and can
-        ' make the document appear blank behind a modal prompt. Preserve the cached field
-        ' result already stored in the template and leave any later refresh to an explicit
-        ' Word operation requested by the caller.
+        ' Generated files must never force Word to update fields on open. Forcing
+        ' updateFields/dirty causes link/field update prompts and can leave the document
+        ' blocked behind a modal dialog. Preserve cached results; native cross-references
+        ' use one bounded post-create Word refresh and are normalized again afterwards.
         If storyXml IsNot Nothing Then
             For Each pair As System.Collections.Generic.KeyValuePair(Of System.String, System.Xml.Linq.XDocument) In storyXml
                 If pair.Value Is Nothing Then Continue For
@@ -1632,7 +2040,7 @@ Partial Public Class ThisAddIn
 
                     bindingSummary = carrierSummary & " Bound " & boundCount.ToString(System.Globalization.CultureInfo.InvariantCulture) &
                                      " template placeholder occurrence(s) using " & System.IO.Path.GetFileName(contract.GuidancePath) &
-                                     " with the OOXML-only structured renderer; Word/COM was not started."
+                                     " with the OOXML structured renderer."
                 End Using
             End Using
 

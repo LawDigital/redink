@@ -8475,6 +8475,58 @@ Partial Public Class ThisAddIn
         Return True
     End Function
 
+    Private Shared Function ValidateAutoPilotWordCrossReferenceContract(
+            markdownContent As System.String,
+            ByRef referenceCount As System.Int32,
+            ByRef validationError As System.String) As System.Boolean
+
+        referenceCount = 0
+        validationError = System.String.Empty
+        Dim content As System.String = If(markdownContent, System.String.Empty).Replace(vbCrLf, vbLf).Replace(vbCr, vbLf)
+        Dim anchorRegex As New System.Text.RegularExpressions.Regex(
+            "(?m)^[ \t]*\[\[anchor:([A-Za-z0-9_.-]{1,64})\]\][ \t]*$",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+        Dim anyAnchorRegex As New System.Text.RegularExpressions.Regex(
+            "\[\[anchor:([A-Za-z0-9_.-]{1,64})\]\]",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+        Dim referenceRegex As New System.Text.RegularExpressions.Regex(
+            "\[\[ref:([A-Za-z0-9_.-]{1,64}):(number|text|full)\]\]",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant Or System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+
+        Dim anchorMatches As System.Text.RegularExpressions.MatchCollection = anchorRegex.Matches(content)
+        Dim allAnchorMatches As System.Text.RegularExpressions.MatchCollection = anyAnchorRegex.Matches(content)
+        If allAnchorMatches.Count <> anchorMatches.Count Then
+            validationError = "Every [[anchor:ID]] marker must appear on its own Markdown line immediately before the target paragraph or heading."
+            Return False
+        End If
+
+        Dim anchors As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
+        For Each anchorMatch As System.Text.RegularExpressions.Match In anchorMatches
+            Dim anchorId As System.String = anchorMatch.Groups(1).Value
+            If Not anchors.Add(anchorId) Then
+                validationError = "Duplicate create_word_document cross-reference anchor '" & anchorId & "' is not allowed."
+                Return False
+            End If
+        Next
+
+        Dim referenceMatches As System.Text.RegularExpressions.MatchCollection = referenceRegex.Matches(content)
+        referenceCount = referenceMatches.Count
+        For Each referenceMatch As System.Text.RegularExpressions.Match In referenceMatches
+            Dim anchorId As System.String = referenceMatch.Groups(1).Value
+            If Not anchors.Contains(anchorId) Then
+                validationError = "Cross-reference marker '" & referenceMatch.Value & "' requires a matching [[anchor:" & anchorId & "]] marker in markdown_content."
+                Return False
+            End If
+        Next
+
+        If content.IndexOf("[[ref:", System.StringComparison.OrdinalIgnoreCase) >= 0 AndAlso referenceMatches.Count = 0 Then
+            validationError = "Invalid Word cross-reference syntax. Use [[ref:ID:number]], [[ref:ID:text]], or [[ref:ID:full]]."
+            Return False
+        End If
+
+        Return True
+    End Function
+
     Private Shared Function ContainsLikelyWordPseudoGraphic(markdownContent As String) As Boolean
         If String.IsNullOrWhiteSpace(markdownContent) Then Return False
 
@@ -11353,6 +11405,92 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
+    Private Shared Function RefreshAutoPilotGeneratedWordFields(
+            outputPath As System.String,
+            ByRef updatedFieldCount As System.Int32,
+            ByRef refreshError As System.String) As System.Boolean
+
+        updatedFieldCount = 0
+        refreshError = System.String.Empty
+        If System.String.IsNullOrWhiteSpace(outputPath) OrElse Not System.IO.File.Exists(outputPath) Then
+            refreshError = "Cannot refresh Word fields because the generated DOCX was not found."
+            Return False
+        End If
+
+        Dim wordApp As Microsoft.Office.Interop.Word.Application = Nothing
+        Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
+        Try
+            ' Cross-reference creation is normally OOXML-only. When native REF fields are
+            ' present, use one isolated hidden Word instance at the very end so Word itself
+            ' resolves its native heading/list numbering and writes the field-result cache.
+            ' Never reuse the user's interactive Word instance and never persist updateFields.
+            wordApp = New Microsoft.Office.Interop.Word.Application()
+            wordApp.Visible = False
+            wordApp.ScreenUpdating = False
+            wordApp.DisplayAlerts = Microsoft.Office.Interop.Word.WdAlertLevel.wdAlertsNone
+            Try : wordApp.Options.UpdateLinksAtOpen = False : Catch ex As System.Exception : End Try
+
+            doc = wordApp.Documents.Open(
+                FileName:=outputPath,
+                ConfirmConversions:=False,
+                ReadOnly:=False,
+                AddToRecentFiles:=False,
+                Revert:=False,
+                Visible:=False,
+                OpenAndRepair:=False)
+
+            Try : doc.Repaginate() : Catch ex As System.Exception : End Try
+
+            ' Update every field story in this newly generated document in one bounded pass.
+            ' This deliberately avoids per-reference Interop calls; 1 or 300 REF fields incur
+            ' the same single open/update/save lifecycle. StoryTypes 1..17 cover main text,
+            ' notes/comments, text frames, headers/footers and separator stories.
+            For storyTypeValue As System.Int32 = 1 To 17
+                Dim currentStory As Microsoft.Office.Interop.Word.Range = Nothing
+                Try
+                    currentStory = doc.StoryRanges(CType(storyTypeValue, Microsoft.Office.Interop.Word.WdStoryType))
+                Catch ex As System.Exception
+                    currentStory = Nothing
+                End Try
+
+                Do While currentStory IsNot Nothing
+                    Dim fields As Microsoft.Office.Interop.Word.Fields = Nothing
+                    Dim nextStory As Microsoft.Office.Interop.Word.Range = Nothing
+                    Try
+                        fields = currentStory.Fields
+                        Dim count As System.Int32 = 0
+                        Try : count = fields.Count : Catch ex As System.Exception : End Try
+                        If count > 0 Then
+                            fields.Update()
+                            updatedFieldCount += count
+                        End If
+                        Try : nextStory = currentStory.NextStoryRange : Catch ex As System.Exception : nextStory = Nothing : End Try
+                    Finally
+                        If fields IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(fields) : Catch ex As System.Exception : End Try
+                        If currentStory IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(currentStory) : Catch ex As System.Exception : End Try
+                    End Try
+                    currentStory = nextStory
+                Loop
+            Next
+
+            doc.Save()
+            Return True
+        Catch ex As System.Exception
+            refreshError = "Word field refresh failed: " & ex.Message
+            Return False
+        Finally
+            If doc IsNot Nothing Then
+                Try : doc.Close(SaveChanges:=False) : Catch ex As System.Exception : End Try
+                Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(doc) : Catch ex As System.Exception : End Try
+            End If
+            If wordApp IsNot Nothing Then
+                Try : wordApp.ScreenUpdating = True : Catch ex As System.Exception : End Try
+                Try : wordApp.Quit(SaveChanges:=False) : Catch ex As System.Exception : End Try
+                Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(wordApp) : Catch ex As System.Exception : End Try
+            End If
+        End Try
+    End Function
+
     Private Async Function ExecuteCreateWordDocTool(
             toolCall As ToolCall, context As ToolExecutionContext, ct As CancellationToken) As System.Threading.Tasks.Task(Of ToolResponse)
 
@@ -11457,6 +11595,15 @@ Partial Public Class ThisAddIn
                 Return response
             End If
 
+            Dim requestedCrossReferenceCount As System.Int32 = 0
+            Dim crossReferenceContractError As System.String = System.String.Empty
+            If Not ValidateAutoPilotWordCrossReferenceContract(markdownContent, requestedCrossReferenceCount, crossReferenceContractError) Then
+                response.Success = False
+                response.ErrorMessage = crossReferenceContractError
+                response.Response = response.ErrorMessage
+                Return response
+            End If
+
             Dim visuals As Newtonsoft.Json.Linq.JArray = GetAutoPilotWordVisuals(toolCall.Arguments)
             Dim visualContractError As System.String = System.String.Empty
             If Not ValidateAutoPilotWordVisualContract(markdownContent, visuals, context, visualContractError) Then
@@ -11502,7 +11649,13 @@ Partial Public Class ThisAddIn
 
             Dim success As System.Boolean
             If wordTemplateContract IsNot Nothing AndAlso wordTemplateContract.HasSlots Then
-                If context IsNot Nothing Then context.Log("Structured Word template renderer selected: OOXML-only; Word/COM will not be started.")
+                If context IsNot Nothing Then
+                    If requestedCrossReferenceCount > 0 Then
+                        context.Log("Structured Word template renderer selected: OOXML-first; one final hidden Word field-refresh pass will run for native cross-references.")
+                    Else
+                        context.Log("Structured Word template renderer selected: OOXML-only; Word/COM will not be started.")
+                    End If
+                End If
                 success = TryCreateAutoPilotStructuredWordDocumentOpenXml(
                     design.TemplatePath,
                     outputPath,
@@ -11513,7 +11666,13 @@ Partial Public Class ThisAddIn
                     templateBindingSummary,
                     creationError)
             ElseIf design Is Nothing OrElse System.String.IsNullOrWhiteSpace(design.TemplatePath) Then
-                If context IsNot Nothing Then context.Log("Generic Word renderer selected: OOXML-only; Word/COM will not be started.")
+                If context IsNot Nothing Then
+                    If requestedCrossReferenceCount > 0 Then
+                        context.Log("Generic Word renderer selected: OOXML-first; one final hidden Word field-refresh pass will run for native cross-references.")
+                    Else
+                        context.Log("Generic Word renderer selected: OOXML-only; Word/COM will not be started.")
+                    End If
+                End If
                 success = TryCreateAutoPilotGenericWordDocumentOpenXml(
                     outputPath,
                     markdownContent,
@@ -11716,6 +11875,55 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
+            Dim insertedCrossReferenceAnchorCount As System.Int32 = 0
+            Dim insertedCrossReferenceCount As System.Int32 = 0
+            Dim refreshedFieldCount As System.Int32 = 0
+            Dim crossReferenceSyntaxPresent As System.Boolean =
+                requestedCrossReferenceCount > 0 OrElse
+                markdownContent.IndexOf("[[anchor:", System.StringComparison.OrdinalIgnoreCase) >= 0
+
+            If success AndAlso File.Exists(outputPath) AndAlso crossReferenceSyntaxPresent Then
+                Dim crossReferenceInsertionError As System.String = System.String.Empty
+                If Not InsertAutoPilotWordCrossReferencesOpenXml(
+                    outputPath,
+                    insertedCrossReferenceAnchorCount,
+                    insertedCrossReferenceCount,
+                    crossReferenceInsertionError) Then
+
+                    success = False
+                    creationError = crossReferenceInsertionError
+                ElseIf insertedCrossReferenceCount <> requestedCrossReferenceCount Then
+                    success = False
+                    creationError = "Native Word cross-reference insertion count mismatch: expected " &
+                                    requestedCrossReferenceCount.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                    ", inserted " & insertedCrossReferenceCount.ToString(System.Globalization.CultureInfo.InvariantCulture) & "."
+                End If
+            End If
+
+            If success AndAlso File.Exists(outputPath) AndAlso insertedCrossReferenceCount > 0 Then
+                ct.ThrowIfCancellationRequested()
+                If context IsNot Nothing Then context.Log("Native Word cross-references detected; running one final hidden Word field-refresh pass.")
+                Dim fieldRefreshError As System.String = System.String.Empty
+                Dim fieldRefreshSucceeded As System.Boolean = Await SwitchToUi(
+                    Function() RefreshAutoPilotGeneratedWordFields(outputPath, refreshedFieldCount, fieldRefreshError))
+                If Not fieldRefreshSucceeded Then
+                    success = False
+                    creationError = fieldRefreshError
+                Else
+                    Dim fieldStateError As System.String = System.String.Empty
+                    If Not NormalizeAutoPilotWordOpenXmlFieldUpdateStateOnDisk(outputPath, fieldStateError) Then
+                        success = False
+                        creationError = fieldStateError
+                    Else
+                        Dim crossReferenceValidationError As System.String = System.String.Empty
+                        If Not ValidateAutoPilotWordCrossReferenceRefreshOpenXml(outputPath, insertedCrossReferenceCount, crossReferenceValidationError) Then
+                            success = False
+                            creationError = crossReferenceValidationError
+                        End If
+                    End If
+                End If
+            End If
+
             If success AndAlso File.Exists(outputPath) Then
                 RegisterAutoPilotGeneratedOutputFile(outputPath)
 
@@ -11733,7 +11941,14 @@ Partial Public Class ThisAddIn
                         visualSummary &= " Visual warnings: " & String.Join(" | ", visualWarnings)
                     End If
                 End If
-                response.Response = $"Word document created: {fileName} ({New FileInfo(outputPath).Length / 1024:F0} KB). The file will be attached to the reply.{designSummary}{templateBindingSummary}{footnoteSummary}{visualSummary}"
+                Dim crossReferenceSummary As System.String = System.String.Empty
+                If insertedCrossReferenceCount > 0 Then
+                    crossReferenceSummary = " Inserted " & insertedCrossReferenceCount.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                            " native Word cross-reference(s) across " & insertedCrossReferenceAnchorCount.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                            " bookmark target(s), then refreshed " & refreshedFieldCount.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                            " field(s) in one final Word pass."
+                End If
+                response.Response = $"Word document created: {fileName} ({New FileInfo(outputPath).Length / 1024:F0} KB). The file will be attached to the reply.{designSummary}{templateBindingSummary}{footnoteSummary}{visualSummary}{crossReferenceSummary}"
                 ApDashboardLog($"✓ Word document created: {fileName}", "info")
             Else
                 response.Success = False
