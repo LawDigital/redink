@@ -272,6 +272,12 @@ Namespace Agents
             Public Property LastFailureUltimatelyFatal As Boolean
             Public Property RecoveryToolName As String
 
+            ' Tool-agnostic retry fidelity state. When a failed tool call carried a named
+            ' design/template constraint, a retry of that same tool may not silently drop or
+            ' replace it. The dispatcher uses the shared helper below in both Outlook and Word.
+            Public Property RetryInvariantArgumentsByTool As New System.Collections.Generic.Dictionary(Of String, System.Collections.Generic.Dictionary(Of String, String))(System.StringComparer.OrdinalIgnoreCase)
+            Public Property RetryInvariantPendingFailureTools As New System.Collections.Generic.HashSet(Of String)(System.StringComparer.OrdinalIgnoreCase)
+
             Public Property ActiveToolingSession As Boolean
             Public Property HasOpenToolWorkflow As Boolean
             Public Property LastStateFilePath As String
@@ -995,10 +1001,30 @@ Namespace Agents
                 LastFailureHandledByBlockedFinal = False
                 LastFailureUltimatelyFatal = False
                 RecoveryToolName = ""
+
+                Dim normalizedToolName As String = If(toolName, "").Trim()
+                If normalizedToolName <> "" AndAlso
+                   RetryInvariantArgumentsByTool IsNot Nothing AndAlso
+                   RetryInvariantArgumentsByTool.ContainsKey(normalizedToolName) Then
+
+                    If RetryInvariantPendingFailureTools Is Nothing Then
+                        RetryInvariantPendingFailureTools = New System.Collections.Generic.HashSet(Of String)(System.StringComparer.OrdinalIgnoreCase)
+                    End If
+                    RetryInvariantPendingFailureTools.Add(normalizedToolName)
+                End If
             End Sub
 
             Public Sub NoteRecoveryByLaterToolCall(toolName As String)
                 If Not HasUnresolvedToolFailure Then Return
+
+                Dim normalizedToolName As String = If(toolName, "").Trim()
+                If normalizedToolName <> "" AndAlso
+                   System.String.Equals(normalizedToolName, If(LastToolName, ""), System.StringComparison.OrdinalIgnoreCase) Then
+                    ' Issuing the same failed tool again is a retry, not a recovery. Keep the
+                    ' failure state until the retry has actually succeeded or a different path
+                    ' has recovered the workflow.
+                    Return
+                End If
 
                 HasUnresolvedToolFailure = False
                 LastFailureRecoveredByToolCall = True
@@ -1015,14 +1041,23 @@ Namespace Agents
                 LastFailureHandledByBlockedFinal = True
                 LastFailureUltimatelyFatal = False
                 RecoveryToolName = ""
+                If RetryInvariantPendingFailureTools IsNot Nothing Then RetryInvariantPendingFailureTools.Clear()
+                If RetryInvariantArgumentsByTool IsNot Nothing Then RetryInvariantArgumentsByTool.Clear()
             End Sub
 
             Public Sub NoteFailureFatal()
                 If Not HasUnresolvedToolFailure Then Return
                 LastFailureUltimatelyFatal = True
+                If RetryInvariantPendingFailureTools IsNot Nothing Then RetryInvariantPendingFailureTools.Clear()
+                If RetryInvariantArgumentsByTool IsNot Nothing Then RetryInvariantArgumentsByTool.Clear()
             End Sub
 
-            Public Sub NoteSuccessfulProgress()
+            Public Sub NoteSuccessfulProgress(Optional toolName As String = "")
+                Dim normalizedToolName As String = If(toolName, "").Trim()
+                If normalizedToolName <> "" AndAlso RetryInvariantPendingFailureTools IsNot Nothing Then
+                    RetryInvariantPendingFailureTools.Remove(normalizedToolName)
+                End If
+
                 HasUnresolvedToolFailure = False
                 LastToolName = ""
                 LastErrorCode = ""
@@ -1035,6 +1070,122 @@ Namespace Agents
                 RecoveryToolName = ""
             End Sub
         End Class
+
+        Private Shared ReadOnly RetryInvariantArgumentNames As String() = {"design_name", "template_attachment_name", "document_type", "document_language", "organization"}
+
+        ''' <summary>
+        ''' Preserves named artifact-fidelity constraints after a failed tool call until that same
+        ''' tool later succeeds. This logic is deliberately tool-agnostic and is consumed by both
+        ''' Outlook and Word dispatchers. A missing invariant is restored; an attempted replacement
+        ''' is rejected. Intervening recovery/helper tools do not silently release the constraint.
+        ''' </summary>
+        Public Shared Function EnforceRetryInvariantArguments(toolName As String,
+                                                               arguments As System.Collections.Generic.IDictionary(Of String, Object),
+                                                               runState As ToolingRunState,
+                                                               ByRef restoredSummary As String,
+                                                               ByRef validationError As String) As Boolean
+            restoredSummary = ""
+            validationError = ""
+            If runState Is Nothing OrElse arguments Is Nothing Then Return True
+
+            Dim normalizedToolName As String = If(toolName, "").Trim()
+            If normalizedToolName = "" Then Return True
+
+            If runState.RetryInvariantArgumentsByTool Is Nothing Then
+                runState.RetryInvariantArgumentsByTool =
+                    New System.Collections.Generic.Dictionary(Of String, System.Collections.Generic.Dictionary(Of String, String))(System.StringComparer.OrdinalIgnoreCase)
+            End If
+
+            Dim captured As System.Collections.Generic.Dictionary(Of String, String) = Nothing
+            runState.RetryInvariantArgumentsByTool.TryGetValue(normalizedToolName, captured)
+
+            Dim isRetryOfFailedTool As Boolean =
+                runState.HasUnresolvedToolFailure AndAlso
+                System.String.Equals(If(runState.LastToolName, ""), normalizedToolName, System.StringComparison.OrdinalIgnoreCase)
+            Dim hasPendingRetryFidelity As Boolean =
+                runState.RetryInvariantPendingFailureTools IsNot Nothing AndAlso
+                runState.RetryInvariantPendingFailureTools.Contains(normalizedToolName)
+
+            If (isRetryOfFailedTool OrElse hasPendingRetryFidelity) AndAlso captured IsNot Nothing AndAlso captured.Count > 0 Then
+                Dim restored As New System.Collections.Generic.List(Of String)()
+                For Each pair As System.Collections.Generic.KeyValuePair(Of String, String) In captured
+                    If System.String.IsNullOrWhiteSpace(pair.Value) Then Continue For
+
+                    Dim currentValue As String = GetRetryInvariantArgumentValue(arguments, pair.Key)
+                    If System.String.IsNullOrWhiteSpace(currentValue) Then
+                        arguments(pair.Key) = pair.Value
+                        restored.Add(pair.Key & "=" & pair.Value)
+                        Continue For
+                    End If
+
+                    If Not System.String.Equals(currentValue, pair.Value, System.StringComparison.OrdinalIgnoreCase) Then
+                        validationError = "Retry attempted to replace required artifact-fidelity argument '" & pair.Key &
+                                          "' value '" & pair.Value & "' with '" & currentValue &
+                                          "'. The original value remains binding after the failed tool call."
+                        Return False
+                    End If
+                Next
+
+                If restored.Count > 0 Then restoredSummary = System.String.Join(", ", restored)
+            End If
+
+            ' Capture the invariant values actually carried by this attempt. The dictionary is
+            ' per tool, so progress/reporting or a different recovery tool cannot erase a failed
+            ' artifact tool's design/template constraint before its retry.
+            Dim currentCapture As New System.Collections.Generic.Dictionary(Of String, String)(System.StringComparer.OrdinalIgnoreCase)
+            For Each argumentName As String In RetryInvariantArgumentNames
+                Dim value As String = GetRetryInvariantArgumentValue(arguments, argumentName)
+                If value <> "" Then currentCapture(argumentName) = value
+            Next
+
+            If currentCapture.Count > 0 Then
+                runState.RetryInvariantArgumentsByTool(normalizedToolName) = currentCapture
+            ElseIf Not isRetryOfFailedTool AndAlso Not hasPendingRetryFidelity Then
+                runState.RetryInvariantArgumentsByTool.Remove(normalizedToolName)
+            End If
+
+            Return True
+        End Function
+
+        ''' <summary>
+        ''' Refreshes retry-fidelity capture after deterministic host-side argument resolution.
+        ''' Use this when the host supplies a default design/template after the initial dispatcher
+        ''' gate, so a later retry cannot silently replace that effective artifact choice.
+        ''' </summary>
+        Public Shared Sub CaptureRetryInvariantArguments(toolName As System.String,
+                                                         arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+                                                         runState As ToolingRunState)
+            If runState Is Nothing OrElse arguments Is Nothing Then Return
+            Dim normalizedToolName As System.String = If(toolName, System.String.Empty).Trim()
+            If normalizedToolName = "" Then Return
+
+            If runState.RetryInvariantArgumentsByTool Is Nothing Then
+                runState.RetryInvariantArgumentsByTool =
+                    New System.Collections.Generic.Dictionary(Of String, System.Collections.Generic.Dictionary(Of String, String))(System.StringComparer.OrdinalIgnoreCase)
+            End If
+
+            Dim capture As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.OrdinalIgnoreCase)
+            For Each argumentName As System.String In RetryInvariantArgumentNames
+                Dim value As System.String = GetRetryInvariantArgumentValue(arguments, argumentName)
+                If value <> "" Then capture(argumentName) = value
+            Next
+
+            If capture.Count > 0 Then
+                runState.RetryInvariantArgumentsByTool(normalizedToolName) = capture
+            End If
+        End Sub
+
+        Private Shared Function GetRetryInvariantArgumentValue(arguments As System.Collections.Generic.IDictionary(Of String, Object),
+                                                               argumentName As String) As String
+            If arguments Is Nothing OrElse System.String.IsNullOrWhiteSpace(argumentName) Then Return ""
+
+            For Each pair As System.Collections.Generic.KeyValuePair(Of String, Object) In arguments
+                If Not System.String.Equals(pair.Key, argumentName, System.StringComparison.OrdinalIgnoreCase) Then Continue For
+                If pair.Value Is Nothing Then Return ""
+                Return pair.Value.ToString().Trim()
+            Next
+            Return ""
+        End Function
 
         Public Shared Function FormatMemoryGroundingMode(mode As MemoryGroundingMode) As String
             Select Case mode

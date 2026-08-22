@@ -2605,7 +2605,7 @@ Partial Public Class ThisAddIn
                                         details:=$"host={context.HostKind}; tool={tc.ToolName}")
                                 Else
                                     If context.SequencingState IsNot Nothing Then
-                                        context.SequencingState.NoteSuccessfulProgress()
+                                        context.SequencingState.NoteSuccessfulProgress(tc.ToolName)
 
                                         If toolConfig IsNot Nothing AndAlso toolConfig.PrefersSingleInvocation Then
                                             context.SequencingState.NoteConsolidatableToolSuccess(tc.ToolName)
@@ -5739,6 +5739,36 @@ Partial Public Class ThisAddIn
     Public Async Function ExecuteToolCall(toolCall As ToolCall, toolConfig As ModelConfig, context As ToolExecutionContext, Optional cancellationToken As System.Threading.CancellationToken = Nothing) As Task(Of ToolResponse)
 
         LogAgentToolCallStatistic(toolCall.ToolName)
+
+        If context IsNot Nothing AndAlso context.SequencingState IsNot Nothing Then
+            If toolCall.Arguments Is Nothing Then
+                toolCall.Arguments = New System.Collections.Generic.Dictionary(Of String, Object)(System.StringComparer.OrdinalIgnoreCase)
+            End If
+
+            Dim restoredRetryInvariants As String = ""
+            Dim retryInvariantError As String = ""
+            If Not SharedLibrary.Agents.ToolCallSequencing.EnforceRetryInvariantArguments(
+                toolCall.ToolName,
+                toolCall.Arguments,
+                context.SequencingState,
+                restoredRetryInvariants,
+                retryInvariantError) Then
+
+                context.LogWarn("Retry fidelity guard rejected a tool call.", details:=retryInvariantError)
+                Return New ToolResponse() With {
+                    .CallId = toolCall.CallId,
+                    .ToolName = toolCall.ToolName,
+                    .Timestamp = System.DateTime.UtcNow,
+                    .Success = False,
+                    .ErrorMessage = retryInvariantError,
+                    .Response = retryInvariantError
+                }
+            End If
+
+            If restoredRetryInvariants <> "" Then
+                context.Log("Retry fidelity guard restored: " & restoredRetryInvariants, "diag")
+            End If
+        End If
 
         ' ── python_execute: secure sandboxed Python execution ──
         If toolCall.ToolName.Equals(SharedLibrary.Agents.PythonExecuteTool.ToolName, StringComparison.OrdinalIgnoreCase) Then

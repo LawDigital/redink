@@ -91,6 +91,31 @@ Partial Public Class ThisAddIn
 
         context.Log($"Executing tool: {toolCall.ToolName}{paramSummary}", "diag")
 
+        If context IsNot Nothing AndAlso context.SequencingState IsNot Nothing Then
+            If toolCall.Arguments Is Nothing Then
+                toolCall.Arguments = New System.Collections.Generic.Dictionary(Of String, Object)(System.StringComparer.OrdinalIgnoreCase)
+            End If
+
+            Dim restoredRetryInvariants As String = ""
+            Dim retryInvariantError As String = ""
+            If Not SharedLibrary.Agents.ToolCallSequencing.EnforceRetryInvariantArguments(
+                toolCall.ToolName,
+                toolCall.Arguments,
+                context.SequencingState,
+                restoredRetryInvariants,
+                retryInvariantError) Then
+
+                context.LogWarn("Retry fidelity guard rejected a tool call.", details:=retryInvariantError)
+                response.Success = False
+                response.ErrorMessage = retryInvariantError
+                response.Response = retryInvariantError
+                Return response
+            End If
+
+            If restoredRetryInvariants <> "" Then
+                context.Log("Retry fidelity guard restored: " & restoredRetryInvariants, "diag")
+            End If
+        End If
 
         Try
             cancellationToken.ThrowIfCancellationRequested()

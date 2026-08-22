@@ -381,6 +381,7 @@
 '   ThisAddIn.AutoPilot.Tools.DataCollector.vb - Structured data-collection helpers for AutoPilot tool runs.
 '   ThisAddIn.AutoPIlot.Tools.Office.Interop.vb - Interop-based Office host helpers for AutoPilot tools.
 '   ThisAddIn.AutoPIlot.Tools.Office.vb - OpenXML and Office-document AutoPilot tool helpers.
+'   ThisAddIn.AutoPilot.Tools.Office.OpenXmlTemplate.vb - OOXML-only slot-bound Word template renderer.
 '   ThisAddIn.AutoPIlot.Tools.Other.vb - Miscellaneous file, system, and media AutoPilot tool helpers.
 '   ThisAddIn.AutoPIlot.Tools.PDF.vb - PDF-specific AutoPilot tool helpers.
 '   ThisAddIn.AutoPIlot.Tools.vb     - Top-level AutoPilot tool surface and dispatch entry points.

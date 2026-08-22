@@ -173,7 +173,7 @@ Partial Public Class ThisAddIn
                 toolResponse.ResultKind)
 
             If context.SequencingState IsNot Nothing Then
-                context.SequencingState.NoteSuccessfulProgress()
+                context.SequencingState.NoteSuccessfulProgress(toolCall.ToolName)
             End If
         End If
 

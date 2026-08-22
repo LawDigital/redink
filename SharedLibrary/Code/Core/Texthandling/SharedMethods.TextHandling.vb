@@ -354,6 +354,157 @@ Namespace SharedLibrary
         End Function
 
         ''' <summary>
+        ''' Validates heading and list nesting against an optional native paragraph-style map.
+        ''' When a native body-style map is present, headings and lists are strict: every
+        ''' encountered heading/list level must have an explicit semantic mapping.
+        ''' </summary>
+        Public Shared Function ValidateMarkdownParagraphStyleMap(
+            markdownText As String,
+            paragraphStyleMap As System.Collections.Generic.IDictionary(Of String, String),
+            ByRef validationError As String
+        ) As Boolean
+            validationError = System.String.Empty
+            If paragraphStyleMap Is Nothing OrElse paragraphStyleMap.Count = 0 OrElse System.String.IsNullOrWhiteSpace(markdownText) Then Return True
+
+            Try
+                Dim pipeline As Markdig.MarkdownPipeline = CreateMarkdownHtmlPipeline(useSoftlineBreakAsHardlineBreak:=True)
+                Dim html As String = Markdig.Markdown.ToHtml(NormalizeMarkdownForHtmlDisplay(markdownText), pipeline)
+                Dim htmlDoc As New HtmlAgilityPack.HtmlDocument()
+                htmlDoc.LoadHtml(html)
+
+                Dim headings As HtmlAgilityPack.HtmlNodeCollection = htmlDoc.DocumentNode.SelectNodes("//h1 | //h2 | //h3 | //h4 | //h5 | //h6")
+                If headings IsNot Nothing Then
+                    For Each heading As HtmlAgilityPack.HtmlNode In headings
+                        If HtmlNodeHasAncestor(heading, "table") Then Continue For
+                        Dim level As Integer = 0
+                        If heading.Name.Length = 2 AndAlso System.Int32.TryParse(heading.Name.Substring(1), level) Then
+                            Dim semantic As String = "heading" & level.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                            If Not paragraphStyleMap.ContainsKey(semantic) Then
+                                validationError = "The selected Word design does not permit Markdown heading level " & level.ToString(System.Globalization.CultureInfo.InvariantCulture) & ". Allowed heading levels are: " & BuildMappedStyleLevelList(paragraphStyleMap, "heading") & "."
+                                Return False
+                            End If
+                        End If
+                    Next
+                End If
+
+                Dim listItems As HtmlAgilityPack.HtmlNodeCollection = htmlDoc.DocumentNode.SelectNodes("//li")
+                If listItems IsNot Nothing Then
+                    For Each item As HtmlAgilityPack.HtmlNode In listItems
+                        If HtmlNodeHasAncestor(item, "table") Then Continue For
+                        Dim owningList As HtmlAgilityPack.HtmlNode = item.ParentNode
+                        If owningList Is Nothing Then Continue For
+
+                        Dim isBullet As Boolean = owningList.Name.Equals("ul", System.StringComparison.OrdinalIgnoreCase)
+                        Dim isNumbered As Boolean = owningList.Name.Equals("ol", System.StringComparison.OrdinalIgnoreCase)
+                        If Not isBullet AndAlso Not isNumbered Then Continue For
+
+                        Dim level As Integer = 1
+                        Dim ancestor As HtmlAgilityPack.HtmlNode = owningList.ParentNode
+                        While ancestor IsNot Nothing
+                            If ancestor.Name.Equals("ul", System.StringComparison.OrdinalIgnoreCase) OrElse ancestor.Name.Equals("ol", System.StringComparison.OrdinalIgnoreCase) Then level += 1
+                            ancestor = ancestor.ParentNode
+                        End While
+
+                        Dim prefix As String = If(isBullet, "bullet", "numbered")
+                        Dim semantic As String = prefix & level.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                        If Not paragraphStyleMap.ContainsKey(semantic) Then
+                            validationError = "The selected Word design does not permit " & If(isBullet, "bullet", "numbered-list") & " nesting level " & level.ToString(System.Globalization.CultureInfo.InvariantCulture) & ". Allowed " & prefix & " levels are: " & BuildMappedStyleLevelList(paragraphStyleMap, prefix) & "."
+                            Return False
+                        End If
+                    Next
+                End If
+
+                Return True
+            Catch ex As System.Exception
+                validationError = "Markdown body-style validation failed: " & ex.Message
+                Return False
+            End Try
+        End Function
+
+        Private Shared Function HtmlNodeHasAncestor(node As HtmlAgilityPack.HtmlNode, ancestorName As String) As Boolean
+            If node Is Nothing OrElse System.String.IsNullOrWhiteSpace(ancestorName) Then Return False
+            Dim current As HtmlAgilityPack.HtmlNode = node.ParentNode
+            While current IsNot Nothing
+                If System.String.Equals(current.Name, ancestorName, System.StringComparison.OrdinalIgnoreCase) Then Return True
+                current = current.ParentNode
+            End While
+            Return False
+        End Function
+
+        Private Shared Function BuildMappedStyleLevelList(
+            paragraphStyleMap As System.Collections.Generic.IDictionary(Of String, String),
+            prefix As String
+        ) As String
+            Dim levels As New System.Collections.Generic.List(Of Integer)()
+            If paragraphStyleMap Is Nothing Then Return "none"
+            For Each key As String In paragraphStyleMap.Keys
+                If key Is Nothing OrElse Not key.StartsWith(prefix, System.StringComparison.OrdinalIgnoreCase) Then Continue For
+                Dim suffix As String = key.Substring(prefix.Length)
+                Dim level As Integer = 0
+                If System.Int32.TryParse(suffix, level) AndAlso level > 0 Then levels.Add(level)
+            Next
+            If levels.Count = 0 Then Return "none"
+            Return System.String.Join(", ", levels.Distinct().OrderBy(Function(level As Integer) level).Select(Function(level As Integer) level.ToString(System.Globalization.CultureInfo.InvariantCulture)))
+        End Function
+
+        ''' <summary>
+        ''' Removes renderer-only boundary whitespace introduced by Markdown-to-HTML formatting.
+        ''' Internal whitespace between inline nodes is preserved. This is intentionally shared by
+        ''' both legacy Word HTML insertion and OOXML Word rendering so Markdig formatting newlines
+        ''' cannot become visible leading/trailing spaces in generated document paragraphs.
+        ''' </summary>
+        Public Shared Sub NormalizeMarkdigHtmlBlockBoundaryWhitespace(htmlDoc As HtmlAgilityPack.HtmlDocument)
+            If htmlDoc Is Nothing OrElse htmlDoc.DocumentNode Is Nothing Then Return
+
+            Dim blocks As HtmlAgilityPack.HtmlNodeCollection =
+                htmlDoc.DocumentNode.SelectNodes("//p | //li | //h1 | //h2 | //h3 | //h4 | //h5 | //h6 | //td | //th | //blockquote")
+            If blocks Is Nothing Then Return
+
+            For Each block As HtmlAgilityPack.HtmlNode In blocks
+                If block Is Nothing Then Continue For
+
+                Dim textNodes As System.Collections.Generic.List(Of HtmlAgilityPack.HtmlNode) =
+                    block.DescendantsAndSelf().Where(
+                        Function(candidate As HtmlAgilityPack.HtmlNode)
+                            If candidate Is Nothing OrElse candidate.NodeType <> HtmlAgilityPack.HtmlNodeType.Text Then Return False
+
+                            Dim ancestor As HtmlAgilityPack.HtmlNode = candidate.ParentNode
+                            Do While ancestor IsNot Nothing AndAlso ancestor IsNot block
+                                Dim name As String = If(ancestor.Name, "").ToLowerInvariant()
+                                If name = "ul" OrElse name = "ol" OrElse name = "table" OrElse name = "pre" OrElse
+                                   name = "p" OrElse name = "blockquote" OrElse System.Text.RegularExpressions.Regex.IsMatch(name, "^h[1-6]$") Then
+                                    Return False
+                                End If
+                                ancestor = ancestor.ParentNode
+                            Loop
+                            Return True
+                        End Function).ToList()
+
+                If textNodes.Count = 0 Then Continue For
+
+                Dim firstMeaningful As Integer = textNodes.FindIndex(
+                    Function(item As HtmlAgilityPack.HtmlNode) Not System.String.IsNullOrWhiteSpace(HtmlAgilityPack.HtmlEntity.DeEntitize(item.InnerText)))
+                Dim lastMeaningful As Integer = textNodes.FindLastIndex(
+                    Function(item As HtmlAgilityPack.HtmlNode) Not System.String.IsNullOrWhiteSpace(HtmlAgilityPack.HtmlEntity.DeEntitize(item.InnerText)))
+
+                If firstMeaningful < 0 Then Continue For
+
+                For index As Integer = 0 To firstMeaningful - 1
+                    textNodes(index).InnerHtml = System.String.Empty
+                Next
+                For index As Integer = lastMeaningful + 1 To textNodes.Count - 1
+                    textNodes(index).InnerHtml = System.String.Empty
+                Next
+
+                Dim firstValue As String = HtmlAgilityPack.HtmlEntity.DeEntitize(textNodes(firstMeaningful).InnerText).TrimStart()
+                textNodes(firstMeaningful).InnerHtml = HtmlAgilityPack.HtmlEntity.Entitize(firstValue)
+
+                Dim lastValue As String = HtmlAgilityPack.HtmlEntity.DeEntitize(textNodes(lastMeaningful).InnerText).TrimEnd()
+                textNodes(lastMeaningful).InnerHtml = HtmlAgilityPack.HtmlEntity.Entitize(lastValue)
+            Next
+        End Sub
+
+        ''' <summary>
         ''' Converts the provided Markdown text to HTML and inserts it into the given Word selection.
         ''' </summary>
         ''' <param name="selection">A Word <see cref="Microsoft.Office.Interop.Word.Selection"/> (passed as <see cref="Object"/>).</param>
@@ -362,7 +513,8 @@ Namespace SharedLibrary
         Public Shared Sub InsertTextWithMarkdown(selection As Object,
                                                  gptResult As String,
                                                  TrailingCR As Boolean,
-                                                 Optional UseHostDefaultFontColor As Boolean = False)
+                                                 Optional UseHostDefaultFontColor As Boolean = False,
+                                                 Optional PreserveDestinationParagraphFormatting As Boolean = False)
 
             Dim wordSelection As Microsoft.Office.Interop.Word.Selection = CType(selection, Microsoft.Office.Interop.Word.Selection)
             Dim wordRange As Microsoft.Office.Interop.Word.Range = wordSelection.Range
@@ -407,12 +559,13 @@ Namespace SharedLibrary
             Dim htmlDoc As New HtmlAgilityPack.HtmlDocument()
             Dim fullhtml As String
             htmlDoc.LoadHtml(htmlresult)
+            NormalizeMarkdigHtmlBlockBoundaryWhitespace(htmlDoc)
 
             fullhtml = htmlDoc.DocumentNode.OuterHtml
 
             Debug.WriteLine("ITWM: " & fullhtml)
 
-            InsertTextWithFormat(fullhtml, wordRange, True, Not TrailingCR, UseHostDefaultFontColor)
+            InsertTextWithFormat(fullhtml, wordRange, True, Not TrailingCR, UseHostDefaultFontColor, PreserveDestinationParagraphFormatting)
 
         End Sub
 
@@ -428,7 +581,8 @@ Namespace SharedLibrary
                                                ByRef range As Microsoft.Office.Interop.Word.Range,
                                                ReplaceSelection As Boolean,
                                                Optional NoTrailingCR As Boolean = False,
-                                               Optional UseHostDefaultFontColor As Boolean = False)
+                                               Optional UseHostDefaultFontColor As Boolean = False,
+                                               Optional PreserveDestinationParagraphFormatting As Boolean = False)
             Try
                 If formattedText Is Nothing OrElse formattedText.Trim() = "" Then
                     Return
@@ -560,7 +714,7 @@ Namespace SharedLibrary
 
                 ' --- 4) Apply inline styles ---
                 Dim allTextContainers As HtmlAgilityPack.HtmlNodeCollection = doc.DocumentNode.SelectNodes("//p | //li")
-                If allTextContainers IsNot Nothing Then
+                If allTextContainers IsNot Nothing AndAlso Not PreserveDestinationParagraphFormatting Then
                     For Each n As HtmlAgilityPack.HtmlNode In allTextContainers
                         n.SetAttributeValue("style", cssPara)
                     Next
@@ -571,7 +725,7 @@ Namespace SharedLibrary
                 ' headings match what the user defined instead of the HTML importer's oversized
                 ' browser-default heading sizing. Reads the built-in heading styles directly.
                 Dim headings As HtmlAgilityPack.HtmlNodeCollection = doc.DocumentNode.SelectNodes("//h1 | //h2 | //h3 | //h4 | //h5 | //h6")
-                If headings IsNot Nothing Then
+                If headings IsNot Nothing AndAlso Not PreserveDestinationParagraphFormatting Then
                     For Each h As HtmlAgilityPack.HtmlNode In headings
                         ' Resolve the built-in heading style for this level.
                         Dim headingLevel As Integer = 1
@@ -721,12 +875,16 @@ Namespace SharedLibrary
                     Dim pasted As Boolean = False
                     For attempt As Integer = 1 To 4
                         Try
+                            Dim recoveryType As Microsoft.Office.Interop.Word.WdRecoveryType =
+                                If(PreserveDestinationParagraphFormatting,
+                                   Microsoft.Office.Interop.Word.WdRecoveryType.wdUseDestinationStylesRecovery,
+                                   Microsoft.Office.Interop.Word.WdRecoveryType.wdFormatOriginalFormatting)
                             If ReplaceSelection Then
-                                range.Application.Selection.PasteAndFormat(Microsoft.Office.Interop.Word.WdRecoveryType.wdFormatOriginalFormatting)
+                                range.Application.Selection.PasteAndFormat(recoveryType)
                             Else
                                 range.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
                                 range.Select()
-                                range.Application.Selection.PasteAndFormat(Microsoft.Office.Interop.Word.WdRecoveryType.wdFormatOriginalFormatting)
+                                range.Application.Selection.PasteAndFormat(recoveryType)
                             End If
                             pasted = True
                             Exit For
@@ -817,6 +975,7 @@ Namespace SharedLibrary
                 End Try
 
             Catch ex As System.Exception
+                If PreserveDestinationParagraphFormatting Then Throw
                 System.Windows.Forms.MessageBox.Show("InsertTextWithFormat Error: " & ex.Message)
             End Try
         End Sub

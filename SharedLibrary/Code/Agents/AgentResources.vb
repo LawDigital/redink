@@ -857,6 +857,1057 @@ Namespace Agents
     End Class
 
     ''' <summary>
+    ''' One deterministic binding declared by a Word design companion guide. The visible
+    ''' placeholder name is deliberately semantic-free: e.g. [[RI:Text]] and [[RI:Body]]
+    ''' are equivalent when their guidance rows map them to the same source.
+    ''' </summary>
+    Public Class WordTemplateSlotDefinition
+        Public Property Placeholder As String
+        Public Property SlotId As String
+        Public Property Source As String
+        Public Property Purpose As String
+        Public Property ContentMode As String
+        Public Property Required As Boolean
+
+        Public ReadOnly Property UsesMarkdownContent As Boolean
+            Get
+                Return String.Equals(Source, "markdown_content", StringComparison.OrdinalIgnoreCase)
+            End Get
+        End Property
+
+        Public ReadOnly Property TemplateFieldKey As String
+            Get
+                Const prefix As String = "template_fields."
+                If String.IsNullOrWhiteSpace(Source) OrElse
+                   Not Source.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) Then
+                    Return ""
+                End If
+                Return Source.Substring(prefix.Length)
+            End Get
+        End Property
+    End Class
+
+    ''' <summary>
+    ''' One native Word paragraph style mapping declared by a design companion guide.
+    ''' Semantic keys are renderer-level concepts rather than organization-specific style names.
+    ''' </summary>
+    Public Class WordTemplateBodyStyleDefinition
+        Public Property Semantic As String
+        Public Property StyleName As String
+    End Class
+
+    ''' <summary>
+    ''' Parsed Word-template contract from a same-basename Markdown companion file.
+    ''' Ordinary prose in the guide stays human guidance. Machine-readable mappings live under
+    ''' "## Word template slots" and "## Word body styles". Property lists are the authoring format;
+    ''' legacy Markdown tables remain accepted as backward-compatible input.
+    ''' </summary>
+    Public Class WordTemplateBindingContract
+        Public Property GuidancePath As String
+        Public Property StylePolicyPath As String
+        Public Property Slots As New System.Collections.Generic.List(Of WordTemplateSlotDefinition)()
+        Public Property BodyStyles As New System.Collections.Generic.List(Of WordTemplateBodyStyleDefinition)()
+        Public Property NativeStyles As New System.Collections.Generic.List(Of WordTemplateBodyStyleDefinition)()
+        Public Property HeadingNumberingMode As String = ""
+
+        Public ReadOnly Property HasSlots As Boolean
+            Get
+                Return Slots IsNot Nothing AndAlso Slots.Count > 0
+            End Get
+        End Property
+
+        Public ReadOnly Property HasBodyStyles As Boolean
+            Get
+                Return BodyStyles IsNot Nothing AndAlso BodyStyles.Count > 0
+            End Get
+        End Property
+
+        Public ReadOnly Property HasNativeStyles As Boolean
+            Get
+                Return NativeStyles IsNot Nothing AndAlso NativeStyles.Count > 0
+            End Get
+        End Property
+
+        Public Function BuildNativeParagraphStyleMap() As System.Collections.Generic.Dictionary(Of String, String)
+            Dim result As New System.Collections.Generic.Dictionary(Of String, String)(System.StringComparer.OrdinalIgnoreCase)
+            If BodyStyles Is Nothing Then Return result
+
+            For Each definition As WordTemplateBodyStyleDefinition In BodyStyles
+                If definition Is Nothing OrElse
+                   System.String.IsNullOrWhiteSpace(definition.Semantic) OrElse
+                   System.String.IsNullOrWhiteSpace(definition.StyleName) Then
+                    Continue For
+                End If
+                result(definition.Semantic) = definition.StyleName
+            Next
+            Return result
+        End Function
+
+        Public Function BuildPromptSummary() As String
+            If Not HasSlots AndAlso Not HasBodyStyles AndAlso Not HasNativeStyles AndAlso System.String.IsNullOrWhiteSpace(HeadingNumberingMode) Then Return ""
+
+            Dim bodySlots As New System.Collections.Generic.List(Of String)()
+            Dim requiredFields As New System.Collections.Generic.List(Of String)()
+            Dim optionalFields As New System.Collections.Generic.List(Of String)()
+
+            If Slots IsNot Nothing Then
+                For Each slot As WordTemplateSlotDefinition In Slots
+                    If slot Is Nothing Then Continue For
+                    Dim purposeSuffix As String = FormatPurposeForPrompt(slot.Purpose)
+                    If slot.UsesMarkdownContent Then
+                        bodySlots.Add(slot.Placeholder & purposeSuffix)
+                        Continue For
+                    End If
+
+                    Dim key As String = slot.TemplateFieldKey
+                    If key = "" Then Continue For
+                    Dim describedKey As String = key & purposeSuffix
+                    If slot.Required Then
+                        requiredFields.Add(describedKey)
+                    Else
+                        optionalFields.Add(describedKey)
+                    End If
+                Next
+            End If
+
+            Dim parts As New System.Collections.Generic.List(Of String)()
+            If bodySlots.Count > 0 Then
+                parts.Add("markdown_content -> " & System.String.Join(", ", bodySlots))
+            End If
+            If requiredFields.Count > 0 Then
+                parts.Add("required template_fields: " & System.String.Join(", ", requiredFields.Distinct(System.StringComparer.OrdinalIgnoreCase)))
+            End If
+            If optionalFields.Count > 0 Then
+                parts.Add("optional template_fields: " & System.String.Join(", ", optionalFields.Distinct(System.StringComparer.OrdinalIgnoreCase)))
+            End If
+            If HasBodyStyles Then
+                Dim styleParts As New System.Collections.Generic.List(Of String)()
+                For Each definition As WordTemplateBodyStyleDefinition In BodyStyles
+                    If definition Is Nothing Then Continue For
+                    styleParts.Add(definition.Semantic & "=" & definition.StyleName)
+                Next
+                If styleParts.Count > 0 Then parts.Add("native body styles: " & System.String.Join(", ", styleParts))
+            End If
+            If Not System.String.IsNullOrWhiteSpace(HeadingNumberingMode) AndAlso Not System.String.Equals(HeadingNumberingMode, "preserve", System.StringComparison.OrdinalIgnoreCase) Then
+                parts.Add("heading numbering=" & HeadingNumberingMode & " (do not put manual numbering prefixes in Markdown headings)")
+            End If
+            If HasNativeStyles Then
+                Dim nativeParts As New System.Collections.Generic.List(Of String)()
+                For Each definition As WordTemplateBodyStyleDefinition In NativeStyles
+                    If definition Is Nothing Then Continue For
+                    nativeParts.Add(definition.Semantic & "=" & definition.StyleName)
+                Next
+                If nativeParts.Count > 0 Then parts.Add("available native styles: " & System.String.Join(", ", nativeParts))
+            End If
+            Return System.String.Join("; ", parts)
+        End Function
+
+        Private Shared Function FormatPurposeForPrompt(value As String) As String
+            Dim normalized As String = If(value, "").Replace(vbCr, " ").Replace(vbLf, " ").Trim()
+            If normalized = "" Then Return ""
+            Do While normalized.Contains("  ")
+                normalized = normalized.Replace("  ", " ")
+            Loop
+            Return " (" & normalized & ")"
+        End Function
+    End Class
+
+    ''' <summary>
+    ''' Shared parser/resolver for Word template contracts. This contains no
+    ''' organization-specific aliases and no Word-Interop rendering logic.
+    ''' </summary>
+    Public NotInheritable Class WordTemplateBindingContractParser
+        Private Shared ReadOnly PlaceholderRegex As New System.Text.RegularExpressions.Regex(
+            "^\[\[RI:([\p{L}\p{N}_.-]{1,64})\]\]$",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+
+        Private Shared ReadOnly BodyStyleSemanticRegex As New System.Text.RegularExpressions.Regex(
+            "^(paragraph|heading[1-6]|bullet[1-9]|numbered[1-9])$",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+
+        Private Sub New()
+        End Sub
+
+        Public Shared Function ResolveGuidancePath(descriptor As DocumentDesignDescriptor,
+                                                   applicationConfig As Newtonsoft.Json.Linq.JObject,
+                                                   templatePath As String) As String
+            If descriptor Is Nothing Then Return ""
+
+            Dim configured As String = ""
+            If applicationConfig IsNot Nothing Then
+                configured = If(applicationConfig.Value(Of String)("guidance_file"), "").Trim()
+            End If
+
+            If configured <> "" Then
+                Dim resolved As String = descriptor.ResolveRepositoryFile(configured)
+                If resolved <> "" AndAlso System.IO.File.Exists(resolved) Then Return resolved
+            End If
+
+            If Not System.String.IsNullOrWhiteSpace(templatePath) Then
+                Try
+                    Dim candidate As String = System.IO.Path.Combine(
+                        System.IO.Path.GetDirectoryName(templatePath),
+                        System.IO.Path.GetFileNameWithoutExtension(templatePath) & ".md")
+                    If System.IO.File.Exists(candidate) Then Return candidate
+                Catch ex As System.Exception
+                End Try
+            End If
+
+            Return ""
+        End Function
+
+        Public Shared Function ResolveStylePolicyPath(descriptor As DocumentDesignDescriptor,
+                                                      applicationConfig As Newtonsoft.Json.Linq.JObject) As String
+            If descriptor Is Nothing OrElse applicationConfig Is Nothing Then Return ""
+            Dim configured As String = If(applicationConfig.Value(Of String)("style_policy_file"), "").Trim()
+            If configured = "" Then Return ""
+            Dim resolved As String = descriptor.ResolveRepositoryFile(configured)
+            If resolved <> "" AndAlso System.IO.File.Exists(resolved) Then Return resolved
+            Return ""
+        End Function
+
+        Public Shared Function TryLoadForDesign(descriptor As DocumentDesignDescriptor,
+                                               applicationConfig As Newtonsoft.Json.Linq.JObject,
+                                               templatePath As String,
+                                               ByRef contract As WordTemplateBindingContract,
+                                               ByRef validationError As String) As Boolean
+            contract = Nothing
+            validationError = ""
+
+            Dim guidancePath As String = ResolveGuidancePath(descriptor, applicationConfig, templatePath)
+            Dim stylePolicyPath As String = ResolveStylePolicyPath(descriptor, applicationConfig)
+            Dim configuredStylePolicy As String = If(applicationConfig Is Nothing, "", If(applicationConfig.Value(Of String)("style_policy_file"), "").Trim())
+            If configuredStylePolicy <> "" AndAlso stylePolicyPath = "" Then
+                validationError = "Configured Word style policy was not found or is outside the design repository: " & configuredStylePolicy
+                Return False
+            End If
+            If guidancePath = "" AndAlso stylePolicyPath = "" Then Return True
+
+            Dim merged As New WordTemplateBindingContract() With {
+                .GuidancePath = guidancePath,
+                .StylePolicyPath = stylePolicyPath
+            }
+
+            If stylePolicyPath <> "" Then
+                Dim policyText As String
+                Try
+                    policyText = System.IO.File.ReadAllText(stylePolicyPath, System.Text.Encoding.UTF8)
+                Catch ex As System.Exception
+                    validationError = "Word style policy could not be read: " & ex.Message
+                    Return False
+                End Try
+
+                Dim policyContract As WordTemplateBindingContract = Nothing
+                If Not TryParse(policyText, stylePolicyPath, policyContract, validationError) Then Return False
+                If policyContract IsNot Nothing Then
+                    If policyContract.HasSlots Then
+                        validationError = "Shared Word style policy '" & System.IO.Path.GetFileName(stylePolicyPath) & "' must not declare template slots. Put slots in the design-specific companion guidance instead."
+                        Return False
+                    End If
+                    MergeStyleDefinitions(merged.BodyStyles, policyContract.BodyStyles, stylePolicyPath, validationError, allowOverride:=False)
+                    If validationError <> "" Then Return False
+                    MergeStyleDefinitions(merged.NativeStyles, policyContract.NativeStyles, stylePolicyPath, validationError, allowOverride:=False)
+                    If validationError <> "" Then Return False
+                    If Not System.String.IsNullOrWhiteSpace(policyContract.HeadingNumberingMode) Then merged.HeadingNumberingMode = policyContract.HeadingNumberingMode
+                End If
+            End If
+
+            If guidancePath <> "" Then
+                Dim guidance As String
+                Try
+                    guidance = System.IO.File.ReadAllText(guidancePath, System.Text.Encoding.UTF8)
+                Catch ex As System.Exception
+                    validationError = "Word design guidance could not be read: " & ex.Message
+                    Return False
+                End Try
+
+                Dim guideContract As WordTemplateBindingContract = Nothing
+                If Not TryParse(guidance, guidancePath, guideContract, validationError) Then Return False
+                If guideContract IsNot Nothing Then
+                    merged.Slots.AddRange(guideContract.Slots)
+                    MergeStyleDefinitions(merged.BodyStyles, guideContract.BodyStyles, guidancePath, validationError, allowOverride:=True)
+                    If validationError <> "" Then Return False
+                    MergeStyleDefinitions(merged.NativeStyles, guideContract.NativeStyles, guidancePath, validationError, allowOverride:=True)
+                    If validationError <> "" Then Return False
+                    If Not System.String.IsNullOrWhiteSpace(guideContract.HeadingNumberingMode) Then merged.HeadingNumberingMode = guideContract.HeadingNumberingMode
+                End If
+            End If
+
+            If merged.HasSlots AndAlso Not System.String.IsNullOrWhiteSpace(templatePath) Then
+                If Not TryValidateTemplateCarrierSlots(templatePath, merged, validationError) Then Return False
+            End If
+
+            If Not merged.HasSlots AndAlso Not merged.HasBodyStyles AndAlso Not merged.HasNativeStyles Then Return True
+            contract = merged
+            Return True
+        End Function
+
+        Private Shared Sub MergeStyleDefinitions(target As System.Collections.Generic.List(Of WordTemplateBodyStyleDefinition),
+                                                  source As System.Collections.Generic.IEnumerable(Of WordTemplateBodyStyleDefinition),
+                                                  sourcePath As String,
+                                                  ByRef validationError As String,
+                                                  Optional allowOverride As System.Boolean = False)
+            If target Is Nothing OrElse source Is Nothing Then Return
+            For Each definition As WordTemplateBodyStyleDefinition In source
+                If definition Is Nothing Then Continue For
+                Dim existing As WordTemplateBodyStyleDefinition = target.FirstOrDefault(
+                    Function(candidate As WordTemplateBodyStyleDefinition) candidate IsNot Nothing AndAlso System.String.Equals(candidate.Semantic, definition.Semantic, System.StringComparison.OrdinalIgnoreCase))
+                If existing IsNot Nothing Then
+                    If allowOverride Then
+                        existing.StyleName = definition.StyleName
+                        Continue For
+                    End If
+                    validationError = "Duplicate Word style semantic '" & definition.Semantic & "' while merging '" & System.IO.Path.GetFileName(sourcePath) & "'. Shared policies must not contain duplicate semantics."
+                    Return
+                End If
+                target.Add(New WordTemplateBodyStyleDefinition() With {.Semantic = definition.Semantic, .StyleName = definition.StyleName})
+            Next
+        End Sub
+
+        Private Shared Function TryValidateTemplateCarrierSlots(templatePath As String,
+                                                                contract As WordTemplateBindingContract,
+                                                                ByRef validationError As String) As Boolean
+            validationError = ""
+            If contract Is Nothing OrElse Not contract.HasSlots Then Return True
+            If System.String.IsNullOrWhiteSpace(templatePath) Then Return True
+            If Not System.IO.File.Exists(templatePath) Then
+                validationError = "Word design template file was not found while validating its companion guidance: " & templatePath
+                Return False
+            End If
+
+            Dim extension As String = System.IO.Path.GetExtension(templatePath).ToLowerInvariant()
+            If extension <> ".docx" AndAlso extension <> ".dotx" AndAlso extension <> ".dotm" Then
+                Return True
+            End If
+
+            Try
+                Dim allParagraphs As New System.Collections.Generic.List(Of System.Tuple(Of String, String))()
+
+                Using input As New System.IO.FileStream(templatePath, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite)
+                    Using archive As New System.IO.Compression.ZipArchive(input, System.IO.Compression.ZipArchiveMode.Read, leaveOpen:=False)
+                        For Each entry As System.IO.Compression.ZipArchiveEntry In archive.Entries
+                            Dim entryName As String = If(entry.FullName, "").Replace("\", "/")
+                            If Not entryName.StartsWith("word/", System.StringComparison.OrdinalIgnoreCase) OrElse
+                               Not entryName.EndsWith(".xml", System.StringComparison.OrdinalIgnoreCase) Then
+                                Continue For
+                            End If
+
+                            Using entryStream As System.IO.Stream = entry.Open()
+                                Dim xml As System.Xml.Linq.XDocument = System.Xml.Linq.XDocument.Load(entryStream, System.Xml.Linq.LoadOptions.PreserveWhitespace)
+                                For Each paragraph As System.Xml.Linq.XElement In xml.Descendants().Where(Function(element As System.Xml.Linq.XElement) System.String.Equals(element.Name.LocalName, "p", System.StringComparison.Ordinal))
+                                    Dim paragraphText As New System.Text.StringBuilder()
+                                    For Each textNode As System.Xml.Linq.XElement In paragraph.Descendants().Where(Function(element As System.Xml.Linq.XElement) System.String.Equals(element.Name.LocalName, "t", System.StringComparison.Ordinal))
+                                        paragraphText.Append(If(textNode.Value, ""))
+                                    Next
+                                    If paragraphText.Length > 0 Then
+                                        allParagraphs.Add(System.Tuple.Create(entryName, paragraphText.ToString()))
+                                    End If
+                                Next
+                            End Using
+                        Next
+                    End Using
+                End Using
+
+                For Each slot As WordTemplateSlotDefinition In contract.Slots
+                    If slot Is Nothing Then Continue For
+                    Dim allCount As Integer = 0
+                    Dim mainDocumentCount As Integer = 0
+
+                    For Each paragraphInfo As System.Tuple(Of String, String) In allParagraphs
+                        Dim occurrenceCount As Integer = CountOrdinalIgnoreCaseOccurrences(paragraphInfo.Item2, slot.Placeholder)
+                        If occurrenceCount <= 0 Then Continue For
+                        allCount += occurrenceCount
+                        If System.String.Equals(paragraphInfo.Item1, "word/document.xml", System.StringComparison.OrdinalIgnoreCase) Then
+                            mainDocumentCount += occurrenceCount
+                        End If
+                    Next
+
+                    If allCount = 0 Then
+                        validationError = "Word design package mismatch: placeholder " & slot.Placeholder &
+                                          " is declared in '" & System.IO.Path.GetFileName(contract.GuidancePath) &
+                                          "' but is absent from template '" & System.IO.Path.GetFileName(templatePath) &
+                                          "'. Deploy the template carrier and its companion .md together."
+                        Return False
+                    End If
+
+                    If System.String.Equals(slot.ContentMode, "markdown", System.StringComparison.OrdinalIgnoreCase) AndAlso
+                       (allCount <> 1 OrElse mainDocumentCount <> 1) Then
+                        validationError = "Word design package mismatch: Markdown placeholder " & slot.Placeholder &
+                                          " must occur exactly once in the main document part of template '" &
+                                          System.IO.Path.GetFileName(templatePath) & "'; found " &
+                                          allCount.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                          " occurrence(s) in all Word XML parts and " &
+                                          mainDocumentCount.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                          " in word/document.xml."
+                        Return False
+                    End If
+                Next
+
+                Return True
+            Catch ex As System.Exception
+                validationError = "Word design template package could not be validated against its companion guidance: " & ex.Message
+                Return False
+            End Try
+        End Function
+
+        Private Shared Function CountOrdinalIgnoreCaseOccurrences(text As String, value As String) As Integer
+            If System.String.IsNullOrEmpty(text) OrElse System.String.IsNullOrEmpty(value) Then Return 0
+            Dim count As Integer = 0
+            Dim startIndex As Integer = 0
+            Do
+                Dim matchIndex As Integer = text.IndexOf(value, startIndex, System.StringComparison.OrdinalIgnoreCase)
+                If matchIndex < 0 Then Exit Do
+                count += 1
+                startIndex = matchIndex + value.Length
+            Loop While startIndex < text.Length
+            Return count
+        End Function
+
+        Public Shared Function TryParse(guidance As String,
+                                       guidancePath As String,
+                                       ByRef contract As WordTemplateBindingContract,
+                                       ByRef validationError As String) As Boolean
+            contract = Nothing
+            validationError = ""
+            If System.String.IsNullOrWhiteSpace(guidance) Then Return True
+
+            Dim lines() As String = guidance.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf).Split(ControlChars.Lf)
+            Dim parsed As New WordTemplateBindingContract() With {.GuidancePath = guidancePath}
+
+            Dim slotSectionIndex As Integer = FindSectionIndex(lines, "## Word template slots")
+            If slotSectionIndex >= 0 Then
+                If Not TryParseSlotSection(lines, slotSectionIndex, guidancePath, parsed, validationError) Then Return False
+            End If
+
+            Dim bodyStyleSectionIndex As Integer = FindSectionIndex(lines, "## Word body styles")
+            If bodyStyleSectionIndex >= 0 Then
+                If Not TryParseBodyStyleSection(lines, bodyStyleSectionIndex, guidancePath, parsed, validationError) Then Return False
+            End If
+
+            Dim nativeStyleSectionIndex As Integer = FindSectionIndex(lines, "## Word native styles")
+            If nativeStyleSectionIndex >= 0 Then
+                If Not TryParseNativeStyleSection(lines, nativeStyleSectionIndex, guidancePath, parsed, validationError) Then Return False
+            End If
+
+            Dim renderingRulesSectionIndex As Integer = FindSectionIndex(lines, "## Word rendering rules")
+            If renderingRulesSectionIndex >= 0 Then
+                If Not TryParseRenderingRulesSection(lines, renderingRulesSectionIndex, guidancePath, parsed, validationError) Then Return False
+            End If
+
+            ' Prose-only companion guides remain valid and preserve the legacy style-carrier path.
+            If Not parsed.HasSlots AndAlso Not parsed.HasBodyStyles AndAlso Not parsed.HasNativeStyles AndAlso System.String.IsNullOrWhiteSpace(parsed.HeadingNumberingMode) Then Return True
+
+            contract = parsed
+            Return True
+        End Function
+
+        Private Shared Function FindSectionIndex(lines() As String, heading As String) As Integer
+            If lines Is Nothing OrElse System.String.IsNullOrWhiteSpace(heading) Then Return -1
+            For i As Integer = 0 To lines.Length - 1
+                If System.String.Equals(If(lines(i), "").Trim(), heading, System.StringComparison.OrdinalIgnoreCase) Then Return i
+            Next
+            Return -1
+        End Function
+
+        Private Shared Function FindSectionEndIndex(lines() As String, sectionIndex As Integer) As Integer
+            If lines Is Nothing Then Return 0
+            For i As Integer = System.Math.Max(0, sectionIndex + 1) To lines.Length - 1
+                Dim candidate As String = If(lines(i), "").Trim()
+                If candidate.StartsWith("#", System.StringComparison.Ordinal) Then Return i
+            Next
+            Return lines.Length
+        End Function
+
+        Private Shared Function TryParseSlotSection(lines() As String,
+                                                    sectionIndex As Integer,
+                                                    guidancePath As String,
+                                                    parsed As WordTemplateBindingContract,
+                                                    ByRef validationError As String) As Boolean
+            If SlotSectionUsesPropertyList(lines, sectionIndex) Then
+                Return TryParseSlotPropertyList(lines, sectionIndex, guidancePath, parsed, validationError)
+            End If
+
+            ' Backward compatibility: older companion guides used Markdown tables. New guidance
+            ' should use the property-list form because it is substantially easier to edit by hand.
+            Return TryParseSlotTable(lines, sectionIndex, guidancePath, parsed, validationError)
+        End Function
+
+        Private Shared Function TryParseBodyStyleSection(lines() As String,
+                                                         sectionIndex As Integer,
+                                                         guidancePath As String,
+                                                         parsed As WordTemplateBindingContract,
+                                                         ByRef validationError As String) As Boolean
+            If BodyStyleSectionUsesPropertyList(lines, sectionIndex) Then
+                Return TryParseBodyStylePropertyList(lines, sectionIndex, guidancePath, parsed, validationError)
+            End If
+
+            ' Backward compatibility only; newly authored guides should use one-line mappings.
+            Return TryParseBodyStyleTable(lines, sectionIndex, guidancePath, parsed, validationError)
+        End Function
+
+        Private Shared Function SlotSectionUsesPropertyList(lines() As String, sectionIndex As Integer) As Boolean
+            Dim sectionEnd As Integer = FindSectionEndIndex(lines, sectionIndex)
+            For i As Integer = sectionIndex + 1 To sectionEnd - 1
+                Dim key As String = ""
+                Dim value As String = ""
+                If Not TrySplitListPropertyLine(If(lines(i), ""), key, value) Then Continue For
+                If System.String.Equals(key, "placeholder", System.StringComparison.OrdinalIgnoreCase) OrElse
+                   System.String.Equals(key, "slot", System.StringComparison.OrdinalIgnoreCase) Then
+                    Return True
+                End If
+            Next
+            Return False
+        End Function
+
+        Private Shared Function BodyStyleSectionUsesPropertyList(lines() As String, sectionIndex As Integer) As Boolean
+            Dim sectionEnd As Integer = FindSectionEndIndex(lines, sectionIndex)
+            For i As Integer = sectionIndex + 1 To sectionEnd - 1
+                Dim candidate As String = If(lines(i), "").Trim()
+                If candidate = "" Then Continue For
+                If candidate.StartsWith("|", System.StringComparison.Ordinal) Then Return False
+
+                Dim key As String = ""
+                Dim value As String = ""
+                If TrySplitListPropertyLine(candidate, key, value) Then Return True
+            Next
+            Return False
+        End Function
+
+        Private Shared Function TryParseSlotPropertyList(lines() As String,
+                                                         sectionIndex As Integer,
+                                                         guidancePath As String,
+                                                         parsed As WordTemplateBindingContract,
+                                                         ByRef validationError As String) As Boolean
+            Dim sectionEnd As Integer = FindSectionEndIndex(lines, sectionIndex)
+            Dim seenPlaceholders As New System.Collections.Generic.HashSet(Of String)(System.StringComparer.OrdinalIgnoreCase)
+            Dim current As System.Collections.Generic.Dictionary(Of String, String) = Nothing
+            Dim currentLine As Integer = -1
+
+            For i As Integer = sectionIndex + 1 To sectionEnd - 1
+                Dim raw As String = If(lines(i), "")
+                Dim trimmed As String = raw.Trim()
+                If trimmed = "" Then Continue For
+
+                Dim listKey As String = ""
+                Dim listValue As String = ""
+                If TrySplitListPropertyLine(raw, listKey, listValue) Then
+                    If System.String.Equals(listKey, "placeholder", System.StringComparison.OrdinalIgnoreCase) OrElse
+                       System.String.Equals(listKey, "slot", System.StringComparison.OrdinalIgnoreCase) Then
+
+                        If current IsNot Nothing Then
+                            If Not TryAddSlotPropertyListEntry(current, currentLine, guidancePath, parsed, seenPlaceholders, validationError) Then Return False
+                        End If
+
+                        current = New System.Collections.Generic.Dictionary(Of String, String)(System.StringComparer.OrdinalIgnoreCase)
+                        current("placeholder") = listValue
+                        currentLine = i + 1
+                        Continue For
+                    End If
+
+                    If current IsNot Nothing Then
+                        validationError = $"Invalid Word template slot list entry in '{System.IO.Path.GetFileName(guidancePath)}' at line {i + 1}. Start each slot with '- placeholder: [[RI:SlotName]]' and put source/purpose/required (and optional content) on the following indented lines."
+                        Return False
+                    End If
+                    Continue For
+                End If
+
+                If current Is Nothing Then
+                    ' Human prose before the first list entry is allowed.
+                    Continue For
+                End If
+
+                Dim propertyKey As String = ""
+                Dim propertyValue As String = ""
+                If Not TrySplitPropertyLine(raw, propertyKey, propertyValue) Then
+                    validationError = $"Invalid Word template slot property in '{System.IO.Path.GetFileName(guidancePath)}' at line {i + 1}. Use 'source:', 'purpose:', 'required:', or optional 'content:'."
+                    Return False
+                End If
+
+                Select Case propertyKey.Trim().ToLowerInvariant()
+                    Case "source", "purpose", "description", "content", "required"
+                        Dim normalizedKey As String = propertyKey.Trim().ToLowerInvariant()
+                        If normalizedKey = "description" Then normalizedKey = "purpose"
+                        current(normalizedKey) = propertyValue
+                    Case Else
+                        validationError = $"Unknown Word template slot property '{propertyKey}' in '{System.IO.Path.GetFileName(guidancePath)}' at line {i + 1}. Use source, purpose, required, or optional content."
+                        Return False
+                End Select
+            Next
+
+            If current IsNot Nothing Then
+                If Not TryAddSlotPropertyListEntry(current, currentLine, guidancePath, parsed, seenPlaceholders, validationError) Then Return False
+            End If
+
+            If parsed.Slots.Count = 0 Then
+                validationError = $"The '## Word template slots' section in '{System.IO.Path.GetFileName(guidancePath)}' contains no bindings. Use '- placeholder: [[RI:SlotName]]' entries with source/purpose/required properties; content is optional."
+                Return False
+            End If
+            Return True
+        End Function
+
+        Private Shared Function TryAddSlotPropertyListEntry(values As System.Collections.Generic.Dictionary(Of String, String),
+                                                            lineNumber As Integer,
+                                                            guidancePath As String,
+                                                            parsed As WordTemplateBindingContract,
+                                                            seenPlaceholders As System.Collections.Generic.HashSet(Of String),
+                                                            ByRef validationError As String) As Boolean
+            If values Is Nothing Then Return True
+
+            Dim placeholder As String = If(values.ContainsKey("placeholder"), NormalizeCell(values("placeholder")), "")
+            Dim source As String = If(values.ContainsKey("source"), NormalizeCell(values("source")), "")
+            Dim purpose As String = If(values.ContainsKey("purpose"), NormalizeCell(values("purpose")), "")
+            Dim contentMode As String = If(values.ContainsKey("content"), NormalizeCell(values("content")).ToLowerInvariant(), "")
+            Dim requiredText As String = If(values.ContainsKey("required"), NormalizeCell(values("required")).ToLowerInvariant(), "")
+
+            If placeholder = "" OrElse source = "" OrElse requiredText = "" Then
+                validationError = $"Incomplete Word template slot entry in '{System.IO.Path.GetFileName(guidancePath)}' at line {lineNumber}. Each slot requires placeholder, source, and required. Add purpose for clear model-facing semantics; content is optional and inferred from source when omitted."
+                Return False
+            End If
+
+            Dim match As System.Text.RegularExpressions.Match = PlaceholderRegex.Match(placeholder)
+            If Not match.Success Then
+                validationError = $"Invalid Word placeholder '{placeholder}' in '{System.IO.Path.GetFileName(guidancePath)}'. Use the exact speaking format [[RI:SlotName]]."
+                Return False
+            End If
+            If Not seenPlaceholders.Add(placeholder) Then
+                validationError = $"Duplicate Word placeholder '{placeholder}' in '{System.IO.Path.GetFileName(guidancePath)}'."
+                Return False
+            End If
+
+            Dim validSource As Boolean =
+                System.String.Equals(source, "markdown_content", System.StringComparison.OrdinalIgnoreCase) OrElse
+                System.Text.RegularExpressions.Regex.IsMatch(source, "^template_fields\.[\p{L}\p{N}_.-]{1,64}$", System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+            If Not validSource Then
+                validationError = $"Invalid source '{source}' for Word placeholder '{placeholder}'. Use markdown_content or template_fields.<key>."
+                Return False
+            End If
+
+            If contentMode = "" Then
+                If System.String.Equals(source, "markdown_content", System.StringComparison.OrdinalIgnoreCase) Then
+                    contentMode = "markdown"
+                Else
+                    contentMode = "text"
+                End If
+            End If
+
+            If contentMode <> "text" AndAlso contentMode <> "markdown" Then
+                validationError = $"Invalid content mode '{contentMode}' for Word placeholder '{placeholder}'. Use text or markdown."
+                Return False
+            End If
+
+            Dim isRequired As Boolean
+            Select Case requiredText
+                Case "yes", "true", "required", "1" : isRequired = True
+                Case "no", "false", "optional", "0" : isRequired = False
+                Case Else
+                    validationError = $"Invalid required value '{requiredText}' for Word placeholder '{placeholder}'. Use yes/no."
+                    Return False
+            End Select
+
+            parsed.Slots.Add(New WordTemplateSlotDefinition() With {
+                .Placeholder = placeholder,
+                .SlotId = match.Groups(1).Value,
+                .Source = source,
+                .Purpose = purpose,
+                .ContentMode = contentMode,
+                .Required = isRequired
+            })
+            Return True
+        End Function
+
+        Private Shared Function TryParseBodyStylePropertyList(lines() As String,
+                                                              sectionIndex As Integer,
+                                                              guidancePath As String,
+                                                              parsed As WordTemplateBindingContract,
+                                                              ByRef validationError As String) As Boolean
+            Dim sectionEnd As Integer = FindSectionEndIndex(lines, sectionIndex)
+            Dim seenSemantics As New System.Collections.Generic.HashSet(Of String)(System.StringComparer.OrdinalIgnoreCase)
+
+            For i As Integer = sectionIndex + 1 To sectionEnd - 1
+                Dim raw As String = If(lines(i), "")
+                Dim trimmed As String = raw.Trim()
+                If trimmed = "" Then Continue For
+
+                Dim key As String = ""
+                Dim value As String = ""
+                If Not TrySplitListPropertyLine(raw, key, value) Then
+                    ' Human prose before the first mapping is allowed; once mappings start the section
+                    ' stays machine-readable and therefore rejects ambiguous free-form content.
+                    If parsed.BodyStyles.Count = 0 Then Continue For
+                    validationError = $"Invalid Word body-style mapping in '{System.IO.Path.GetFileName(guidancePath)}' at line {i + 1}. Use '- semantic: Exact Word Style Name'."
+                    Return False
+                End If
+
+                Dim semantic As String = NormalizeBodyStyleSemantic(key)
+                Dim styleName As String = NormalizeCell(value)
+                If semantic = "" OrElse Not BodyStyleSemanticRegex.IsMatch(semantic) Then
+                    validationError = $"Invalid Word body-style semantic '{key}' in '{System.IO.Path.GetFileName(guidancePath)}'. Use paragraph, heading1..heading6, bullet1..bullet9, or numbered1..numbered9."
+                    Return False
+                End If
+                If System.String.IsNullOrWhiteSpace(styleName) OrElse styleName.Length > 128 Then
+                    validationError = $"Invalid Word style name for semantic '{semantic}' in '{System.IO.Path.GetFileName(guidancePath)}'."
+                    Return False
+                End If
+                If Not seenSemantics.Add(semantic) Then
+                    validationError = $"Duplicate Word body-style semantic '{semantic}' in '{System.IO.Path.GetFileName(guidancePath)}'."
+                    Return False
+                End If
+
+                parsed.BodyStyles.Add(New WordTemplateBodyStyleDefinition() With {
+                    .Semantic = semantic,
+                    .StyleName = styleName
+                })
+            Next
+
+            If parsed.BodyStyles.Count = 0 Then
+                validationError = $"The '## Word body styles' section in '{System.IO.Path.GetFileName(guidancePath)}' contains no mappings. Use one-line entries such as '- paragraph: Normal'."
+                Return False
+            End If
+            Return True
+        End Function
+
+
+        Private Shared Function TryParseRenderingRulesSection(lines() As String,
+                                                               sectionIndex As Integer,
+                                                               guidancePath As String,
+                                                               parsed As WordTemplateBindingContract,
+                                                               ByRef validationError As String) As Boolean
+            Dim sectionEnd As Integer = FindSectionEndIndex(lines, sectionIndex)
+            For i As Integer = sectionIndex + 1 To sectionEnd - 1
+                Dim raw As String = If(lines(i), "")
+                If System.String.IsNullOrWhiteSpace(raw) Then Continue For
+
+                ' Only explicit list-property entries are machine-readable. Human prose, examples,
+                ' inline code and explanatory sentences inside the section must never become
+                ' configuration merely because they contain a colon. This keeps guidance easy to edit
+                ' without making the parser fragile.
+                Dim key As String = ""
+                Dim value As String = ""
+                If Not TrySplitListPropertyLine(raw, key, value) Then Continue For
+
+                Select Case NormalizeCell(key).Trim().ToLowerInvariant()
+                    Case "heading_numbering"
+                        Dim mode As String = NormalizeCell(value).Trim().ToLowerInvariant()
+                        If mode <> "native" AndAlso mode <> "preserve" Then
+                            validationError = $"Invalid heading_numbering value '{value}' in '{System.IO.Path.GetFileName(guidancePath)}'. Use native or preserve."
+                            Return False
+                        End If
+                        parsed.HeadingNumberingMode = mode
+                    Case Else
+                        validationError = $"Unknown Word rendering rule '{key}' in '{System.IO.Path.GetFileName(guidancePath)}'. Currently supported: heading_numbering."
+                        Return False
+                End Select
+            Next
+            Return True
+        End Function
+
+        Private Shared Function TryParseNativeStyleSection(lines() As String,
+                                                            sectionIndex As Integer,
+                                                            guidancePath As String,
+                                                            parsed As WordTemplateBindingContract,
+                                                            ByRef validationError As String) As Boolean
+            Dim sectionEnd As Integer = FindSectionEndIndex(lines, sectionIndex)
+            Dim seenSemantics As New System.Collections.Generic.HashSet(Of String)(System.StringComparer.OrdinalIgnoreCase)
+
+            For i As Integer = sectionIndex + 1 To sectionEnd - 1
+                Dim raw As String = If(lines(i), "")
+                Dim trimmed As String = raw.Trim()
+                If trimmed = "" Then Continue For
+
+                Dim key As String = ""
+                Dim value As String = ""
+                If Not TrySplitListPropertyLine(raw, key, value) Then
+                    If parsed.NativeStyles.Count = 0 Then Continue For
+                    validationError = $"Invalid Word native-style mapping in '{System.IO.Path.GetFileName(guidancePath)}' at line {i + 1}. Use '- semantic: Exact Word Style Name'."
+                    Return False
+                End If
+
+                Dim semantic As String = NormalizeCell(key).Trim().ToLowerInvariant()
+                Dim styleName As String = NormalizeCell(value)
+                If Not System.Text.RegularExpressions.Regex.IsMatch(semantic, "^[a-z][a-z0-9_-]{0,63}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant) Then
+                    validationError = $"Invalid Word native-style semantic '{key}' in '{System.IO.Path.GetFileName(guidancePath)}'."
+                    Return False
+                End If
+                If System.String.IsNullOrWhiteSpace(styleName) OrElse styleName.Length > 128 Then
+                    validationError = $"Invalid Word native style name for semantic '{semantic}' in '{System.IO.Path.GetFileName(guidancePath)}'."
+                    Return False
+                End If
+                If Not seenSemantics.Add(semantic) Then
+                    validationError = $"Duplicate Word native-style semantic '{semantic}' in '{System.IO.Path.GetFileName(guidancePath)}'."
+                    Return False
+                End If
+
+                parsed.NativeStyles.Add(New WordTemplateBodyStyleDefinition() With {
+                    .Semantic = semantic,
+                    .StyleName = styleName
+                })
+            Next
+
+            If parsed.NativeStyles.Count = 0 Then
+                validationError = $"The '## Word native styles' section in '{System.IO.Path.GetFileName(guidancePath)}' contains no mappings."
+                Return False
+            End If
+            Return True
+        End Function
+
+        Private Shared Function TrySplitListPropertyLine(rawLine As String,
+                                                         ByRef key As String,
+                                                         ByRef value As String) As Boolean
+            key = ""
+            value = ""
+            If System.String.IsNullOrWhiteSpace(rawLine) Then Return False
+
+            Dim trimmed As String = rawLine.Trim()
+            If Not trimmed.StartsWith("-", System.StringComparison.Ordinal) Then Return False
+            trimmed = trimmed.Substring(1).TrimStart()
+            Return TrySplitPropertyValue(trimmed, key, value)
+        End Function
+
+        Private Shared Function TrySplitPropertyLine(rawLine As String,
+                                                     ByRef key As String,
+                                                     ByRef value As String) As Boolean
+            key = ""
+            value = ""
+            If System.String.IsNullOrWhiteSpace(rawLine) Then Return False
+            Return TrySplitPropertyValue(rawLine.Trim(), key, value)
+        End Function
+
+        Private Shared Function TrySplitPropertyValue(rawValue As String,
+                                                      ByRef key As String,
+                                                      ByRef value As String) As Boolean
+            key = ""
+            value = ""
+            If System.String.IsNullOrWhiteSpace(rawValue) Then Return False
+
+            Dim separatorIndex As Integer = rawValue.IndexOf(":"c)
+            If separatorIndex <= 0 Then Return False
+
+            key = NormalizeCell(rawValue.Substring(0, separatorIndex))
+            value = NormalizeCell(rawValue.Substring(separatorIndex + 1))
+            Return key <> ""
+        End Function
+
+        Private Shared Function TryParseSlotTable(lines() As String,
+                                                  sectionIndex As Integer,
+                                                  guidancePath As String,
+                                                  parsed As WordTemplateBindingContract,
+                                                  ByRef validationError As String) As Boolean
+            Dim headerIndex As Integer = -1
+            Dim columnIndexes As New System.Collections.Generic.Dictionary(Of String, Integer)(System.StringComparer.OrdinalIgnoreCase)
+
+            For i As Integer = sectionIndex + 1 To lines.Length - 1
+                Dim candidate As String = If(lines(i), "").Trim()
+                If candidate.StartsWith("#", System.StringComparison.Ordinal) Then Exit For
+
+                Dim cells As System.Collections.Generic.List(Of String) = SplitMarkdownTableLine(candidate)
+                If cells.Count < 4 Then Continue For
+
+                columnIndexes.Clear()
+                For c As Integer = 0 To cells.Count - 1
+                    Dim name As String = NormalizeCell(cells(c)).ToLowerInvariant()
+                    If name = "placeholder" OrElse name = "source" OrElse name = "content" OrElse name = "required" OrElse name = "purpose" OrElse name = "description" Then
+                        If name = "description" Then name = "purpose"
+                        columnIndexes(name) = c
+                    End If
+                Next
+
+                If columnIndexes.ContainsKey("placeholder") AndAlso
+                   columnIndexes.ContainsKey("source") AndAlso
+                   columnIndexes.ContainsKey("content") AndAlso
+                   columnIndexes.ContainsKey("required") Then
+                    headerIndex = i
+                    Exit For
+                End If
+            Next
+
+            If headerIndex < 0 Then
+                validationError = $"The '## Word template slots' section in '{System.IO.Path.GetFileName(guidancePath)}' must contain property-list entries beginning with '- placeholder: [[RI:SlotName]]'. Legacy Markdown tables are still accepted for backward compatibility."
+                Return False
+            End If
+
+            Dim seenPlaceholders As New System.Collections.Generic.HashSet(Of String)(System.StringComparer.OrdinalIgnoreCase)
+            For i As Integer = headerIndex + 1 To lines.Length - 1
+                Dim raw As String = If(lines(i), "").Trim()
+                If raw = "" Then
+                    If parsed.Slots.Count > 0 Then Exit For
+                    Continue For
+                End If
+                If raw.StartsWith("#", System.StringComparison.Ordinal) AndAlso parsed.Slots.Count > 0 Then Exit For
+                If Not raw.StartsWith("|", System.StringComparison.Ordinal) Then
+                    If parsed.Slots.Count > 0 Then Exit For
+                    Continue For
+                End If
+
+                Dim cells As System.Collections.Generic.List(Of String) = SplitMarkdownTableLine(raw)
+                If cells.Count = 0 OrElse IsMarkdownSeparatorRow(cells) Then Continue For
+
+                Dim maxIndex As Integer = columnIndexes.Values.Max()
+                If cells.Count <= maxIndex Then
+                    validationError = $"Invalid legacy Word template slot row in '{System.IO.Path.GetFileName(guidancePath)}' at line {i + 1}: expected Placeholder, Source, Content, Required columns."
+                    Return False
+                End If
+
+                Dim placeholder As String = NormalizeCell(cells(columnIndexes("placeholder")))
+                Dim source As String = NormalizeCell(cells(columnIndexes("source")))
+                Dim contentMode As String = NormalizeCell(cells(columnIndexes("content"))).ToLowerInvariant()
+                Dim requiredText As String = NormalizeCell(cells(columnIndexes("required"))).ToLowerInvariant()
+                If placeholder = "" AndAlso source = "" Then Continue For
+
+                Dim values As New System.Collections.Generic.Dictionary(Of String, String)(System.StringComparer.OrdinalIgnoreCase) From {
+                    {"placeholder", placeholder},
+                    {"source", source},
+                    {"content", contentMode},
+                    {"required", requiredText}
+                }
+                If columnIndexes.ContainsKey("purpose") AndAlso cells.Count > columnIndexes("purpose") Then
+                    values("purpose") = NormalizeCell(cells(columnIndexes("purpose")))
+                End If
+                If Not TryAddSlotPropertyListEntry(values, i + 1, guidancePath, parsed, seenPlaceholders, validationError) Then Return False
+            Next
+
+            If parsed.Slots.Count = 0 Then
+                validationError = $"The legacy Word template slot table in '{System.IO.Path.GetFileName(guidancePath)}' contains no bindings."
+                Return False
+            End If
+            Return True
+        End Function
+
+        Private Shared Function TryParseBodyStyleTable(lines() As String,
+                                                       sectionIndex As Integer,
+                                                       guidancePath As String,
+                                                       parsed As WordTemplateBindingContract,
+                                                       ByRef validationError As String) As Boolean
+            Dim headerIndex As Integer = -1
+            Dim semanticColumn As Integer = -1
+            Dim styleColumn As Integer = -1
+
+            For i As Integer = sectionIndex + 1 To lines.Length - 1
+                Dim candidate As String = If(lines(i), "").Trim()
+                If candidate.StartsWith("#", System.StringComparison.Ordinal) Then Exit For
+
+                Dim cells As System.Collections.Generic.List(Of String) = SplitMarkdownTableLine(candidate)
+                If cells.Count < 2 Then Continue For
+
+                semanticColumn = -1
+                styleColumn = -1
+                For c As Integer = 0 To cells.Count - 1
+                    Dim name As String = NormalizeCell(cells(c)).ToLowerInvariant()
+                    If name = "semantic" Then semanticColumn = c
+                    If name = "word style" OrElse name = "style" Then styleColumn = c
+                Next
+                If semanticColumn >= 0 AndAlso styleColumn >= 0 Then
+                    headerIndex = i
+                    Exit For
+                End If
+            Next
+
+            If headerIndex < 0 Then
+                validationError = $"The '## Word body styles' section in '{System.IO.Path.GetFileName(guidancePath)}' must contain one-line mappings such as '- paragraph: Normal'. Legacy Markdown tables are still accepted for backward compatibility."
+                Return False
+            End If
+
+            Dim seenSemantics As New System.Collections.Generic.HashSet(Of String)(System.StringComparer.OrdinalIgnoreCase)
+            For i As Integer = headerIndex + 1 To lines.Length - 1
+                Dim raw As String = If(lines(i), "").Trim()
+                If raw = "" Then
+                    If parsed.BodyStyles.Count > 0 Then Exit For
+                    Continue For
+                End If
+                If raw.StartsWith("#", System.StringComparison.Ordinal) AndAlso parsed.BodyStyles.Count > 0 Then Exit For
+                If Not raw.StartsWith("|", System.StringComparison.Ordinal) Then
+                    If parsed.BodyStyles.Count > 0 Then Exit For
+                    Continue For
+                End If
+
+                Dim cells As System.Collections.Generic.List(Of String) = SplitMarkdownTableLine(raw)
+                If cells.Count = 0 OrElse IsMarkdownSeparatorRow(cells) Then Continue For
+                Dim maxIndex As Integer = System.Math.Max(semanticColumn, styleColumn)
+                If cells.Count <= maxIndex Then
+                    validationError = $"Invalid legacy Word body style row in '{System.IO.Path.GetFileName(guidancePath)}' at line {i + 1}: expected Semantic and Word style columns."
+                    Return False
+                End If
+
+                Dim semantic As String = NormalizeBodyStyleSemantic(NormalizeCell(cells(semanticColumn)))
+                Dim styleName As String = NormalizeCell(cells(styleColumn))
+                If semantic = "" AndAlso styleName = "" Then Continue For
+
+                If semantic = "" OrElse Not BodyStyleSemanticRegex.IsMatch(semantic) Then
+                    validationError = $"Invalid Word body-style semantic '{NormalizeCell(cells(semanticColumn))}' in '{System.IO.Path.GetFileName(guidancePath)}'. Use paragraph, heading1..heading6, bullet1..bullet9, or numbered1..numbered9."
+                    Return False
+                End If
+                If System.String.IsNullOrWhiteSpace(styleName) OrElse styleName.Length > 128 Then
+                    validationError = $"Invalid Word style name for semantic '{semantic}' in '{System.IO.Path.GetFileName(guidancePath)}'."
+                    Return False
+                End If
+                If Not seenSemantics.Add(semantic) Then
+                    validationError = $"Duplicate Word body-style semantic '{semantic}' in '{System.IO.Path.GetFileName(guidancePath)}'."
+                    Return False
+                End If
+
+                parsed.BodyStyles.Add(New WordTemplateBodyStyleDefinition() With {
+                    .Semantic = semantic,
+                    .StyleName = styleName
+                })
+            Next
+
+            If parsed.BodyStyles.Count = 0 Then
+                validationError = $"The legacy Word body style table in '{System.IO.Path.GetFileName(guidancePath)}' contains no mappings."
+                Return False
+            End If
+            Return True
+        End Function
+
+        Private Shared Function NormalizeBodyStyleSemantic(value As String) As String
+            Dim normalized As String = If(value, "").Trim().ToLowerInvariant().Replace(" ", "").Replace("_", "").Replace(".", "")
+            If normalized = "body" OrElse normalized = "normal" OrElse normalized = "bodyparagraph" Then Return "paragraph"
+            Return normalized
+        End Function
+
+        Private Shared Function SplitMarkdownTableLine(rawLine As String) As System.Collections.Generic.List(Of String)
+            Dim result As New System.Collections.Generic.List(Of String)()
+            If System.String.IsNullOrWhiteSpace(rawLine) Then Return result
+            Dim value As String = rawLine.Trim()
+            If value.StartsWith("|", System.StringComparison.Ordinal) Then value = value.Substring(1)
+            If value.EndsWith("|", System.StringComparison.Ordinal) Then value = value.Substring(0, value.Length - 1)
+            For Each part As String In value.Split("|"c)
+                result.Add(part.Trim())
+            Next
+            Return result
+        End Function
+
+        Private Shared Function NormalizeCell(value As String) As String
+            Dim result As String = If(value, "").Trim()
+            Dim changed As Boolean = True
+            Do While changed AndAlso result.Length >= 2
+                changed = False
+                Dim first As Char = result(0)
+                Dim last As Char = result(result.Length - 1)
+                Dim isMatchingWrapper As Boolean =
+                    (first = "`"c AndAlso last = "`"c) OrElse
+                    (first = Microsoft.VisualBasic.ChrW(34) AndAlso last = Microsoft.VisualBasic.ChrW(34)) OrElse
+                    (first = "'"c AndAlso last = "'"c) OrElse
+                    (first = Microsoft.VisualBasic.ChrW(&H201C) AndAlso last = Microsoft.VisualBasic.ChrW(&H201D)) OrElse
+                    (first = Microsoft.VisualBasic.ChrW(&H2018) AndAlso last = Microsoft.VisualBasic.ChrW(&H2019))
+
+                If isMatchingWrapper Then
+                    result = result.Substring(1, result.Length - 2).Trim()
+                    changed = True
+                End If
+            Loop
+            Return result
+        End Function
+
+        Private Shared Function IsMarkdownSeparatorRow(cells As System.Collections.Generic.List(Of String)) As Boolean
+            If cells Is Nothing OrElse cells.Count = 0 Then Return False
+            For Each cell As String In cells
+                Dim normalized As String = NormalizeCell(cell).Replace(":", "").Trim()
+                If normalized.Length < 3 OrElse normalized.Any(Function(ch As Char) ch <> "-"c) Then Return False
+            Next
+            Return True
+        End Function
+    End Class
+
+    ''' <summary>
     ''' Shared, read-only resolver for named Office designs. The CENTRAL catalog is loaded
     ''' first and the LOCAL catalog then overrides a central entry with the same design id.
     ''' No model-side filesystem discovery is required: hosts can expose the available names
@@ -866,6 +1917,8 @@ Namespace Agents
     Public NotInheritable Class DesignRepository
         Public Const DesignsDirectoryName As String = "designs"
         Public Const CatalogFileName As String = "designs.json"
+        Public Const DesignSetsDirectoryName As String = "design_sets"
+        Public Const ActiveDesignSetFileName As String = "active.json"
         Public Const SupportedSchemaVersion As Integer = 1
 
         Private Sub New()
@@ -911,6 +1964,94 @@ Namespace Agents
             Return Nothing
         End Function
 
+        Public Shared Function FindDefaultDesign(applicationName As String) As DocumentDesignDescriptor
+            Dim designs As IReadOnlyList(Of DocumentDesignDescriptor) = GetDesigns()
+            Dim normalizedApplication As String = If(applicationName, "").Trim().ToLowerInvariant()
+            Dim matches As New System.Collections.Generic.List(Of DocumentDesignDescriptor)()
+            For Each d As DocumentDesignDescriptor In designs
+                If d Is Nothing Then Continue For
+                Dim appConfig As Newtonsoft.Json.Linq.JObject = d.GetApplicationConfig(normalizedApplication)
+                If appConfig Is Nothing Then Continue For
+                If appConfig.Value(Of Boolean?)("is_default").GetValueOrDefault(False) Then matches.Add(d)
+            Next
+            If matches.Count = 1 Then Return matches(0)
+            Return Nothing
+        End Function
+
+        Public Shared Function FindBestWordDesign(documentType As String,
+                                                  documentLanguage As String,
+                                                  Optional organization As String = "") As DocumentDesignDescriptor
+            Dim wantedType As String = NormalizeLookupKey(documentType)
+            If wantedType = "" Then Return Nothing
+
+            Dim wantedLanguage As String = NormalizeLanguageKey(documentLanguage)
+            Dim wantedOrganization As String = NormalizeLookupKey(organization)
+            Dim candidates As New System.Collections.Generic.List(Of DocumentDesignDescriptor)()
+
+            For Each d As DocumentDesignDescriptor In GetDesigns()
+                If d Is Nothing OrElse d.Word Is Nothing Then Continue For
+                Dim candidateType As String = NormalizeLookupKey(If(d.Word.Value(Of String)("document_type"), ""))
+                If candidateType <> wantedType Then Continue For
+                If wantedOrganization <> "" Then
+                    Dim candidateOrganization As String = NormalizeLookupKey(If(d.Word.Value(Of String)("organization"), ""))
+                    If candidateOrganization <> "" AndAlso candidateOrganization <> wantedOrganization Then Continue For
+                End If
+                candidates.Add(d)
+            Next
+
+            If candidates.Count = 0 Then Return Nothing
+
+            If wantedLanguage <> "" Then
+                Dim exactLanguage As New System.Collections.Generic.List(Of DocumentDesignDescriptor)()
+                Dim anyLanguage As New System.Collections.Generic.List(Of DocumentDesignDescriptor)()
+                For Each d As DocumentDesignDescriptor In candidates
+                    Dim candidateLanguage As String = NormalizeLanguageKey(If(d.Word.Value(Of String)("language"), ""))
+                    If candidateLanguage = wantedLanguage Then
+                        exactLanguage.Add(d)
+                    ElseIf candidateLanguage = "any" OrElse candidateLanguage = "" Then
+                        anyLanguage.Add(d)
+                    End If
+                Next
+                If exactLanguage.Count = 1 Then Return exactLanguage(0)
+                If exactLanguage.Count > 1 Then
+                    Dim exactDefault As DocumentDesignDescriptor = FindSingleDefaultFor(exactLanguage, wantedType)
+                    If exactDefault IsNot Nothing Then Return exactDefault
+                    Return Nothing
+                End If
+                If anyLanguage.Count = 1 Then Return anyLanguage(0)
+                If anyLanguage.Count > 1 Then
+                    Dim anyDefault As DocumentDesignDescriptor = FindSingleDefaultFor(anyLanguage, wantedType)
+                    If anyDefault IsNot Nothing Then Return anyDefault
+                    Return Nothing
+                End If
+            End If
+
+            If candidates.Count = 1 Then Return candidates(0)
+            Return FindSingleDefaultFor(candidates, wantedType)
+        End Function
+
+        Private Shared Function FindSingleDefaultFor(candidates As IEnumerable(Of DocumentDesignDescriptor),
+                                                     wantedType As String) As DocumentDesignDescriptor
+            If candidates Is Nothing Then Return Nothing
+            Dim matches As New System.Collections.Generic.List(Of DocumentDesignDescriptor)()
+            For Each d As DocumentDesignDescriptor In candidates
+                If d Is Nothing OrElse d.Word Is Nothing Then Continue For
+                Dim defaultFor As String = NormalizeLookupKey(If(d.Word.Value(Of String)("default_for"), ""))
+                If defaultFor = wantedType Then matches.Add(d)
+            Next
+            If matches.Count = 1 Then Return matches(0)
+            Return Nothing
+        End Function
+
+        Private Shared Function NormalizeLanguageKey(value As String) As String
+            Dim normalized As String = If(value, "").Trim().ToLowerInvariant().Replace("_", "-")
+            If normalized = "" Then Return ""
+            If normalized = "any" Then Return "any"
+            Dim separator As Integer = normalized.IndexOf("-"c)
+            If separator > 0 Then normalized = normalized.Substring(0, separator)
+            Return normalized
+        End Function
+
         Public Shared Function BuildPromptFragment(Optional maxDesigns As Integer = 24) As String
             Dim designs As IReadOnlyList(Of DocumentDesignDescriptor) = GetDesigns()
             If designs Is Nothing OrElse designs.Count = 0 Then
@@ -924,13 +2065,47 @@ Namespace Agents
                 If d.PowerPoint IsNot Nothing Then apps.Add("PowerPoint")
                 If d.Excel IsNot Nothing Then apps.Add("Excel")
                 Dim source As String = If(d.IsLocal, "local", "central")
-                items.Add($"{d.Name} [design_name={d.Id}; {String.Join("/", apps)}; {source}]")
+                Dim wordContractNote As String = ""
+                If d.Word IsNot Nothing Then
+                    Dim templateRelative As String = If(d.Word.Value(Of String)("template_file"), "").Trim()
+                    Dim templatePath As String = If(templateRelative = "", "", d.ResolveRepositoryFile(templateRelative))
+                    Dim contract As WordTemplateBindingContract = Nothing
+                    Dim contractError As String = ""
+                    If WordTemplateBindingContractParser.TryLoadForDesign(d, d.Word, templatePath, contract, contractError) Then
+                        If contract IsNot Nothing AndAlso (contract.HasSlots OrElse contract.HasBodyStyles OrElse contract.HasNativeStyles) Then
+                            Dim summary As String = contract.BuildPromptSummary()
+                            If summary <> "" Then wordContractNote = "; Word contract: " & summary
+                        End If
+                    ElseIf contractError <> "" Then
+                        wordContractNote = "; Word design package INVALID: " & contractError
+                    End If
+                End If
+                Dim routingNote As String = ""
+                If d.Word IsNot Nothing Then
+                    Dim documentType As String = If(d.Word.Value(Of String)("document_type"), "").Trim()
+                    Dim language As String = If(d.Word.Value(Of String)("language"), "").Trim()
+                    Dim organization As String = If(d.Word.Value(Of String)("organization"), "").Trim()
+                    Dim isDefault As Boolean = d.Word.Value(Of Boolean?)("is_default").GetValueOrDefault(False)
+                    Dim defaultFor As String = If(d.Word.Value(Of String)("default_for"), "").Trim()
+                    Dim routeParts As New System.Collections.Generic.List(Of String)()
+                    If documentType <> "" Then routeParts.Add("type=" & documentType)
+                    If language <> "" Then routeParts.Add("language=" & language)
+                    If organization <> "" Then routeParts.Add("organization=" & organization)
+                    If defaultFor <> "" Then routeParts.Add("default_for=" & defaultFor)
+                    If isDefault Then routeParts.Add("global_default=yes")
+                    If routeParts.Count > 0 Then routingNote = "; routing: " & System.String.Join(", ", routeParts)
+                End If
+                items.Add($"{d.Name} [design_name={d.Id}; {String.Join("/", apps)}; {source}{routingNote}{wordContractNote}]")
             Next
 
             Dim suffix As String = If(designs.Count > items.Count, $" (+{designs.Count - items.Count} more)", "")
             Return "DESIGN REPOSITORY: Configured named designs: " & String.Join("; ", items) & suffix & ". " &
+                   "For Word creation, an explicitly user-requested named design comes first. Otherwise DOCUMENT TYPE IS THE PRIMARY ROUTING KEY: a requested memo must be routed only among memo designs, a letter only among letter designs, and a generic/blank design must never win merely because its language is broader. Within the matching document type, use language and then organization/default metadata to choose the best variant. Prefer passing document_type and document_language to create_word_document and let the host resolve the configured design; pass design_name directly only when the user explicitly named a particular design. Prefer a matching default_for entry when several same-type/same-language designs fit. If the format is genuinely ambiguous and no applicable default exists, ask the user only when ask_user is available; in unattended AutoPilot do not invent a format and explain which configured fallback/default was used so the user can give a new instruction if needed. If no Word design_name is supplied, the host applies the single Word entry marked global_default=yes when configured. " &
                    "When the user asks for one of these designs, pass its exact design_name to create_word_document, create_powerpoint, or create_excel_spreadsheet. " &
-                   "Do not substitute a similarly named organization and do not claim any design not backed by this repository or another concrete authorized source."
+                   "For a Word design whose entry lists Word slots, put the substantive body in markdown_content and pass the listed template_fields keys exactly; the host binds them to the template deterministically. " &
+                   "If the Word contract lists native body styles, use only the declared Markdown heading/list levels; ordinary Markdown paragraphs and declared list/heading semantics are mapped to the template's exact native Word styles by the host. " &
+                   "A user-requested named design remains binding after a creator failure: never obtain apparent success by retrying the same artifact creator without its design/template constraint. " &
+                   "Do not infer slot meaning from a visible placeholder name, and do not substitute a similarly named organization or claim any design not backed by this repository or another concrete authorized source."
         End Function
 
         Public Shared Function GetCatalogPaths() As IReadOnlyList(Of String)
@@ -940,10 +2115,42 @@ Namespace Agents
             Return result
         End Function
 
+        Private Shared Function ResolveDesignsDirectory(root As String) As String
+            If System.String.IsNullOrWhiteSpace(root) Then Return ""
+            Try
+                Dim defaultDir As String = System.IO.Path.GetFullPath(System.IO.Path.Combine(root, DesignsDirectoryName))
+                Dim selectorPath As String = System.IO.Path.Combine(root, DesignSetsDirectoryName, ActiveDesignSetFileName)
+                If Not System.IO.File.Exists(selectorPath) Then Return defaultDir
+
+                Dim selector As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(System.IO.File.ReadAllText(selectorPath, System.Text.Encoding.UTF8))
+                Dim schemaVersion As Integer = 0
+                System.Int32.TryParse(If(selector("schema_version"), "").ToString(), schemaVersion)
+                If schemaVersion <> SupportedSchemaVersion Then Return defaultDir
+
+                Dim activeSet As String = If(selector.Value(Of String)("active_set"), "").Trim()
+                If activeSet = "" Then Return defaultDir
+                ' Explicitly supported opt-out: use the neutral .inky/designs fallback and expose no design-set brand.
+                If System.String.Equals(activeSet, "none", System.StringComparison.OrdinalIgnoreCase) Then Return defaultDir
+                Dim sets As Newtonsoft.Json.Linq.JObject = TryCast(selector("sets"), Newtonsoft.Json.Linq.JObject)
+                If sets Is Nothing Then Return defaultDir
+                Dim relative As String = If(sets.Value(Of String)(activeSet), "").Trim()
+                If relative = "" Then Return defaultDir
+
+                Dim setsRoot As String = System.IO.Path.GetFullPath(System.IO.Path.Combine(root, DesignSetsDirectoryName))
+                Dim selectedDir As String = System.IO.Path.GetFullPath(System.IO.Path.Combine(setsRoot, relative))
+                Dim prefix As String = setsRoot.TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar) & System.IO.Path.DirectorySeparatorChar
+                If Not selectedDir.StartsWith(prefix, System.StringComparison.OrdinalIgnoreCase) Then Return defaultDir
+                If Not System.IO.Directory.Exists(selectedDir) Then Return defaultDir
+                Return selectedDir
+            Catch ex As System.Exception
+                Return System.IO.Path.GetFullPath(System.IO.Path.Combine(root, DesignsDirectoryName))
+            End Try
+        End Function
+
         Private Shared Sub AddCatalogPath(result As List(Of String), root As String)
             If result Is Nothing OrElse String.IsNullOrWhiteSpace(root) Then Return
             Try
-                result.Add(System.IO.Path.Combine(root, DesignsDirectoryName, CatalogFileName))
+                result.Add(System.IO.Path.Combine(ResolveDesignsDirectory(root), CatalogFileName))
             Catch ex As System.Exception
             End Try
         End Sub
@@ -956,7 +2163,7 @@ Namespace Agents
             Dim designsDir As String
             Dim catalogPath As String
             Try
-                designsDir = System.IO.Path.GetFullPath(System.IO.Path.Combine(root, DesignsDirectoryName))
+                designsDir = ResolveDesignsDirectory(root)
                 catalogPath = System.IO.Path.Combine(designsDir, CatalogFileName)
             Catch ex As System.Exception
                 Return
@@ -1025,9 +2232,7 @@ Namespace Agents
 
             Dim designsDir As String
             Try
-                designsDir = System.IO.Path.GetFullPath(
-                    System.IO.Path.Combine(root, DesignsDirectoryName)
-                )
+                designsDir = ResolveDesignsDirectory(root)
             Catch ex As System.Exception
                 Return
             End Try
@@ -1142,8 +2347,8 @@ Namespace Agents
 
                 ' Optional human-readable companion guidance uses the same basename
                 ' as the Office carrier. This keeps design authoring user-friendly:
-                ' a user can drop Example.potx + Example.md into designs\powerpoint
-                ' without writing or editing designs.json.
+                ' a user can drop an Office carrier plus a same-basename .md into the
+                ' conventional designs\<application> folder without editing designs.json.
                 Dim guidanceCandidate As String =
                     System.IO.Path.Combine(
                         applicationDir,

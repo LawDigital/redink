@@ -88,6 +88,7 @@ Partial Public Class ThisAddIn
         Public Property TemplatePath As String
         Public Property TemplateWarning As String
         Public Property AppliedDefaultCount As Integer
+        Public Property IsImplicitDefault As Boolean
 
         Public ReadOnly Property Found As Boolean
             Get
@@ -131,6 +132,9 @@ Partial Public Class ThisAddIn
             Return $" Configured design '{design.Descriptor.Name}' has no {design.ApplicationName} profile; neutral professional design was used."
         End If
         If design.Applied Then
+            If design.IsImplicitDefault Then
+                Return $" Configured default design used: '{design.Descriptor.Name}' ({design.SourceLabel})."
+            End If
             Return $" Configured design used: '{design.Descriptor.Name}' ({design.SourceLabel})."
         End If
         Return $" Configured design '{design.Descriptor.Name}' contained no applicable {design.ApplicationName} settings or usable template; neutral professional design was used."
@@ -150,9 +154,62 @@ Partial Public Class ThisAddIn
             .RequestedName = If(GetArgString(args, "design_name"), "").Trim(),
             .ApplicationName = If(applicationName, "").Trim()
         }
-        If result.RequestedName = "" Then Return result
+        Dim typedWordRouteRequested As System.Boolean =
+            System.String.Equals(applicationName, "Word", System.StringComparison.OrdinalIgnoreCase) AndAlso
+            Not System.String.IsNullOrWhiteSpace(GetArgString(args, "document_type"))
 
-        result.Descriptor = SharedLibrary.Agents.DesignRepository.FindDesign(result.RequestedName)
+        If result.RequestedName = "" Then
+            If System.String.Equals(applicationName, "Word", System.StringComparison.OrdinalIgnoreCase) Then
+                Dim requestedDocumentType As System.String = If(GetArgString(args, "document_type"), System.String.Empty).Trim()
+                Dim requestedDocumentLanguage As System.String = If(GetArgString(args, "document_language"), System.String.Empty).Trim()
+                Dim requestedOrganization As System.String = If(GetArgString(args, "organization"), System.String.Empty).Trim()
+                If requestedDocumentType <> System.String.Empty Then
+                    result.Descriptor = SharedLibrary.Agents.DesignRepository.FindBestWordDesign(requestedDocumentType, requestedDocumentLanguage, requestedOrganization)
+                    If result.Descriptor IsNot Nothing Then
+                        result.RequestedName = result.Descriptor.Id
+                        args("design_name") = result.RequestedName
+                        If context IsNot Nothing Then context.Log("Resolved Word design by document type first: type='" & requestedDocumentType & "', language='" & requestedDocumentLanguage & "' -> '" & result.Descriptor.Name & "'.")
+                        ApDashboardLog("Resolved Word design by document type first: '" & result.Descriptor.Name & "'.", "info")
+                    End If
+                End If
+            End If
+
+            If result.Descriptor Is Nothing AndAlso typedWordRouteRequested Then
+                result.TemplateWarning = "No unambiguous configured Word design matched document_type='" & If(GetArgString(args, "document_type"), System.String.Empty) & "' and document_language='" & If(GetArgString(args, "document_language"), System.String.Empty) & "'. A global blank/default design will not be substituted for a requested document type."
+                If context IsNot Nothing Then context.Log(result.TemplateWarning)
+                Return result
+            End If
+
+            If result.Descriptor Is Nothing Then
+                result.Descriptor = SharedLibrary.Agents.DesignRepository.FindDefaultDesign(applicationName)
+                If result.Descriptor Is Nothing Then Return result
+                result.RequestedName = result.Descriptor.Id
+                result.IsImplicitDefault = True
+                args("design_name") = result.RequestedName
+                If context IsNot Nothing Then context.Log("Using configured default " & applicationName & " design '" & result.Descriptor.Name & "'.")
+                ApDashboardLog("Using configured default " & applicationName & " design '" & result.Descriptor.Name & "'.", "info")
+            End If
+        Else
+            result.Descriptor = SharedLibrary.Agents.DesignRepository.FindDesign(result.RequestedName)
+            If result.Descriptor IsNot Nothing AndAlso System.String.Equals(applicationName, "Word", System.StringComparison.OrdinalIgnoreCase) Then
+                Dim requestedDocumentType As System.String = If(GetArgString(args, "document_type"), System.String.Empty).Trim()
+                If requestedDocumentType <> System.String.Empty Then
+                    Dim selectedWord As Newtonsoft.Json.Linq.JObject = result.Descriptor.GetApplicationConfig("Word")
+                    Dim selectedType As System.String = If(If(selectedWord Is Nothing, Nothing, selectedWord.Value(Of System.String)("document_type")), System.String.Empty).Trim()
+                    If selectedType <> System.String.Empty AndAlso Not System.String.Equals(selectedType, requestedDocumentType, System.StringComparison.OrdinalIgnoreCase) Then
+                        Dim requestedDocumentLanguage As System.String = If(GetArgString(args, "document_language"), System.String.Empty).Trim()
+                        Dim requestedOrganization As System.String = If(GetArgString(args, "organization"), System.String.Empty).Trim()
+                        Dim typeMatched As SharedLibrary.Agents.DocumentDesignDescriptor = SharedLibrary.Agents.DesignRepository.FindBestWordDesign(requestedDocumentType, requestedDocumentLanguage, requestedOrganization)
+                        If typeMatched IsNot Nothing Then
+                            If context IsNot Nothing Then context.Log("Corrected conflicting model design selection by document type: '" & result.Descriptor.Name & "' -> '" & typeMatched.Name & "'.")
+                            result.Descriptor = typeMatched
+                            result.RequestedName = typeMatched.Id
+                            args("design_name") = result.RequestedName
+                        End If
+                    End If
+                End If
+            End If
+        End If
         If result.Descriptor Is Nothing Then
             result.TemplateWarning = $"Configured design '{result.RequestedName}' was not found; neutral professional design was used."
             If context IsNot Nothing Then context.Log(result.TemplateWarning)
@@ -442,6 +499,10 @@ Partial Public Class ThisAddIn
                 New String() {"style_preset", "accent_color", "secondary_color", "font_name", "aspect_ratio", "footer_text", "show_slide_numbers", "text_color", "muted_color", "light_color", "line_color", "green_color", "red_color", "amber_color", "preserve_template_slides"},
                 New String() {".pptx", ".potx"},
                 context)
+
+            If context IsNot Nothing AndAlso context.SequencingState IsNot Nothing Then
+                SharedLibrary.Agents.ToolCallSequencing.CaptureRetryInvariantArguments(toolCall.ToolName, toolCall.Arguments, context.SequencingState)
+            End If
 
             Dim fileName As String = GetArgString(toolCall.Arguments, "file_name")
             If String.IsNullOrWhiteSpace(fileName) Then fileName = "Presentation"
@@ -6099,6 +6160,10 @@ Partial Public Class ThisAddIn
                 New String() {".xltx"},
                 context)
 
+            If context IsNot Nothing AndAlso context.SequencingState IsNot Nothing Then
+                SharedLibrary.Agents.ToolCallSequencing.CaptureRetryInvariantArguments(toolCall.ToolName, toolCall.Arguments, context.SequencingState)
+            End If
+
             ' ── Determine file name and extension ──
             Dim fileName = GetArgString(toolCall.Arguments, "file_name")
             If String.IsNullOrWhiteSpace(fileName) Then fileName = "Spreadsheet"
@@ -10433,6 +10498,823 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
+    Private Shared Function GetAutoPilotWordTemplateFields(args As Dictionary(Of String, Object)) As Newtonsoft.Json.Linq.JObject
+        If args Is Nothing OrElse Not args.ContainsKey("template_fields") OrElse args("template_fields") Is Nothing Then
+            Return New Newtonsoft.Json.Linq.JObject()
+        End If
+
+        Try
+            Dim token As Newtonsoft.Json.Linq.JToken = TryCast(args("template_fields"), Newtonsoft.Json.Linq.JToken)
+            If token Is Nothing Then token = Newtonsoft.Json.Linq.JToken.FromObject(args("template_fields"))
+            If token IsNot Nothing AndAlso token.Type = Newtonsoft.Json.Linq.JTokenType.Object Then
+                Return DirectCast(token, Newtonsoft.Json.Linq.JObject)
+            End If
+        Catch ex As System.Exception
+        End Try
+
+        Return New Newtonsoft.Json.Linq.JObject()
+    End Function
+
+    Private Shared Function GetAutoPilotWordTemplateFieldToken(
+            templateFields As Newtonsoft.Json.Linq.JObject,
+            key As String) As Newtonsoft.Json.Linq.JToken
+
+        If templateFields Is Nothing OrElse System.String.IsNullOrWhiteSpace(key) Then Return Nothing
+        For Each propertyItem As Newtonsoft.Json.Linq.JProperty In templateFields.Properties()
+            If System.String.Equals(propertyItem.Name, key, System.StringComparison.OrdinalIgnoreCase) Then
+                Return propertyItem.Value
+            End If
+        Next
+        Return Nothing
+    End Function
+
+    Private Shared Function ValidateAutoPilotWordTemplateContractInputs(
+            contract As SharedLibrary.Agents.WordTemplateBindingContract,
+            templateFields As Newtonsoft.Json.Linq.JObject,
+            markdownContent As String,
+            ByRef validationError As String) As Boolean
+
+        validationError = String.Empty
+        If contract Is Nothing OrElse Not contract.HasSlots Then Return True
+        If templateFields Is Nothing Then templateFields = New Newtonsoft.Json.Linq.JObject()
+
+        Dim allowedFieldKeys As New System.Collections.Generic.HashSet(Of String)(System.StringComparer.OrdinalIgnoreCase)
+        For Each slot As SharedLibrary.Agents.WordTemplateSlotDefinition In contract.Slots
+            If slot Is Nothing Then Continue For
+
+            If slot.UsesMarkdownContent Then
+                If slot.Required AndAlso System.String.IsNullOrWhiteSpace(markdownContent) Then
+                    validationError = "The selected Word template requires markdown_content for placeholder " & slot.Placeholder & "."
+                    Return False
+                End If
+                Continue For
+            End If
+
+            Dim key As String = slot.TemplateFieldKey
+            If key = "" Then Continue For
+            allowedFieldKeys.Add(key)
+
+            If slot.Required Then
+                Dim fieldToken As Newtonsoft.Json.Linq.JToken = GetAutoPilotWordTemplateFieldToken(templateFields, key)
+                Dim fieldValue As String = If(fieldToken Is Nothing OrElse fieldToken.Type = Newtonsoft.Json.Linq.JTokenType.Null, "", fieldToken.ToString())
+                If System.String.IsNullOrWhiteSpace(fieldValue) Then
+                    validationError = "The selected Word template requires template_fields.'" & key & "' for placeholder " & slot.Placeholder & "."
+                    Return False
+                End If
+            End If
+        Next
+
+        For Each propertyItem As Newtonsoft.Json.Linq.JProperty In templateFields.Properties()
+            If Not allowedFieldKeys.Contains(propertyItem.Name) Then
+                validationError = "Unknown template_fields key '" & propertyItem.Name & "' for the selected Word design. Use only the keys exposed by its design guidance."
+                Return False
+            End If
+        Next
+
+        Return True
+    End Function
+
+    Private Shared Function GetAutoPilotWordTemplateSlotValue(
+            slot As SharedLibrary.Agents.WordTemplateSlotDefinition,
+            templateFields As Newtonsoft.Json.Linq.JObject,
+            markdownContent As String) As String
+
+        If slot Is Nothing Then Return String.Empty
+        If slot.UsesMarkdownContent Then Return If(markdownContent, String.Empty)
+
+        Dim key As String = slot.TemplateFieldKey
+        If key = "" OrElse templateFields Is Nothing Then Return String.Empty
+        Dim token As Newtonsoft.Json.Linq.JToken = GetAutoPilotWordTemplateFieldToken(templateFields, key)
+        If token Is Nothing OrElse token.Type = Newtonsoft.Json.Linq.JTokenType.Null Then Return String.Empty
+        Return token.ToString()
+    End Function
+
+    Private Shared Function FindAutoPilotWordTemplatePlaceholderPositions(
+            doc As Microsoft.Office.Interop.Word.Document,
+            placeholder As String) As System.Collections.Generic.List(Of System.Tuple(Of Integer, Integer))
+
+        Dim result As New System.Collections.Generic.List(Of System.Tuple(Of Integer, Integer))()
+        If doc Is Nothing OrElse System.String.IsNullOrWhiteSpace(placeholder) Then Return result
+
+        Dim searchRange As Microsoft.Office.Interop.Word.Range = Nothing
+        Dim finder As Microsoft.Office.Interop.Word.Find = Nothing
+        Try
+            searchRange = doc.Content.Duplicate
+            Dim documentEnd As Integer = searchRange.End
+
+            Do While searchRange.Start < documentEnd
+                If finder IsNot Nothing Then
+                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(finder) : Catch ex As System.Exception : End Try
+                    finder = Nothing
+                End If
+
+                finder = searchRange.Find
+                finder.ClearFormatting()
+                finder.Text = placeholder
+                finder.Forward = True
+                finder.Wrap = Microsoft.Office.Interop.Word.WdFindWrap.wdFindStop
+                finder.MatchCase = False
+                finder.MatchWildcards = False
+
+                If Not finder.Execute() Then Exit Do
+
+                Dim foundStart As Integer = searchRange.Start
+                Dim foundEnd As Integer = searchRange.End
+                result.Add(System.Tuple.Create(foundStart, foundEnd))
+
+                If foundEnd >= documentEnd Then Exit Do
+                searchRange.SetRange(foundEnd, documentEnd)
+            Loop
+        Catch ex As System.Exception
+            result.Clear()
+        Finally
+            If finder IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(finder) : Catch ex As System.Exception : End Try
+            If searchRange IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(searchRange) : Catch ex As System.Exception : End Try
+        End Try
+
+        Return result
+    End Function
+
+    Private Shared Function CountAutoPilotWordTemplatePlaceholderOccurrencesAllStories(
+            doc As Microsoft.Office.Interop.Word.Document,
+            placeholder As String) As Integer
+
+        If doc Is Nothing OrElse System.String.IsNullOrWhiteSpace(placeholder) Then Return 0
+
+        Dim total As Integer = 0
+        Try
+            For Each firstStory As Microsoft.Office.Interop.Word.Range In doc.StoryRanges
+                Dim currentStory As Microsoft.Office.Interop.Word.Range = firstStory
+                Do While currentStory IsNot Nothing
+                    Dim searchRange As Microsoft.Office.Interop.Word.Range = Nothing
+                    Dim finder As Microsoft.Office.Interop.Word.Find = Nothing
+                    Try
+                        searchRange = currentStory.Duplicate
+                        Dim storyEnd As Integer = searchRange.End
+
+                        Do While searchRange.Start < storyEnd
+                            If finder IsNot Nothing Then
+                                Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(finder) : Catch ex As System.Exception : End Try
+                                finder = Nothing
+                            End If
+
+                            finder = searchRange.Find
+                            finder.ClearFormatting()
+                            finder.Text = placeholder
+                            finder.Forward = True
+                            finder.Wrap = Microsoft.Office.Interop.Word.WdFindWrap.wdFindStop
+                            finder.MatchCase = False
+                            finder.MatchWildcards = False
+
+                            If Not finder.Execute() Then Exit Do
+                            total += 1
+
+                            Dim foundEnd As Integer = searchRange.End
+                            If foundEnd >= storyEnd Then Exit Do
+                            searchRange.SetRange(foundEnd, storyEnd)
+                        Loop
+                    Finally
+                        If finder IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(finder) : Catch ex As System.Exception : End Try
+                        If searchRange IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(searchRange) : Catch ex As System.Exception : End Try
+                    End Try
+
+                    currentStory = currentStory.NextStoryRange
+                Loop
+            Next
+        Catch ex As System.Exception
+            Return -1
+        End Try
+
+        Return total
+    End Function
+
+    Private Shared Function ReplaceAutoPilotWordTemplateTextPlaceholderAllStories(
+            doc As Microsoft.Office.Interop.Word.Document,
+            placeholder As String,
+            value As String,
+            ByRef replacedCount As Integer,
+            ByRef replacementError As String) As Boolean
+
+        replacedCount = 0
+        replacementError = String.Empty
+        If doc Is Nothing OrElse System.String.IsNullOrWhiteSpace(placeholder) Then Return True
+
+        Try
+            For Each firstStory As Microsoft.Office.Interop.Word.Range In doc.StoryRanges
+                Dim currentStory As Microsoft.Office.Interop.Word.Range = firstStory
+                Do While currentStory IsNot Nothing
+                    Dim searchRange As Microsoft.Office.Interop.Word.Range = Nothing
+                    Dim finder As Microsoft.Office.Interop.Word.Find = Nothing
+                    Try
+                        searchRange = currentStory.Duplicate
+
+                        Do While searchRange.Start < currentStory.End
+                            If finder IsNot Nothing Then
+                                Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(finder) : Catch ex As System.Exception : End Try
+                                finder = Nothing
+                            End If
+
+                            finder = searchRange.Find
+                            finder.ClearFormatting()
+                            finder.Text = placeholder
+                            finder.Forward = True
+                            finder.Wrap = Microsoft.Office.Interop.Word.WdFindWrap.wdFindStop
+                            finder.MatchCase = False
+                            finder.MatchWildcards = False
+
+                            If Not finder.Execute() Then Exit Do
+
+                            searchRange.Text = If(value, String.Empty)
+                            replacedCount += 1
+
+                            Dim nextStart As Integer = searchRange.End
+                            Dim storyEnd As Integer = currentStory.End
+                            If nextStart >= storyEnd Then Exit Do
+                            searchRange.SetRange(nextStart, storyEnd)
+                        Loop
+                    Finally
+                        If finder IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(finder) : Catch ex As System.Exception : End Try
+                        If searchRange IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(searchRange) : Catch ex As System.Exception : End Try
+                    End Try
+
+                    currentStory = currentStory.NextStoryRange
+                Loop
+            Next
+            Return True
+        Catch ex As System.Exception
+            replacementError = ex.Message
+            Return False
+        End Try
+    End Function
+
+    Private Shared Function NormalizeAutoPilotWordTemplateParagraphText(value As String) As String
+        If value Is Nothing Then Return String.Empty
+        Return value.Replace(vbCr, String.Empty).
+                     Replace(vbLf, String.Empty).
+                     Replace(ChrW(7), String.Empty).
+                     Trim()
+    End Function
+
+    Private Shared Function AutoPilotWordDocumentContainsTemplateMarkers(
+            doc As Microsoft.Office.Interop.Word.Document) As Boolean
+
+        If doc Is Nothing Then Return False
+        Try
+            For Each firstStory As Microsoft.Office.Interop.Word.Range In doc.StoryRanges
+                Dim currentStory As Microsoft.Office.Interop.Word.Range = firstStory
+                Do While currentStory IsNot Nothing
+                    Dim storyText As String = If(currentStory.Text, String.Empty)
+                    If System.Text.RegularExpressions.Regex.IsMatch(
+                        storyText,
+                        "\[\[RI:[\p{L}\p{N}_.-]{1,64}\]\]",
+                        System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant) Then
+
+                        Return True
+                    End If
+                    currentStory = currentStory.NextStoryRange
+                Loop
+            Next
+            Return False
+        Catch ex As System.Exception
+            ' A failed full-story scan is treated conservatively. Structured output must not
+            ' be accepted when unresolved marker state cannot be established deterministically.
+            Return True
+        End Try
+    End Function
+
+    Private Shared Function ValidateAutoPilotWordTemplateBodyStyles(
+            doc As Microsoft.Office.Interop.Word.Document,
+            contract As SharedLibrary.Agents.WordTemplateBindingContract,
+            ByRef validationError As String) As Boolean
+
+        validationError = System.String.Empty
+        If contract Is Nothing OrElse Not contract.HasBodyStyles Then Return True
+        If doc Is Nothing Then
+            validationError = "The Word body-style contract could not be validated because no document is open."
+            Return False
+        End If
+
+        For Each definition As SharedLibrary.Agents.WordTemplateBodyStyleDefinition In contract.BodyStyles
+            If definition Is Nothing Then Continue For
+            Dim styleObject As Microsoft.Office.Interop.Word.Style = Nothing
+            Try
+                styleObject = doc.Styles.Item(definition.StyleName)
+                If styleObject Is Nothing Then
+                    validationError = "Word style '" & definition.StyleName & "' declared for semantic '" & definition.Semantic & "' was not found in the selected template."
+                    Return False
+                End If
+            Catch ex As System.Exception
+                validationError = "Word style '" & definition.StyleName & "' declared for semantic '" & definition.Semantic & "' was not found in the selected template."
+                Return False
+            Finally
+                If styleObject IsNot Nothing Then
+                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(styleObject) : Catch ex As System.Exception : End Try
+                End If
+            End Try
+        Next
+
+        Return True
+    End Function
+
+    Private Shared Function GetAutoPilotWordParagraphSemantic(
+            paragraph As Microsoft.Office.Interop.Word.Paragraph) As String
+
+        If paragraph Is Nothing Then Return System.String.Empty
+        Try
+            If paragraph.Range.Information(Microsoft.Office.Interop.Word.WdInformation.wdWithInTable) Then Return System.String.Empty
+        Catch ex As System.Exception
+        End Try
+
+        Try
+            Select Case paragraph.OutlineLevel
+                Case Microsoft.Office.Interop.Word.WdOutlineLevel.wdOutlineLevel1 : Return "heading1"
+                Case Microsoft.Office.Interop.Word.WdOutlineLevel.wdOutlineLevel2 : Return "heading2"
+                Case Microsoft.Office.Interop.Word.WdOutlineLevel.wdOutlineLevel3 : Return "heading3"
+                Case Microsoft.Office.Interop.Word.WdOutlineLevel.wdOutlineLevel4 : Return "heading4"
+                Case Microsoft.Office.Interop.Word.WdOutlineLevel.wdOutlineLevel5 : Return "heading5"
+                Case Microsoft.Office.Interop.Word.WdOutlineLevel.wdOutlineLevel6 : Return "heading6"
+                Case Microsoft.Office.Interop.Word.WdOutlineLevel.wdOutlineLevel7 : Return "heading7"
+                Case Microsoft.Office.Interop.Word.WdOutlineLevel.wdOutlineLevel8 : Return "heading8"
+                Case Microsoft.Office.Interop.Word.WdOutlineLevel.wdOutlineLevel9 : Return "heading9"
+            End Select
+        Catch ex As System.Exception
+        End Try
+
+        Try
+            Dim listType As Microsoft.Office.Interop.Word.WdListType = paragraph.Range.ListFormat.ListType
+            If listType <> Microsoft.Office.Interop.Word.WdListType.wdListNoNumbering Then
+                Dim level As Integer = 1
+                Try
+                    level = paragraph.Range.ListFormat.ListLevelNumber
+                    If level < 1 Then level = 1
+                Catch ex As System.Exception
+                    level = 1
+                End Try
+
+                If listType = Microsoft.Office.Interop.Word.WdListType.wdListBullet Then
+                    Return "bullet" & level.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                End If
+                Return "numbered" & level.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            End If
+        Catch ex As System.Exception
+        End Try
+
+        Return "paragraph"
+    End Function
+
+    Private Shared Function TryApplyAutoPilotWordBodyStyles(
+            doc As Microsoft.Office.Interop.Word.Document,
+            insertedStart As Integer,
+            insertedEnd As Integer,
+            contract As SharedLibrary.Agents.WordTemplateBindingContract,
+            ByRef stylingSummary As String,
+            ByRef stylingError As String) As Boolean
+
+        stylingSummary = System.String.Empty
+        stylingError = System.String.Empty
+        If contract Is Nothing OrElse Not contract.HasBodyStyles Then Return True
+        If doc Is Nothing Then
+            stylingError = "The Word body-style contract could not be applied because no document is open."
+            Return False
+        End If
+
+        Dim styleMap As System.Collections.Generic.Dictionary(Of String, String) = contract.BuildNativeParagraphStyleMap()
+        If styleMap.Count = 0 Then Return True
+        If insertedEnd < insertedStart Then
+            stylingError = "The inserted Word body range could not be determined for native style application."
+            Return False
+        End If
+
+        Dim insertedRange As Microsoft.Office.Interop.Word.Range = Nothing
+        Dim appliedCount As Integer = 0
+        Try
+            insertedRange = doc.Range(insertedStart, insertedEnd)
+            For Each paragraph As Microsoft.Office.Interop.Word.Paragraph In insertedRange.Paragraphs
+                Dim paragraphText As String = NormalizeAutoPilotWordTemplateParagraphText(paragraph.Range.Text)
+                If paragraphText = System.String.Empty Then Continue For
+                If System.Text.RegularExpressions.Regex.IsMatch(
+                    paragraphText,
+                    "^\[\[visual:[^\]]+\]\]$",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant) Then
+                    Continue For
+                End If
+
+                Dim semantic As String = GetAutoPilotWordParagraphSemantic(paragraph)
+                If semantic = System.String.Empty Then Continue For
+                If Not styleMap.ContainsKey(semantic) Then
+                    ' Ordinary paragraphs may intentionally be left to the destination style when
+                    ' no paragraph mapping is declared. Structural Markdown semantics are strict:
+                    ' an unexpected heading/list semantic must never silently fall back.
+                    If System.String.Equals(semantic, "paragraph", System.StringComparison.OrdinalIgnoreCase) Then Continue For
+                    stylingError = "Word imported a body paragraph as structural semantic '" & semantic & "', but that semantic is not declared by the selected Word body-style contract. Generation was stopped to avoid a silent formatting fallback."
+                    Return False
+                End If
+
+                Dim styleName As String = styleMap(semantic)
+                Dim targetStyle As Microsoft.Office.Interop.Word.Style = Nothing
+                Dim actualStyle As Microsoft.Office.Interop.Word.Style = Nothing
+                Try
+                    targetStyle = doc.Styles.Item(styleName)
+
+                    ' Imported HTML list/heading numbering is direct formatting. Remove it before
+                    ' assigning a native template style so only the template's numbering definition wins.
+                    If semantic.StartsWith("heading", System.StringComparison.OrdinalIgnoreCase) OrElse
+                       semantic.StartsWith("bullet", System.StringComparison.OrdinalIgnoreCase) OrElse
+                       semantic.StartsWith("numbered", System.StringComparison.OrdinalIgnoreCase) Then
+                        Try
+                            If paragraph.Range.ListFormat.ListType <> Microsoft.Office.Interop.Word.WdListType.wdListNoNumbering Then
+                                paragraph.Range.ListFormat.RemoveNumbers(Microsoft.Office.Interop.Word.WdNumberType.wdNumberParagraph)
+                            End If
+                        Catch ex As System.Exception
+                        End Try
+                    End If
+
+                    paragraph.Range.Style = targetStyle
+                    Try : paragraph.Range.ParagraphFormat.Reset() : Catch ex As System.Exception : End Try
+
+                    actualStyle = TryCast(paragraph.Range.Style, Microsoft.Office.Interop.Word.Style)
+                    If actualStyle Is Nothing OrElse
+                       Not System.String.Equals(actualStyle.NameLocal, targetStyle.NameLocal, System.StringComparison.OrdinalIgnoreCase) Then
+                        stylingError = "Word failed to apply native style '" & styleName & "' to semantic '" & semantic & "'."
+                        Return False
+                    End If
+                    appliedCount += 1
+                Catch ex As System.Exception
+                    stylingError = "Failed to apply Word style '" & styleName & "' to semantic '" & semantic & "': " & ex.Message
+                    Return False
+                Finally
+                    If actualStyle IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(actualStyle) : Catch ex As System.Exception : End Try
+                    If targetStyle IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(targetStyle) : Catch ex As System.Exception : End Try
+                End Try
+            Next
+        Catch ex As System.Exception
+            stylingError = "Failed to apply the Word body-style contract: " & ex.Message
+            Return False
+        Finally
+            If insertedRange IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(insertedRange) : Catch ex As System.Exception : End Try
+        End Try
+
+        stylingSummary = " Applied " & appliedCount.ToString(System.Globalization.CultureInfo.InvariantCulture) & " native body style assignment(s)."
+        Return True
+    End Function
+
+    Private Shared Function TryInsertAutoPilotWordMarkdown(
+            doc As Microsoft.Office.Interop.Word.Document,
+            selection As Microsoft.Office.Interop.Word.Selection,
+            markdownContent As String,
+            contract As SharedLibrary.Agents.WordTemplateBindingContract,
+            ByRef stylingSummary As String,
+            ByRef insertionError As String) As Boolean
+
+        stylingSummary = System.String.Empty
+        insertionError = System.String.Empty
+        If doc Is Nothing OrElse selection Is Nothing Then
+            insertionError = "Word Markdown insertion requires an open document and selection."
+            Return False
+        End If
+
+        Dim startPosition As Integer = selection.Range.Start
+        Try
+            SharedMethods.InsertTextWithMarkdown(
+                selection,
+                markdownContent,
+                TrailingCR:=False,
+                PreserveDestinationParagraphFormatting:=(contract IsNot Nothing AndAlso contract.HasBodyStyles))
+
+            Dim endPosition As Integer = selection.Range.End
+            If contract IsNot Nothing AndAlso contract.HasBodyStyles Then
+                If Not TryApplyAutoPilotWordBodyStyles(doc, startPosition, endPosition, contract, stylingSummary, insertionError) Then Return False
+            End If
+            Return True
+        Catch ex As System.Exception
+            insertionError = "Failed to insert Markdown into Word: " & ex.Message
+            Return False
+        End Try
+    End Function
+
+    Private Shared Function TryBindAutoPilotWordTemplateSlots(
+            doc As Microsoft.Office.Interop.Word.Document,
+            contract As SharedLibrary.Agents.WordTemplateBindingContract,
+            templateFields As Newtonsoft.Json.Linq.JObject,
+            markdownContent As String,
+            ByRef bindingSummary As String,
+            ByRef bindingError As String) As Boolean
+
+        bindingSummary = String.Empty
+        bindingError = String.Empty
+        If contract Is Nothing OrElse Not contract.HasSlots Then Return True
+        If doc Is Nothing Then
+            bindingError = "The Word template binding contract could not be applied because no document was open."
+            Return False
+        End If
+        If templateFields Is Nothing Then templateFields = New Newtonsoft.Json.Linq.JObject()
+
+        ' Validate the physical template before changing anything. A guide/template mismatch
+        ' is a hard error rather than a silent append-at-start fallback.
+        For Each slot As SharedLibrary.Agents.WordTemplateSlotDefinition In contract.Slots
+            If slot Is Nothing Then Continue For
+
+            Dim allStoryCount As Integer = CountAutoPilotWordTemplatePlaceholderOccurrencesAllStories(doc, slot.Placeholder)
+            If allStoryCount < 0 Then
+                bindingError = "Word template placeholder locations could not be inspected deterministically for " & slot.Placeholder & "."
+                Return False
+            End If
+            If allStoryCount = 0 Then
+                bindingError = "Word template placeholder " & slot.Placeholder & " declared in '" &
+                               System.IO.Path.GetFileName(contract.GuidancePath) & "' was not found in the template."
+                Return False
+            End If
+
+            If System.String.Equals(slot.ContentMode, "markdown", System.StringComparison.OrdinalIgnoreCase) Then
+                Dim mainStoryPositions As System.Collections.Generic.List(Of System.Tuple(Of Integer, Integer)) =
+                    FindAutoPilotWordTemplatePlaceholderPositions(doc, slot.Placeholder)
+                If allStoryCount <> 1 OrElse mainStoryPositions.Count <> 1 Then
+                    bindingError = "Markdown Word template placeholder " & slot.Placeholder &
+                                   " must occur exactly once in the main document story; found " &
+                                   allStoryCount.ToString(System.Globalization.CultureInfo.InvariantCulture) & " occurrence(s) across all Word stories."
+                    Return False
+                End If
+            End If
+        Next
+
+        Dim boundCount As Integer = 0
+
+        ' Plain-text fields can live in the main body, tables, headers/footers, text frames,
+        ' footnotes/endnotes, or another writable Word story. The marker name remains semantic-free;
+        ' only the companion mapping decides which value is written there.
+        For Each slot As SharedLibrary.Agents.WordTemplateSlotDefinition In contract.Slots
+            If slot Is Nothing OrElse Not System.String.Equals(slot.ContentMode, "text", System.StringComparison.OrdinalIgnoreCase) Then Continue For
+
+            Dim value As String = GetAutoPilotWordTemplateSlotValue(slot, templateFields, markdownContent)
+            Dim replacedForSlot As Integer = 0
+            Dim replacementError As String = String.Empty
+            If Not ReplaceAutoPilotWordTemplateTextPlaceholderAllStories(
+                doc,
+                slot.Placeholder,
+                value,
+                replacedForSlot,
+                replacementError) Then
+
+                bindingError = "Failed to fill Word template placeholder " & slot.Placeholder & ": " & replacementError
+                Return False
+            End If
+            If replacedForSlot = 0 Then
+                bindingError = "Word template placeholder " & slot.Placeholder & " disappeared before it could be filled."
+                Return False
+            End If
+            boundCount += replacedForSlot
+        Next
+
+        ' Markdown slots must occupy a whole paragraph. Without a body-style contract, the
+        ' existing placeholder supplies the legacy insertion formatting. With a body-style
+        ' contract, destination formatting is preferred and the declared native paragraph styles
+        ' are assigned deterministically after paste.
+        For Each slot As SharedLibrary.Agents.WordTemplateSlotDefinition In contract.Slots
+            If slot Is Nothing OrElse Not System.String.Equals(slot.ContentMode, "markdown", System.StringComparison.OrdinalIgnoreCase) Then Continue For
+
+            Dim positions As System.Collections.Generic.List(Of System.Tuple(Of Integer, Integer)) =
+                FindAutoPilotWordTemplatePlaceholderPositions(doc, slot.Placeholder)
+            If positions.Count <> 1 Then
+                bindingError = "Markdown Word template placeholder " & slot.Placeholder & " could not be resolved uniquely."
+                Return False
+            End If
+
+            Dim target As Microsoft.Office.Interop.Word.Range = Nothing
+            Dim paragraphRange As Microsoft.Office.Interop.Word.Range = Nothing
+            Try
+                target = doc.Range(positions(0).Item1, positions(0).Item2)
+                paragraphRange = target.Paragraphs(1).Range.Duplicate
+                Dim paragraphText As String = NormalizeAutoPilotWordTemplateParagraphText(paragraphRange.Text)
+                If Not System.String.Equals(paragraphText, slot.Placeholder, System.StringComparison.OrdinalIgnoreCase) Then
+                    bindingError = "Markdown Word template placeholder " & slot.Placeholder &
+                                   " must be the only visible content in its paragraph so the template's native paragraph formatting can be inherited safely."
+                    Return False
+                End If
+
+                Dim value As String = GetAutoPilotWordTemplateSlotValue(slot, templateFields, markdownContent)
+                If System.String.IsNullOrEmpty(value) Then
+                    target.Text = String.Empty
+                Else
+                    target.Select()
+                    Dim bodyStyleSummary As String = System.String.Empty
+                    Dim bodyInsertError As String = System.String.Empty
+                    If Not TryInsertAutoPilotWordMarkdown(
+                        doc,
+                        doc.Application.Selection,
+                        value,
+                        contract,
+                        bodyStyleSummary,
+                        bodyInsertError) Then
+
+                        bindingError = bodyInsertError
+                        Return False
+                    End If
+                    bindingSummary &= bodyStyleSummary
+                End If
+                boundCount += 1
+            Catch ex As System.Exception
+                bindingError = "Failed to fill Markdown Word template placeholder " & slot.Placeholder & ": " & ex.Message
+                Return False
+            Finally
+                If paragraphRange IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(paragraphRange) : Catch ex As System.Exception : End Try
+                If target IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(target) : Catch ex As System.Exception : End Try
+            End Try
+        Next
+
+        If AutoPilotWordDocumentContainsTemplateMarkers(doc) Then
+            bindingError = "The generated Word document still contains one or more unresolved [[RI:...]] template placeholders. Output was rejected."
+            Return False
+        End If
+
+        bindingSummary = " Bound " & boundCount.ToString(System.Globalization.CultureInfo.InvariantCulture) & " template placeholder occurrence(s) using " &
+                         System.IO.Path.GetFileName(contract.GuidancePath) & "." & bindingSummary
+        Return True
+    End Function
+
+    Private Shared Function IsAutoPilotWordTemplateUiCustomizationEntry(entryName As System.String) As Boolean
+        Dim normalized As System.String = If(entryName, System.String.Empty).Replace("\", "/").TrimStart("/"c)
+        If normalized = System.String.Empty Then Return False
+        If System.String.Equals(normalized, "word/customizations.xml", System.StringComparison.OrdinalIgnoreCase) Then Return True
+        If System.String.Equals(normalized, "word/_rels/customizations.xml.rels", System.StringComparison.OrdinalIgnoreCase) Then Return True
+        If System.String.Equals(normalized, "word/attachedToolbars.bin", System.StringComparison.OrdinalIgnoreCase) Then Return True
+        If normalized.StartsWith("customUI/", System.StringComparison.OrdinalIgnoreCase) Then Return True
+        Return False
+    End Function
+
+    Private Shared Function IsAutoPilotWordTemplateUiCustomizationRelationshipType(value As System.String) As Boolean
+        Dim normalized As System.String = If(value, System.String.Empty).Trim()
+        If normalized = System.String.Empty Then Return False
+        If normalized.IndexOf("keyMapCustomizations", System.StringComparison.OrdinalIgnoreCase) >= 0 Then Return True
+        If normalized.IndexOf("attachedToolbars", System.StringComparison.OrdinalIgnoreCase) >= 0 Then Return True
+        If normalized.IndexOf("ui/extensibility", System.StringComparison.OrdinalIgnoreCase) >= 0 Then Return True
+        If normalized.IndexOf("customUI", System.StringComparison.OrdinalIgnoreCase) >= 0 Then Return True
+        Return False
+    End Function
+
+    Private Shared Sub WriteAutoPilotWordTemplatePackageXml(
+            inputEntry As System.IO.Compression.ZipArchiveEntry,
+            outputEntry As System.IO.Compression.ZipArchiveEntry,
+            mutate As System.Action(Of System.Xml.Linq.XDocument))
+
+        Using inputStream As System.IO.Stream = inputEntry.Open()
+            Dim xml As System.Xml.Linq.XDocument = System.Xml.Linq.XDocument.Load(inputStream, System.Xml.Linq.LoadOptions.PreserveWhitespace)
+            If mutate IsNot Nothing Then mutate(xml)
+            Using outputStream As System.IO.Stream = outputEntry.Open()
+                xml.Save(outputStream, System.Xml.Linq.SaveOptions.DisableFormatting)
+            End Using
+        End Using
+    End Sub
+
+    ''' <summary>
+    ''' Materializes a slot-bound macro-free Word template as the actual DOCX package before Word
+    ''' opens it. This intentionally avoids Documents.Add(Template:=...) for .dotx carriers: that
+    ''' Word template-instantiation path can depend on template trust/macro storage even when the
+    ''' document content itself is macro-free. The clone keeps document content/styles/layout and
+    ''' removes template-only UI customizations (legacy key bindings/toolbars/custom UI), which do
+    ''' not participate in document rendering or slot binding.
+    ''' </summary>
+    Private Shared Function TryMaterializeAutoPilotSlotBoundDotxAsDocx(
+            templatePath As System.String,
+            outputPath As System.String,
+            ByRef preparationSummary As System.String,
+            ByRef preparationError As System.String) As System.Boolean
+
+        preparationSummary = System.String.Empty
+        preparationError = System.String.Empty
+
+        If System.String.IsNullOrWhiteSpace(templatePath) OrElse Not System.IO.File.Exists(templatePath) Then
+            preparationError = "The selected slot-bound Word template carrier is unavailable."
+            Return False
+        End If
+        If System.String.IsNullOrWhiteSpace(outputPath) Then
+            preparationError = "No output path was available for the slot-bound Word template carrier."
+            Return False
+        End If
+        If Not System.String.Equals(System.IO.Path.GetExtension(templatePath), ".dotx", System.StringComparison.OrdinalIgnoreCase) Then
+            preparationError = "The safe slot-bound template materializer accepts only macro-free .dotx carriers."
+            Return False
+        End If
+
+        Try
+            If System.IO.File.Exists(outputPath) Then System.IO.File.Delete(outputPath)
+
+            Using inputStream As New System.IO.FileStream(templatePath, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite)
+                Using inputArchive As New System.IO.Compression.ZipArchive(inputStream, System.IO.Compression.ZipArchiveMode.Read, leaveOpen:=False)
+                    Using outputStream As New System.IO.FileStream(outputPath, System.IO.FileMode.CreateNew, System.IO.FileAccess.ReadWrite, System.IO.FileShare.None)
+                        Using outputArchive As New System.IO.Compression.ZipArchive(outputStream, System.IO.Compression.ZipArchiveMode.Create, leaveOpen:=False)
+                            For Each inputEntry As System.IO.Compression.ZipArchiveEntry In inputArchive.Entries
+                                Dim normalizedName As System.String = If(inputEntry.FullName, System.String.Empty).Replace("\", "/")
+                                If IsAutoPilotWordTemplateUiCustomizationEntry(normalizedName) Then Continue For
+
+                                Dim outputEntry As System.IO.Compression.ZipArchiveEntry = outputArchive.CreateEntry(
+                                    inputEntry.FullName,
+                                    System.IO.Compression.CompressionLevel.Optimal)
+
+                                If normalizedName.EndsWith("/", System.StringComparison.Ordinal) Then Continue For
+
+                                If System.String.Equals(normalizedName, "[Content_Types].xml", System.StringComparison.OrdinalIgnoreCase) Then
+                                    WriteAutoPilotWordTemplatePackageXml(
+                                        inputEntry,
+                                        outputEntry,
+                                        Sub(xml As System.Xml.Linq.XDocument)
+                                            Dim root As System.Xml.Linq.XElement = xml.Root
+                                            If root Is Nothing Then Throw New System.Exception("The Word template content-type manifest is empty.")
+
+                                            For Each element As System.Xml.Linq.XElement In New System.Collections.Generic.List(Of System.Xml.Linq.XElement)(root.Elements())
+                                                Dim contentTypeAttribute As System.Xml.Linq.XAttribute = element.Attribute("ContentType")
+                                                Dim contentType As System.String = If(contentTypeAttribute Is Nothing, System.String.Empty, contentTypeAttribute.Value)
+
+                                                If System.String.Equals(element.Name.LocalName, "Default", System.StringComparison.Ordinal) Then
+                                                    If System.String.Equals(contentType, "application/vnd.ms-word.attachedToolbars", System.StringComparison.OrdinalIgnoreCase) Then
+                                                        element.Remove()
+                                                    End If
+                                                    Continue For
+                                                End If
+                                                If Not System.String.Equals(element.Name.LocalName, "Override", System.StringComparison.Ordinal) Then Continue For
+
+                                                Dim partNameAttribute As System.Xml.Linq.XAttribute = element.Attribute("PartName")
+                                                Dim partName As System.String = If(partNameAttribute Is Nothing, System.String.Empty, partNameAttribute.Value)
+
+                                                If System.String.Equals(partName, "/word/document.xml", System.StringComparison.OrdinalIgnoreCase) Then
+                                                    If contentTypeAttribute Is Nothing Then
+                                                        element.Add(New System.Xml.Linq.XAttribute("ContentType", "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"))
+                                                    Else
+                                                        contentTypeAttribute.Value = "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
+                                                    End If
+                                                ElseIf System.String.Equals(partName, "/word/customizations.xml", System.StringComparison.OrdinalIgnoreCase) OrElse
+                                                       partName.StartsWith("/customUI/", System.StringComparison.OrdinalIgnoreCase) Then
+                                                    element.Remove()
+                                                End If
+                                            Next
+                                        End Sub)
+                                    Continue For
+                                End If
+
+                                If System.String.Equals(normalizedName, "word/settings.xml", System.StringComparison.OrdinalIgnoreCase) Then
+                                    WriteAutoPilotWordTemplatePackageXml(
+                                        inputEntry,
+                                        outputEntry,
+                                        Sub(xml As System.Xml.Linq.XDocument)
+                                            Dim root As System.Xml.Linq.XElement = xml.Root
+                                            If root Is Nothing Then Return
+                                            For Each element As System.Xml.Linq.XElement In New System.Collections.Generic.List(Of System.Xml.Linq.XElement)(root.Elements())
+                                                If System.String.Equals(element.Name.LocalName, "attachedTemplate", System.StringComparison.Ordinal) Then element.Remove()
+                                            Next
+                                        End Sub)
+                                    Continue For
+                                End If
+
+                                If System.String.Equals(normalizedName, "word/_rels/document.xml.rels", System.StringComparison.OrdinalIgnoreCase) OrElse
+                                   System.String.Equals(normalizedName, "word/_rels/settings.xml.rels", System.StringComparison.OrdinalIgnoreCase) OrElse
+                                   System.String.Equals(normalizedName, "_rels/.rels", System.StringComparison.OrdinalIgnoreCase) Then
+
+                                    WriteAutoPilotWordTemplatePackageXml(
+                                        inputEntry,
+                                        outputEntry,
+                                        Sub(xml As System.Xml.Linq.XDocument)
+                                            Dim root As System.Xml.Linq.XElement = xml.Root
+                                            If root Is Nothing Then Return
+                                            For Each relationship As System.Xml.Linq.XElement In New System.Collections.Generic.List(Of System.Xml.Linq.XElement)(root.Elements())
+                                                If Not System.String.Equals(relationship.Name.LocalName, "Relationship", System.StringComparison.Ordinal) Then Continue For
+                                                Dim typeAttribute As System.Xml.Linq.XAttribute = relationship.Attribute("Type")
+                                                Dim relationshipType As System.String = If(typeAttribute Is Nothing, System.String.Empty, typeAttribute.Value)
+                                                If IsAutoPilotWordTemplateUiCustomizationRelationshipType(relationshipType) OrElse
+                                                   relationshipType.EndsWith("/attachedTemplate", System.StringComparison.OrdinalIgnoreCase) Then
+                                                    relationship.Remove()
+                                                End If
+                                            Next
+                                        End Sub)
+                                    Continue For
+                                End If
+
+                                Using entryInput As System.IO.Stream = inputEntry.Open()
+                                    Using entryOutput As System.IO.Stream = outputEntry.Open()
+                                        entryInput.CopyTo(entryOutput)
+                                    End Using
+                                End Using
+                            Next
+                        End Using
+                    End Using
+                End Using
+            End Using
+
+            If Not System.IO.File.Exists(outputPath) OrElse New System.IO.FileInfo(outputPath).Length = 0 Then
+                preparationError = "The slot-bound Word template carrier could not be materialized as a DOCX package."
+                Return False
+            End If
+
+            preparationSummary = " Materialized the macro-free .dotx carrier as a DOCX package before Word opened it; template-only UI customizations were excluded."
+            Return True
+        Catch ex As System.Exception
+            Try
+                If System.IO.File.Exists(outputPath) Then System.IO.File.Delete(outputPath)
+            Catch cleanupEx As System.Exception
+            End Try
+            preparationError = "Failed to materialize the slot-bound .dotx carrier safely: " & ex.Message
+            Return False
+        End Try
+    End Function
+
     Private Async Function ExecuteCreateWordDocTool(
             toolCall As ToolCall, context As ToolExecutionContext, ct As CancellationToken) As System.Threading.Tasks.Task(Of ToolResponse)
 
@@ -10454,6 +11336,79 @@ Partial Public Class ThisAddIn
                 New String() {"base_font_name", "base_font_size", "page_orientation", "professional_layout", "style_preset", "accent_color", "secondary_color", "text_color", "muted_color", "light_color", "line_color", "table_style_name", "header_text", "footer_text", "show_page_numbers", "use_template_styles"},
                 New String() {".dotx", ".dotm", ".docx"},
                 context)
+
+            If context IsNot Nothing AndAlso context.SequencingState IsNot Nothing Then
+                SharedLibrary.Agents.ToolCallSequencing.CaptureRetryInvariantArguments(toolCall.ToolName, toolCall.Arguments, context.SequencingState)
+            End If
+
+            If HasMeaningfulToolArgument(toolCall.Arguments, "document_type") AndAlso
+               (design Is Nothing OrElse design.Descriptor Is Nothing) Then
+                response.Success = False
+                response.ErrorMessage = If(If(design Is Nothing, System.String.Empty, design.TemplateWarning), System.String.Empty)
+                If System.String.IsNullOrWhiteSpace(response.ErrorMessage) Then response.ErrorMessage = "No configured Word design matched the requested document type. The host will not silently substitute a generic/blank design."
+                response.Response = response.ErrorMessage
+                Return response
+            End If
+
+            Dim wordTemplateContract As SharedLibrary.Agents.WordTemplateBindingContract = Nothing
+            Dim wordTemplateContractError As String = String.Empty
+            If design IsNot Nothing AndAlso design.Descriptor IsNot Nothing AndAlso design.ApplicationConfig IsNot Nothing Then
+                If Not SharedLibrary.Agents.WordTemplateBindingContractParser.TryLoadForDesign(
+                    design.Descriptor,
+                    design.ApplicationConfig,
+                    design.TemplatePath,
+                    wordTemplateContract,
+                    wordTemplateContractError) Then
+
+                    response.Success = False
+                    response.ErrorMessage = wordTemplateContractError
+                    response.Response = response.ErrorMessage
+                    Return response
+                End If
+            End If
+
+            Dim templateFields As Newtonsoft.Json.Linq.JObject = GetAutoPilotWordTemplateFields(toolCall.Arguments)
+            If wordTemplateContract IsNot Nothing AndAlso wordTemplateContract.HasSlots Then
+                If String.IsNullOrWhiteSpace(design.TemplatePath) Then
+                    response.Success = False
+                    response.ErrorMessage = "The selected Word design declares structured template slots, but no usable Word template carrier is available."
+                    response.Response = response.ErrorMessage
+                    Return response
+                End If
+
+                Dim templateInputError As String = String.Empty
+                If Not ValidateAutoPilotWordTemplateContractInputs(wordTemplateContract, templateFields, markdownContent, templateInputError) Then
+                    response.Success = False
+                    response.ErrorMessage = templateInputError
+                    response.Response = response.ErrorMessage
+                    Return response
+                End If
+
+                If GetArgBool(toolCall.Arguments, "include_cover", False) Then
+                    ' Presentation-only options must not invalidate a structurally bound design.
+                    ' The carrier owns its document structure, so include_cover is a tolerant no-op here.
+                    If context IsNot Nothing Then context.Log("Ignored include_cover=true because the selected slot-bound Word design owns document structure.")
+                End If
+
+                If context IsNot Nothing Then
+                    context.Log("Word template slot contract loaded: " & wordTemplateContract.BuildPromptSummary())
+                End If
+            End If
+
+            If wordTemplateContract IsNot Nothing AndAlso wordTemplateContract.HasBodyStyles Then
+                Dim paragraphStyleMap As System.Collections.Generic.Dictionary(Of String, String) = wordTemplateContract.BuildNativeParagraphStyleMap()
+                Dim markdownStyleError As String = System.String.Empty
+                If Not SharedMethods.ValidateMarkdownParagraphStyleMap(markdownContent, paragraphStyleMap, markdownStyleError) Then
+                    response.Success = False
+                    response.ErrorMessage = markdownStyleError
+                    response.Response = response.ErrorMessage
+                    Return response
+                End If
+
+                If context IsNot Nothing Then
+                    context.Log("Word body-style contract loaded: " & wordTemplateContract.BuildPromptSummary())
+                End If
+            End If
 
             Dim visuals As Newtonsoft.Json.Linq.JArray = GetAutoPilotWordVisuals(toolCall.Arguments)
             Dim visualContractError As System.String = System.String.Empty
@@ -10496,8 +11451,31 @@ Partial Public Class ThisAddIn
             Dim embeddedVisualCount As Integer = 0
             Dim visualWarnings As New List(Of String)()
             Dim creationError As String = String.Empty
+            Dim templateBindingSummary As String = String.Empty
 
-            Dim success = Await SwitchToUi(Function()
+            Dim success As System.Boolean
+            If wordTemplateContract IsNot Nothing AndAlso wordTemplateContract.HasSlots Then
+                If context IsNot Nothing Then context.Log("Structured Word template renderer selected: OOXML-only; Word/COM will not be started.")
+                success = TryCreateAutoPilotStructuredWordDocumentOpenXml(
+                    design.TemplatePath,
+                    outputPath,
+                    wordTemplateContract,
+                    templateFields,
+                    markdownContent,
+                    GetArgString(toolCall.Arguments, "table_style_name"),
+                    templateBindingSummary,
+                    creationError)
+            ElseIf design Is Nothing OrElse System.String.IsNullOrWhiteSpace(design.TemplatePath) Then
+                If context IsNot Nothing Then context.Log("Generic Word renderer selected: OOXML-only; Word/COM will not be started.")
+                success = TryCreateAutoPilotGenericWordDocumentOpenXml(
+                    outputPath,
+                    markdownContent,
+                    toolCall.Arguments,
+                    templateBindingSummary,
+                    creationError)
+            Else
+                If context IsNot Nothing Then context.Log("Legacy Word carrier renderer selected: Word/COM compatibility path.")
+                success = Await SwitchToUi(Function()
                                                Dim wordApp As Microsoft.Office.Interop.Word.Application = Nothing
                                                Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
                                                Dim weCreated As Boolean = False
@@ -10515,23 +11493,38 @@ Partial Public Class ThisAddIn
                                                    wordApp.ScreenUpdating = False
                                                    If design IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(design.TemplatePath) Then
                                                        Dim designExt As String = System.IO.Path.GetExtension(design.TemplatePath).ToLowerInvariant()
-                                                       If designExt = ".dotx" OrElse designExt = ".dotm" Then
+                                                       If designExt = ".dotx" AndAlso wordTemplateContract IsNot Nothing AndAlso wordTemplateContract.HasSlots Then
+                                                           Dim carrierPreparationSummary As System.String = System.String.Empty
+                                                           Dim carrierPreparationError As System.String = System.String.Empty
+                                                           If Not TryMaterializeAutoPilotSlotBoundDotxAsDocx(
+                                                               design.TemplatePath,
+                                                               outputPath,
+                                                               carrierPreparationSummary,
+                                                               carrierPreparationError) Then
+
+                                                               Throw New System.Exception(carrierPreparationError)
+                                                           End If
+                                                           templateBindingSummary &= carrierPreparationSummary
+                                                           doc = wordApp.Documents.Open(outputPath, ReadOnly:=False, AddToRecentFiles:=False, Visible:=False)
+                                                       ElseIf designExt = ".dotx" OrElse designExt = ".dotm" Then
                                                            doc = wordApp.Documents.Add(Template:=design.TemplatePath, NewTemplate:=False)
                                                        Else
-                                                           ' A .docx design source is cloned before use and its body is cleared.
-                                                           ' Styles, theme, sections, headers and footers remain available, while
-                                                           ' sample document content cannot leak into the generated deliverable.
+                                                           ' A .docx design source is cloned before use. Legacy style carriers keep
+                                                           ' the established clear-body behavior. A slot-bound template is a native
+                                                           ' document structure carrier, so its body must remain intact for binding.
                                                            System.IO.File.Copy(design.TemplatePath, outputPath, overwrite:=False)
                                                            doc = wordApp.Documents.Open(outputPath, ReadOnly:=False, AddToRecentFiles:=False, Visible:=False)
-                                                           Try
-                                                               Dim bodyRange As Microsoft.Office.Interop.Word.Range = doc.Content
+                                                           If wordTemplateContract Is Nothing OrElse Not wordTemplateContract.HasSlots Then
                                                                Try
-                                                                   If bodyRange.End > bodyRange.Start Then bodyRange.Text = ""
-                                                               Finally
-                                                                   Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(bodyRange) : Catch ex As System.Exception : End Try
+                                                                   Dim bodyRange As Microsoft.Office.Interop.Word.Range = doc.Content
+                                                                   Try
+                                                                       If bodyRange.End > bodyRange.Start Then bodyRange.Text = ""
+                                                                   Finally
+                                                                       Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(bodyRange) : Catch ex As System.Exception : End Try
+                                                                   End Try
+                                                               Catch ex As System.Exception
                                                                End Try
-                                                           Catch ex As System.Exception
-                                                           End Try
+                                                           End If
                                                        End If
                                                    Else
                                                        doc = wordApp.Documents.Add()
@@ -10540,21 +11533,63 @@ Partial Public Class ThisAddIn
 
                                                    sel = wordApp.Selection
 
-                                                   Dim includeCover As Boolean = GetArgBool(toolCall.Arguments, "include_cover", False)
-                                                   Dim coverTitle As String = GetArgString(toolCall.Arguments, "cover_title")
-                                                   If includeCover AndAlso String.IsNullOrWhiteSpace(coverTitle) Then coverTitle = GetArgString(toolCall.Arguments, "document_title")
-                                                   If Not String.IsNullOrWhiteSpace(coverTitle) Then
-                                                       Dim coverSubtitle As String = GetArgString(toolCall.Arguments, "cover_subtitle")
-                                                       Dim coverKicker As String = GetArgString(toolCall.Arguments, "cover_kicker")
-                                                       Dim coverAccent As Integer = PptHexColor(GetArgString(toolCall.Arguments, "accent_color"), "#17365D")
-                                                       Dim coverText As Integer = PptHexColor(GetArgString(toolCall.Arguments, "text_color"), "#202124")
-                                                       Dim coverMuted As Integer = PptHexColor(GetArgString(toolCall.Arguments, "muted_color"), "#667085")
-                                                       Dim coverFont As String = GetArgString(toolCall.Arguments, "base_font_name")
-                                                       If String.IsNullOrWhiteSpace(coverFont) Then coverFont = "Aptos"
-                                                       InsertAutoPilotWordCoverPage(sel, coverTitle, coverSubtitle, coverKicker, coverAccent, coverText, coverMuted, coverFont)
+                                                   If wordTemplateContract IsNot Nothing AndAlso wordTemplateContract.HasBodyStyles Then
+                                                       Dim bodyStyleValidationError As String = System.String.Empty
+                                                       If Not ValidateAutoPilotWordTemplateBodyStyles(doc, wordTemplateContract, bodyStyleValidationError) Then
+                                                           Throw New System.Exception(bodyStyleValidationError)
+                                                       End If
                                                    End If
 
-                                                   SharedMethods.InsertTextWithMarkdown(sel, markdownContent, TrailingCR:=False)
+                                                   If wordTemplateContract IsNot Nothing AndAlso wordTemplateContract.HasSlots Then
+                                                       Dim bindingError As String = String.Empty
+                                                       If Not TryBindAutoPilotWordTemplateSlots(
+                                                           doc,
+                                                           wordTemplateContract,
+                                                           templateFields,
+                                                           markdownContent,
+                                                           templateBindingSummary,
+                                                           bindingError) Then
+
+                                                           Throw New System.Exception(bindingError)
+                                                       End If
+                                                   Else
+                                                       ' Preserve the legacy create-word path exactly for designs that have
+                                                       ' not opted into the structured slot contract. If RI markers are present,
+                                                       ' however, a missing companion mapping is unsafe and must not be guessed.
+                                                       If design IsNot Nothing AndAlso
+                                                          Not String.IsNullOrWhiteSpace(design.TemplatePath) AndAlso
+                                                          AutoPilotWordDocumentContainsTemplateMarkers(doc) Then
+                                                           Throw New System.Exception("The Word template contains [[RI:...]] placeholders but no valid Word template slot contract was loaded from its companion guidance file.")
+                                                       End If
+
+                                                       Dim includeCover As Boolean = GetArgBool(toolCall.Arguments, "include_cover", False)
+                                                       Dim coverTitle As String = GetArgString(toolCall.Arguments, "cover_title")
+                                                       If includeCover AndAlso String.IsNullOrWhiteSpace(coverTitle) Then coverTitle = GetArgString(toolCall.Arguments, "document_title")
+                                                       If Not String.IsNullOrWhiteSpace(coverTitle) Then
+                                                           Dim coverSubtitle As String = GetArgString(toolCall.Arguments, "cover_subtitle")
+                                                           Dim coverKicker As String = GetArgString(toolCall.Arguments, "cover_kicker")
+                                                           Dim coverAccent As Integer = PptHexColor(GetArgString(toolCall.Arguments, "accent_color"), "#17365D")
+                                                           Dim coverText As Integer = PptHexColor(GetArgString(toolCall.Arguments, "text_color"), "#202124")
+                                                           Dim coverMuted As Integer = PptHexColor(GetArgString(toolCall.Arguments, "muted_color"), "#667085")
+                                                           Dim coverFont As String = GetArgString(toolCall.Arguments, "base_font_name")
+                                                           If String.IsNullOrWhiteSpace(coverFont) Then coverFont = "Aptos"
+                                                           InsertAutoPilotWordCoverPage(sel, coverTitle, coverSubtitle, coverKicker, coverAccent, coverText, coverMuted, coverFont)
+                                                       End If
+
+                                                       Dim legacyBodyStyleSummary As String = System.String.Empty
+                                                       Dim legacyInsertError As String = System.String.Empty
+                                                       If Not TryInsertAutoPilotWordMarkdown(
+                                                           doc,
+                                                           sel,
+                                                           markdownContent,
+                                                           wordTemplateContract,
+                                                           legacyBodyStyleSummary,
+                                                           legacyInsertError) Then
+
+                                                           Throw New System.Exception(legacyInsertError)
+                                                       End If
+                                                       templateBindingSummary &= legacyBodyStyleSummary
+                                                   End If
 
                                                    Dim baseFontName As String = GetArgString(toolCall.Arguments, "base_font_name")
                                                    If String.IsNullOrWhiteSpace(baseFontName) Then baseFontName = "Aptos"
@@ -10610,6 +11645,7 @@ Partial Public Class ThisAddIn
                                                    End If
                                                End Try
                                            End Function)
+            End If
 
             If success AndAlso File.Exists(outputPath) AndAlso visuals.Count > 0 Then
                 If Not InsertAutoPilotWordVisualsOpenXml(outputPath, visuals, fontName:=GetArgString(toolCall.Arguments, "base_font_name"), accentHexRaw:=GetArgString(toolCall.Arguments, "accent_color"), embeddedCount:=embeddedVisualCount, warnings:=visualWarnings) Then
@@ -10636,7 +11672,7 @@ Partial Public Class ThisAddIn
                         visualSummary &= " Visual warnings: " & String.Join(" | ", visualWarnings)
                     End If
                 End If
-                response.Response = $"Word document created: {fileName} ({New FileInfo(outputPath).Length / 1024:F0} KB). The file will be attached to the reply.{designSummary}{visualSummary}"
+                response.Response = $"Word document created: {fileName} ({New FileInfo(outputPath).Length / 1024:F0} KB). The file will be attached to the reply.{designSummary}{templateBindingSummary}{visualSummary}"
                 ApDashboardLog($"✓ Word document created: {fileName}", "info")
             Else
                 response.Success = False

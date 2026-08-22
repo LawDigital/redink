@@ -2042,7 +2042,7 @@ Partial Public Class ThisAddIn
                                         details:=$"host={context.HostKind}; tool={tc.ToolName}")
                                 Else
                                     If context.SequencingState IsNot Nothing Then
-                                        context.SequencingState.NoteSuccessfulProgress()
+                                        context.SequencingState.NoteSuccessfulProgress(tc.ToolName)
 
                                         If toolConfig IsNot Nothing AndAlso toolConfig.PrefersSingleInvocation Then
                                             context.SequencingState.NoteConsolidatableToolSuccess(tc.ToolName)
