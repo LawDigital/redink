@@ -28,7 +28,6 @@
 '
 ' =============================================================================
 ' Red Ink Source Code Overview
-' Updated: 2026-08-23
 '
 ' Purpose:
 '   Consolidated overview of the current hand-authored source files and helper
@@ -51,7 +50,7 @@
 ' [Agents]
 '   ActionPromiseValidator.vb        - Validates promised follow-up actions emitted by agent responses.
 '   AgentGate.vb                     - Runtime gating, serialization, and reentrancy protection for agent execution.
-'   AgentResources.vb                - Discovers agent/skill resources such as `Inky.md`, `SKILL.md`, and `AGENT.md`. Design guidance also makes user-selected source-format carriers outrank implicit repository defaults.
+'   AgentResources.vb                - Discovers agent/skill resources such as `Inky.md`, `SKILL.md`, and `AGENT.md`.
 '   AgentResourcesViewerForm.vb      - Viewer UI for discovered agent and skill resources.
 '   AgentToolRouter.vb               - Host-neutral execution router for authorized shared memory/file/workspace/skill/agent/Word/JS/browser/Python/context tools.
 '   ArtifactDelivery.vb              - Host-agnostic artifact registry, lifecycle tracking, validation, and final-delivery selection.
@@ -92,13 +91,13 @@
 '   TaskStatusFooterParser.vb        - Parses and validates `TASK_STATUS` footers in model responses.
 '   TextTools.SemanticAndExport.vb   - Agent-layer `text_*` and semantic-index tool family.
 '   TextTools.vb                     - Shared plain-text file read/write/search tools.
-'   ToolCallSequencing.vb            - Tool-call ordering, repair guards, and continuation decision helpers. Also carries bootstrap-classified source-format authority for deterministic creator validation.
+'   ToolCallSequencing.vb            - Tool-call ordering, repair guards, and continuation decision helpers.
 '   ToolDescribeTool.vb              - Internal inspection-only tool for describing tool schemas without exposing them.
 '   ToolExecutorRegistry.vb          - Registry of executable tool handlers and factories.
 '   ToolingConstants.vb              - Shared constants for agent and tooling infrastructure.
 '   ToolingFinalResponseContract.vb  - Selects user-facing TASK_STATUS vs raw-caller final-response semantics across hosts/sub-agents.
 '   ToolingOrchestrator.vb           - Host-agnostic final-turn accept/reject decision logic.
-'   ToolLoaderTool.vb                - Lazy manifest-only loader tool used to keep initial tool exposure small; also supplies binding source-format/existing-artifact routing guidance.
+'   ToolLoaderTool.vb                - Lazy manifest-only loader tool used to keep initial tool exposure small.
 '   ToolRegistry.vb                  - Lazy registry of tool manifests and factories.
 '   ToolRegistryBuilder.vb           - Registers shared tools, skills, and agents into per-run registries.
 '   ToolResultStore.vb               - Workflow-scoped store for full large-result bodies.
@@ -222,7 +221,7 @@
 '   SharedMethods.Http.vb            - Shared HttpClient/WinHTTP transport abstraction, fallback selection, request bodies, compression/timeouts, and response decoding.
 '   SharedMethods.MainLLM.vb         - Primary LLM invocation pipeline and response handling.
 '   SharedMethods.MCP.vb             - MCP transport runtime helpers for handshake, SSE, and tool calls.
-'   SharedMethods.MCPOAuth.vb        - OAuth helpers for MCP-protected services, including HTTPS-only validation for OAuth server endpoints.
+'   SharedMethods.MCPOAuth.vb        - OAuth helpers for MCP-protected services.
 '   SharedMethods.Signing.vb         - Cryptographic signing helpers using BouncyCastle.
 '
 ' [Core\LLM\ModelSelection]
@@ -234,8 +233,8 @@
 '   SharedMethods.PrimaryModelManager.vb - Primary-model selection and active-model state management.
 '
 ' [Core\Security]
-'   LocalHttpBrowserSecurity.vb      - Host-agnostic localhost HTTP trust layer: DPAPI-backed browser credentials, CSRF/origin validation, loopback checks, approved browser-extension origins, and byte-bounded HTTP request reading with shared transport/upload limits.
-'   SharedMethods.SafeExternalLinks.vb - Host-agnostic external-link security boundary: permits only absolute HTTP/HTTPS/MAILTO URIs before invoking the OS shell.
+'   LocalHttpBrowserSecurity.vb      - Shared security helpers for authenticated local HTTP/browser access and bounded request handling.
+'   SharedMethods.SafeExternalLinks.vb - Shared validation and opening of approved external URI schemes.
 '
 ' [Core\Texthandling]
 '   SharedMethods.Diff.vb            - Text diff helpers built atop DiffPlex.
@@ -327,8 +326,8 @@
 '   ThisAddIn.Processing.Tooling.ToolExecutionContext.vb - Per-run registries, lazy/capability routing, responses, sequencing, fidelity, workflow and finalization state.
 '   ThisAddIn.Processing.Tooling.ToolResponse.vb - Tool-response shaping, post-processing, and continuation helpers.
 '   ThisAddIn.Processing.Tooling.Tools.vb - Word-specific tool catalog construction and registration helpers.
-'   ThisAddIn.Processing.Tooling.UserRequestResolution.vb - Word bootstrap preflight for authoritative request, language, memory grounding and initial capability route; it also applies source-format authority before normal Word tooling.
-'   ThisAddIn.Processing.Tooling.vb   - Top-level orchestration for the Word tooling loop, including main/sub-agent progress reporting.
+'   ThisAddIn.Processing.Tooling.UserRequestResolution.vb - Word bootstrap preflight for authoritative request, language, memory grounding and initial capability route.
+'   ThisAddIn.Processing.Tooling.vb   - Top-level orchestration for the Word tooling loop.
 '   ThisAddIn.Processing.vb           - Main selection-processing pipeline and batch file processing.
 '   ThisAddIn.Properties.vb           - SharedContext bridge and Word-side configuration properties.
 '   ThisAddIn.Redactions.vb           - LLM-powered PDF redaction preparation and finalization.
@@ -346,6 +345,7 @@
 '   ThisAddIn.Watermark.vb            - Watermark, source-profile, and document-marking helpers.
 '   ThisAddIn.WebAgent.vb             - WebAgent discovery, execution, and authoring support for Word.
 '   ThisAddIn.WebExtension.vb         - Word-side local web-extension/browser integration helpers.
+'   ThisAddIn.WebExtension.Security.vb - Word-side security helpers for local web-extension access.
 '   ThisAddIn.WordDocHost.vb          - Word implementation of `IWordDocumentHost`.
 '   ThisAddIn.WordHelpers,ImageGeneration.vb - Image-generation helpers for Word asset insertion workflows.
 '   ThisAddIn.WordHelpers.DrawioConverter.vb - `.drawio` and diagram conversion helpers for Word workflows.
@@ -389,6 +389,7 @@
 '   ThisAddIn.AgentHost.vb           - Outlook implementation of `ISubAgentHost`.
 '   ThisAddIn.AutoPilot.AudioBook.vb - AutoPilot tool for generating audiobook/podcast audio from mail or attachments.
 '   ThisAddIn.AutoPilot.Cleanup.vb   - Cleanup and retention helpers for AutoPilot-processed mail threads.
+'   ThisAddIn.AutoPilot.OutgoingDelivery.vb - Size-aware AutoPilot delivery planning and attachment follow-up mail batching.
 '   ThisAddIn.AutoPilot.CommentProcessor.vb - Adds Word comment bubbles to DOCX via OpenXML.
 '   ThisAddIn.Autopilot.CompleteTables.vb - AutoPilot helpers for table-completion and structured attachment output.
 '   ThisAddIn.AutoPilot.Config.vb    - AutoPilot configuration data class and startup dialog logic.
@@ -396,20 +397,20 @@
 '   ThisAddIn.AutoPilot.PDFCommentProcessor.vb - Adds PDF highlight/comment annotations using PdfPig/PDFsharp.
 '   ThisAddIn.AutoPilot.PdfRedactor.vb - Headless AutoPilot PDF-redaction workflow.
 '   ThisAddIn.AutoPilot.RegistryBackup.vb - Backup and restore helpers for AutoPilot persisted state.
-'   ThisAddIn.AutoPilot.Scheduler.vb - Scheduled-task store, recurrence logic, due-task execution, and AutoPilot tooling-log run-bundle archive routing.
+'   ThisAddIn.AutoPilot.Scheduler.vb - Scheduled-task store, recurrence logic, and due-task execution.
 '   ThisAddIn.AutoPilot.SenderToolPolicy.vb - Sender-based tool-policy rules for AutoPilot execution.
 '   ThisAddIn.AutoPilot.ThreadRetention.vb - Sender/conversation-scoped retention of inbound attachments for AutoPilot follow-up continuity.
 '   ThisAddIn.AutoPilot.Tools.DataCollector.vb - Structured data-collection helpers for AutoPilot tool runs.
 '   ThisAddIn.AutoPilot.Tools.Office.Interop.vb - Explicit Excel COM compatibility boundary for live workbook inspection and updates.
-'   ThisAddIn.AutoPIlot.Tools.Office.vb - Office creation/conversion and design routing; Word structured/generic creation is OOXML-first with bounded legacy compatibility paths. Explicit user/source carriers can suppress implicit repository defaults and are validated before creator execution.
+'   ThisAddIn.AutoPIlot.Tools.Office.vb - Office creation/conversion and design routing; Word structured/generic creation is OOXML-first with bounded legacy compatibility paths.
 '   ThisAddIn.AutoPilot.Tools.Office.OpenXmlTemplate.vb - OOXML-only structured/generic Word renderer: slots, Markdown blocks, native styles/numbering, list/table layout and output validation.
 '   ThisAddIn.AutoPilot.Tools.Office.OpenXmlVisuals.vb - Post-body OOXML visual pass for native charts, DrawingML diagrams/images and validated visual anchors without Office COM.
 '   ThisAddIn.AutoPIlot.Tools.Other.vb - Miscellaneous file, system, and media AutoPilot tool helpers.
 '   ThisAddIn.AutoPIlot.Tools.PDF.vb - PDF-specific AutoPilot tool helpers.
-'   ThisAddIn.AutoPIlot.Tools.vb     - Top-level AutoPilot tool surface and dispatch entry points, including source-preserving create-vs-transform contracts.
+'   ThisAddIn.AutoPIlot.Tools.vb     - Top-level AutoPilot tool surface and dispatch entry points.
 '   ThisAddIn.AutoPilot.UserStorage.vb - Per-user AutoPilot storage layout and persistence helpers.
 '   ThisAddIn.AutoPilot.UserStorageDashboard.vb - Admin dashboard for per-user AutoPilot files and memory.
-'   ThisAddIn.Autopilot.vb           - Inky AutoPilot mail watcher/top-level orchestration, guaranteed voicemail failure notices, and rolling 50-run AutoPilot tooling-log bundle retention.
+'   ThisAddIn.Autopilot.vb           - Inky AutoPilot mail watcher and top-level orchestration.
 '   ThisAddIn.ChatAgentScope.vb      - Scoped token for temporary chat-agent elevation during tooling runs.
 '   ThisAddIn.Commands.InboxBoard.vb - WebView2-based Inbox board for categorized email visualization.
 '   ThisAddIn.Commands.MailMover.vb  - AI-assisted mail sorting with review UI, confidence coloring, and undo.
@@ -422,7 +423,7 @@
 '   ThisAddIn.Processing.KnowledgeRAG.vb - Knowledge Store-backed grounding for Outlook processing flows.
 '   ThisAddIn.Processing.vb          - Text-processing helpers for Markdown, formatted insertion, RTF/plain text, and diffs.
 '   ThisAddIn.Properties.vb          - SharedContext bridge, `Override()` helpers, and startup-state flags.
-'   ThisAddIn.Tooling.Logging.vb     - File-based tooling logger with nested-session depth support and optional unattended AutoPilot run-bundle mirroring (main + companion sub-agent log).
+'   ThisAddIn.Tooling.Logging.vb     - File-based tooling logger with nested-session depth support.
 '   ThisAddIn.Tooling.M365.vb        - Outlook host adapter for shared Microsoft 365 tools.
 '   ThisAddIn.Tooling.Memory.vb      - Memory-grounding mode resolution and classification.
 '   ThisAddIn.Tooling.Parameterhandling.vb - Tool argument normalization and coercion helpers.
@@ -434,12 +435,13 @@
 '   ThisAddIn.Tooling.ToolResponse.vb - Tool-response shaping, post-processing, and continuation helpers.
 '   ThisAddIn.Tooling.Tools.vb       - Outlook Local Chat host-tool catalog/adapters plus web retrieval, WebView2 and reflection support utilities.
 '   ThisAddIn.Tooling.UserRequestResolution.vb - User-intent resolution and tooling-mode classification.
-'   ThisAddIn.Tooling.vb             - Top-level orchestration for the Outlook tooling loop, including main/sub-agent progress reporting and optional per-run archive-log routing. Bootstrap also applies source-format authority to deterministic creator validation.
+'   ThisAddIn.Tooling.vb             - Top-level orchestration for the Outlook tooling loop.
 '   ThisAddIn.VarHelpers.vb          - Variable and interaction helpers for compose-editor comparison and diff flows.
 '   ThisAddIn.WebExtension.Agent.vb  - Chat Agent mode for the local web UI with tooling-loop execution.
 '   ThisAddIn.WebExtension.FileHelpers.vb - Browser-upload extraction helpers for Office/text files.
 '   ThisAddIn.WebExtension.InkyPlay.vb - Security-awareness mini games served by the local web UI.
 '   ThisAddIn.WebExtension.ListenerAndPower.vb - HttpListener lifecycle, suspend/resume, watchdog, and power handling.
+'   ThisAddIn.WebExtension.Security.vb - Outlook-side security helpers for local web-extension access.
 '   ThisAddIn.WebExtension.vb        - Local web UI, API route handling, file upload/extraction, and browser integration.
 '   Ribbon1.vb                       - Outlook ribbon callbacks, commands, and dynamic enable/disable logic.
 '

@@ -39,6 +39,7 @@
 '      * A persistent task-specific workspace is available for optional cross-run state
 '      * Generated outputs automatically persisted to workspace for next execution
 '      * Result e-mail sent to authorized recipients with HTML formatting and sources
+'      * Oversized result-attachment sets are split by the central outgoing-delivery pipeline into attachment-only follow-up mails using the same cleanup metadata.
 '
 '  - Catch-up & Reliability:
 '      * On AutoPilot start, overdue tasks executed immediately
@@ -1673,6 +1674,7 @@ Partial Public Class ThisAddIn
                                          resultAttachments As List(Of String),
                                          sourcesHtml As String)
         Dim newMail As MailItem = Nothing
+        Dim scheduledSendAccount As Microsoft.Office.Interop.Outlook.Account = Nothing
         Try
             newMail = Application.CreateItem(OlItemType.olMailItem)
 
@@ -1740,17 +1742,21 @@ Partial Public Class ThisAddIn
                 htmlBody &= sourcesHtml
             End If
 
-            htmlBody &= BuildAutoPilotFooter()
+            Dim footerHtml As String = BuildAutoPilotFooter()
+            Dim deliveryPlan As AutoPilotOutgoingDeliveryPlan =
+                PrepareAutoPilotOutgoingDelivery(htmlBody & footerHtml, resultAttachments)
+
+            htmlBody &= BuildAutoPilotAttachmentSplitNoticeHtml(deliveryPlan)
+            htmlBody &= footerHtml
             newMail.HTMLBody = htmlBody
 
-            ' Add result attachments (dangerous file types are zipped before delivery)
-            If resultAttachments IsNot Nothing Then
-                For Each attachPath In SanitizeOutgoingAttachmentsForDelivery(resultAttachments)
-                    If File.Exists(attachPath) Then
-                        newMail.Attachments.Add(attachPath, OlAttachmentType.olByValue, , Path.GetFileName(attachPath))
-                    End If
-                Next
-            End If
+            ' Add result attachments only when the complete scheduled-result message remains
+            ' within the safe transport target. Larger sets are sent in follow-up batches.
+            For Each attachPath As String In deliveryPlan.PrimaryAttachments
+                If File.Exists(attachPath) Then
+                    newMail.Attachments.Add(attachPath, OlAttachmentType.olByValue, , Path.GetFileName(attachPath))
+                End If
+            Next
 
             ' Tag as AutoPilot reply for loop prevention
             Try
@@ -1839,6 +1845,10 @@ Partial Public Class ThisAddIn
             ' Therefore, capture every property that is required after Send() BEFORE calling Send().
             Dim sentSubject As String = newMail.Subject
             Dim sentTo As String = newMail.To
+            Try
+                scheduledSendAccount = newMail.SendUsingAccount
+            Catch
+            End Try
 
             newMail.Send()
 
@@ -1858,6 +1868,16 @@ Partial Public Class ThisAddIn
         $"[AutoPilot] Failed to move scheduled task result to Inky Replies: {ex.Message}")
             End Try
 
+            SendAutoPilotAttachmentFollowUps(
+                safeRecipients,
+                sentSubject,
+                deliveryPlan,
+                scheduledSendAccount,
+                cleanupGroupId,
+                cleanupIsEligible,
+                cleanupAnsweredUtc,
+                cleanupDeleteAfterUtc)
+
             ApDashboardLog(
     $"📅 Result e-mail submitted to: {String.Join(", ", task.DeliverTo)}",
     "info")
@@ -1870,6 +1890,13 @@ Partial Public Class ThisAddIn
             Throw
 
         Finally
+            If scheduledSendAccount IsNot Nothing Then
+                Try
+                    System.Runtime.InteropServices.Marshal.ReleaseComObject(scheduledSendAccount)
+                Catch
+                End Try
+            End If
+
             If newMail IsNot Nothing Then
                 Try
                     System.Runtime.InteropServices.Marshal.ReleaseComObject(newMail)

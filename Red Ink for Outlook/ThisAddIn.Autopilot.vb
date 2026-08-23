@@ -41,6 +41,7 @@
 '      * Archives the most recent AutoPilot tooling runs under `%APPDATA%\RedInk\autopilot-logs`.
 '  - Reply handling:
 '      * Sends HTML replies with optional generated attachments.
+'      * Oversized attachment sets are delivered by the central outgoing-delivery pipeline as attachment-only follow-up mails under a conservative 30 MB target.
 '      * Optional approval dialog and "Sources used" footer.
 '      * Moves AutoPilot replies to Sent Items\Inky Replies.
 '  - Web grounding:
@@ -5563,32 +5564,37 @@ Partial Public Class ThisAddIn
             reply.BodyFormat = OlBodyFormat.olFormatHTML
 
             Dim originalThread As String = If(reply.HTMLBody, "")
-            Dim htmlBody As String = ConvertResponseToHtml(responseText)
+            Dim contentHtml As String = ConvertResponseToHtml(responseText)
 
             If Not String.IsNullOrWhiteSpace(sourcesHtml) Then
-                htmlBody &= sourcesHtml
+                contentHtml &= sourcesHtml
             End If
 
-            htmlBody &= BuildAutoPilotFooter()
+            Dim footerHtml As String = BuildAutoPilotFooter()
+            Dim deliveryPlan As AutoPilotOutgoingDeliveryPlan =
+                PrepareAutoPilotOutgoingDelivery(contentHtml & footerHtml & originalThread, resultAttachments)
 
-            reply.HTMLBody = htmlBody & originalThread
+            contentHtml &= BuildAutoPilotAttachmentSplitNoticeHtml(deliveryPlan)
+            contentHtml &= footerHtml
 
-            ' Add result attachments.
-            If resultAttachments IsNot Nothing Then
-                For Each attachPath As String In SanitizeOutgoingAttachmentsForDelivery(resultAttachments)
-                    If String.IsNullOrWhiteSpace(attachPath) OrElse Not File.Exists(attachPath) Then
-                        Throw New System.IO.FileNotFoundException(
-                            "An outgoing deliverable disappeared before Outlook attachment creation.",
-                            If(attachPath, ""))
-                    End If
+            reply.HTMLBody = contentHtml & originalThread
 
-                    reply.Attachments.Add(
-                        attachPath,
-                        OlAttachmentType.olByValue,
-                        ,
-                        Path.GetFileName(attachPath))
-                Next
-            End If
+            ' Add result attachments when the complete message remains within the safe
+            ' transport target. Oversized deliveries put all result attachments into
+            ' separately sized follow-up messages instead.
+            For Each attachPath As String In deliveryPlan.PrimaryAttachments
+                If String.IsNullOrWhiteSpace(attachPath) OrElse Not File.Exists(attachPath) Then
+                    Throw New System.IO.FileNotFoundException(
+                        "An outgoing deliverable disappeared before Outlook attachment creation.",
+                        If(attachPath, ""))
+                End If
+
+                reply.Attachments.Add(
+                    attachPath,
+                    OlAttachmentType.olByValue,
+                    ,
+                    Path.GetFileName(attachPath))
+            Next
 
             If tagAsAutoReply Then
                 Try
@@ -5736,6 +5742,8 @@ Partial Public Class ThisAddIn
             ' SEND
             ' =====================================================================
 
+            Dim sentPrimarySubject As String = reply.Subject
+            Dim sentPrimaryTo As String = reply.To
             reply.Send()
 
 
@@ -5746,10 +5754,22 @@ Partial Public Class ThisAddIn
                 cleanupIsEligible,
                 cleanupAnsweredUtc,
                 cleanupDeleteAfterUtc,
-                senderAddr,
-                senderAddr)
+                sentPrimarySubject,
+                sentPrimaryTo)
             Catch
             End Try
+
+            ' If the result attachments would have exceeded the conservative transport
+            ' target, deliver them only after the primary reply has been submitted.
+            SendAutoPilotAttachmentFollowUps(
+                New String() {senderAddr},
+                sentPrimarySubject,
+                deliveryPlan,
+                sendAccount,
+                cleanupGroupId,
+                cleanupIsEligible,
+                cleanupAnsweredUtc,
+                cleanupDeleteAfterUtc)
 
         Catch ex As System.Exception
             ApDashboardLog(
@@ -7797,33 +7817,36 @@ Partial Public Class ThisAddIn
             newMail.Subject = "Re: " & subject
             newMail.BodyFormat = OlBodyFormat.olFormatHTML
 
-            Dim htmlBody As String = ConvertResponseToHtml(responseText)
+            Dim contentHtml As String = ConvertResponseToHtml(responseText)
 
-            htmlBody &= "<br/><div style='font-size:9pt;color:#888888;font-style:italic;margin-top:12px;'>" &
-                        System.Net.WebUtility.HtmlEncode(voicemailNote) & "</div>"
+            contentHtml &= "<br/><div style='font-size:9pt;color:#888888;font-style:italic;margin-top:12px;'>" &
+                           System.Net.WebUtility.HtmlEncode(voicemailNote) & "</div>"
 
             If Not String.IsNullOrWhiteSpace(sourcesHtml) Then
-                htmlBody &= sourcesHtml
+                contentHtml &= sourcesHtml
             End If
 
-            htmlBody &= BuildAutoPilotFooter()
-            newMail.HTMLBody = htmlBody
+            Dim footerHtml As String = BuildAutoPilotFooter()
+            Dim deliveryPlan As AutoPilotOutgoingDeliveryPlan =
+                PrepareAutoPilotOutgoingDelivery(contentHtml & footerHtml, resultAttachments)
 
-            If resultAttachments IsNot Nothing Then
-                For Each attachPath As String In SanitizeOutgoingAttachmentsForDelivery(resultAttachments)
-                    If String.IsNullOrWhiteSpace(attachPath) OrElse Not IO.File.Exists(attachPath) Then
-                        Throw New System.IO.FileNotFoundException(
-                            "An outgoing deliverable disappeared before voicemail attachment creation.",
-                            If(attachPath, ""))
-                    End If
+            contentHtml &= BuildAutoPilotAttachmentSplitNoticeHtml(deliveryPlan)
+            contentHtml &= footerHtml
+            newMail.HTMLBody = contentHtml
 
-                    newMail.Attachments.Add(
-                        attachPath,
-                        OlAttachmentType.olByValue,
-                        ,
-                        IO.Path.GetFileName(attachPath))
-                Next
-            End If
+            For Each attachPath As String In deliveryPlan.PrimaryAttachments
+                If String.IsNullOrWhiteSpace(attachPath) OrElse Not IO.File.Exists(attachPath) Then
+                    Throw New System.IO.FileNotFoundException(
+                        "An outgoing deliverable disappeared before voicemail attachment creation.",
+                        If(attachPath, ""))
+                End If
+
+                newMail.Attachments.Add(
+                    attachPath,
+                    OlAttachmentType.olByValue,
+                    ,
+                    IO.Path.GetFileName(attachPath))
+            Next
 
             Try
                 newMail.PropertyAccessor.SetProperty(AP_LoopHeaderProperty, AP_LoopHeaderValue)
@@ -7909,6 +7932,8 @@ Partial Public Class ThisAddIn
                 Debug.WriteLine($"[AutoPilot] Failed to stamp cleanup metadata on voicemail reply: {ex.Message}")
             End Try
 
+            Dim sentPrimarySubject As String = newMail.Subject
+            Dim sentPrimaryTo As String = newMail.To
             newMail.Send()
 
             Try
@@ -7917,10 +7942,20 @@ Partial Public Class ThisAddIn
                     cleanupIsEligible,
                     cleanupAnsweredUtc,
                     cleanupDeleteAfterUtc,
-                    newMail.Subject,
-                    recipientEmail)
+                    sentPrimarySubject,
+                    sentPrimaryTo)
             Catch
             End Try
+
+            SendAutoPilotAttachmentFollowUps(
+                New String() {recipientEmail},
+                sentPrimarySubject,
+                deliveryPlan,
+                sendAccount,
+                cleanupGroupId,
+                cleanupIsEligible,
+                cleanupAnsweredUtc,
+                cleanupDeleteAfterUtc)
 
         Catch ex As System.Exception
             ApDashboardLog($"ERROR sending voicemail reply: {ex.Message}", "error")
