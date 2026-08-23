@@ -28,7 +28,6 @@
 '
 ' =============================================================================
 ' Red Ink Source Code Overview
-' Updated: 2026-08-22
 '
 ' Purpose:
 '   Consolidated overview of the current hand-authored source files and helper
@@ -328,7 +327,7 @@
 '   ThisAddIn.Processing.Tooling.ToolResponse.vb - Tool-response shaping, post-processing, and continuation helpers.
 '   ThisAddIn.Processing.Tooling.Tools.vb - Word-specific tool catalog construction and registration helpers.
 '   ThisAddIn.Processing.Tooling.UserRequestResolution.vb - Word bootstrap preflight for authoritative request, language, memory grounding and initial capability route.
-'   ThisAddIn.Processing.Tooling.vb   - Top-level orchestration for the Word tooling loop.
+'   ThisAddIn.Processing.Tooling.vb   - Top-level and sub-agent orchestration for the Word tooling loop.
 '   ThisAddIn.Processing.vb           - Main selection-processing pipeline and batch file processing.
 '   ThisAddIn.Properties.vb           - SharedContext bridge and Word-side configuration properties.
 '   ThisAddIn.Redactions.vb           - LLM-powered PDF redaction preparation and finalization.
@@ -434,7 +433,7 @@
 '   ThisAddIn.Tooling.ToolResponse.vb - Tool-response shaping, post-processing, and continuation helpers.
 '   ThisAddIn.Tooling.Tools.vb       - Outlook Local Chat host-tool catalog/adapters plus web retrieval, WebView2 and reflection support utilities.
 '   ThisAddIn.Tooling.UserRequestResolution.vb - User-intent resolution and tooling-mode classification.
-'   ThisAddIn.Tooling.vb             - Top-level orchestration for the Outlook tooling loop.
+'   ThisAddIn.Tooling.vb             - Top-level orchestration for the Outlook tooling loop, including main/sub-agent progress reporting.
 '   ThisAddIn.VarHelpers.vb          - Variable and interaction helpers for compose-editor comparison and diff flows.
 '   ThisAddIn.WebExtension.Agent.vb  - Chat Agent mode for the local web UI with tooling-loop execution.
 '   ThisAddIn.WebExtension.FileHelpers.vb - Browser-upload extraction helpers for Office/text files.

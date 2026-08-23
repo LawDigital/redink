@@ -4,7 +4,8 @@
 ' =============================================================================
 ' File: ThisAddin.Tooling.vb
 ' Purpose: Core model-agnostic tooling loop for LLM tool/function calling.
-'          Orchestrates tool selection, call detection/extraction, execution, and response injection.
+'          Orchestrates tool selection, call detection/extraction, execution, response injection,
+'          and host-owned major-step progress reporting in both main and isolated sub-agent loops.
 '
 ' Architecture:
 '  - Tooling Execution Loop (ExecuteToolingLoop):
@@ -989,6 +990,19 @@ Partial Public Class ThisAddIn
             context.AllowedToolRegistry = scopeInit.NarrowedRegistry
             context.SelectedTools = New List(Of ModelConfig)(scopeInit.ResolvedTools)
 
+            ' report_progress is an internal host-control no-op, not part of the sub-agent's
+            ' substantive tool capability scope. Expose it explicitly so isolated sub-agents
+            ' can report major phases without widening their allowed business/tool registry.
+            Dim subAgentProgressReportTool As ModelConfig = GetInternalProgressReportTool()
+            If subAgentProgressReportTool IsNot Nothing AndAlso
+               Not context.SelectedTools.Any(
+                   Function(t)
+                       Return t IsNot Nothing AndAlso
+                              IsReportProgressToolName(t.ToolName)
+                   End Function) Then
+                context.SelectedTools.Insert(0, subAgentProgressReportTool)
+            End If
+
             Dim requestedNamesText As String =
                 If(scopeInit.RequestedToolNames Is Nothing OrElse scopeInit.RequestedToolNames.Count = 0,
                    "(none)",
@@ -1132,7 +1146,17 @@ Partial Public Class ThisAddIn
 
         _activeToolingContext = context
 
-        context.ProgressSink = progressSink
+        ' Isolated sub-agents share the parent's user-facing progress channel unless a
+        ' caller deliberately supplies a different sink. This keeps progress reporting
+        ' visible without coupling the sub-agent runtime to a specific Office host/UI.
+        Dim effectiveProgressSink As Action(Of String) = progressSink
+        If effectiveProgressSink Is Nothing AndAlso
+           subAgentMode AndAlso
+           parentToolingContext IsNot Nothing Then
+            effectiveProgressSink = parentToolingContext.ProgressSink
+        End If
+
+        context.ProgressSink = effectiveProgressSink
         context.ReportProgress("Preparing request: determining language, context and workflow...")
 
         context.Log("Starting tooling session...")
@@ -4135,6 +4159,12 @@ Partial Public Class ThisAddIn
 
     Private Function IsToolAllowedForCurrentContext(toolName As String, context As ToolExecutionContext) As Boolean
         If context Is Nothing OrElse String.IsNullOrWhiteSpace(toolName) Then Return False
+
+        ' report_progress is a host-owned, side-effect-free control channel. It must remain
+        ' available inside isolated sub-agent loops without becoming part of the sub-agent's
+        ' substantive allowed-tool registry.
+        If IsReportProgressToolName(toolName) Then Return True
+
         If Not context.EnforceAllowedToolScope Then Return True
         If context.AllowedToolNames Is Nothing Then Return False
         Return context.AllowedToolNames.Contains(toolName.Trim())
