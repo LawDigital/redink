@@ -199,6 +199,15 @@ Partial Public Class ThisAddIn
             "For Word documents, returns both a clean version and a compare document showing changes. " &
             "For PowerPoint and Excel files, returns the processed version (no compare document). " &
             "For Excel files, you can optionally restrict processing to specific sheet names using the sheet_names parameter. " &
+            "CHUNKING / GLOBAL CONSISTENCY (IMPORTANT): The processor model does NOT receive the whole document at once. " &
+            "It processes the document sequentially in bounded chunks with only a small nearby context window, and the individual processor calls do not share hidden memory. " &
+            "Therefore YOU, the calling model, are responsible for document-wide consistency. When the task depends on information or choices that must remain stable across the whole document, " &
+            "put those facts and decisions in global_context so the same compact guidance is repeated to every chunk. Examples: defined-term translations, names, terminology, " &
+            "target-language variant, tone/register, abbreviation policy, recurring replacements, or terms that must not be translated. " &
+            "For very long documents, keep global_context bounded to reusable cross-document rules and decisions; do NOT paste the document or a long document summary into it. " &
+            "Do not assume the processor can infer information that appears only elsewhere in the document, and do not invent global facts that are not supported by the user request or known source context. " &
+            "global_context is context, not a second operation. " &
+            "For a successful Word transformation, the tool returns TWO user-relevant files: the clean processed document and the tracked-changes compare document. In the final user-facing answer, identify BOTH generated files by name; do not collapse them into a generic reference to one processed document. " &
             "CRITICAL — ONE OPERATION PER CALL: This tool applies exactly ONE instruction per call. " &
             "If the user requests multiple distinct operations (e.g., 'correct and translate', 'anonymize and summarize', 'fix grammar then make more concise'), " &
             "you MUST split them into separate sequential calls. First call: apply the first operation to the original file. " &
@@ -215,6 +224,9 @@ Partial Public Class ThisAddIn
             "Use for translation, correction, proofreading, anonymization, replacements, data updates, formula modifications, and other transformations of an existing Office file. " &
             "For Word documents, produces clean output plus a compare document with tracked changes. " &
             "For PowerPoint and Excel, produces the processed file only. " &
+            "The processor works chunk-by-chunk and does not see the full document in one model call or retain hidden memory between chunks. The calling model is responsible for document-wide consistency: " &
+            "when stable terminology, names, translation choices, tone, abbreviations, recurring replacements, or other cross-document facts matter, provide a compact reusable global_context. " &
+            "For successful Word processing, surface both returned files (clean processed document and compare document) to the user. " &
             "IMPORTANT: Apply only ONE operation per call. For multi-step requests (e.g. 'correct and translate'), " &
             "make separate sequential calls — first correct, then translate the corrected output file. " &
             "Output files are named '<original>_processed.<ext>' and can be used as input for the next call via attachment_names.""," &
@@ -222,6 +234,12 @@ Partial Public Class ThisAddIn
             """instruction"":{""type"":""string"",""description"":""A single, specific instruction to apply to the document. Must be ONE operation only — " &
             "e.g. 'Translate to German' or 'Correct spelling and grammar' or 'Anonymize all personal names'. " &
             "Do NOT combine multiple operations like 'Correct and translate'. Split those into separate calls.""}," &
+            """global_context"":{""type"":""string"",""description"":""Optional document-wide consistency context repeated to EVERY processing chunk. " &
+            "Use this when all chunks must know stable facts or decisions that may not appear in their local text window, such as defined-term translations, names, terminology, " &
+            "target-language variant, tone/register, abbreviation policy, recurring replacements, or do-not-translate terms. " &
+            "The processor never sees the complete document in one model call, so the calling model is responsible for supplying material cross-document guidance here. " &
+            "Keep this compact even for very long documents: include reusable rules/decisions, not the document itself or a long summary. Do not invent unsupported facts. " &
+            "This is context only and does not count as a second operation.""}," &
             """task_type"":{""type"":""string"",""enum"":[""translate"",""correct"",""other""]," &
             """description"":""Classifies the operation: 'translate' for language translation, 'correct' for spelling/grammar/style correction or proofreading, " &
             "'other' for everything else (anonymization, data transformation, restructuring, summarization, etc.). Default: 'other'""}," &

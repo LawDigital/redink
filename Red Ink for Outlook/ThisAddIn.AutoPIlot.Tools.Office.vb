@@ -12235,6 +12235,15 @@ Partial Public Class ThisAddIn
                 Return response
             End If
 
+            Dim globalContext = GetArgString(toolCall.Arguments, "global_context")
+            Dim processorInstruction As String = instruction.Trim()
+            If Not String.IsNullOrWhiteSpace(globalContext) Then
+                processorInstruction &= vbCrLf & vbCrLf &
+                    "[DOCUMENT-WIDE CONSISTENCY CONTEXT - apply this guidance to every chunk; this is context, not a separate operation]" &
+                    vbCrLf & globalContext.Trim() & vbCrLf &
+                    "[/DOCUMENT-WIDE CONSISTENCY CONTEXT]"
+            End If
+
             Dim targetNames = GetArgStringArray(toolCall.Arguments, "attachment_names")
             Dim sheetNames = GetArgStringArray(toolCall.Arguments, "sheet_names")
 
@@ -12296,7 +12305,7 @@ Partial Public Class ThisAddIn
 
                 ' Pass sheet filter only for Excel files
                 Dim sheetFilter As List(Of String) = If(isXlsx AndAlso sheetNames.Count > 0, sheetNames, Nothing)
-                Dim success = Await ProcessDocumentForAutoPilot(inputPath, outputPath, instruction, ct, sheetFilter, useOfflineDocs)
+                Dim success = Await ProcessDocumentForAutoPilot(inputPath, outputPath, processorInstruction, ct, sheetFilter, useOfflineDocs)
 
                 If success Then
                     ' Register output on the original attachment (not on a transient object)
@@ -12323,7 +12332,7 @@ Partial Public Class ThisAddIn
                         Dim compareSuccess = Await SwitchToUi(Function() CreateWordCompareDocumentForAutoPilot(inputPath, outputPath, comparePath))
                         If compareSuccess Then
                             registrationTarget.OutputFiles.Add(comparePath)
-                            resultMessages.Add($"✓ {att.OriginalFileName}: Processed successfully. Output: {outputName} + compare document.")
+                            resultMessages.Add($"✓ {att.OriginalFileName}: Processed successfully. Created files: {outputName}; {Path.GetFileName(comparePath)} (tracked-changes compare).")
                         Else
                             resultMessages.Add($"✓ {att.OriginalFileName}: Processed successfully. Output: {outputName} (compare document creation failed).")
                         End If
@@ -12359,44 +12368,61 @@ Partial Public Class ThisAddIn
         Dim originalDoc As Microsoft.Office.Interop.Word.Document = Nothing
         Dim processedDoc As Microsoft.Office.Interop.Word.Document = Nothing
         Dim compareDoc As Microsoft.Office.Interop.Word.Document = Nothing
-        Dim weCreatedWordApp As Boolean = False
 
         Try
-            Try
-                wordApp = DirectCast(GetObject(, "Word.Application"), Microsoft.Office.Interop.Word.Application)
-            Catch
-                wordApp = New Microsoft.Office.Interop.Word.Application()
-                wordApp.Visible = False
-                weCreatedWordApp = True
-            End Try
-
-            Dim wasScreenUpdating = wordApp.ScreenUpdating
+            ' Always use a dedicated hidden Word instance for comparison. Never attach to an
+            ' existing user/host instance: the compare lifecycle is owned by this method and
+            ' must be closed deterministically when the comparison finishes.
+            wordApp = New Microsoft.Office.Interop.Word.Application()
+            wordApp.Visible = False
+            wordApp.DisplayAlerts = Microsoft.Office.Interop.Word.WdAlertLevel.wdAlertsNone
             wordApp.ScreenUpdating = False
+            Try : wordApp.Options.UpdateLinksAtOpen = False : Catch : End Try
 
-            originalDoc = wordApp.Documents.Open(originalPath, ReadOnly:=True, Visible:=False, AddToRecentFiles:=False)
-            processedDoc = wordApp.Documents.Open(processedPath, ReadOnly:=True, Visible:=False, AddToRecentFiles:=False)
+            originalDoc = wordApp.Documents.Open(
+                FileName:=originalPath,
+                ReadOnly:=True,
+                Visible:=False,
+                AddToRecentFiles:=False)
+
+            processedDoc = wordApp.Documents.Open(
+                FileName:=processedPath,
+                ReadOnly:=True,
+                Visible:=False,
+                AddToRecentFiles:=False)
 
             compareDoc = wordApp.CompareDocuments(
-                OriginalDocument:=originalDoc, RevisedDocument:=processedDoc,
+                OriginalDocument:=originalDoc,
+                RevisedDocument:=processedDoc,
                 Destination:=Microsoft.Office.Interop.Word.WdCompareDestination.wdCompareDestinationNew,
                 Granularity:=Microsoft.Office.Interop.Word.WdGranularity.wdGranularityWordLevel,
-                CompareFormatting:=True, CompareCaseChanges:=True, CompareWhitespace:=True,
-                CompareTables:=True, CompareHeaders:=True, CompareFootnotes:=True,
-                CompareTextboxes:=True, CompareFields:=True, CompareComments:=True,
-                RevisedAuthor:=AN6, IgnoreAllComparisonWarnings:=True)
+                CompareFormatting:=True,
+                CompareCaseChanges:=True,
+                CompareWhitespace:=True,
+                CompareTables:=True,
+                CompareHeaders:=True,
+                CompareFootnotes:=True,
+                CompareTextboxes:=True,
+                CompareFields:=True,
+                CompareComments:=True,
+                RevisedAuthor:=AN6,
+                IgnoreAllComparisonWarnings:=True)
 
             compareDoc.SaveAs2(comparePath, Microsoft.Office.Interop.Word.WdSaveFormat.wdFormatXMLDocument)
+
             compareDoc.Close(Microsoft.Office.Interop.Word.WdSaveOptions.wdDoNotSaveChanges)
             Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(compareDoc) : Catch : End Try
             compareDoc = Nothing
+
             processedDoc.Close(Microsoft.Office.Interop.Word.WdSaveOptions.wdDoNotSaveChanges)
             Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(processedDoc) : Catch : End Try
             processedDoc = Nothing
+
             originalDoc.Close(Microsoft.Office.Interop.Word.WdSaveOptions.wdDoNotSaveChanges)
             Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(originalDoc) : Catch : End Try
             originalDoc = Nothing
-            wordApp.ScreenUpdating = wasScreenUpdating
-            Return True
+
+            Return File.Exists(comparePath)
 
         Catch ex As System.Exception
             Debug.WriteLine($"CreateWordCompareDocumentForAutoPilot error: {ex.Message}")
@@ -12415,15 +12441,11 @@ Partial Public Class ThisAddIn
                 Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(originalDoc) : Catch : End Try
             End If
             If wordApp IsNot Nothing Then
-                Try : wordApp.ScreenUpdating = True : Catch : End Try
-                If weCreatedWordApp Then
-                    Try : wordApp.Quit(False) : Catch : End Try
-                End If
+                Try : wordApp.Quit(Microsoft.Office.Interop.Word.WdSaveOptions.wdDoNotSaveChanges) : Catch : End Try
                 Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(wordApp) : Catch : End Try
             End If
         End Try
     End Function
-
 
 
     ' ═══════════════════════════════════════════════════════════════════════════

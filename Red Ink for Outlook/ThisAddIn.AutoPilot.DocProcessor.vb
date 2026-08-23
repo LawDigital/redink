@@ -28,8 +28,9 @@
 '      * XLSX: worksheet parts, shared strings table, workbook relationships,
 '        and content-type registration when creating shared strings on demand.
 '  - Batch strategy:
-'      * Context-before/context-after windows.
+'      * Context-before/context-after windows; each LLM batch is explicitly treated as isolated.
 '      * Paragraph/cell chunking with character cap and cancellation support.
+'      * Caller-supplied document-wide consistency context is repeated through the instruction when provided.
 '      * Structured response parsing (`[n] ...` for paragraph batches,
 '        `[A1] ...` for spreadsheet cells).
 '
@@ -632,11 +633,16 @@ Partial Public Class ThisAddIn
             "You are a professional document processor. Apply the following instruction to the numbered paragraphs " &
             "in the [TEXTTOPROCESS] section." & vbCrLf & vbCrLf &
             "INSTRUCTION: " & instruction & vbCrLf & vbCrLf &
-            "IMPORTANT CONTEXT: The document is being processed in multiple sequential batches. Each batch " &
-            "contains only a SMALL PORTION of the full document. The INSTRUCTION describes the OVERALL task " &
-            "for the entire document — it does NOT mean that every paragraph in THIS batch needs to be changed. " &
-            "Only modify paragraphs whose content is actually relevant to the INSTRUCTION. If a paragraph in " &
-            "this batch does not need any change, return it EXACTLY as-is." & vbCrLf & vbCrLf &
+            "IMPORTANT BATCH SCOPE: The document is being processed in multiple sequential batches. This is an independent model call. " &
+            "You do NOT have access to the full document and you do NOT retain hidden memory of earlier or later batches. In this call you see only " &
+            "the current [TEXTTOPROCESS] plus the small [CONTEXT BEFORE] and [CONTEXT AFTER] windows supplied below. " &
+            "The INSTRUCTION is repeated to every batch and is the authoritative document-wide contract. If it contains a " &
+            "[DOCUMENT-WIDE CONSISTENCY CONTEXT] block, apply that block consistently throughout the document; it contains stable facts or decisions " &
+            "that may not be visible in this local chunk and is context, not an additional operation. Reuse terminology and style choices visible in " &
+            "[CONTEXT BEFORE] as precedent unless the document-wide instruction/context says otherwise. [CONTEXT AFTER] is unprocessed source context. " &
+            "Do not invent facts, definitions, terminology choices, or other global conventions based on unseen text. " &
+            "The INSTRUCTION describes the OVERALL task for the entire document — it does NOT mean that every paragraph in THIS batch needs to be changed. " &
+            "Only modify paragraphs whose content is actually relevant to the INSTRUCTION. If a paragraph in this batch does not need any change, return it EXACTLY as-is." & vbCrLf & vbCrLf &
             "RULES:" & vbCrLf &
             "1. Process ONLY paragraphs inside [TEXTTOPROCESS], not the context sections." & vbCrLf &
             "2. Use [CONTEXT BEFORE] and [CONTEXT AFTER] to understand meaning, tone, and terminology." & vbCrLf &

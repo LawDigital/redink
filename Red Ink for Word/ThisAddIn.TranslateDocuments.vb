@@ -16,9 +16,10 @@
 '    stay within LLM token/character limits. Each batch contains a bounded
 '    number of paragraphs (TranslateParagraphsPerBatch) and is further reduced
 '    if the combined character count would exceed TranslateMaxCharsPerBatch.
-'  - Context Windows: Each batch includes a small window of already-processed
-'    preceding paragraphs and unprocessed following paragraphs to help the LLM
-'    preserve meaning, terminology, and tone across batch boundaries.
+'  - Context Windows: Each independent LLM batch includes a small window of already-processed
+'    preceding paragraphs and unprocessed following paragraphs. The model is explicitly told
+'    that it does not see or remember the rest of the document; global instructions/dictionaries
+'    remain authoritative across all batches.
 '  - Pure Text to LLM: Only plain, visible text is sent to the LLM—no XML, no
 '    formatting codes, and no markup—ensuring maximum formatting preservation.
 '  - Formatting Preservation (default): Inserts | markers only at
@@ -563,7 +564,7 @@ Partial Public Class ThisAddIn
         Dim usedActiveDocument As Boolean = False
         Dim activeDocumentTempFolder As String = Nothing
         Dim keepActiveDocumentTempFolder As Boolean = False
-        Dim desktopResultPaths As New List(Of String)()
+        Dim resultFilePaths As New List(Of String)()
 
         Dim modeVerb As String = If(mode = DocumentProcessMode.Translate, "translate", If(_isFreestyle, "adapt", "correct"))
         Dim modeVerbPast As String = If(mode = DocumentProcessMode.Translate, "translated", If(_isFreestyle, "adapted", "corrected"))
@@ -894,27 +895,31 @@ Partial Public Class ThisAddIn
                     End If
 
                     If success Then
-                        ' For correction mode on Word docs, create compare document
+                        Dim compareCreated As Boolean = False
+
+                        ' For correction mode on Word docs, create compare document.
                         If mode = DocumentProcessMode.Correct AndAlso Not isPptx Then
-                            Dim compareSuccess As Boolean = CreateWordCompareDocument(filePath, outputPath)
-                            If Not compareSuccess Then
+                            compareCreated = CreateWordCompareDocument(filePath, outputPath)
+                            If Not compareCreated Then
                                 failedFiles.Add($"{fileName}: Corrected but compare document creation failed")
                             End If
                         End If
 
                         Dim desktopMoveSucceeded As Boolean = True
+                        Dim finalOutputPath As String = outputPath
+                        Dim finalComparePath As String = If(compareCreated, compareOutputPath, Nothing)
 
                         If usedActiveDocument Then
                             Try
                                 Dim movedOutputPath As String = MoveFileToDesktop(outputPath)
                                 If Not String.IsNullOrWhiteSpace(movedOutputPath) Then
-                                    desktopResultPaths.Add(movedOutputPath)
+                                    finalOutputPath = movedOutputPath
                                 End If
 
-                                If Not String.IsNullOrWhiteSpace(compareOutputPath) AndAlso File.Exists(compareOutputPath) Then
+                                If compareCreated AndAlso Not String.IsNullOrWhiteSpace(compareOutputPath) AndAlso File.Exists(compareOutputPath) Then
                                     Dim movedComparePath As String = MoveFileToDesktop(compareOutputPath)
                                     If Not String.IsNullOrWhiteSpace(movedComparePath) Then
-                                        desktopResultPaths.Add(movedComparePath)
+                                        finalComparePath = movedComparePath
                                     End If
                                 End If
                             Catch ex As Exception
@@ -925,6 +930,12 @@ Partial Public Class ThisAddIn
                         End If
 
                         If desktopMoveSucceeded Then
+                            If Not String.IsNullOrWhiteSpace(finalOutputPath) AndAlso File.Exists(finalOutputPath) Then
+                                resultFilePaths.Add(finalOutputPath)
+                            End If
+                            If Not String.IsNullOrWhiteSpace(finalComparePath) AndAlso File.Exists(finalComparePath) Then
+                                resultFilePaths.Add(finalComparePath)
+                            End If
                             successCount += 1
                         End If
                     Else
@@ -967,14 +978,19 @@ Partial Public Class ThisAddIn
             End If
         End If
 
-        If usedActiveDocument AndAlso desktopResultPaths.Count > 0 Then
+        Dim distinctResultPaths As List(Of String) = resultFilePaths.
+            Where(Function(p) Not String.IsNullOrWhiteSpace(p)).
+            Distinct(StringComparer.OrdinalIgnoreCase).
+            ToList()
+
+        If distinctResultPaths.Count > 0 Then
             summary.AppendLine()
-            summary.AppendLine("Result files saved to Desktop:")
-            For Each resultPath In desktopResultPaths.Take(10)
+            summary.AppendLine(If(usedActiveDocument, "Result files saved to Desktop:", "Created result files:"))
+            For Each resultPath In distinctResultPaths.Take(20)
                 summary.AppendLine($"  • {Path.GetFileName(resultPath)}")
             Next
-            If desktopResultPaths.Count > 10 Then
-                summary.AppendLine($"  ... and {desktopResultPaths.Count - 10} more")
+            If distinctResultPaths.Count > 20 Then
+                summary.AppendLine($"  ... and {distinctResultPaths.Count - 20} more")
             End If
         End If
 
@@ -1035,16 +1051,21 @@ Partial Public Class ThisAddIn
         Dim tempCompareDir As String = Nothing
 
         Try
-            wordApp = Globals.ThisAddIn.Application
-            Dim wasScreenUpdating As Boolean = wordApp.ScreenUpdating
+            ' The comparison owns its Word instance. Do not reuse Globals.ThisAddIn.Application:
+            ' the hidden comparison process must be closed deterministically and must not leave
+            ' comparison documents or state in the user's interactive Word instance.
+            wordApp = New Word.Application()
+            wordApp.Visible = False
+            wordApp.DisplayAlerts = WdAlertLevel.wdAlertsNone
             wordApp.ScreenUpdating = False
+            Try : wordApp.Options.UpdateLinksAtOpen = False : Catch : End Try
 
-            ' Determine final compare output path
+            ' Determine final compare output path.
             Dim comparePath As String = GetCompareFilePath(correctedPath)
 
             ' Work entirely on local copies inside a private %TEMP% folder so the compare
             ' interop never opens documents that live in a document-management or cloud-synced
-            ' location (a known source of crashes / event re-entrancy).
+            ' location.
             tempCompareDir = Path.Combine(Path.GetTempPath(), $"{AN2}_compare_{Guid.NewGuid():N}")
             Directory.CreateDirectory(tempCompareDir)
 
@@ -1055,12 +1076,18 @@ Partial Public Class ThisAddIn
             File.Copy(originalPath, tempOriginalPath, overwrite:=True)
             File.Copy(correctedPath, tempCorrectedPath, overwrite:=True)
 
-            ' Open the local copies only (never the original DMS/synced paths)
-            originalDoc = wordApp.Documents.Open(tempOriginalPath, ReadOnly:=True, Visible:=False, AddToRecentFiles:=False)
-            correctedDoc = wordApp.Documents.Open(tempCorrectedPath, ReadOnly:=True, Visible:=False, AddToRecentFiles:=False)
+            originalDoc = wordApp.Documents.Open(
+                FileName:=tempOriginalPath,
+                ReadOnly:=True,
+                Visible:=False,
+                AddToRecentFiles:=False)
 
-            ' Create comparison document using Word's built-in compare feature
-            ' This preserves all formatting and shows changes as tracked changes
+            correctedDoc = wordApp.Documents.Open(
+                FileName:=tempCorrectedPath,
+                ReadOnly:=True,
+                Visible:=False,
+                AddToRecentFiles:=False)
+
             compareDoc = wordApp.CompareDocuments(
                 OriginalDocument:=originalDoc,
                 RevisedDocument:=correctedDoc,
@@ -1079,23 +1106,21 @@ Partial Public Class ThisAddIn
                 IgnoreAllComparisonWarnings:=True
             )
 
-            ' Save the compare document to the local temp path first
             compareDoc.SaveAs2(tempComparePath, WdSaveFormat.wdFormatXMLDocument)
 
-            ' Close documents
             compareDoc.Close(WdSaveOptions.wdDoNotSaveChanges)
+            Try : Marshal.FinalReleaseComObject(compareDoc) : Catch : End Try
             compareDoc = Nothing
 
             correctedDoc.Close(WdSaveOptions.wdDoNotSaveChanges)
+            Try : Marshal.FinalReleaseComObject(correctedDoc) : Catch : End Try
             correctedDoc = Nothing
 
             originalDoc.Close(WdSaveOptions.wdDoNotSaveChanges)
+            Try : Marshal.FinalReleaseComObject(originalDoc) : Catch : End Try
             originalDoc = Nothing
 
-            wordApp.ScreenUpdating = wasScreenUpdating
-
-            ' Move the finished compare file to its final destination (plain file I/O only —
-            ' no Word interop against the destination folder).
+            ' Move the finished compare file to its final destination with plain file I/O.
             File.Copy(tempComparePath, comparePath, overwrite:=True)
 
             Return File.Exists(comparePath)
@@ -1104,18 +1129,21 @@ Partial Public Class ThisAddIn
             Debug.WriteLine($"CreateWordCompareDocument error: {ex.Message}")
             Return False
         Finally
-            ' Cleanup
             If compareDoc IsNot Nothing Then
                 Try : compareDoc.Close(WdSaveOptions.wdDoNotSaveChanges) : Catch : End Try
+                Try : Marshal.FinalReleaseComObject(compareDoc) : Catch : End Try
             End If
             If correctedDoc IsNot Nothing Then
                 Try : correctedDoc.Close(WdSaveOptions.wdDoNotSaveChanges) : Catch : End Try
+                Try : Marshal.FinalReleaseComObject(correctedDoc) : Catch : End Try
             End If
             If originalDoc IsNot Nothing Then
                 Try : originalDoc.Close(WdSaveOptions.wdDoNotSaveChanges) : Catch : End Try
+                Try : Marshal.FinalReleaseComObject(originalDoc) : Catch : End Try
             End If
             If wordApp IsNot Nothing Then
-                Try : wordApp.ScreenUpdating = True : Catch : End Try
+                Try : wordApp.Quit(WdSaveOptions.wdDoNotSaveChanges) : Catch : End Try
+                Try : Marshal.FinalReleaseComObject(wordApp) : Catch : End Try
             End If
             If Not String.IsNullOrWhiteSpace(tempCompareDir) AndAlso Directory.Exists(tempCompareDir) Then
                 Try : Directory.Delete(tempCompareDir, recursive:=True) : Catch : End Try
@@ -1757,6 +1785,14 @@ Partial Public Class ThisAddIn
             Dim effectivePrompt As String = If(String.IsNullOrWhiteSpace(_correctPromptOverride), SP_Correct_Document, _correctPromptOverride)
             systemPrompt = InterpolateAtRuntime(effectivePrompt)
         End If
+
+        systemPrompt = systemPrompt & vbCrLf & vbCrLf &
+            "BATCH SCOPE / DOCUMENT-WIDE CONSISTENCY: This document is processed in independent sequential batches. " &
+            "In this model call you do NOT have access to the full document and you do NOT retain hidden memory of earlier or later batches. " &
+            "You see only the current [TEXTTOPROCESS] plus the small [CONTEXT BEFORE] and [CONTEXT AFTER] windows supplied with this call. " &
+            "Treat the processing instruction, target language, translation dictionary, configured correction rules, and any user-supplied instruction as document-wide rules that apply consistently to every batch. " &
+            "Use terminology and style choices visible in [CONTEXT BEFORE] as processed precedent unless a document-wide rule says otherwise; [CONTEXT AFTER] is unprocessed source context. " &
+            "Do not invent facts, definitions, terminology choices, or other conventions based on parts of the document you cannot see."
 
         If _useFormattingMarkers Then
             systemPrompt = systemPrompt & vbCrLf & vbCrLf & SP_Add_Markers
