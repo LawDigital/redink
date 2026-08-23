@@ -19,6 +19,10 @@
 '     methods so Word COM work remains on the host/UI boundary.
 '   - Model switching, Markdown/HTML rendering, clipboard/export and status/error handling
 '     are UI responsibilities; cross-host policy remains in SharedLibrary.
+' Security:
+'   - External link launches from rendered chat content route through the shared
+'     SafeOpenExternalLink boundary (absolute HTTP/HTTPS/MAILTO only).
+'
 ' =============================================================================
 
 
@@ -4719,7 +4723,7 @@ Partial Public Class frmAIChat
             ' Only handle external protocols
             Dim lower = href.Trim().ToLowerInvariant()
             If lower.StartsWith("http://") OrElse lower.StartsWith("https://") OrElse lower.StartsWith("mailto:") Then
-                Process.Start(New ProcessStartInfo(href) With {.UseShellExecute = True})
+                Global.SharedLibrary.SharedLibrary.SharedMethods.SafeOpenExternalLink(href)
                 ' Prevent internal WebBrowser navigation
                 If e IsNot Nothing Then
                     e.ReturnValue = False
@@ -4749,7 +4753,7 @@ Partial Public Class frmAIChat
         Public Sub OpenLink(url As String)
             Try
                 If String.IsNullOrEmpty(url) Then Return
-                Process.Start(New ProcessStartInfo(url) With {.UseShellExecute = True})
+                Global.SharedLibrary.SharedLibrary.SharedMethods.SafeOpenExternalLink(url)
             Catch
                 ' Silently ignore errors
             End Try
@@ -6029,7 +6033,7 @@ Partial Public Class frmAIChat
                     Dim urlToOpen As String = e.Url.ToString()
                     Me.BeginInvoke(Sub()
                                        Try
-                                           Process.Start(New ProcessStartInfo(urlToOpen) With {.UseShellExecute = True})
+                                           Global.SharedLibrary.SharedLibrary.SharedMethods.SafeOpenExternalLink(urlToOpen)
                                        Catch
                                            ' Silently ignore errors
                                        End Try
@@ -6056,7 +6060,7 @@ Partial Public Class frmAIChat
                     Dim urlToOpen As String = href
                     Me.BeginInvoke(Sub()
                                        Try
-                                           Process.Start(New ProcessStartInfo(urlToOpen) With {.UseShellExecute = True})
+                                           Global.SharedLibrary.SharedLibrary.SharedMethods.SafeOpenExternalLink(urlToOpen)
                                        Catch
                                            ' Silently ignore errors
                                        End Try

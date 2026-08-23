@@ -31,6 +31,7 @@
 '  - Markdig: Markdown -> HTML rendering.
 '  - HtmlAgilityPack: HTML -> plain text extraction for manual loading.
 '  - SharedLibrary.SharedMethods: LLM invocation, PDF/RTF reading, config discovery, model switching.
+'  - External links are opened only through SharedMethods.SafeOpenExternalLink (HTTP/HTTPS/MAILTO).
 ' =============================================================================
 
 Option Strict On
@@ -2106,7 +2107,7 @@ Namespace SharedLibrary
                 Dim scheme = e.Url?.Scheme?.ToLowerInvariant()
                 If scheme = "http" OrElse scheme = "https" OrElse scheme = "mailto" Then
                     e.Cancel = True
-                    Process.Start(New ProcessStartInfo(e.Url.ToString()) With {.UseShellExecute = True})
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.SafeOpenExternalLink(e.Url.ToString())
                 End If
             Catch ex As Exception
                 Dbg("Navigating error: " & ex.Message)

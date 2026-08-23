@@ -18,6 +18,10 @@
 '     reimplemented here; tool permissions/log display remain explicit session choices.
 '   - Export back to Word delegates document creation/Markdown insertion to host helpers.
 '   - File extraction, model configuration and common dialogs come from SharedLibrary.
+' Security:
+'   - External links from the embedded chat browser route through the shared
+'     SafeOpenExternalLink boundary (absolute HTTP/HTTPS/MAILTO only).
+'
 ' =============================================================================
 
 Option Strict Off
@@ -5825,7 +5829,7 @@ Public Class DiscussInky
             Dim scheme = e.Url?.Scheme?.ToLowerInvariant()
             If scheme = "http" OrElse scheme = "https" OrElse scheme = "mailto" Then
                 e.Cancel = True
-                Process.Start(New ProcessStartInfo(e.Url.ToString()) With {.UseShellExecute = True})
+                Global.SharedLibrary.SharedLibrary.SharedMethods.SafeOpenExternalLink(e.Url.ToString())
             End If
         Catch
         End Try

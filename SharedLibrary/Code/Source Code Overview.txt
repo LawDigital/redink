@@ -222,7 +222,7 @@
 '   SharedMethods.Http.vb            - Shared HttpClient/WinHTTP transport abstraction, fallback selection, request bodies, compression/timeouts, and response decoding.
 '   SharedMethods.MainLLM.vb         - Primary LLM invocation pipeline and response handling.
 '   SharedMethods.MCP.vb             - MCP transport runtime helpers for handshake, SSE, and tool calls.
-'   SharedMethods.MCPOAuth.vb        - OAuth helpers for MCP-protected services.
+'   SharedMethods.MCPOAuth.vb        - OAuth helpers for MCP-protected services, including HTTPS-only validation for OAuth server endpoints.
 '   SharedMethods.Signing.vb         - Cryptographic signing helpers using BouncyCastle.
 '
 ' [Core\LLM\ModelSelection]
@@ -235,6 +235,7 @@
 '
 ' [Core\Security]
 '   LocalHttpBrowserSecurity.vb      - Host-agnostic localhost HTTP trust layer: DPAPI-backed browser credentials, CSRF/origin validation, loopback checks, approved browser-extension origins, and byte-bounded HTTP request reading with shared transport/upload limits.
+'   SharedMethods.SafeExternalLinks.vb - Host-agnostic external-link security boundary: permits only absolute HTTP/HTTPS/MAILTO URIs before invoking the OS shell.
 '
 ' [Core\Texthandling]
 '   SharedMethods.Diff.vb            - Text diff helpers built atop DiffPlex.

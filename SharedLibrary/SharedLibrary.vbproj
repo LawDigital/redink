@@ -609,6 +609,7 @@
     <Compile Include="Code\Core\Config\SharedMethods.LoadConfig.vb" />
     <Compile Include="Code\Core\Config\SharedMethods.Settings.vb" />
     <Compile Include="Code\Core\Security\LocalHttpBrowserSecurity.vb" />
+    <Compile Include="Code\Core\Security\SharedMethods.SafeExternalLinks.vb" />
     <Compile Include="Code\Core\Definitions\SharedContext.vb" />
     <Compile Include="Code\Core\Converter\MarkdownToRtfConverter.vb" />
     <Compile Include="Code\Core\Definitions\SharedMethods.Constants.vb" />
