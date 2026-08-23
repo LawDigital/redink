@@ -8,6 +8,7 @@
 '   in a JSON file alongside the redink.ini configuration file. Tasks are
 '   created, queried, updated, and deleted via natural language commands
 '   processed by the LLM through the manage_scheduled_tasks internal tool.
+'   Tooling executions are routed into the same rolling AutoPilot tooling-log archive used by mail/voicemail runs.
 '
 ' Key Features:
 '  - Persistent Storage:
@@ -33,10 +34,12 @@
 '
 '  - Execution Pipeline:
 '      * Due tasks processed through LLM + tooling with instruction as user prompt
+'      * Tool-enabled scheduled runs use the same rolling AutoPilot tooling-log archive
 '      * Input attachments and prior workspace files loaded into temp directory
 '      * A persistent task-specific workspace is available for optional cross-run state
 '      * Generated outputs automatically persisted to workspace for next execution
 '      * Result e-mail sent to authorized recipients with HTML formatting and sources
+'      * Oversized result-attachment sets are split by the central outgoing-delivery pipeline into attachment-only follow-up mails using the same cleanup metadata.
 '
 '  - Catch-up & Reliability:
 '      * On AutoPilot start, overdue tasks executed immediately
@@ -110,6 +113,7 @@ Partial Public Class ThisAddIn
     Private _apLocalSchedulerCts As CancellationTokenSource = Nothing
     Private _apScheduledWorkspaceTaskId As String = ""
     Private _apScheduledWorkspaceRoot As String = ""
+    Private ReadOnly _apScheduleFileGate As New Object()
 
 
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -221,49 +225,80 @@ Partial Public Class ThisAddIn
                             AP_ScheduleAttachmentDir, taskId)
     End Function
 
-    ''' <summary>Reads and deserializes the schedule file. Returns empty schedule if file missing or corrupt.</summary>
-    Private Function ReadScheduleFile() As ScheduleFile
-        Try
-            Dim filePath = GetScheduleFilePath()
-            If Not File.Exists(filePath) Then Return New ScheduleFile()
-            Dim json = File.ReadAllText(filePath, Encoding.UTF8)
-            If String.IsNullOrWhiteSpace(json) Then Return New ScheduleFile()
+    ''' <summary>Reads and deserializes the schedule file. Read-only callers may receive an empty schedule on corruption; mutation callers use failClosed=True.</summary>
+    Private Function ReadScheduleFile(Optional failClosed As Boolean = False) As ScheduleFile
+        SyncLock _apScheduleFileGate
+            Try
+                Dim filePath = GetScheduleFilePath()
+                If Not File.Exists(filePath) Then Return New ScheduleFile()
+                Dim json = File.ReadAllText(filePath, Encoding.UTF8)
+                If String.IsNullOrWhiteSpace(json) Then
+                    If failClosed Then
+                        Throw New System.InvalidOperationException("Scheduler state file exists but is empty.")
+                    End If
+                    Return New ScheduleFile()
+                End If
 
-            Dim sf = JsonConvert.DeserializeObject(Of ScheduleFile)(json)
-            sf = If(sf, New ScheduleFile())
+                Dim sf = JsonConvert.DeserializeObject(Of ScheduleFile)(json)
+                If sf Is Nothing Then
+                    If failClosed Then
+                        Throw New System.InvalidOperationException("Scheduler state file did not contain a valid schedule object.")
+                    End If
+                    sf = New ScheduleFile()
+                End If
 
-            If sf.Tasks Is Nothing Then sf.Tasks = New List(Of ScheduledTask)()
+                If sf.Tasks Is Nothing Then sf.Tasks = New List(Of ScheduledTask)()
 
-            For Each task In sf.Tasks
-                NormalizeScheduledTask(task)
-            Next
+                For Each task In sf.Tasks
+                    NormalizeScheduledTask(task)
+                Next
 
-            Return sf
-        Catch ex As System.Exception
-            ApDashboardLog($"📅 ERROR reading schedule file: {ex.Message}", "error")
-            Return New ScheduleFile()
-        End Try
+                Return sf
+            Catch ex As System.Exception
+                ApDashboardLog($"📅 ERROR reading schedule file: {ex.Message}", "error")
+                If failClosed Then
+                    Throw New System.InvalidOperationException(
+                        "Scheduler state could not be read safely; refusing to mutate shared task state.", ex)
+                End If
+                Return New ScheduleFile()
+            End Try
+        End SyncLock
     End Function
 
     ''' <summary>Serializes and writes the schedule file atomically (write-to-temp then move).</summary>
     Private Sub WriteScheduleFile(schedule As ScheduleFile)
-        Try
-            Dim filePath = GetScheduleFilePath()
-            Dim dir = Path.GetDirectoryName(filePath)
-            If Not Directory.Exists(dir) Then Directory.CreateDirectory(dir)
+        SyncLock _apScheduleFileGate
+            Dim tempPath As String = Nothing
+            Try
+                Dim filePath As String = GetScheduleFilePath()
+                Dim dir As String = Path.GetDirectoryName(filePath)
+                If Not Directory.Exists(dir) Then Directory.CreateDirectory(dir)
 
-            Dim json = JsonConvert.SerializeObject(schedule, Formatting.Indented)
-            Dim tempPath = filePath & ".tmp"
-            File.WriteAllText(tempPath, json, Encoding.UTF8)
+                Dim json As String = JsonConvert.SerializeObject(schedule, Formatting.Indented)
+                tempPath = filePath & ".tmp." & Guid.NewGuid().ToString("N")
+                File.WriteAllText(tempPath, json, Encoding.UTF8)
 
-            ' Atomic replace
-            If File.Exists(filePath) Then File.Delete(filePath)
-            File.Move(tempPath, filePath)
+                ' Preserve the existing scheduler storage semantics for broad Windows/volume
+                ' compatibility. The process-wide gate above prevents concurrent read/modify/write
+                ' loss between AutoPilot, Scheduler and Local Agent callers, while the unique temp
+                ' name prevents one writer from trampling another writer's staging file.
+                If File.Exists(filePath) Then File.Delete(filePath)
+                File.Move(tempPath, filePath)
+                tempPath = Nothing
 
-            ApDashboardLog($"📅 Schedule saved to: {filePath} ({schedule.Tasks.Count} task(s))", "step")
-        Catch ex As System.Exception
-            ApDashboardLog($"📅 ERROR writing schedule file: {ex.Message}", "error")
-        End Try
+                ApDashboardLog($"📅 Schedule saved to: {filePath} ({schedule.Tasks.Count} task(s))", "step")
+            Catch ex As System.Exception
+                ApDashboardLog($"📅 ERROR writing schedule file: {ex.Message}", "error")
+                Throw
+            Finally
+                If Not String.IsNullOrWhiteSpace(tempPath) Then
+                    Try
+                        If File.Exists(tempPath) Then File.Delete(tempPath)
+                    Catch
+                    End Try
+                End If
+            End Try
+        End SyncLock
     End Sub
 
     Private Sub NormalizeScheduledTask(task As ScheduledTask)
@@ -307,25 +342,27 @@ Partial Public Class ThisAddIn
 
     ''' <summary>Creates a new scheduled task and persists it.</summary>
     Friend Function SchedulerCreateTask(task As ScheduledTask) As String
-        If String.IsNullOrWhiteSpace(task.Id) Then task.Id = Guid.NewGuid().ToString("N")
-        If task.CreatedUtc = DateTime.MinValue Then task.CreatedUtc = DateTime.UtcNow
-        If String.IsNullOrWhiteSpace(task.Status) Then task.Status = "active"
-        If String.IsNullOrWhiteSpace(task.Subject) Then task.Subject = "Scheduled Task Result"
+        SyncLock _apScheduleFileGate
+            If String.IsNullOrWhiteSpace(task.Id) Then task.Id = Guid.NewGuid().ToString("N")
+            If task.CreatedUtc = DateTime.MinValue Then task.CreatedUtc = DateTime.UtcNow
+            If String.IsNullOrWhiteSpace(task.Status) Then task.Status = "active"
+            If String.IsNullOrWhiteSpace(task.Subject) Then task.Subject = "Scheduled Task Result"
 
-        ' Create attachment directory if files are referenced
-        If task.AttachmentFiles IsNot Nothing AndAlso task.AttachmentFiles.Count > 0 Then
-            task.AttachmentDir = Path.Combine(AP_ScheduleAttachmentDir, task.Id)
-            Dim fullDir = Path.Combine(Path.GetDirectoryName(GetScheduleFilePath()), task.AttachmentDir)
-            If Not Directory.Exists(fullDir) Then Directory.CreateDirectory(fullDir)
-        End If
+            ' Create attachment directory if files are referenced
+            If task.AttachmentFiles IsNot Nothing AndAlso task.AttachmentFiles.Count > 0 Then
+                task.AttachmentDir = Path.Combine(AP_ScheduleAttachmentDir, task.Id)
+                Dim fullDir = Path.Combine(Path.GetDirectoryName(GetScheduleFilePath()), task.AttachmentDir)
+                If Not Directory.Exists(fullDir) Then Directory.CreateDirectory(fullDir)
+            End If
 
-        Dim schedule = ReadScheduleFile()
-        schedule.Tasks.Add(task)
-        WriteScheduleFile(schedule)
+            Dim schedule = ReadScheduleFile(failClosed:=True)
+            schedule.Tasks.Add(task)
+            WriteScheduleFile(schedule)
 
-        ApDashboardLog($"📅 Scheduler: Created task {task.Id.Substring(0, 8)}... — ""{Truncate(task.Instruction, 60)}"" next due: {task.NextDueUtc:yyyy-MM-dd HH:mm} UTC", "info")
-        RefreshSchedulerDashboard()
-        Return task.Id
+            ApDashboardLog($"📅 Scheduler: Created task {task.Id.Substring(0, 8)}... — ""{Truncate(task.Instruction, 60)}"" next due: {task.NextDueUtc:yyyy-MM-dd HH:mm} UTC", "info")
+            RefreshSchedulerDashboard()
+            Return task.Id
+        End SyncLock
     End Function
 
     ''' <summary>Lists all tasks, optionally filtered by status.</summary>
@@ -351,70 +388,76 @@ Partial Public Class ThisAddIn
 
     ''' <summary>Updates an existing task (replaces the task with matching ID).</summary>
     Friend Function SchedulerUpdateTask(updated As ScheduledTask) As Boolean
-        Dim schedule = ReadScheduleFile()
-        Dim idx = schedule.Tasks.FindIndex(Function(t) t.Id.Equals(updated.Id, StringComparison.OrdinalIgnoreCase))
-        If idx < 0 Then Return False
-        schedule.Tasks(idx) = updated
-        WriteScheduleFile(schedule)
-        ApDashboardLog($"📅 Scheduler: Updated task {updated.Id.Substring(0, 8)}...", "info")
-        RefreshSchedulerDashboard()
-        Return True
+        SyncLock _apScheduleFileGate
+            Dim schedule = ReadScheduleFile(failClosed:=True)
+            Dim idx = schedule.Tasks.FindIndex(Function(t) t.Id.Equals(updated.Id, StringComparison.OrdinalIgnoreCase))
+            If idx < 0 Then Return False
+            schedule.Tasks(idx) = updated
+            WriteScheduleFile(schedule)
+            ApDashboardLog($"📅 Scheduler: Updated task {updated.Id.Substring(0, 8)}...", "info")
+            RefreshSchedulerDashboard()
+            Return True
+        End SyncLock
     End Function
 
     ''' <summary>Deletes a task by ID. Also removes its attachment directory.</summary>
     Friend Function SchedulerDeleteTask(taskId As String) As Boolean
-        Dim schedule = ReadScheduleFile()
-        Dim task = schedule.Tasks.FirstOrDefault(Function(t) t.Id.Equals(taskId, StringComparison.OrdinalIgnoreCase))
-        If task Is Nothing Then Return False
+        SyncLock _apScheduleFileGate
+            Dim schedule = ReadScheduleFile(failClosed:=True)
+            Dim task = schedule.Tasks.FirstOrDefault(Function(t) t.Id.Equals(taskId, StringComparison.OrdinalIgnoreCase))
+            If task Is Nothing Then Return False
 
-        schedule.Tasks.Remove(task)
-        WriteScheduleFile(schedule)
+            schedule.Tasks.Remove(task)
+            WriteScheduleFile(schedule)
 
-        ' Clean up the full task directory, including its persistent workspace
-        Try
-            DeactivateScheduledTaskWorkspace(taskId)
-        Catch
-        End Try
+            ' Clean up the full task directory, including its persistent workspace
+            Try
+                DeactivateScheduledTaskWorkspace(taskId)
+            Catch
+            End Try
 
-        Try
-            Dim fullDir = GetTaskInputDir(taskId)
-            If Directory.Exists(fullDir) Then Directory.Delete(fullDir, recursive:=True)
-        Catch
-        End Try
+            Try
+                Dim fullDir = GetTaskInputDir(taskId)
+                If Directory.Exists(fullDir) Then Directory.Delete(fullDir, recursive:=True)
+            Catch
+            End Try
 
-        ApDashboardLog($"📅 Scheduler: Deleted task {taskId.Substring(0, Math.Min(8, taskId.Length))}...", "info")
-        RefreshSchedulerDashboard()
-        Return True
+            ApDashboardLog($"📅 Scheduler: Deleted task {taskId.Substring(0, Math.Min(8, taskId.Length))}...", "info")
+            RefreshSchedulerDashboard()
+            Return True
+        End SyncLock
     End Function
 
     ''' <summary>Stores an attachment file for a task from the current AutoPilot temp directory.</summary>
     Friend Function SchedulerStoreAttachment(taskId As String, sourceFilePath As String) As Boolean
-        Try
-            Dim schedule = ReadScheduleFile()
-            Dim task = schedule.Tasks.FirstOrDefault(Function(t) t.Id.Equals(taskId, StringComparison.OrdinalIgnoreCase))
-            If task Is Nothing Then Return False
+        SyncLock _apScheduleFileGate
+            Try
+                Dim schedule As ScheduleFile = ReadScheduleFile(failClosed:=True)
+                Dim task As ScheduledTask = schedule.Tasks.FirstOrDefault(Function(t) t.Id.Equals(taskId, StringComparison.OrdinalIgnoreCase))
+                If task Is Nothing Then Return False
 
-            If String.IsNullOrWhiteSpace(task.AttachmentDir) Then
-                task.AttachmentDir = Path.Combine(AP_ScheduleAttachmentDir, task.Id)
-            End If
+                If String.IsNullOrWhiteSpace(task.AttachmentDir) Then
+                    task.AttachmentDir = Path.Combine(AP_ScheduleAttachmentDir, task.Id)
+                End If
 
-            Dim fullDir = Path.Combine(Path.GetDirectoryName(GetScheduleFilePath()), task.AttachmentDir)
-            If Not Directory.Exists(fullDir) Then Directory.CreateDirectory(fullDir)
+                Dim fullDir As String = Path.Combine(Path.GetDirectoryName(GetScheduleFilePath()), task.AttachmentDir)
+                If Not Directory.Exists(fullDir) Then Directory.CreateDirectory(fullDir)
 
-            Dim destName = Path.GetFileName(sourceFilePath)
-            Dim destPath = Path.Combine(fullDir, destName)
-            File.Copy(sourceFilePath, destPath, overwrite:=True)
+                Dim destName As String = Path.GetFileName(sourceFilePath)
+                Dim destPath As String = Path.Combine(fullDir, destName)
+                File.Copy(sourceFilePath, destPath, overwrite:=True)
 
-            If Not task.AttachmentFiles.Contains(destName, StringComparer.OrdinalIgnoreCase) Then
-                task.AttachmentFiles.Add(destName)
-            End If
+                If Not task.AttachmentFiles.Contains(destName, StringComparer.OrdinalIgnoreCase) Then
+                    task.AttachmentFiles.Add(destName)
+                End If
 
-            WriteScheduleFile(schedule)
-            Return True
-        Catch ex As System.Exception
-            Debug.WriteLine($"[Scheduler] Error storing attachment: {ex.Message}")
-            Return False
-        End Try
+                WriteScheduleFile(schedule)
+                Return True
+            Catch ex As System.Exception
+                Debug.WriteLine($"[Scheduler] Error storing attachment: {ex.Message}")
+                Return False
+            End Try
+        End SyncLock
     End Function
 
 
@@ -424,35 +467,43 @@ Partial Public Class ThisAddIn
     ''' workspace files are pruned until the new file fits.
     ''' </summary>
     Friend Function SchedulerStoreWorkspaceFile(taskId As String, sourceFilePath As String) As Boolean
-        Try
-            Dim schedule = ReadScheduleFile()
-            Dim task = schedule.Tasks.FirstOrDefault(Function(t) t.Id.Equals(taskId, StringComparison.OrdinalIgnoreCase))
-            If task Is Nothing Then Return False
+        SyncLock _apScheduleFileGate
+            Try
+                Dim schedule As ScheduleFile = ReadScheduleFile(failClosed:=True)
+                Dim task As ScheduledTask = schedule.Tasks.FirstOrDefault(Function(t) t.Id.Equals(taskId, StringComparison.OrdinalIgnoreCase))
+                If task Is Nothing Then Return False
 
-            Dim wsDir = GetTaskWorkspaceDir(taskId)
-            If Not Directory.Exists(wsDir) Then Directory.CreateDirectory(wsDir)
+                Dim wsDir As String = GetTaskWorkspaceDir(taskId)
+                If Not Directory.Exists(wsDir) Then Directory.CreateDirectory(wsDir)
 
-            Dim destName = Path.GetFileName(sourceFilePath)
-            Dim destPath = Path.Combine(wsDir, destName)
-            Dim newFileSize As Long = New FileInfo(sourceFilePath).Length
+                Dim destName As String = Path.GetFileName(sourceFilePath)
+                Dim destPath As String = Path.Combine(wsDir, destName)
+                Dim newFileSize As Long = New FileInfo(sourceFilePath).Length
 
-            ' Enforce workspace quota — prune oldest files until we fit
-            EnforceWorkspaceQuota(wsDir, newFileSize)
+                Dim sourceFullPath As String = Path.GetFullPath(sourceFilePath)
+                Dim destinationFullPath As String = Path.GetFullPath(destPath)
+                Dim isAlreadyPersistedPath As Boolean =
+                    String.Equals(sourceFullPath, destinationFullPath, StringComparison.OrdinalIgnoreCase)
 
-            File.Copy(sourceFilePath, destPath, overwrite:=True)
+                If Not isAlreadyPersistedPath Then
+                    ' Enforce workspace quota only when a physical copy is required.
+                    EnforceWorkspaceQuota(wsDir, newFileSize)
+                    File.Copy(sourceFullPath, destinationFullPath, overwrite:=True)
+                End If
 
-            If task.WorkspaceFiles Is Nothing Then task.WorkspaceFiles = New List(Of String)()
-            If Not task.WorkspaceFiles.Contains(destName, StringComparer.OrdinalIgnoreCase) Then
-                task.WorkspaceFiles.Add(destName)
-            End If
+                If task.WorkspaceFiles Is Nothing Then task.WorkspaceFiles = New List(Of String)()
+                If Not task.WorkspaceFiles.Contains(destName, StringComparer.OrdinalIgnoreCase) Then
+                    task.WorkspaceFiles.Add(destName)
+                End If
 
-            WriteScheduleFile(schedule)
-            ApDashboardLog($"📅 Workspace: stored '{destName}' for task {taskId.Substring(0, 8)}...", "step")
-            Return True
-        Catch ex As System.Exception
-            Debug.WriteLine($"[Scheduler] Error storing workspace file: {ex.Message}")
-            Return False
-        End Try
+                WriteScheduleFile(schedule)
+                ApDashboardLog($"📅 Workspace: stored '{destName}' for task {taskId.Substring(0, 8)}...", "step")
+                Return True
+            Catch ex As System.Exception
+                Debug.WriteLine($"[Scheduler] Error storing workspace file: {ex.Message}")
+                Return False
+            End Try
+        End SyncLock
     End Function
 
     ''' <summary>
@@ -481,33 +532,38 @@ Partial Public Class ThisAddIn
     ''' remove orphaned data from manually deleted tasks.
     ''' </summary>
     Friend Sub SchedulerPurgeOrphanDirectories()
-        Try
-            Dim baseDir = GetScheduleAttachmentBaseDir()
-            If Not Directory.Exists(baseDir) Then Return
+        SyncLock _apScheduleFileGate
+            Try
+                Dim baseDir = GetScheduleAttachmentBaseDir()
+                If Not Directory.Exists(baseDir) Then Return
 
-            Dim schedule = ReadScheduleFile()
-            Dim activeIds As New HashSet(Of String)(
-                schedule.Tasks.Select(Function(t) t.Id),
-                StringComparer.OrdinalIgnoreCase)
+                ' Purge is destructive: fail closed if the shared schedule file cannot
+                ' be parsed. Treating corruption as an empty schedule would delete every
+                ' user's task directory.
+                Dim schedule = ReadScheduleFile(failClosed:=True)
+                Dim activeIds As New HashSet(Of String)(
+                    schedule.Tasks.Select(Function(t) t.Id),
+                    StringComparer.OrdinalIgnoreCase)
 
-            Dim purgedCount = 0
-            For Each subDir In Directory.GetDirectories(baseDir)
-                Dim dirName = Path.GetFileName(subDir)
-                If Not activeIds.Contains(dirName) Then
-                    Try
-                        Directory.Delete(subDir, recursive:=True)
-                        purgedCount += 1
-                    Catch
-                    End Try
+                Dim purgedCount = 0
+                For Each subDir In Directory.GetDirectories(baseDir)
+                    Dim dirName = Path.GetFileName(subDir)
+                    If Not activeIds.Contains(dirName) Then
+                        Try
+                            Directory.Delete(subDir, recursive:=True)
+                            purgedCount += 1
+                        Catch
+                        End Try
+                    End If
+                Next
+
+                If purgedCount > 0 Then
+                    ApDashboardLog($"📅 Scheduler: purged {purgedCount} orphan task director(ies).", "info")
                 End If
-            Next
-
-            If purgedCount > 0 Then
-                ApDashboardLog($"📅 Scheduler: purged {purgedCount} orphan task director(ies).", "info")
-            End If
-        Catch ex As System.Exception
-            ApDashboardLog($"📅 Orphan purge error: {ex.Message}", "warn")
-        End Try
+            Catch ex As System.Exception
+                ApDashboardLog($"📅 Orphan purge error: {ex.Message}", "warn")
+            End Try
+        End SyncLock
     End Sub
 
     ''' <summary>
@@ -726,6 +782,25 @@ Partial Public Class ThisAddIn
     '  TASK EXECUTION
     ' ═══════════════════════════════════════════════════════════════════════════
 
+    ''' <summary>
+    ''' Ensures a persisted task is only executed by the runtime identity that owns it.
+    ''' AutoPilot tasks require an explicit authenticated CreatedBy identity. When the
+    ''' Local Agent scheduler is active instead, the task owner must be the local main
+    ''' mailbox. This also prevents legacy tasks without CreatedBy from being silently
+    ''' adopted after a mode/user transition.
+    ''' </summary>
+    Private Function IsScheduledTaskOwnedByCurrentRuntime(task As ScheduledTask) As Boolean
+        If task Is Nothing OrElse String.IsNullOrWhiteSpace(task.CreatedBy) Then Return False
+
+        If _apActive Then
+            Return True
+        End If
+
+        Dim localOwnerAddress As String = GetLocalChatMainMailboxSmtpAddress()
+        Return Not String.IsNullOrWhiteSpace(localOwnerAddress) AndAlso
+               task.CreatedBy.Trim().Equals(localOwnerAddress.Trim(), StringComparison.OrdinalIgnoreCase)
+    End Function
+
     ''' <summary>Checks for due tasks and executes them sequentially.</summary>
     Private Async Function CheckAndExecuteDueTasks(ct As CancellationToken) As Task
         If Not IsSchedulerRuntimeAvailable() Then Return
@@ -739,6 +814,15 @@ Partial Public Class ThisAddIn
             If task.Status <> "active" Then Continue For
             If task.SnoozeUntilUtc > now Then Continue For
             If task.NextDueUtc > now Then Continue For
+
+            ' Ownership is checked before prompting, loading attachments/workspaces, or
+            ' taking any shared run state. A task from another AutoPilot sender must not
+            ' become a Local Agent task merely because the scheduler runtime mode changed.
+            If Not IsScheduledTaskOwnedByCurrentRuntime(task) Then
+                Dim taskLogId As String = If(String.IsNullOrWhiteSpace(task.Id), "(unknown)", task.Id.Substring(0, Math.Min(8, task.Id.Length)))
+                ApDashboardLog($"📅 Scheduler skipped task {taskLogId}: owner is not authorized for the current runtime.", "warn")
+                Continue For
+            End If
 
             Dim isLocalInteractiveTask = IsLocalInteractiveScheduledTask(task)
 
@@ -823,18 +907,39 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Async Function ExecuteScheduledTask(task As ScheduledTask, ct As CancellationToken) As Task
         Dim tempDir As String = Nothing
-        Dim previousMaxToolIterations = INI_ToolingMaximumIterations
+        Dim previousMaxToolIterations As Integer = 0
         Dim executionState As InkyState = Nothing
         Dim executionModelConfig As ModelConfig = Nothing
         Dim executionSelectedTools As List(Of ModelConfig) = Nothing
-        Dim executionUseSecondApi As Boolean = _apUseSecondApi
+        Dim executionUseSecondApi As Boolean = False
         Dim restoreExecutionConfig As Boolean = False
         Dim originalExecutionConfig As ModelConfig = Nothing
-        Dim previousChatAgentWorkspace As ChatAgentWorkspaceState = _chatAgentWorkspace
-        Dim previousChatAgentWorkspaceLoaded As Boolean = _chatAgentWorkspaceLoaded
-        Dim previousWorkspaceOnlyMode As Boolean = SharedLibrary.Agents.PathPolicy.RestrictToWorkspaceRootOnly
+        Dim previousChatAgentWorkspace As ChatAgentWorkspaceState = Nothing
+        Dim previousChatAgentWorkspaceLoaded As Boolean = False
+        Dim previousWorkspaceOnlyMode As Boolean = False
+        Dim previousSessionStagingRoot As String = Nothing
+        Dim mayDeleteTempDirectory As Boolean = False
+        Dim runIsolationOwned As Boolean = False
 
         Try
+            Await SharedLibrary.Agents.AgentGate.BeginOwnedScopeAsync(ct).ConfigureAwait(False)
+            runIsolationOwned = True
+
+            ' Snapshot every process-global host value only AFTER the isolation gate is held.
+            ' Capturing these values before WaitAsync could snapshot another user's transient
+            ' AutoPilot/Local-Agent state and restore it after the scheduled run completed.
+            previousMaxToolIterations = INI_ToolingMaximumIterations
+            executionUseSecondApi = _apUseSecondApi
+            previousChatAgentWorkspace = _chatAgentWorkspace
+            previousChatAgentWorkspaceLoaded = _chatAgentWorkspaceLoaded
+            previousWorkspaceOnlyMode = SharedLibrary.Agents.PathPolicy.RestrictToWorkspaceRootOnly
+            previousSessionStagingRoot = SharedLibrary.Agents.PathPolicy.SessionStagingRoot
+
+            ' Every scheduled execution owns a fresh top-level tooling/delivery result.
+            ' A no-tool scheduled run must never see the previous AutoPilot/Local-Agent registry.
+            _lastCompletedToolingRunState = Nothing
+            _lastCompletedToolResponses = New List(Of ToolResponse)()
+
             ' Create isolated temp directory
             tempDir = Path.Combine(Path.GetTempPath(), AP_TempPrefix & "sched_" & Guid.NewGuid().ToString("N"))
             Directory.CreateDirectory(tempDir)
@@ -915,6 +1020,7 @@ Partial Public Class ThisAddIn
         }
             _chatAgentWorkspaceLoaded = True
             SyncWorkspaceToPathPolicy()
+            SharedLibrary.Agents.PathPolicy.SetSessionStagingRoot(tempDir)
             SharedLibrary.Agents.PathPolicy.RestrictToWorkspaceRootOnly = True
             SharedLibrary.Agents.PathPolicy.SetStrictExtraRoots({tempDir, _apScheduledWorkspaceRoot})
 
@@ -963,7 +1069,10 @@ Partial Public Class ThisAddIn
                         systemPrompt, userPrompt.ToString(),
                         schedulerTools, executionUseSecondApi,
                         hideSplash:=True, hideLogWindow:=True,
-                        cancellationToken:=ct, binaryOutputDirectory:=tempDir)
+                        cancellationToken:=ct, binaryOutputDirectory:=tempDir,
+                        toolingLogArchivePath:=BuildAutoPilotToolingLogArchivePath(
+                            task.CreatedBy,
+                            If(String.IsNullOrWhiteSpace(task.Subject), task.Instruction, task.Subject)))
                 Else
                     response = Await LLM(systemPrompt, userPrompt.ToString(),
                                          UseSecondAPI:=executionUseSecondApi,
@@ -1029,6 +1138,7 @@ Partial Public Class ThisAddIn
 
             ' Send result e-mail
             Await SwitchToUi(Sub() SendScheduledTaskResult(task, response, resultAttachments, sourcesHtml))
+            mayDeleteTempDirectory = True
 
             Interlocked.Increment(_apSessionReplyCount)
             RecordLastProcessedTime()
@@ -1038,39 +1148,58 @@ Partial Public Class ThisAddIn
             End If
 
         Finally
-            _apCurrentTempDir = Nothing
-            _apCurrentAttachments = Nothing
-            _apCurrentMailInfo = Nothing
-            _apCurrentToolCallLog = Nothing
+            ' A cancellation/error while waiting for AgentGate means this run never owned
+            ' the process-global scheduler/AutoPilot/Local-Agent state. In that case it
+            ' must not clear or restore anything, because those globals can belong to the
+            ' run that is still holding the gate.
+            If runIsolationOwned Then
+                _apCurrentTempDir = Nothing
+                _apCurrentAttachments = Nothing
+                _apCurrentMailInfo = Nothing
+                _apCurrentToolCallLog = Nothing
 
-            Try
-                If restoreExecutionConfig AndAlso originalExecutionConfig IsNot Nothing Then
-                    RestoreDefaults(_context, originalExecutionConfig)
+                Try
+                    If restoreExecutionConfig AndAlso originalExecutionConfig IsNot Nothing Then
+                        RestoreDefaults(_context, originalExecutionConfig)
+                    End If
+                Catch
+                End Try
+
+                INI_ToolingMaximumIterations = previousMaxToolIterations
+                ClearAttachmentCaches()
+
+                Try
+                    RefreshScheduledTaskWorkspaceTracking(task.Id)
+                Catch
+                End Try
+
+                _chatAgentWorkspace = previousChatAgentWorkspace
+                _chatAgentWorkspaceLoaded = previousChatAgentWorkspaceLoaded
+                SharedLibrary.Agents.PathPolicy.RestrictToWorkspaceRootOnly = previousWorkspaceOnlyMode
+                SharedLibrary.Agents.PathPolicy.SetStrictExtraRoots(Nothing)
+
+                DeactivateScheduledTaskWorkspace(task.Id)
+                ' Restore the previously connected Local-Agent workspace/path permissions.
+                ' DeactivateScheduledTaskWorkspace clears the shared workspace when no agent
+                ' run is active, so the saved host workspace must be re-synchronized explicitly.
+                SyncWorkspaceToPathPolicy()
+                SharedLibrary.Agents.PathPolicy.SetSessionStagingRoot(previousSessionStagingRoot)
+
+                If mayDeleteTempDirectory Then
+                    Try
+                        If tempDir IsNot Nothing AndAlso Directory.Exists(tempDir) Then
+                            Directory.Delete(tempDir, recursive:=True)
+                        End If
+                    Catch ex As System.Exception
+                        ApDashboardLog($"📅 Scheduled task temp cleanup failed: {ex.Message}", "warn")
+                    End Try
+                ElseIf tempDir IsNot Nothing AndAlso Directory.Exists(tempDir) Then
+                    ApDashboardLog($"📅 Scheduled task recovery files preserved at: {tempDir}", "warn")
                 End If
-            Catch
-            End Try
 
-            INI_ToolingMaximumIterations = previousMaxToolIterations
-            ClearAttachmentCaches()
-
-            Try
-                RefreshScheduledTaskWorkspaceTracking(task.Id)
-            Catch
-            End Try
-
-            _chatAgentWorkspace = previousChatAgentWorkspace
-            _chatAgentWorkspaceLoaded = previousChatAgentWorkspaceLoaded
-            SharedLibrary.Agents.PathPolicy.RestrictToWorkspaceRootOnly = previousWorkspaceOnlyMode
-            SharedLibrary.Agents.PathPolicy.SetStrictExtraRoots(Nothing)
-
-            DeactivateScheduledTaskWorkspace(task.Id)
-
-            Try
-                If tempDir IsNot Nothing AndAlso Directory.Exists(tempDir) Then
-                    Directory.Delete(tempDir, recursive:=True)
-                End If
-            Catch
-            End Try
+                SharedLibrary.Agents.AgentGate.EndOwnedScope()
+                runIsolationOwned = False
+            End If
         End Try
     End Function
 
@@ -1461,29 +1590,21 @@ Partial Public Class ThisAddIn
     ''' are skipped (only genuinely new outputs are persisted).
     ''' </summary>
     Private Sub PersistResultsToWorkspace(taskId As String,
-                                           tempDir As String,
-                                           resultAttachments As List(Of String),
-                                           inputFileNames As HashSet(Of String),
-                                           workspaceFileNames As HashSet(Of String))
-        Try
-            For Each resultPath In resultAttachments
-                If Not File.Exists(resultPath) Then Continue For
-                Dim fileName = Path.GetFileName(resultPath)
+                                          tempDir As String,
+                                          resultAttachments As List(Of String),
+                                          inputFileNames As HashSet(Of String),
+                                          workspaceFileNames As HashSet(Of String))
+        If resultAttachments Is Nothing Then Return
 
-                ' Skip files that are original input attachments (they already live
-                ' in the task's attachment directory and should not be duplicated)
-                If inputFileNames.Contains(fileName) Then Continue For
+        For Each resultPath As String In resultAttachments
+            If String.IsNullOrWhiteSpace(resultPath) OrElse Not File.Exists(resultPath) Then
+                Throw New System.IO.FileNotFoundException("Scheduled task result file is missing and cannot be persisted.", resultPath)
+            End If
 
-                ' Skip files that were loaded from workspace (avoid re-copying unchanged files;
-                ' if a tool modified the file in-place, the overwrite in Copy handles it)
-                ' We DO want to update workspace files that were modified, so we only skip
-                ' files whose name AND size match what was loaded.
-
-                SchedulerStoreWorkspaceFile(taskId, resultPath)
-            Next
-        Catch ex As System.Exception
-            ApDashboardLog($"📅 Error persisting workspace files: {ex.Message}", "warn")
-        End Try
+            If Not SchedulerStoreWorkspaceFile(taskId, resultPath) Then
+                Throw New System.IO.IOException("Failed to persist scheduled task result to the task workspace: " & resultPath)
+            End If
+        Next
     End Sub
 
     Private Function BuildScheduledTaskExecutionPrompt(task As ScheduledTask,
@@ -1553,6 +1674,7 @@ Partial Public Class ThisAddIn
                                          resultAttachments As List(Of String),
                                          sourcesHtml As String)
         Dim newMail As MailItem = Nothing
+        Dim scheduledSendAccount As Microsoft.Office.Interop.Outlook.Account = Nothing
         Try
             newMail = Application.CreateItem(OlItemType.olMailItem)
 
@@ -1620,17 +1742,21 @@ Partial Public Class ThisAddIn
                 htmlBody &= sourcesHtml
             End If
 
-            htmlBody &= BuildAutoPilotFooter()
+            Dim footerHtml As String = BuildAutoPilotFooter()
+            Dim deliveryPlan As AutoPilotOutgoingDeliveryPlan =
+                PrepareAutoPilotOutgoingDelivery(htmlBody & footerHtml, resultAttachments)
+
+            htmlBody &= BuildAutoPilotAttachmentSplitNoticeHtml(deliveryPlan)
+            htmlBody &= footerHtml
             newMail.HTMLBody = htmlBody
 
-            ' Add result attachments (dangerous file types are zipped before delivery)
-            If resultAttachments IsNot Nothing Then
-                For Each attachPath In SanitizeOutgoingAttachmentsForDelivery(resultAttachments)
-                    If File.Exists(attachPath) Then
-                        newMail.Attachments.Add(attachPath, OlAttachmentType.olByValue, , Path.GetFileName(attachPath))
-                    End If
-                Next
-            End If
+            ' Add result attachments only when the complete scheduled-result message remains
+            ' within the safe transport target. Larger sets are sent in follow-up batches.
+            For Each attachPath As String In deliveryPlan.PrimaryAttachments
+                If File.Exists(attachPath) Then
+                    newMail.Attachments.Add(attachPath, OlAttachmentType.olByValue, , Path.GetFileName(attachPath))
+                End If
+            Next
 
             ' Tag as AutoPilot reply for loop prevention
             Try
@@ -1708,24 +1834,75 @@ Partial Public Class ThisAddIn
             End If
 
             If Not newMail.Recipients.ResolveAll() Then
-                ApDashboardLog($"📅 ERROR: could not resolve scheduled task recipient(s) '{newMail.To}' — result not sent (would remain in Drafts).", "error")
-                Return
+                Dim unresolvedRecipients As String = newMail.To
+
+                Throw New System.InvalidOperationException(
+        $"Could not resolve scheduled task recipient(s) '{unresolvedRecipients}'.")
             End If
+
+            ' IMPORTANT:
+            ' Outlook may move/invalidate the MailItem COM object immediately after Send().
+            ' Therefore, capture every property that is required after Send() BEFORE calling Send().
+            Dim sentSubject As String = newMail.Subject
+            Dim sentTo As String = newMail.To
+            Try
+                scheduledSendAccount = newMail.SendUsingAccount
+            Catch
+            End Try
 
             newMail.Send()
 
-            If Not newMail.Sent Then
-                ApDashboardLog($"📅 ERROR: scheduled task result to '{newMail.To}' was not submitted and remains in Drafts (check Work Offline / send hooks / transport rules).", "error")
-                Return
-            End If
+            ' Do not access newMail properties after Send().
+            ' The Outlook MailItem may already have been moved from Drafts/Outbox,
+            ' which can cause: "The item has been moved or deleted."
+            Try
+                MoveLastSentToInkyReplies(
+        cleanupGroupId,
+        cleanupIsEligible,
+        cleanupAnsweredUtc,
+        cleanupDeleteAfterUtc,
+        sentSubject,
+        sentTo)
+            Catch ex As System.Exception
+                Debug.WriteLine(
+        $"[AutoPilot] Failed to move scheduled task result to Inky Replies: {ex.Message}")
+            End Try
 
-            Try : MoveLastSentToInkyReplies(cleanupGroupId, cleanupIsEligible, cleanupAnsweredUtc, cleanupDeleteAfterUtc, newMail.Subject, newMail.To) : Catch : End Try
-            ApDashboardLog($"📅 Result e-mail sent to: {String.Join(", ", task.DeliverTo)}", "info")
+            SendAutoPilotAttachmentFollowUps(
+                safeRecipients,
+                sentSubject,
+                deliveryPlan,
+                scheduledSendAccount,
+                cleanupGroupId,
+                cleanupIsEligible,
+                cleanupAnsweredUtc,
+                cleanupDeleteAfterUtc)
+
+            ApDashboardLog(
+    $"📅 Result e-mail submitted to: {String.Join(", ", task.DeliverTo)}",
+    "info")
 
         Catch ex As System.Exception
-            ApDashboardLog($"📅 ERROR sending scheduled task result: {ex.Message}", "error")
+            ApDashboardLog(
+        $"📅 ERROR sending scheduled task result: {ex.Message}",
+        "error")
+
+            Throw
+
         Finally
-            If newMail IsNot Nothing Then Try : Marshal.ReleaseComObject(newMail) : Catch : End Try
+            If scheduledSendAccount IsNot Nothing Then
+                Try
+                    System.Runtime.InteropServices.Marshal.ReleaseComObject(scheduledSendAccount)
+                Catch
+                End Try
+            End If
+
+            If newMail IsNot Nothing Then
+                Try
+                    System.Runtime.InteropServices.Marshal.ReleaseComObject(newMail)
+                Catch
+                End Try
+            End If
         End Try
     End Sub
 
@@ -1831,8 +2008,11 @@ Partial Public Class ThisAddIn
     Private Function QueueScheduledTaskForLocalBrowserRun(task As ScheduledTask) As Boolean
         If task Is Nothing Then Return False
         If HasPendingScheduledBrowserTask() Then Return False
-        If Not PrepareScheduledTaskForLocalChat(task) Then Return False
 
+        ' Do not activate the task workspace or copy its files yet. The browser may
+        ' remain unopened/unclaimed for an arbitrary period; leaving that state in
+        ' process-global Local Agent fields would expose it to unrelated runs. File
+        ' preparation is deferred to inky_send while AgentGate is owned.
         QueuePendingScheduledBrowserTask(
             task.Id,
             BuildScheduledTaskExecutionPrompt(
@@ -1843,11 +2023,47 @@ Partial Public Class ThisAddIn
 
         If Not OpenLocalSchedulerBrowser() Then
             ClearPendingScheduledBrowserTask(task.Id)
-            DeactivateScheduledTaskWorkspace(task.Id)
             Return False
         End If
 
         Return True
+    End Function
+
+    Friend Function SchedulerPrepareLocalBrowserTaskForExecution(taskId As String) As Boolean
+        If String.IsNullOrWhiteSpace(taskId) Then Return False
+
+        Try
+            Dim task As ScheduledTask = SchedulerListTasks().FirstOrDefault(
+                Function(candidate) candidate IsNot Nothing AndAlso
+                    candidate.Id.Equals(taskId.Trim(), StringComparison.OrdinalIgnoreCase))
+
+            If task Is Nothing OrElse Not IsLocalInteractiveScheduledTask(task) Then
+                Return False
+            End If
+
+            Dim localOwnerAddress As String = GetLocalChatPrimaryMailboxSmtpAddress()
+            If String.IsNullOrWhiteSpace(localOwnerAddress) OrElse
+               String.IsNullOrWhiteSpace(task.CreatedBy) OrElse
+               Not task.CreatedBy.Trim().Equals(localOwnerAddress.Trim(), StringComparison.OrdinalIgnoreCase) Then
+                Return False
+            End If
+
+            Dim recipients As List(Of String) =
+                If(task.DeliverTo, New List(Of String)()).
+                    Where(Function(addr) Not String.IsNullOrWhiteSpace(addr)).
+                    Select(Function(addr) addr.Trim()).
+                    Distinct(StringComparer.OrdinalIgnoreCase).
+                    ToList()
+
+            If recipients.Count <> 0 Then
+                Return False
+            End If
+
+            Return PrepareScheduledTaskForLocalChat(task)
+        Catch ex As System.Exception
+            ApDashboardLog($"📅 Failed to validate Local Agent scheduled task ownership: {ex.Message}", "warn")
+            Return False
+        End Try
     End Function
 
     Private Function PrepareScheduledTaskForLocalChat(task As ScheduledTask) As Boolean
@@ -2038,28 +2254,29 @@ Partial Public Class ThisAddIn
         SchedulerUpdateTask(task)
     End Sub
 
-    Friend Sub SchedulerPersistLocalBrowserOutputs(taskId As String, resultFiles As IEnumerable(Of String))
-        If resultFiles Is Nothing Then Return
+    Friend Function SchedulerPersistLocalBrowserOutputs(taskId As String, resultFiles As IEnumerable(Of String)) As Boolean
+        If resultFiles Is Nothing Then Return True
 
         Dim storedAny As Boolean = False
 
-        For Each filePath In resultFiles
-            If String.IsNullOrWhiteSpace(filePath) Then Continue For
-            If Not File.Exists(filePath) Then Continue For
-
-            If SchedulerStoreWorkspaceFile(taskId, filePath) Then
-                storedAny = True
+        For Each filePath As String In resultFiles
+            If String.IsNullOrWhiteSpace(filePath) OrElse Not File.Exists(filePath) Then
+                Return False
             End If
+
+            If Not SchedulerStoreWorkspaceFile(taskId, filePath) Then Return False
+            storedAny = True
         Next
 
         If storedAny Then
             Dim task = SchedulerFindTask(taskId)
-            If task IsNot Nothing Then
-                SyncWorkspaceFileList(task)
-                SchedulerUpdateTask(task)
-            End If
+            If task Is Nothing Then Return False
+            SyncWorkspaceFileList(task)
+            SchedulerUpdateTask(task)
         End If
-    End Sub
+
+        Return True
+    End Function
 
     Friend Sub SchedulerCompleteLocalBrowserTask(taskId As String, resultSummary As String)
         Dim task = SchedulerFindTask(taskId)

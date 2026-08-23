@@ -41,6 +41,14 @@ Partial Public Class ThisAddIn
     Public Class TTSSelectionForm
         Inherits Form
 
+        Protected Overrides Sub OnShown(e As System.EventArgs)
+            MyBase.OnShown(e)
+            Me.TopMost = True
+            SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(Me)
+            SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(Me)
+        End Sub
+
+
         ' -- Controls --
         Private lblIntro As Label
 

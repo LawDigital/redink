@@ -1,7 +1,19 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: ThisAddIn.vb
+' Purpose:
+'   Main Word VSTO add-in entry point. Owns startup/shutdown, configuration
+'   initialization, Office event wiring, deferred warm-up, and host-level services.
 '
-' 16.8.2026
+' Architecture:
+'   Root partial ThisAddIn lifecycle module for the Word host. It initializes shared
+'   configuration/resources and host integrations, then delegates document, tooling,
+'   agent, UI, transcription, and command behavior to the other ThisAddIn.* files.
+' =============================================================================
+'
+' 23.8.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -55,7 +67,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.160826" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.230826" & SharedMethods.VersionQualifier
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
     Public Const AN5 As String = "RI" ' for bubble comments 
@@ -679,6 +691,42 @@ Partial Public Class ThisAddIn
     End Sub
 
     ''' <summary>
+    ''' Primes context-independent model/tool INI parsing and the skill/agent index off the
+    ''' Word UI thread. The on-demand paths remain authoritative and retry on failure.
+    ''' No Office COM or WinForms objects are touched by the background task.
+    ''' </summary>
+    Private Sub QueueModelAndAgentResourceWarmup()
+        Try
+            Dim alternateModelPath As String = SharedMethods.ExpandEnvironmentVariables(If(INI_AlternateModelPath, ""))
+            Dim specialServicePath As String = SharedMethods.ExpandEnvironmentVariables(If(INI_SpecialServicePath, ""))
+            Dim centralResourcePath As String = SharedMethods.ExpandEnvironmentVariables(If(INI_AgentResourcesPath, ""))
+            Dim localResourcePath As String = SharedMethods.ExpandEnvironmentVariables(If(INI_AgentResourcesPathLocal, ""))
+
+            SharedLibrary.Agents.AgentResources.SetPaths(centralResourcePath, localResourcePath)
+
+            System.Threading.Tasks.Task.Run(
+                Sub()
+                    Dim stopwatch As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
+                    Try
+                        SharedMethods.WarmAlternativeModelsCache(alternateModelPath)
+                        SharedMethods.WarmAlternativeModelsCache(specialServicePath)
+                        SharedLibrary.Agents.AgentResources.EnsureFresh()
+                    Catch ex As System.Exception
+                        System.Diagnostics.Debug.WriteLine("[PERF] Word startup warm-up failed: " & ex.Message)
+                    Finally
+                        stopwatch.Stop()
+                        System.Diagnostics.Debug.WriteLine(
+                            "[PERF] Word model/tool/resource warm-up: " &
+                            stopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                            " ms")
+                    End Try
+                End Sub)
+        Catch ex As System.Exception
+            ' Non-fatal. Each on-demand path performs the same work if the cache is cold.
+        End Try
+    End Sub
+
+    ''' <summary>
     ''' Fire-and-forget warm-up of the Python Agent version cache. Runs off the UI thread and never
     ''' throws; on failure the on-demand tool-registration path re-probes.
     ''' </summary>
@@ -715,6 +763,7 @@ Partial Public Class ThisAddIn
 
     Public Sub InitializeAddInFeatures()
         InitializeConfig(True, True)
+        QueueModelAndAgentResourceWarmup()
 
         ' Reconcile the persisted CrashLog switch with the INI parameter. Any change
         ' takes effect on the next host launch (the INI is read after ThisAddIn_Startup).
@@ -1056,109 +1105,48 @@ End Class
 
 
 ' =================================================================================================
-' Red Ink – Architectural Overview (for maintenance & security review)
+' Red Ink for Word - Architecture Overview
 '
-' PURPOSE
-'   Red Ink is a Word COM/VSTO Add-in providing AI-assisted authoring, search, review, redaction,
-'   speech (TTS/STT), transcription and document transformation features. It orchestrates Word UI
-'   events, user prompts, external AI services and local processing utilities.
+' ROLE OF THIS FILE
+'   ThisAddIn.vb is the Word VSTO composition root. It owns add-in startup/shutdown,
+'   shared-context/config initialization, Word application event wiring, UI-thread
+'   marshaling, update/warm-up work and host bridges into SharedLibrary. Feature logic
+'   is deliberately split across the partial ThisAddIn.* files listed below.
 '
-' HIGH-LEVEL LAYERS
-'   1. Host Integration (Word object model, events, task panes, context menus, Ribbon)
-'   2. Command & Orchestration Layer (user actions → pipelines)
-'   3. Processing & Transformation (text, markup, diff, formatting, RAG, grounding, redaction)
-'   4. Speech & Transcription (TTS/STT handling, language model bridging)
-'   5. Web / External Services (LLM calls, auxiliary web agent, update mechanism)
-'   6. Helpers & Utilities (file I/O, Word-specific helpers, JSON templating, state management)
+' PRIMARY ARCHITECTURAL AREAS
+'   - UI/commands: Ribbon1.vb, ThisAddIn.Menu.vb, Form1.vb, DiscussInky.vb,
+'     WordWorkspaceForm.vb and the Commands.* partials.
+'   - Document transformation: Processing.vb plus Comments, HTMLToWord,
+'     FormatSaveAndRestore, SurgicalInsert, SearchGrounding, CompleteTables,
+'     MarkupReview, Redactions, DocStyle, AssembleDocuments and translation modules.
+'   - Tooling/agents: Processing.Tooling.vb and its Selection, PromptBuilding,
+'     ToolExecution, ToolExecutionContext, ToolResponse, Tools, Sources, Memory,
+'     M365, PythonExecute, Logging, Parameterhandling and UserRequestResolution partials;
+'     ThisAddIn.AgentHost.vb implements the shared isolated sub-agent host contract.
+'   - Retrieval/context: ContextSearch, FileRAG, KnowledgeRAG, KnowledgeStoreWiring,
+'     WordSearchHelper, FindClause and FindHiddenPrompt.
+'   - Word host bridge/helpers: WordDocHost implements shared Word document tools;
+'     WordHelpers*, FileHelpers and Properties isolate Word/object-model utilities.
+'   - Media/presentations: Slides*, TranslatePresentations, TalkToMe, TextToSpeech*,
+'     Transcriptor and TranscriptionOptionsDialog.
+'   - External/automation surfaces: BridgeSubs COM automation, MCPImporter, WebAgent,
+'     WebExtension and SpecialServices.
 '
-' CORE ENTRYPOINT
-'   ThisAddIn.vb
-'       - Startup sequencing: attaches Word events, then runs DelayedStartupTasks once a document
-'         context exists (avoids premature automation calls).
-'       - Initializes configuration via SharedLibrary (SharedMethods.Initialize / InitializeConfig).
-'       - Registers context menus (AddContextMenu) & periodic update checks (UpdateHandler).
-'       - Exposes LLM(), PostCorrection(), and other bridges to SharedLibrary for central API usage.
-'       - Manages asynchronous UI thread marshaling (EnsureUIThread + mainThreadControl).
-'       - Maintains numerous constants (trigger tokens, feature switches, language/model lists).
-'       - Holds transient state fields used by runtime prompt interpolation.
-'       - Performs COM automation exposure (RequestComAddInAutomationService → BridgeSubs).
-'       - Security-sensitive areas: HTTP listener (StartupHttpListener/ShutdownHttpListener),
-'         external endpoints (OpenAI, Google, Whisper, Vosk), dynamic JSON template formatting code.
+' SHARED-LIBRARY BOUNDARY
+'   Cross-host orchestration, agent/tool registries and sequencing, artifact delivery,
+'   path policy, M365/knowledge services, LLM/HTTP/model selection, transcription engines,
+'   configuration/licensing and common UI/utilities live in SharedLibrary. Word partials
+'   should remain host adapters or Word-specific feature implementations rather than
+'   duplicating those policies.
 '
-' HOST / WORD INTEGRATION
-'   Word (implicit)              – Microsoft.Office.Interop.Word objects consumed throughout.
-'   ThisAddIn.WordHelpers.vb     – Word-range/document manipulations (selection, insertion, cleanup).
-'   ThisAddIn.WordSearchHelper.vb– Specialized search routines (clauses, hidden prompts, regex etc.).
-'   ThisAddIn.Menu.vb            – Context menu creation & teardown; maps triggers → command handlers.
-'   ThisAddIn.PaneAndMerge.vb    – Task pane orchestration, pane content updates, merge/view logic.
-'   ThisAddIn.Slides.vb          – Document → slide generation utilities.
-'   ThisAddIn.Redactions.vb      – Sensitive content detection & redaction application.
+' EXECUTION FLOW
+'   Word/VSTO event or UI command -> host command/processing layer -> optional shared
+'   tooling/agent loop -> shared or Word-specific capability -> validated mutation/output
+'   -> UI/final-response delivery. Async work returns to Word only through the host's
+'   UI-thread marshaling boundary.
 '
-' UI COMPONENTS
-'   Ribbon1.vb                   – Ribbon callbacks (buttons → Commands layer). Multiple partials
-'                                  may exist to segregate feature groups (ensure all are reviewed).
-'   Form1.vb                     – Main dialog or configuration/interaction form (general UI).
-'   DragDropForm.vb              – Drag-and-drop ingestion (files/clipboard objects → processing).
-'   ThisAddIn.TextToSpeech.Form.vb – UI for TTS settings, voice/model selection, playback controls.
-'
-' VBA / AUTOMATION BRIDGE
-'   VBA Helper (external .dotm)  – Provides macro functions (e.g., CheckAppHelper) to validate helper
-'                                  version or offer legacy automation tasks. Security: ensure trusted
-'                                  location + signed macros.
-'   BridgeSubs.vb                – COM-visible automation surface (exposed via RequestComAddInAutomationService)
-'                                  enabling external scripts/macros to trigger add-in commands safely.
-'
-' COMMAND LAYER (User Intent → Pipelines)
-'   ThisAddIn.Commands.vb              – Central dispatcher for high-level actions.
-'   ThisAddIn.Commands.Freestyle.vb    – Freeform / ad-hoc prompt execution and content generation.
-'   ThisAddIn.TextToSpeech.Commands.vb – TTS/STT specific commands (start synthesis, transcription).
-'
-' SEARCH / CONTEXT / RETRIEVAL
-'   ThisAddIn.ContextSearch.vb         – Multi-source contextual search (library, document chunks).
-'   ThisAddIn.SearchGrounding.vb       – Grounding retrieved context before LLM calls.
-'   ThisAddIn.FileRAG.vb               – File-based Retrieval-Augmented Generation (embeddings, chunking).
-'   ThisAddIn.FindClause.vb            – Clause / structured legal text identification.
-'   ThisAddIn.FindHiddenPrompt.vb      – Detection of hidden / obfuscated prompt injections (security).
-'   ThisAddIn.DocCheck.vb              – Document diagnostics (integrity, version, compliance).
-'
-' PROCESSING / TRANSFORMATION
-'   ThisAddIn.Processing.vb                    – Orchestrates multi-step pipelines (markup, diff, inject).
-'   ThisAddIn.Processing.Comments.vb           – Bubble/comment extraction, formatting, pushback handling.
-'   ThisAddIn.Processing.HTMLToWord.vb         – HTML → Word conversion (sanitization + formatting).
-'   ThisAddIn.Processing.FormatSaveAndRestore.vb – Captures/restores formatting state around operations.
-'   ThisAddIn.Processing.SearchGrounding.vb    – (See above) bridging search results into prompts.
-'
-' TEXT / DATA UTILITIES
-'   ThisAddIn.FileHelpers.vb           – Safe file I/O, temp handling, path resolution, model file mgmt.
-'   ThisAddIn.Helpers.vb               – Generic helper routines (parsing, mapping, template injection).
-'   ThisAddIn.Properties.vb            – Configuration property wrappers (INI/env/registry abstraction).
-'
-' SPEECH / TRANSCRIPTION
-'   ThisAddIn.TextToSpeech.vb          – Core TTS pipeline (Google, OpenAI, local fallback).
-'   ThisAddIn.Transcriptor.vb          – STT/transcription (Whisper, Vosk, Google streaming).
-'
-' WEB / EXTERNAL INTERFACES
-'   ThisAddIn.WebAgent.vb              – Local HTTP listener / agent for inter-process automation.
-'   ThisAddIn.WebExtension.vb          – Bridges browser/extension requests to internal commands.
-'   SpecialServices.vb (ThisAddIn.SpecialServices.vb)
-'                                     – Ancillary external service tasks (e.g., update fetch, licensing).
-'
-' RESOURCES
-'   Resources (resx / assets)          – Icons, localization strings, model metadata, license text.
-'                                        Security: validate no embedded secrets; ensure license compliance.
-'
-' KEY DATA FLOWS
-'   Word Events → ThisAddIn Startup → Menu/Ribbon & Pane Initialization → User Action →
-'   Commands Layer → (Search/RAG/Processing) → LLM/TTS/STT/Web → Results Injection (markup, panes, doc).
-'
-' SECURITY / REVIEW HOTSPOTS
-'   - External service calls (LLM/TTS/STT endpoints): validate secure transport (HTTPS / WSS).
-'   - Dynamic code string (Code_JsonTemplateFormatter): ensure it is not compiled/executed unsafely.
-'   - HTTP listener (WebAgent): restrict origin, sanitize inputs.
-'   - Prompt injection & hidden content (FindHiddenPrompt.vb): confirm effective sanitization.
-'   - File ingestion (DragDropForm, FileHelpers): path traversal & format validation.
-'   - Macro bridge (VBA Helper + BridgeSubs): enforce version check & signed VBA project.
-'   - Redaction logic: confirm irreversible removal when required.
-'
-'
+' MAINTENANCE HOTSPOTS
+'   COM lifetime/UI-thread ownership; document/range mutation and formatting preservation;
+'   tooling retry/finality/artifact invariants; external content and prompt boundaries;
+'   file/path containment; automation/WebExtension surfaces; and third-party service calls.
 ' =================================================================================================

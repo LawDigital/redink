@@ -1,4 +1,4 @@
-﻿# Red Ink Tool List
+# Red Ink Tool List
 
 This file lists the built-in internal tools that can be advertised by Word, Outlook, and Outlook AutoPilot.
 
@@ -11,6 +11,16 @@ Notes:
 - The `Outlook` column refers to Outlook tooling outside AutoPilot, primarily Local Chat / Agent mode.
 - `AutoPilot` is listed separately because it does not expose the full Outlook tool surface.
 
+
+## Skill/agent resource dependency semantics
+
+- A skill may list the helper tools it is permitted to use in `allowed-tools`; the runtime still exposes only tools available for the current Word/Outlook surface.
+- For an **agent**, `allowed-tools` are hard dependencies. If an exact required tool cannot be resolved from the parent host's authoritative registry snapshot, the isolated run may be blocked before model execution.
+- Agents may additionally declare `optional-tools`. The host includes only optional names that are actually present in the authoritative registry snapshot; missing optional tools are ignored. Use this for host-specific source access (`m365_*`, attachment-only tools, `agent_workspace_*`) and configuration-dependent helpers such as `js_run` when they are useful but not fundamental to the agent's bounded job.
+- `ask_user` belongs to interactive parent Word/Outlook workflows. Sub-agents must not ask the end user; they return missing information to the parent.
+- `python_execute` is not a guaranteed foundation dependency despite being supported by all three host families when the helper is installed. Skills/agents must not assume it exists.
+- Every `agent_<name>` invocation must carry the host-required `subagent_task_id` and `expected_artifacts` contract; use an empty artifact list for analysis-only delegated work.
+
 ## Shared tools
 
 | Tool | Description | Word | Outlook | AutoPilot |
@@ -22,6 +32,7 @@ Notes:
 | `web_grounding` | Uses a web-enabled model to perform cited live-web research. | Yes | Yes | Yes |
 | `knowledge_search` | Searches the user's local knowledge store for relevant internal content. | Yes | Yes | Yes |
 | `tool_loader` | Lazily loads full tool definitions only when a specific tool is needed. | Yes | Yes | Yes |
+| `resolve_capability_route` | Internal top-level routing handshake. Before substantive ordinary tooling, selects a specifically applicable advertised skill; otherwise a suitable top-level agent; otherwise `none`. Uses manifest metadata only and does not preload skill/agent bodies. Availability is host/runtime controlled. | Yes | Yes | Yes |
 | `report_progress` | Announces a short user-facing major-step progress update. Use it before the first substantive tool action and again whenever a new major phase begins. | Yes | Yes | No |
 | `tool_describe` | Returns the full parameter schema and usage instructions for one or more tools (by name or name prefix) without making them callable, so overlapping tools can be compared before loading. | Yes | Yes | Yes |
 | `context_expand` | Retrieves a character window from a large tool result that was stored by reference. Large results are replaced in context by a short `result_ref` plus a preview; this tool reads more of that stored content on demand. | Yes | Yes | Yes |
@@ -46,9 +57,9 @@ Notes:
 | `semantic_index_reset_conversation` | Resets and removes a stored semantic-search conversation handle. | Yes | Yes | Yes |
 | `semantic_index_invalidate_cache` | Invalidates one indexed-file cache entry or the full semantic-search cache. | Yes | Yes | Yes |
 | `js_run` | Executes sandboxed JavaScript in a hidden WebView2 environment. Availability is subject to the user's `JsRunDisable` configuration setting. | Yes | Yes | Yes |
-| `browser_open` | Opens or navigates the shared Playwright browser session to an absolute HTTP/HTTPS URL. After success, call `browser_snapshot` before attempting interaction. | Yes | Yes | No |
-| `browser_snapshot` | Captures the current page as an AI-optimized Playwright ARIA snapshot and returns short-lived refs such as `[ref=e7]` for later interaction. | Yes | Yes | No |
-| `browser_interact` | Performs exactly one Playwright action against one ref from the most recent `browser_snapshot`. After every attempted interaction, take a new snapshot before another interaction. | Yes | Yes | No |
+| `browser_open` | Opens or navigates the shared Playwright browser session to a rendered public website. Prefer it for site-specific exploration, dynamic/JavaScript content, menus, pagination, and finding links/pages/downloads that simple retrieval may miss. | Yes | Yes | Yes |
+| `browser_snapshot` | Captures the rendered page as an AI-optimized Playwright ARIA snapshot, exposing links, controls, headings and short-lived refs such as `[ref=e7]`; particularly useful for scanning a specific website and finding navigable links. | Yes | Yes | Yes |
+| `browser_interact` | Performs exactly one Playwright action against one ref from the most recent `browser_snapshot`, for example following a link/menu/pagination result found while exploring a site. Take a fresh snapshot after every attempted interaction. | Yes | Yes | Yes |
 | `python_execute` | Executes sandboxed Python code through the configured secure Python agent and may return structured results or published output files.1) | Yes | Yes | Yes |
 | `skill_use` | Loads a skill's instructions and file inventory for guided execution. Word and Outlook Local Chat expose this generic loader directly. AutoPilot does not advertise the generic `skill_use` tool, but it can still run selected skills through dynamic `skill_<name>` tools that route internally to the same skill loader. | Yes | Yes | No |
 | `m365_search` | Searches Microsoft 365 content such as mail, files, chats, events, and notes. | Yes | Yes | No |
@@ -186,10 +197,11 @@ These binary-safe tools operate across the PathPolicy-governed roots (the agent 
 | `collect_data` | Runs a configured data-collection workflow against the current session files. | No | Yes | Yes |
 | `preview_collection` | Previews how a configured data-collection workflow would interpret the current request and files. | No | Yes | Yes |
 
-## Choosing among overlapping tools
+## Capability routing and overlapping tools
 
-Several tool families overlap. Use `tool_describe` to read each candidate's exact
-parameters before selecting one. Key distinctions:
+When `resolve_capability_route` is advertised, it precedes ordinary overlap resolution: choose a specifically applicable workflow skill first, otherwise a suitable top-level agent, otherwise `none`. The router uses only advertised manifest metadata and does not load skill/agent bodies. If a route is selected, enter that capability before unrelated substantive tools; after entering a skill, follow that skill's own tool/source/delegation policy.
+
+After that routing phase, several ordinary tool families may still overlap. Use `tool_describe` to read each candidate's exact parameters before selecting one. Key distinctions:
 
 - **Open-document vs. file-on-disk vs. host-bridge Word tools.**
   - `worddoc_*` operate on a document already OPEN in Word (Word host only), addressing the active or a named open document. They support resilient live-document matching for text operations; `worddoc_insert_text`, `worddoc_replace`, and `worddoc_delete` support `track_changes` (default `true`), and `worddoc_replace`/`worddoc_delete` also support `match_scope` for exact-span, sentence-level, or paragraph-level edits.

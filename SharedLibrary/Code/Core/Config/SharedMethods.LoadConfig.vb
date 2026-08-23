@@ -89,7 +89,12 @@ Namespace SharedLibrary
                 If Not System.IO.File.Exists(IniFilePath) Then
                     If FirstTime Then
                         Using frm As New InitialConfig(context)
-                            frm.ShowDialog()
+                            Dim __safeDialogOwner92 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                            If __safeDialogOwner92 IsNot Nothing Then
+                                frm.ShowDialog(__safeDialogOwner92)
+                            Else
+                                frm.ShowDialog()
+                            End If
                         End Using
                         IniFilePath = DefaultPath
                         If context.InitialConfigFailed AndAlso Not System.IO.File.Exists(IniFilePath) Then
@@ -904,7 +909,12 @@ Namespace SharedLibrary
             settingsForm.ClientSize = New System.Drawing.Size(controlXOffset + defaultControlWidth + 40, cancelButton.Bottom + 20)
 
             ' Show the form and wait for user input.
-            settingsForm.ShowDialog()
+            Dim __safeDialogOwner907 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            If __safeDialogOwner907 IsNot Nothing Then
+                settingsForm.ShowDialog(__safeDialogOwner907)
+            Else
+                settingsForm.ShowDialog()
+            End If
 
             ' Return whether the user completed the form.
             Return userCompleted

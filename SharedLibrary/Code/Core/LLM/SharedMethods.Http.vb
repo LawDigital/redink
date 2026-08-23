@@ -3,7 +3,17 @@
 '
 ' =============================================================================
 ' File: SharedMethods.Http.vb
-' Purpose: Provides shared HTTP methods for sending requests and handling responses.
+' Purpose:
+'   Shared HTTP transport abstraction used by higher-level Red Ink services for text and
+'   binary requests without coupling callers to one .NET networking stack.
+'
+' Architecture / Function:
+'   - Defines normalized request/response DTOs and HttpStackPreference routing.
+'   - Supports HttpClient and WinHTTP execution with configured ordering/fallback,
+'     headers, request bodies, compression handling, timeouts and response decoding.
+'   - Keeps transport selection and compatibility fallback in one place; authentication,
+'     API-specific payloads and semantic retry policy remain with the calling service.
+'   - Callers should treat returned bytes/text as untrusted remote content.
 ' =============================================================================
 
 Option Strict On

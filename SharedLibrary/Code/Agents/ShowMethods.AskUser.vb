@@ -20,12 +20,18 @@
 '            - OK/Cancel therefore remain reachable regardless of prompt length.
 '
 '          Threading / ownership:
-'            - If the caller is already STA, the dialog is shown on that thread.
-'              This permits a real modal owner without blocking the owner's thread.
-'            - If the caller is not STA, a dedicated STA thread is used.
-'            - If an MTA caller itself owns the captured native owner window, that
-'              owner is deliberately not passed across to the STA dialog thread;
-'              doing so while the owner thread is blocked on Join can deadlock.
+'            - If the caller is already STA, the dialog is shown on that thread
+'              with the captured owner. This permits a real modal owner without
+'              blocking the owner's thread (ShowDialog runs its nested modal loop).
+'            - If the caller is not STA (e.g. an MTA agent/tooling worker thread),
+'              a dedicated background STA thread is used and NO owner HWND is passed
+'              to ShowDialog. Any owner captured on an MTA caller belongs to another
+'              thread (typically the Office host UI thread); passing it across would
+'              call EnableWindow(owner, FALSE) cross-thread and disable the host's
+'              main window while the modal loop pumps on the worker thread and the
+'              caller blocks on Join. That leaves the host stuck disabled ("invisible"
+'              blocking window; clicks only ding) and can deadlock. The dialog instead
+'              stays reachable via TopMost and cursor-screen positioning.
 ' =============================================================================
 
 Option Strict On
@@ -64,14 +70,22 @@ Namespace SharedLibrary
             Dim uiError As System.Exception = Nothing
 
             Dim callerNativeThreadId As System.UInt32 = AskUserGetCurrentThreadId()
-            Dim ownerHandleForUiThread As System.IntPtr = ownerInfo.Handle
 
-            ' Never pass an owner HWND to another UI thread while that HWND belongs
-            ' to the caller thread that is about to block on Join(). That combination
-            ' can deadlock through synchronous native window messages.
-            If ownerInfo.ThreadId <> 0UI AndAlso
-               ownerInfo.ThreadId = callerNativeThreadId Then
+            ' In this MTA fallback the dialog is shown on a dedicated background STA
+            ' thread. Any owner captured by CaptureAskUserOwnerInfo belongs to another
+            ' thread (typically the Office host UI thread). Passing such a foreign-thread
+            ' HWND to ShowDialog(owner) calls EnableWindow(owner, FALSE) cross-thread and
+            ' disables the host's main window while the modal message loop runs on this
+            ' worker thread instead. The host window is then stuck disabled ("invisible"
+            ' blocking window; clicks just ding) and can also deadlock on synchronous
+            ' native window messages. Therefore never adopt a cross-thread owner here;
+            ' the dialog stays reachable via TopMost and cursor-screen positioning.
+            Dim ownerHandleForUiThread As System.IntPtr = System.IntPtr.Zero
 
+            ' Kept intentionally: same-thread owners never reach this fallback (the STA
+            ' caller path above handles them), so callerNativeThreadId is retained only
+            ' for future diagnostics and to preserve the existing method signature usage.
+            If callerNativeThreadId = 0UI Then
                 ownerHandleForUiThread = System.IntPtr.Zero
             End If
 
@@ -334,6 +348,7 @@ Namespace SharedLibrary
                     ' instead; its OffsetRectangle is independent of viewport height.
                     Dim questionMeasurePending As Boolean = False
                     Dim lastQuestionWidth As Integer = -1
+                    Dim growFormForOptionsIfNeeded As System.Action = Nothing
 
                     Dim measureQuestionHeight As System.Action =
                         Sub()
@@ -384,6 +399,10 @@ Namespace SharedLibrary
 
                                 promptHost.AutoScrollPosition =
                                     New System.Drawing.Point(0, 0)
+
+                                If growFormForOptionsIfNeeded IsNot Nothing Then
+                                    growFormForOptionsIfNeeded()
+                                End If
                             Catch ex As System.Exception
                                 ' Keep the current height if IE/DOM measurement is
                                 ' temporarily unavailable.
@@ -938,6 +957,95 @@ Namespace SharedLibrary
                             End Sub
                     End If
 
+                    ' Grow the whole dialog only when predefined answer buttons do not
+                    ' fit in the prompt panel. Automatic growth is deliberately
+                    ' capped at 60% of the current working-screen height; beyond that,
+                    ' promptHost remains scrollable and the fixed input/footer rows stay
+                    ' reachable. Manual user resizing/maximizing remains available.
+                    Dim optionGrowthPending As Boolean = False
+                    growFormForOptionsIfNeeded =
+                        Sub()
+                            If optionGrowthPending OrElse
+                               Not hasOptions OrElse
+                               optionsTable Is Nothing OrElse
+                               optionButtons.Count = 0 OrElse
+                               inputForm.IsDisposed OrElse
+                               inputForm.WindowState <>
+                                   System.Windows.Forms.FormWindowState.Normal Then
+
+                                Return
+                            End If
+
+                            optionGrowthPending = True
+                            Try
+                                inputForm.PerformLayout()
+                                updateOptionButtonHeights()
+                                promptLayout.PerformLayout()
+
+                                Dim contentHeight As Integer =
+                                    System.Math.Max(
+                                        promptLayout.Height,
+                                        promptLayout.PreferredSize.Height
+                                    )
+
+                                Dim visiblePromptHeight As Integer =
+                                    promptHost.ClientSize.Height
+
+                                If visiblePromptHeight <= 0 OrElse
+                                   contentHeight <= visiblePromptHeight +
+                                       AskUserScale(inputForm, 2) Then
+
+                                    Return
+                                End If
+
+                                Dim edgeMargin As Integer =
+                                    AskUserScale(inputForm, 28)
+
+                                Dim screenSafeHeight As Integer =
+                                    System.Math.Max(
+                                        AskUserScale(inputForm, 260),
+                                        wa.Height - (edgeMargin * 2)
+                                    )
+
+                                Dim automaticHeightCap As Integer =
+                                    System.Math.Min(
+                                        screenSafeHeight,
+                                        System.Math.Max(
+                                            AskUserScale(inputForm, 260),
+                                            CInt(System.Math.Floor(wa.Height * 0.6R))
+                                        )
+                                    )
+
+                                Dim fixedChromeHeight As Integer =
+                                    System.Math.Max(
+                                        0,
+                                        inputForm.Height - visiblePromptHeight
+                                    )
+
+                                Dim targetHeight As Integer =
+                                    System.Math.Min(
+                                        automaticHeightCap,
+                                        fixedChromeHeight +
+                                        contentHeight +
+                                        AskUserScale(inputForm, 4)
+                                    )
+
+                                If targetHeight > inputForm.Height Then
+                                    inputForm.Height = targetHeight
+                                    inputForm.Location =
+                                        New System.Drawing.Point(
+                                            wa.X +
+                                            (wa.Width - inputForm.Width) \ 2,
+                                            wa.Y +
+                                            (wa.Height - inputForm.Height) \ 2
+                                        )
+                                    inputForm.PerformLayout()
+                                End If
+                            Finally
+                                optionGrowthPending = False
+                            End Try
+                        End Sub
+
                     ' =========================================================
                     ' Shown: final DPI-aware sizing, positioning and foreground
                     ' protection.
@@ -952,7 +1060,7 @@ Namespace SharedLibrary
                             queueQuestionHeightMeasure()
 
                             Dim edgeMargin As Integer =
-                                AskUserScale(inputForm, 20)
+                                AskUserScale(inputForm, 28)
 
                             Dim maxWidth As Integer =
                                 System.Math.Max(
@@ -1017,6 +1125,7 @@ Namespace SharedLibrary
                             inputForm.PerformLayout()
                             updateOptionButtonHeights()
                             queueQuestionHeightMeasure()
+                            growFormForOptionsIfNeeded()
 
                             ' Never let layout/focus side effects leave the prompt
                             ' scrolled down when the dialog first becomes visible.
@@ -1113,14 +1222,11 @@ Namespace SharedLibrary
 
             Try
                 Dim pipeline As Markdig.MarkdownPipeline =
-                    New Markdig.MarkdownPipelineBuilder().
-                        UseAdvancedExtensions().
-                        UseSoftlineBreakAsHardlineBreak().
-                        Build()
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.CreateMarkdownHtmlPipeline(useSoftlineBreakAsHardlineBreak:=True)
 
                 bodyHtml =
                     Markdig.Markdown.ToHtml(
-                        If(question, ""),
+                        Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(If(question, "")),
                         pipeline
                     )
             Catch ex As System.Exception
@@ -1149,10 +1255,10 @@ Namespace SharedLibrary
                    "body{font-family:'Segoe UI',sans-serif;font-size:11pt;" &
                    "color:#1b1b1b;line-height:1.35;overflow-wrap:anywhere;" &
                    "word-wrap:break-word;}" &
-                   "#ask-user-question-content{margin:0;padding:0;" &
+                   "#ask-user-question-content{margin:0;padding:0 8px 0 2px;" &
                    "overflow:hidden;width:100%;box-sizing:border-box;}" &
                    "p{margin:0 0 6px 0;}" &
-                   "ul,ol{margin:0 0 6px 20px;padding:0;}" &
+                   "ul,ol{margin:0 0 6px 0;padding-left:28px;box-sizing:border-box;}" &
                    "code{background:#e6e6e6;padding:1px 4px;border-radius:3px;}" &
                    "pre{white-space:pre-wrap;overflow-wrap:anywhere;}" &
                    "h1,h2,h3{font-size:12pt;margin:0 0 6px 0;}" &

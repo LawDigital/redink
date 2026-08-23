@@ -9,33 +9,32 @@
 '
 ' Architecture:
 '  - Storage layout (alongside redink.ini / scheduler files):
-'      {INI dir}/autopilot_users/{sanitized_email}/
+'      {INI dir}/autopilot_users/.identity_v2/{safe_prefix}__{identity_hash}/
+'          .owner_email         — canonical owner marker
 '          memory.txt           — user's InkyMemory file
 '          home/                — user's persistent file storage
 '              template.docx
 '              ...
 '
-'  - E-mail addresses are sanitised into filesystem-safe folder names
-'    using SanitizeEmailToFolderName(). Sanitisation is deterministic and
-'    case-insensitive (lowercased first).
+'  - E-mail addresses are normalized case-insensitively and mapped to a
+'    filesystem-safe display prefix plus a SHA-256 identity suffix. The lossy
+'    sanitized prefix is never used as the security identity by itself.
 '
 '  - Security model:
 '      * Every path operation validates that resolved paths stay within
 '        the user's own subdirectory (path-prefix containment check).
-'      * No API accepts a raw path from the user — only filenames that
-'        are resolved against the user's home directory.
-'      * Cross-user access is impossible because the sender e-mail from
-'        the incoming mail determines the directory, not user input.
+'      * No API accepts a raw user-identity path from the sender.
+'      * Canonical sender identity + SHA-256 suffix + .owner_email marker prevent
+'        distinct valid e-mail addresses from sharing persistent storage.
+'      * Legacy pre-hash folders are never auto-adopted because their lossy names
+'        cannot prove ownership when two addresses sanitize to the same value.
 '
-'  - Operator (admin) functions are provided for the dashboard:
-'      * ListAllUserStorageDirs() — enumerate all user directories
-'      * ListUserHomeFiles() — list files in a user's home directory
-'      * DeleteUserFile() / DeleteUserAllFiles() / DeleteUserMemory()
-'      * ReadUserMemoryContent() / WriteUserMemoryContent()
+'  - Operator (admin) functions are provided for the dashboard.
 '
 ' Threading:
 '  - File I/O is synchronous with retry-based locking (same as InkyMemory).
-'  - No concurrent mutation is expected per-user (one mail processed at a time).
+'  - AgentGate serializes complete AutoPilot/Scheduler/Local-Agent runs that can
+'    mutate shared Outlook host state; per-user files also use retry-based I/O.
 ' =============================================================================
 
 Option Explicit On
@@ -54,6 +53,10 @@ Partial Public Class ThisAddIn
     Private Const AP_UserStorageDir As String = "autopilot_users"
     Private Const AP_UserMemoryFileName As String = "memory.txt"
     Private Const AP_UserHomeSubdir As String = "home"
+    Private Const AP_UserCanonicalIdentitySubdir As String = ".identity_v2"
+    Private Const AP_UserOwnerIdentityFileName As String = ".owner_email"
+    Private Const AP_UserIdentityHashHexLength As Integer = 24
+    Private Const AP_UserIdentityDisplayPrefixMaxLength As Integer = 96
     Private Const AP_UserHomeMaxBytes As Long = 100 * 1024 * 1024  ' 100 MB per user
 
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -70,20 +73,62 @@ Partial Public Class ThisAddIn
         Return Path.Combine(iniDir, AP_UserStorageDir)
     End Function
 
+    Private Function GetCanonicalUserStorageRootDir() As String
+        Return Path.Combine(GetUserStorageRootDir(), AP_UserCanonicalIdentitySubdir)
+    End Function
+
+    Private Function EnumerateUserStorageDirectoriesForAdminAndMaintenance() As List(Of String)
+        Dim result As New List(Of String)()
+        Dim rootDir As String = GetUserStorageRootDir()
+        If Not Directory.Exists(rootDir) Then Return result
+
+        Dim canonicalRoot As String = GetCanonicalUserStorageRootDir()
+        If Directory.Exists(canonicalRoot) Then
+            result.AddRange(Directory.GetDirectories(canonicalRoot))
+        End If
+
+        ' Legacy pre-v2 directories remain visible to the local administrator for
+        ' explicit migration/cleanup, but are never used by GetUserDir().
+        For Each legacyDir As String In Directory.GetDirectories(rootDir)
+            If String.Equals(Path.GetFullPath(legacyDir),
+                             Path.GetFullPath(canonicalRoot),
+                             StringComparison.OrdinalIgnoreCase) Then
+                Continue For
+            End If
+            result.Add(legacyDir)
+        Next
+
+        Return result
+    End Function
+
     ''' <summary>
-    ''' Returns the per-user directory: {root}/autopilot_users/{sanitized_email}/
+    ''' Returns the canonical per-user directory: {root}/autopilot_users/.identity_v2/{sanitized_email}__{identity_hash}/
     ''' Creates the directory if it does not exist.
     ''' </summary>
     Private Function GetUserDir(senderEmail As String) As String
-        Dim sanitized = SanitizeEmailToFolderName(senderEmail)
-        Dim userDir = Path.Combine(GetUserStorageRootDir(), sanitized)
+        Dim normalizedEmail As String = NormalizeUserIdentityEmail(senderEmail)
+        If String.IsNullOrWhiteSpace(normalizedEmail) Then
+            Throw New System.ArgumentException("A non-empty sender e-mail address is required for per-user storage.", NameOf(senderEmail))
+        End If
+
+        Dim userDir As String = GetCanonicalUserDirPath(normalizedEmail)
         If Not Directory.Exists(userDir) Then Directory.CreateDirectory(userDir)
+        EnsureUserOwnershipMarker(userDir, normalizedEmail)
         Return userDir
+    End Function
+
+    Private Function GetCanonicalUserDirPath(senderEmail As String) As String
+        Dim normalizedEmail As String = NormalizeUserIdentityEmail(senderEmail)
+        If String.IsNullOrWhiteSpace(normalizedEmail) Then
+            Throw New System.ArgumentException("A non-empty sender e-mail address is required for per-user storage.", NameOf(senderEmail))
+        End If
+
+        Return Path.Combine(GetCanonicalUserStorageRootDir(), GetCanonicalUserFolderName(normalizedEmail))
     End Function
 
     ''' <summary>
     ''' Returns the full path to a user's InkyMemory file:
-    ''' {root}/autopilot_users/{sanitized_email}/memory.txt
+    ''' {root}/autopilot_users/.identity_v2/{sanitized_email}__{identity_hash}/memory.txt
     ''' </summary>
     Private Function GetUserMemoryFilePath(senderEmail As String) As String
         Return Path.Combine(GetUserDir(senderEmail), AP_UserMemoryFileName)
@@ -91,7 +136,7 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Returns the full path to a user's home directory:
-    ''' {root}/autopilot_users/{sanitized_email}/home/
+    ''' {root}/autopilot_users/.identity_v2/{sanitized_email}__{identity_hash}/home/
     ''' Creates the directory if it does not exist.
     ''' </summary>
     Private Function GetUserHomeDir(senderEmail As String) As String
@@ -127,6 +172,81 @@ Partial Public Class ThisAddIn
         If result.Length = 0 Then result = "_unknown_"
         Return result
     End Function
+
+
+    ''' <summary>
+    ''' Returns the canonical case-insensitive identity string used for persistent
+    ''' AutoPilot user storage. The human-readable sanitized prefix is NOT an
+    ''' identity key because distinct valid addresses can sanitize to the same text.
+    ''' </summary>
+    Private Shared Function NormalizeUserIdentityEmail(email As String) As String
+        If String.IsNullOrWhiteSpace(email) Then Return ""
+        Return email.Trim().ToLowerInvariant()
+    End Function
+
+    ''' <summary>
+    ''' Builds a collision-resistant folder name from the normalized e-mail address.
+    ''' The SHA-256 suffix is authoritative; the sanitized prefix is informational only.
+    ''' </summary>
+    Private Shared Function GetCanonicalUserFolderName(email As String) As String
+        Dim normalizedEmail As String = NormalizeUserIdentityEmail(email)
+        If String.IsNullOrWhiteSpace(normalizedEmail) Then Return "_unknown_"
+
+        Dim digest As Byte()
+        Using sha As System.Security.Cryptography.SHA256 = System.Security.Cryptography.SHA256.Create()
+            digest = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(normalizedEmail))
+        End Using
+
+        Dim hex As New System.Text.StringBuilder(digest.Length * 2)
+        For Each b As Byte In digest
+            hex.Append(b.ToString("x2", System.Globalization.CultureInfo.InvariantCulture))
+        Next
+
+        Dim hashPart As String = hex.ToString()
+        If hashPart.Length > AP_UserIdentityHashHexLength Then
+            hashPart = hashPart.Substring(0, AP_UserIdentityHashHexLength)
+        End If
+
+        Dim displayPrefix As String = SanitizeEmailToFolderName(normalizedEmail)
+        If displayPrefix.Length > AP_UserIdentityDisplayPrefixMaxLength Then
+            displayPrefix = displayPrefix.Substring(0, AP_UserIdentityDisplayPrefixMaxLength)
+        End If
+
+        Return displayPrefix & "__" & hashPart
+    End Function
+
+    ''' <summary>
+    ''' Stamps and verifies the canonical owner identity. Legacy pre-hash folders are
+    ''' deliberately not auto-adopted: without an ownership marker their lossy names
+    ''' cannot prove which colliding address owns the data. They remain on disk for
+    ''' explicit administrator migration rather than risking cross-user disclosure.
+    ''' </summary>
+    Private Shared Sub EnsureUserOwnershipMarker(userDir As String, normalizedEmail As String)
+        Dim markerPath As String = Path.Combine(userDir, AP_UserOwnerIdentityFileName)
+
+        If File.Exists(markerPath) Then
+            Dim existingOwner As String = File.ReadAllText(markerPath, System.Text.Encoding.UTF8).Trim()
+            If Not existingOwner.Equals(normalizedEmail, StringComparison.OrdinalIgnoreCase) Then
+                Throw New System.UnauthorizedAccessException(
+                    "Per-user storage ownership marker does not match the active sender identity.")
+            End If
+            Return
+        End If
+
+        Try
+            Using fs As New FileStream(markerPath, FileMode.CreateNew, FileAccess.Write, FileShare.Read)
+                Using writer As New StreamWriter(fs, New System.Text.UTF8Encoding(False))
+                    writer.Write(normalizedEmail)
+                End Using
+            End Using
+        Catch ex As System.IO.IOException
+            Dim existingOwner As String = File.ReadAllText(markerPath, System.Text.Encoding.UTF8).Trim()
+            If Not existingOwner.Equals(normalizedEmail, StringComparison.OrdinalIgnoreCase) Then
+                Throw New System.UnauthorizedAccessException(
+                    "Per-user storage ownership marker does not match the active sender identity.")
+            End If
+        End Try
+    End Sub
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  SECURITY: PATH CONTAINMENT
@@ -342,10 +462,15 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Friend Function ListAllUserStorageDirs() As List(Of (FolderName As String, HasMemory As Boolean, HomeFileCount As Integer, HomeSizeBytes As Long))
         Dim result As New List(Of (String, Boolean, Integer, Long))()
-        Dim rootDir = GetUserStorageRootDir()
+        Dim rootDir As String = GetUserStorageRootDir()
         If Not Directory.Exists(rootDir) Then Return result
-        For Each userDir In Directory.GetDirectories(rootDir)
-            Dim folderName = Path.GetFileName(userDir)
+        For Each userDir As String In EnumerateUserStorageDirectoriesForAdminAndMaintenance()
+            Dim folderName As String = Path.GetFileName(userDir)
+            If String.Equals(Path.GetDirectoryName(Path.GetFullPath(userDir)).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                             Path.GetFullPath(GetCanonicalUserStorageRootDir()).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                             StringComparison.OrdinalIgnoreCase) Then
+                folderName = Path.Combine(AP_UserCanonicalIdentitySubdir, folderName)
+            End If
             Dim hasMemory = File.Exists(Path.Combine(userDir, AP_UserMemoryFileName))
             Dim homeDir = Path.Combine(userDir, AP_UserHomeSubdir)
             Dim fileCount = 0
@@ -411,9 +536,12 @@ Partial Public Class ThisAddIn
     ''' <summary>Deletes the entire user directory including memory and all home files (admin).</summary>
     Friend Sub AdminDeleteUserStorage(senderEmail As String)
         Try
-            Dim sanitized = SanitizeEmailToFolderName(senderEmail)
-            Dim userDir = Path.Combine(GetUserStorageRootDir(), sanitized)
+            Dim normalizedEmail As String = NormalizeUserIdentityEmail(senderEmail)
+            If String.IsNullOrWhiteSpace(normalizedEmail) Then Return
+
+            Dim userDir As String = GetCanonicalUserDirPath(normalizedEmail)
             If Directory.Exists(userDir) Then
+                EnsureUserOwnershipMarker(userDir, normalizedEmail)
                 Directory.Delete(userDir, recursive:=True)
             End If
         Catch

@@ -3,31 +3,19 @@
 '
 ' =============================================================================
 ' File: ThisAddIn.Processing.Tooling.ToolExecutionContext.vb
-' Purpose: Execution state container for tool session lifecycle and diagnostics.
+' Purpose:
+'   Mutable per-run state object for the Word tooling loop, shared by selection,
+'   execution, retry/recovery, finalization and diagnostics phases.
 '
-' Responsibilities:
-'  - Hold per-session state: selected tools, allowed registries, iteration counts.
-'  - Track all tool responses (successful and failed) during session.
-'  - Manage continuation guards and retry prompts for failed turns.
-'  - Log session events with optional UI window display.
-'  - Track duplicate tool execution detection (signature + repeat count).
-'  - Track consecutive tool failures for abort thresholds.
-'  - Hold premature text response retry state.
-'  - Maintain sequencing state (tool ordering, deliverable requirements, memory grounding).
-'  - Expose finalization blocked state and reason codes.
-'  - Integrate with workflow continuity (WorkflowId, RuntimeState).
-'  - Provide diagnostic snapshots for logs.
-'
-' Architecture:
-'  - Mutable state container passed through ExecuteToolingLoop iterations.
-'  - Nested logging via optional LogWindow (WinForms Form).
-'  - External log sink support for sub-agent integration.
-'  - Exposes SequencingState for complex orchestration decisions.
-'
-' External Dependencies:
-'  - SharedLibrary.Agents.ToolCallSequencing for sequencing state.
-'  - SharedLibrary.Agents.WorkflowContinuity for workflow state.
-'  - LogWindow for optional UI logging display.
+' Architecture / Function:
+'   - Holds selected/authorized tool registries, lazy-loading and capability-routing
+'     state, iteration/cancellation state and the complete ToolResponse history.
+'   - Owns sequencing state for memory grounding, explicit operations, sub-agent tasks,
+'     deliverable requirements and retry/fidelity guards, plus workflow-continuity data.
+'   - Preserves required design/template choices across retries where host fidelity must
+'     not silently degrade.
+'   - Centralizes structured logging and finalization-block information; it contains
+'     state only and does not itself execute tools.
 ' =============================================================================
 
 Option Explicit On
@@ -67,6 +55,18 @@ Partial Public Class ThisAddIn
 
         ''' <summary>True when only a lightweight tool index is initially exposed to the model.</summary>
         Public Property LazyToolLoadingEnabled As Boolean
+
+        ''' <summary>Top-level capability-routing gate state.</summary>
+        Public Property CapabilityRoutingRequired As Boolean
+        Public Property CapabilityRoutingResolved As Boolean
+        Public Property CapabilityRoutingKind As String
+        Public Property CapabilityRoutingName As String
+        Public Property CapabilityRoutingEntered As Boolean
+
+        ' Persist an explicitly selected PowerPoint design/template across retries so a
+        ' failed branded attempt cannot silently degrade into a neutral deliverable.
+        Public Property RequiredPowerPointDesignName As String = ""
+        Public Property RequiredPowerPointTemplateAttachmentName As String = ""
 
         ''' <summary>All responses generated during this session (successful and failed).</summary>
         Public Property AllToolResponses As List(Of ToolResponse)
@@ -109,6 +109,7 @@ Partial Public Class ThisAddIn
         Public Property PendingRejectedTurnExplanation As String = ""
 
         Public Const MaxContinuationRetries As Integer = 5
+        Public Const MaxEmptyResponseRetries As Integer = 1
 
         ''' <summary>Per-target counts of transport-successful but zero-change (no-op) tool results this run.</summary>
         Public Property ZeroChangeOperationCounts As Dictionary(Of String, Integer) =
@@ -156,6 +157,11 @@ Partial Public Class ThisAddIn
             CurrentIteration = 0
             MaxIterations = INI_ToolingMaximumIterations
             IsCancelled = False
+            CapabilityRoutingRequired = False
+            CapabilityRoutingResolved = True
+            CapabilityRoutingKind = "none"
+            CapabilityRoutingName = ""
+            CapabilityRoutingEntered = True
             LastToolExecutionSignature = ""
             LastToolExecutionRepeatCount = 0
             DuplicateToolExecutionAbortThreshold = 3

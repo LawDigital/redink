@@ -2121,6 +2121,12 @@
         }
         "Entry"
         {
+        "MsmKey" = "8:_012FCF5DDBC6BA58843C046DF17D67EE"
+        "OwnerKey" = "8:_UNDEFINED"
+        "MsmSig" = "8:_UNDEFINED"
+        }
+        "Entry"
+        {
         "MsmKey" = "8:_C8FA8217B95D0DFB74A5D352B6DC2C88"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
@@ -9333,6 +9339,26 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_012FCF5DDBC6BA58843C046DF17D67EE"
+            {
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\Release\\System.ValueTuple.xml"
+            "TargetName" = "8:System.ValueTuple.xml"
+            "Tag" = "8:REDINK_AUTOPAYLOAD"
+            "Folder" = "8:_59F219B692AC4E50870C188F6E2F47D2"
+            "Condition" = "8:"
+            "Transitive" = "11:FALSE"
+            "Vital" = "11:TRUE"
+            "ReadOnly" = "11:FALSE"
+            "Hidden" = "11:FALSE"
+            "System" = "11:FALSE"
+            "Permanent" = "11:FALSE"
+            "SharedLegacy" = "11:FALSE"
+            "PackageAs" = "3:1"
+            "Register" = "3:1"
+            "Exclude" = "11:FALSE"
+            "IsDependency" = "11:FALSE"
+            "IsolateTo" = "8:"
+            }
             "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_C8FA8217B95D0DFB74A5D352B6DC2C88"
             {
             "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\Release\\UglyToad.PdfPig.Core.dll"
@@ -10317,15 +10343,15 @@
         {
         "Name" = "8:Microsoft Visual Studio"
         "ProductName" = "8:Red Ink for Excel (Preview)"
-        "ProductCode" = "8:{19438631-79B3-4F52-9D65-605C23CAFF02}"
-        "PackageCode" = "8:{845B88AC-B533-4201-8C9F-81547455062C}"
+        "ProductCode" = "8:{346E36C6-E4E5-4AED-8276-BE91DFF5EE87}"
+        "PackageCode" = "8:{BA37A01A-AA8E-4507-8580-2FDA1E31CA18}"
         "UpgradeCode" = "8:{71903376-5275-44CA-9A5E-30AEC2282B47}"
         "AspNetVersion" = "8:4.0.30319.0"
         "RestartWWWService" = "11:FALSE"
         "RemovePreviousVersions" = "11:TRUE"
         "DetectNewerInstalledVersion" = "11:TRUE"
         "InstallAllUsers" = "11:TRUE"
-        "ProductVersion" = "8:1.6.17"
+        "ProductVersion" = "8:1.6.18"
         "Manufacturer" = "8:LawDigital Ltd."
         "ARPHELPTELEPHONE" = "8:"
         "ARPHELPLINK" = "8:"

@@ -27,7 +27,7 @@ Namespace Agents
         Private Sub New()
         End Sub
 
-        Private Shared Function ToSafeToolSuffix(value As String) As String
+        Public Shared Function ToSafeToolSuffix(value As String) As String
             If String.IsNullOrWhiteSpace(value) Then
                 Return ""
             End If
@@ -46,6 +46,18 @@ Namespace Agents
             Next
 
             Return sb.ToString().Trim("_"c)
+        End Function
+
+        Public Shared Function BuildSkillToolName(skillName As String) As String
+            Dim suffix As String = ToSafeToolSuffix(skillName)
+            If String.IsNullOrWhiteSpace(suffix) Then Return ""
+            Return "skill_" & suffix
+        End Function
+
+        Public Shared Function BuildAgentToolName(agentName As String) As String
+            Dim suffix As String = ToSafeToolSuffix(agentName)
+            If String.IsNullOrWhiteSpace(suffix) Then Return ""
+            Return "agent_" & suffix
         End Function
 
         ''' <summary>
@@ -97,7 +109,7 @@ Namespace Agents
                 Dim toolSuffix As String = ToSafeToolSuffix(localSk.Name)
                 If String.IsNullOrWhiteSpace(toolSuffix) Then Continue For
 
-                Dim toolName As String = "skill_" & toolSuffix
+                Dim toolName As String = BuildSkillToolName(localSk.Name)
                 Dim shortDesc As String = If(localSk.Description, "")
                 Dim originLabel As String = If(localSk.IsLocal, "local", "central")
 
@@ -127,7 +139,7 @@ Namespace Agents
                 Dim toolSuffix As String = ToSafeToolSuffix(localAg.Name)
                 If String.IsNullOrWhiteSpace(toolSuffix) Then Continue For
 
-                Dim toolName As String = "agent_" & toolSuffix
+                Dim toolName As String = BuildAgentToolName(localAg.Name)
                 Dim shortDesc As String = If(localAg.Description, "")
                 Dim originLabel As String = If(localAg.IsLocal, "local", "central")
 
@@ -196,6 +208,10 @@ Namespace Agents
                 instr.Append("Delegates a task to the '").Append(ag.Name).Append("' sub-agent.")
             End If
             instr.Append(" Returns a JSON object {summary, result}. ")
+            instr.Append("Every invocation MUST include an opaque stable subagent_task_id assigned by the parent. ")
+            instr.Append("Reuse exactly the same subagent_task_id for the same logical delegated task; use a new id only for a genuinely new independent task. ")
+            instr.Append("Do not derive task identity from task wording, filenames, paths, anchors, or semantic similarity. ")
+            instr.Append("Every invocation MUST include expected_artifacts. Use [] when the delegated task is explicitly non-file-producing. For a file-producing task, expected_artifacts MUST declare the complete set of opaque logical_deliverable_id/output_slot_id pairs before the agent runs. ")
             instr.Append("(Agent, ").Append(originLabel).Append(
                 If(String.IsNullOrWhiteSpace(ag.Model), ".)", ", model='" & ag.Model & "'.)"))
 
@@ -204,8 +220,12 @@ Namespace Agents
                 """description"":""" & JsonEscape(If(ag.Description, "Delegates a task to a sub-agent.")) & """," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """task"":{""type"":""string"",""description"":""Self-contained task description for the sub-agent.""}," &
-                """context"":{""type"":""string"",""description"":""Optional context blob (text) the parent wants to pass through. Defaults to none.""}}," &
-                """required"":[""task""]}}"
+                """context"":{""type"":""string"",""description"":""Optional context blob (text) the parent wants to pass through. Defaults to none.""}," &
+                """subagent_task_id"":{""type"":""string"",""description"":""REQUIRED opaque stable caller-assigned identity for this logical delegated task. Reuse exactly for the same task; use a new id only for a genuinely new independent task. Do not derive identity from task wording, filenames, paths, anchors, or semantic similarity.""}," &
+                """expected_artifacts"":{""type"":""array"",""description"":""REQUIRED exact expected-final-artifact contract. Use [] for an explicitly non-file-producing delegated task; otherwise provide the complete opaque logical_deliverable_id/output_slot_id set."",""items"":{""type"":""object"",""properties"":{" &
+                """logical_deliverable_id"":{""type"":""string""}," &
+                """output_slot_id"":{""type"":""string""}},""required"":[""logical_deliverable_id"",""output_slot_id""]}}}," &
+                """required"":[""task"",""subagent_task_id"",""expected_artifacts""]}}"
 
             Return New SharedLibrary.ModelConfig() With {
                 .ToolName = toolName,

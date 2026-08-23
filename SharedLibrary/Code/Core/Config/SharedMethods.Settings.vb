@@ -786,7 +786,18 @@ Namespace SharedLibrary
                 cancelButton.Bottom + 20
             )
 
-            settingsForm.ShowDialog()
+            AddHandler settingsForm.Shown,
+                Sub()
+                    settingsForm.TopMost = True
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(settingsForm)
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(settingsForm)
+                End Sub
+            Dim __safeDialogOwner789 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            If __safeDialogOwner789 IsNot Nothing Then
+                settingsForm.ShowDialog(__safeDialogOwner789)
+            Else
+                settingsForm.ShowDialog()
+            End If
 
             If temporaryNoLocalConfigSessionUnlocked Then
                 CapturedContext.INI_NoLocalConfig = originalNoLocalConfigValue
@@ -1002,7 +1013,7 @@ Namespace SharedLibrary
 
                 passwordForm.Text = title
                 passwordForm.FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedDialog
-                passwordForm.StartPosition = System.Windows.Forms.FormStartPosition.CenterParent
+                passwordForm.StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen
                 passwordForm.MaximizeBox = False
                 passwordForm.MinimizeBox = False
                 passwordForm.ShowInTaskbar = False
@@ -1430,7 +1441,8 @@ Namespace SharedLibrary
                         If System.IO.Directory.Exists(targetDir) Then dlg.SelectedPath = targetDir
                     Catch
                     End Try
-                    If dlg.ShowDialog() = DialogResult.OK AndAlso Not String.IsNullOrWhiteSpace(dlg.SelectedPath) Then
+                    Dim __safeDialogOwner1433 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                    If If(__safeDialogOwner1433 IsNot Nothing, dlg.ShowDialog(__safeDialogOwner1433), dlg.ShowDialog()) = DialogResult.OK AndAlso Not String.IsNullOrWhiteSpace(dlg.SelectedPath) Then
                         targetDir = dlg.SelectedPath
                     End If
                 End Using
@@ -4885,7 +4897,7 @@ Namespace SharedLibrary
             ' Create the form
             Dim aboutForm As New System.Windows.Forms.Form() With {
                         .FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedDialog,
-                        .StartPosition = System.Windows.Forms.FormStartPosition.CenterParent,
+                        .StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen,
                         .ClientSize = New System.Drawing.Size(formWidth, formHeight),
                         .BackColor = owner.BackColor,
                         .Font = standardFont,

@@ -1182,7 +1182,8 @@ Partial Public Class ThisAddIn
 
         Try
             Using frm As New DragDropForm(DragDropMode.FileOrDirectory)
-                If frm.ShowDialog() = DialogResult.OK Then
+                Dim __safeDialogOwner1185 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If If(__safeDialogOwner1185 IsNot Nothing, frm.ShowDialog(__safeDialogOwner1185), frm.ShowDialog()) = DialogResult.OK Then
                     selectedPath = frm.SelectedFilePath
                 End If
             End Using
@@ -1933,7 +1934,8 @@ Partial Public Class ThisAddIn
 
         Try
             Using frm As New DragDropForm(DragDropMode.FileOrDirectory)
-                If frm.ShowDialog() = DialogResult.OK Then
+                Dim __safeDialogOwner1936 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If If(__safeDialogOwner1936 IsNot Nothing, frm.ShowDialog(__safeDialogOwner1936), frm.ShowDialog()) = DialogResult.OK Then
                     selectedPath = frm.SelectedFilePath
                 End If
             End Using
@@ -2815,7 +2817,7 @@ Partial Public Class ThisAddIn
                     Dim htmlResult As String
                     Try
                         Dim pipeline = New Markdig.MarkdownPipelineBuilder().UseAdvancedExtensions().Build()
-                        Dim bodyHtml As String = Markdig.Markdown.ToHtml(If(llmResult, String.Empty), pipeline)
+                        Dim bodyHtml As String = Markdig.Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(If(llmResult, String.Empty)), pipeline)
 
                         htmlResult = "<!DOCTYPE html><html><head><meta charset=""utf-8"">" &
                                      SummaryHtmlStyle &
@@ -2932,7 +2934,7 @@ Partial Public Class ThisAddIn
             Dim htmlResult As String
             Try
                 Dim pipeline = New Markdig.MarkdownPipelineBuilder().UseAdvancedExtensions().Build()
-                Dim bodyHtml As String = Markdig.Markdown.ToHtml(If(llmResult, String.Empty), pipeline)
+                Dim bodyHtml As String = Markdig.Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(If(llmResult, String.Empty)), pipeline)
 
                 Dim dateFilterInfo As String = If(filterByDate,
                     $"<p style='color:#666; font-size:9pt;'>Covering changes/comments from {filterDate.Value:yyyy-MM-dd} onwards in {scopeDescription}</p>",
@@ -5109,7 +5111,8 @@ Partial Public Class ThisAddIn
 
         Try
             Using frm As New DragDropForm(DragDropMode.FileOnly)
-                If frm.ShowDialog() = DialogResult.OK Then
+                Dim __safeDialogOwner5112 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If If(__safeDialogOwner5112 IsNot Nothing, frm.ShowDialog(__safeDialogOwner5112), frm.ShowDialog()) = DialogResult.OK Then
                     selectedPath = frm.SelectedFilePath
                 End If
             End Using

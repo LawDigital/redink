@@ -152,6 +152,7 @@ Partial Public Class ThisAddIn
         Catch ex As System.Exception
             Debug.WriteLine("An error occurred while correcting PFOR markers: " & ex.Message, ex)
         End Try
+        Return ""
     End Function
 
     ''' <summary>

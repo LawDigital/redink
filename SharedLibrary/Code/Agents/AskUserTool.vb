@@ -91,7 +91,7 @@ Namespace Agents
         Public Shared Function Build() As SharedLibrary.ModelConfig
             Dim def As String =
                 "{""name"":""" & ToolName & """," &
-                """description"":""Ask the user for information or direction needed to continue. This is the REQUIRED channel for obtaining user input: when you need a decision, choice, value, or clarification from the user, you MUST call this tool rather than asking in narrative prose or assuming a default. Use it when required information is missing, when multiple materially different interpretations are possible, or when a skill or workflow requires an explicit user choice or value. When a skill or workflow explicitly instructs you to ask the user (e.g. to disambiguate between several candidates), that instruction is mandatory and overrides any general preference for defaults: in that case you MUST call ask_user and MUST NOT skip it on the grounds that a probable default exists or that a chat sentence would be simpler. Prefer one concise question with concrete options where a small set of meaningful choices helps. The user may always provide a free-form answer instead of selecting an option. Absent such an explicit instruction, do not ask when the answer is already known, a harmless obvious default exists, or the uncertainty does not materially affect the result. If the run is non-interactive, this tool returns immediately without a user answer, so proceed with a clearly stated assumption instead.""," &
+                """description"":""Ask the user for information or direction needed to continue. This is the REQUIRED channel for obtaining user input: when you need a decision, choice, value, or clarification from the user, you MUST call this tool rather than asking in narrative prose or assuming a default. Use it when required information is missing, when multiple materially different interpretations are possible, or when a skill or workflow requires an explicit user choice or value. When a skill or workflow explicitly instructs you to ask the user (e.g. to disambiguate between several candidates), that instruction is mandatory and overrides any general preference for defaults: in that case you MUST call ask_user and MUST NOT skip it on the grounds that a probable default exists or that a chat sentence would be simpler. ONE QUESTION PER CALL (BINDING): the question field must contain exactly one decision/fact question. Never bundle several questions, numbered subquestions, or a questionnaire into one ask_user call. If several facts are missing, ask one question, wait for its answer, then issue a new ask_user call for the next still-material fact. For choice/yes-no/unknown questions, supply concrete clickable options and set input_type=choice. Choice buttons are suggestions, not an exhaustive list; the user must always be allowed to provide a free-form answer as an alternative. Absent such an explicit instruction, do not ask when the answer is already known, a harmless obvious default exists, or the uncertainty does not materially affect the result. If the run is non-interactive, this tool returns immediately without a user answer, so proceed with a clearly stated assumption instead.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """question"":{""type"":""string"",""description"":""One clear, concise question describing the actual decision to be made.""}," &
                 """options"":{""type"":""array"",""description"":""Optional 2-6 concrete choices to help the user answer faster."",""items"":{""type"":""object"",""properties"":{" &
@@ -107,7 +107,7 @@ Namespace Agents
             Return New SharedLibrary.ModelConfig() With {
                 .ToolName = ToolName,
                 .ToolDefinition = def,
-                .ToolInstructionsPrompt = ToolName & ": The required channel for getting input or direction from the user — when you need a decision, choice, value, or clarification, call this tool instead of asking in prose or silently assuming a default. Ask a single high-value question when required information is missing, several materially different interpretations exist, or a skill/workflow needs an explicit choice or value. When a skill or workflow explicitly tells you to ask the user (e.g. to pick among several candidates), that is mandatory: call ask_user and do not skip it because a likely default exists or because answering in chat seems simpler. Offer concrete options where useful, but the user may answer freely. Otherwise, do not ask about minor uncertainty, do not repeat answered questions, and continue as soon as the answer is sufficient. If the run is non-interactive this tool returns without an answer; in that case proceed with a clearly stated assumption.",
+                .ToolInstructionsPrompt = ToolName & ": The required channel for getting input or direction from the user — when you need a decision, choice, value, or clarification, call this tool instead of asking in prose or silently assuming a default. ONE QUESTION PER CALL (BINDING): ask exactly one high-value question. Never put multiple questions, numbered subquestions, or a questionnaire into the question field. If several facts are missing, call ask_user once for the first still-material fact, wait for the answer, then call ask_user again for the next fact. When the answer is categorical (including yes/no/unknown), provide 2-6 concrete clickable options, set input_type=choice, and set allow_free_text=true so the user may always provide an alternative free-form answer. When a skill/workflow explicitly tells you to ask the user, that is mandatory and must be performed sequentially one ask_user call at a time. Otherwise, do not ask about minor uncertainty, do not repeat answered questions, and continue as soon as the answer is sufficient. If the run is non-interactive this tool returns without an answer; in that case proceed with a clearly stated assumption.",
                 .ModelDescription = "User clarification / input (internal)",
                 .Tool = True,
                 .ToolPriority = 937,
@@ -123,7 +123,7 @@ Namespace Agents
                     New JProperty("status", "no_user"),
                     New JProperty("selected_option_ids", New JArray()),
                     New JProperty("free_text", Nothing),
-                    New JProperty("guidance", "No user can be asked in this run (unattended AutoPilot / e-mail Scheduler). Do not wait for input. Choose the single most likely answer yourself, proceed with it, and clearly tell the user in your final response that no interactive question was possible and which assumption you made."),
+                    New JProperty("guidance", "No live user can be asked in this run (unattended AutoPilot / e-mail Scheduler). Do not invent or guess a materially required fact. If the answer is required by the active skill/workflow, ask the clarification in the outgoing response and end the current run blocked so the requester can reply. Use a default only when the active workflow explicitly permits that default."),
                     New JProperty("error", New JObject(
                         New JProperty("code", "no_user_available"),
                         New JProperty("message", "This run is non-interactive; ask_user cannot collect an answer.")))
@@ -138,7 +138,10 @@ Namespace Agents
                 .Options = ParseOptions(arguments)
             }
 
-            If String.IsNullOrWhiteSpace(req.Question) Then
+            ' Choice buttons are suggestions, never an exhaustive restriction.
+            ' Preserve a free-text escape hatch even if a model/skill explicitly
+            ' supplied allow_free_text=false.
+If String.IsNullOrWhiteSpace(req.Question) Then
                 Return New JObject(
                     New JProperty("status", "cancelled"),
                     New JProperty("selected_option_ids", New JArray()),
@@ -146,6 +149,30 @@ Namespace Agents
                     New JProperty("error", New JObject(
                         New JProperty("code", "missing_question"),
                         New JProperty("message", "ask_user requires a non-empty 'question'.")))
+                ).ToString(Newtonsoft.Json.Formatting.None)
+            End If
+
+            If LooksLikeBundledQuestions(req.Question) Then
+                Return New JObject(
+                    New JProperty("status", "invalid_request"),
+                    New JProperty("selected_option_ids", New JArray()),
+                    New JProperty("free_text", Nothing),
+                    New JProperty("error", New JObject(
+                        New JProperty("code", "multiple_questions_not_allowed"),
+                        New JProperty("message", "ask_user accepts exactly one question per call. Ask the first still-material fact now, wait for the answer, then call ask_user again for the next fact.")))
+                ).ToString(Newtonsoft.Json.Formatting.None)
+            End If
+
+            If req.InputType.Equals("choice", StringComparison.OrdinalIgnoreCase) AndAlso
+               (req.Options Is Nothing OrElse req.Options.Count < 2) Then
+
+                Return New JObject(
+                    New JProperty("status", "invalid_request"),
+                    New JProperty("selected_option_ids", New JArray()),
+                    New JProperty("free_text", Nothing),
+                    New JProperty("error", New JObject(
+                        New JProperty("code", "choice_options_required"),
+                        New JProperty("message", "For input_type=choice, provide at least two concrete clickable options. Ask exactly one choice question in this call.")))
                 ).ToString(Newtonsoft.Json.Formatting.None)
             End If
 
@@ -157,7 +184,7 @@ Namespace Agents
             Dim res As AskUserResult
             Try
                 res = cb(req)
-            Catch ex As Exception
+            Catch ex As System.Exception
                 Return New JObject(
                     New JProperty("status", "cancelled"),
                     New JProperty("selected_option_ids", New JArray()),
@@ -193,10 +220,35 @@ Namespace Agents
             ' When the user dismisses the dialog without answering, the model must not
             ' re-ask or stall: it should pick the most likely answer itself and disclose it.
             If Not statusText.Equals("answered", StringComparison.OrdinalIgnoreCase) Then
-                outObj("guidance") = "The user did not provide an answer. Do not ask again. Choose the single most likely answer yourself, proceed with it, and briefly note in your final response which assumption you made."
+                outObj("guidance") = "The user cancelled this question. Do not invent a materially required fact. If the active workflow requires the answer, leave the fact missing and end/continue according to that workflow's cancellation rule. Use an assumption only when the workflow explicitly permits it."
             End If
 
             Return outObj.ToString(Newtonsoft.Json.Formatting.None)
+        End Function
+
+        Private Shared Function LooksLikeBundledQuestions(question As String) As Boolean
+            Dim text As String = If(question, "").Trim()
+            If text = "" Then Return False
+
+            Dim questionMarks As Integer = 0
+            For Each ch As Char In text
+                If ch = "?"c Then questionMarks += 1
+            Next
+            If questionMarks > 1 Then Return True
+
+            Dim numberedMatches As System.Text.RegularExpressions.MatchCollection =
+                System.Text.RegularExpressions.Regex.Matches(
+                    text,
+                    "(?m)^\s*\d{1,2}[\.\)]\s+"
+                )
+            If numberedMatches.Count > 1 Then Return True
+
+            Dim bulletQuestions As System.Text.RegularExpressions.MatchCollection =
+                System.Text.RegularExpressions.Regex.Matches(
+                    text,
+                    "(?m)^\s*[-*•]\s+.*\?\s*$"
+                )
+            Return bulletQuestions.Count > 1
         End Function
 
         Private Shared Function ParseOptions(args As Dictionary(Of String, Object)) As List(Of AskUserOption)

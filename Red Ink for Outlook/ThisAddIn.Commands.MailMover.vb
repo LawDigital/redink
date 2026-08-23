@@ -1404,7 +1404,12 @@ Partial Public Class ThisAddIn
                 End Sub
 
             updateCount.Invoke()
-            frm.ShowDialog()
+            Dim __safeDialogOwner1407 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            If __safeDialogOwner1407 IsNot Nothing Then
+                frm.ShowDialog(__safeDialogOwner1407)
+            Else
+                frm.ShowDialog()
+            End If
         End Using
 
         Return approved

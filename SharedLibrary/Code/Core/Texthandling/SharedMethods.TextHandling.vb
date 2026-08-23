@@ -152,6 +152,642 @@ Namespace SharedLibrary
             Return sText.TrimEnd()
         End Function
 
+
+        ''' <summary>
+        ''' Builds the common Markdig pipeline used for HTML display. Advanced extensions are preserved,
+        ''' but the Mathematics extension is removed because the embedded HTML viewers do not run MathJax/KaTeX.
+        ''' </summary>
+        Public Shared Function CreateMarkdownHtmlPipeline(Optional useSoftlineBreakAsHardlineBreak As Boolean = False) As Markdig.MarkdownPipeline
+            Dim builder As New Markdig.MarkdownPipelineBuilder()
+            builder.UseAdvancedExtensions()
+
+            ' UseAdvancedExtensions includes Mathematics. Remove it explicitly while preserving
+            ' every other advanced extension supported by the installed Markdig version.
+            For extensionIndex As Integer = builder.Extensions.Count - 1 To 0 Step -1
+                Dim extensionInstance As Object = builder.Extensions(extensionIndex)
+                If extensionInstance IsNot Nothing AndAlso
+                   String.Equals(extensionInstance.GetType().FullName,
+                                 "Markdig.Extensions.Mathematics.MathExtension",
+                                 StringComparison.Ordinal) Then
+                    builder.Extensions.RemoveAt(extensionIndex)
+                End If
+            Next
+
+            If useSoftlineBreakAsHardlineBreak Then
+                builder.UseSoftlineBreakAsHardlineBreak()
+            End If
+
+            Return builder.Build()
+        End Function
+
+
+        ''' <summary>
+        ''' Normalizes lightweight LaTeX-style notation emitted by LLMs before Markdown-to-HTML rendering.
+        ''' Embedded Red Ink viewers do not run MathJax, so wrappers such as \(\rightarrow\) would otherwise
+        ''' remain visible verbatim. Only a bounded allow-list is substituted; Markdown link destinations remain unchanged.
+        ''' </summary>
+        Public Shared Function NormalizeMarkdownForHtmlDisplay(markdown As String) As String
+            If String.IsNullOrEmpty(markdown) Then Return If(markdown, String.Empty)
+
+            ' Keep this deliberately bounded. Red Ink is not a LaTeX renderer: it only
+            ' substitutes a known allow-list of common inline commands that models emit
+            ' in otherwise ordinary prose. Markdown link/image destinations are preserved
+            ' byte-for-byte so backslashes in paths and URLs cannot be damaged.
+            Return NormalizeKnownLatexCodesPreservingMarkdownLinks(markdown)
+        End Function
+
+        Private Shared Function NormalizeKnownLatexCodesPreservingMarkdownLinks(value As String) As String
+            If String.IsNullOrEmpty(value) Then Return If(value, String.Empty)
+
+            Dim output As New System.Text.StringBuilder(value.Length + 16)
+            Dim index As Integer = 0
+            While index < value.Length
+                Dim linkStart As Integer = FindNextMarkdownLinkStart(value, index)
+                If linkStart < 0 Then
+                    output.Append(NormalizeKnownLatexCodes(value.Substring(index)))
+                    Exit While
+                End If
+
+                If linkStart > index Then output.Append(NormalizeKnownLatexCodes(value.Substring(index, linkStart - index)))
+
+                Dim labelOpen As Integer = If(value(linkStart) = "!"c, linkStart + 1, linkStart)
+                Dim labelClose As Integer = FindUnescapedMarkdownDelimiter(value, labelOpen + 1, "]"c)
+                If labelClose < 0 OrElse labelClose + 1 >= value.Length OrElse value(labelClose + 1) <> "("c Then
+                    output.Append(NormalizeKnownLatexCodes(value.Substring(linkStart, 1)))
+                    index = linkStart + 1
+                    Continue While
+                End If
+
+                Dim destinationClose As Integer = FindMarkdownLinkDestinationClose(value, labelClose + 2)
+                If destinationClose < 0 Then
+                    output.Append(NormalizeKnownLatexCodes(value.Substring(linkStart)))
+                    Exit While
+                End If
+
+                If value(linkStart) = "!"c Then output.Append("!")
+                output.Append("[")
+                output.Append(NormalizeKnownLatexCodes(value.Substring(labelOpen + 1, labelClose - labelOpen - 1)))
+                output.Append("](")
+                output.Append(value.Substring(labelClose + 2, destinationClose - labelClose - 2))
+                output.Append(")")
+                index = destinationClose + 1
+            End While
+            Return output.ToString()
+        End Function
+
+        Private Shared Function NormalizeKnownLatexCodes(value As String) As String
+            If String.IsNullOrEmpty(value) Then Return If(value, String.Empty)
+
+            Dim result As String = value
+
+            ' Keep LaTeX normalization deliberately literal and bounded. Do not use regular
+            ' expressions here: ordinary prose, paths, environment-variable notation, URLs,
+            ' and other backslash-containing text must remain byte-for-byte unchanged unless
+            ' it contains one of the explicitly supported LaTeX forms below.
+            result = ReplaceSimpleBracedLatexCommand(result, "\text", "", "")
+            result = ReplaceSimpleBracedLatexSubscript(result)
+            result = ReplaceSimpleBracedLatexCommand(result, "\mathrm", "", "")
+            result = ReplaceSimpleBracedLatexCommand(result, "\mathbf", "", "")
+            result = ReplaceSimpleBracedLatexCommand(result, "\mathit", "", "")
+            result = ReplaceSimpleBracedLatexCommand(result, "\xrightarrow", " —", "→ ")
+            result = ReplaceSimpleBracedLatexCommand(result, "\xleftarrow", " ←", "— ")
+
+            result = result.Replace("^{\circ}", "°")
+            result = result.Replace("^\circ", "°")
+
+            Dim replacements As New System.Collections.Generic.Dictionary(Of String, String)(StringComparer.Ordinal) From {
+                {"\leftrightarrow", "↔"}, {"\rightarrow", "→"}, {"\leftarrow", "←"}, {"\to", "→"}, {"\gets", "←"},
+                {"\Longleftrightarrow", "⟺"}, {"\Longrightarrow", "⟹"}, {"\Longleftarrow", "⟸"},
+                {"\Rightarrow", "⇒"}, {"\Leftarrow", "⇐"}, {"\Leftrightarrow", "⇔"}, {"\implies", "⇒"}, {"\impliedby", "⇐"}, {"\iff", "⇔"}, {"\mapsto", "↦"},
+                {"\Updownarrow", "⇕"}, {"\Uparrow", "⇑"}, {"\Downarrow", "⇓"}, {"\uparrow", "↑"}, {"\downarrow", "↓"}, {"\updownarrow", "↕"},
+                {"\leq", "≤"}, {"\le", "≤"}, {"\geq", "≥"}, {"\ge", "≥"}, {"\neq", "≠"}, {"\ne", "≠"},
+                {"\ll", "≪"}, {"\gg", "≫"}, {"\approx", "≈"}, {"\equiv", "≡"}, {"\propto", "∝"},
+                {"\pm", "±"}, {"\mp", "∓"}, {"\times", "×"}, {"\cdot", "·"}, {"\div", "÷"}, {"\circ", "°"},
+                {"\checkmark", "✓"}, {"\star", "★"}, {"\bullet", "•"}, {"\textdegree", "°"},
+                {"\notin", "∉"}, {"\in", "∈"}, {"\subseteq", "⊆"}, {"\supseteq", "⊇"}, {"\subset", "⊂"}, {"\supset", "⊃"},
+                {"\cap", "∩"}, {"\cup", "∪"}, {"\forall", "∀"}, {"\exists", "∃"}, {"\land", "∧"}, {"\lor", "∨"}, {"\neg", "¬"}
+            }
+
+            For Each pair As System.Collections.Generic.KeyValuePair(Of String, String) In System.Linq.Enumerable.OrderByDescending(replacements, Function(item) item.Key.Length)
+                result = ReplaceBoundedLatexToken(result, pair.Key, pair.Value)
+            Next
+
+            result = ReplaceBoundedSectionLatexToken(result, "\S", "§")
+            result = ReplaceBoundedSectionLatexToken(result, "\P", "¶")
+            result = result.Replace("\,", " ")
+            result = NormalizeSimpleLatexSubscriptsAndSuperscripts(result)
+            result = RemoveKnownLatexMathWrappers(result)
+            result = result.Replace("$>$", ">").Replace("$<$", "<")
+
+            Return result
+        End Function
+
+        Private Shared Function ReplaceSimpleBracedLatexCommand(
+            value As String,
+            command As String,
+            replacementPrefix As String,
+            replacementSuffix As String
+        ) As String
+            If String.IsNullOrEmpty(value) OrElse String.IsNullOrEmpty(command) Then Return If(value, String.Empty)
+
+            Dim startToken As String = command & "{"
+            Dim output As New System.Text.StringBuilder(value.Length)
+            Dim index As Integer = 0
+
+            While index < value.Length
+                Dim commandStart As Integer = value.IndexOf(startToken, index, StringComparison.Ordinal)
+                If commandStart < 0 Then
+                    output.Append(value.Substring(index))
+                    Exit While
+                End If
+
+                output.Append(value.Substring(index, commandStart - index))
+                Dim contentStart As Integer = commandStart + startToken.Length
+                Dim commandEnd As Integer = value.IndexOf("}"c, contentStart)
+                If commandEnd < 0 Then
+                    output.Append(value.Substring(commandStart))
+                    Exit While
+                End If
+
+                Dim content As String = value.Substring(contentStart, commandEnd - contentStart)
+                If content.IndexOf("{"c) >= 0 OrElse content.IndexOf("}"c) >= 0 Then
+                    output.Append(startToken)
+                    index = contentStart
+                    Continue While
+                End If
+
+                output.Append(replacementPrefix)
+                output.Append(content)
+                output.Append(replacementSuffix)
+                index = commandEnd + 1
+            End While
+
+            Return output.ToString()
+        End Function
+
+        Private Shared Function ReplaceSimpleBracedLatexSubscript(value As String) As String
+            If String.IsNullOrEmpty(value) Then Return If(value, String.Empty)
+
+            Const startToken As String = "_{"
+            Dim output As New System.Text.StringBuilder(value.Length)
+            Dim index As Integer = 0
+
+            While index < value.Length
+                Dim tokenStart As Integer = value.IndexOf(startToken, index, StringComparison.Ordinal)
+                If tokenStart < 0 Then
+                    output.Append(value.Substring(index))
+                    Exit While
+                End If
+
+                output.Append(value.Substring(index, tokenStart - index))
+                Dim contentStart As Integer = tokenStart + startToken.Length
+                Dim tokenEnd As Integer = value.IndexOf("}"c, contentStart)
+                If tokenEnd < 0 Then
+                    output.Append(value.Substring(tokenStart))
+                    Exit While
+                End If
+
+                Dim content As String = value.Substring(contentStart, tokenEnd - contentStart)
+                If content.IndexOf("{"c) >= 0 OrElse content.IndexOf("}"c) >= 0 Then
+                    output.Append(startToken)
+                    index = contentStart
+                    Continue While
+                End If
+
+                output.Append("_")
+                output.Append(content)
+                index = tokenEnd + 1
+            End While
+
+            Return output.ToString()
+        End Function
+
+        Private Shared Function ReplaceBoundedLatexToken(value As String, token As String, replacement As String) As String
+            If String.IsNullOrEmpty(value) OrElse String.IsNullOrEmpty(token) Then Return If(value, String.Empty)
+
+            Dim output As New System.Text.StringBuilder(value.Length)
+            Dim index As Integer = 0
+
+            While index < value.Length
+                Dim tokenStart As Integer = value.IndexOf(token, index, StringComparison.Ordinal)
+                If tokenStart < 0 Then
+                    output.Append(value.Substring(index))
+                    Exit While
+                End If
+
+                output.Append(value.Substring(index, tokenStart - index))
+                Dim tokenEnd As Integer = tokenStart + token.Length
+                Dim nextIsAsciiLetter As Boolean = tokenEnd < value.Length AndAlso IsAsciiLetter(value(tokenEnd))
+
+                If nextIsAsciiLetter OrElse IsLikelyFilesystemPathToken(value, tokenStart, tokenEnd) Then
+                    output.Append(token)
+                Else
+                    output.Append(replacement)
+                End If
+                index = tokenEnd
+            End While
+
+            Return output.ToString()
+        End Function
+
+        Private Shared Function ReplaceBoundedSectionLatexToken(value As String, token As String, replacement As String) As String
+            If String.IsNullOrEmpty(value) OrElse String.IsNullOrEmpty(token) Then Return If(value, String.Empty)
+
+            Dim output As New System.Text.StringBuilder(value.Length)
+            Dim index As Integer = 0
+
+            While index < value.Length
+                Dim tokenStart As Integer = value.IndexOf(token, index, StringComparison.Ordinal)
+                If tokenStart < 0 Then
+                    output.Append(value.Substring(index))
+                    Exit While
+                End If
+
+                output.Append(value.Substring(index, tokenStart - index))
+                Dim tokenEnd As Integer = tokenStart + token.Length
+                Dim boundaryIndex As Integer = tokenEnd
+                If boundaryIndex + 1 < value.Length AndAlso value(boundaryIndex) = "\"c AndAlso value(boundaryIndex + 1) = ","c Then
+                    boundaryIndex += 2
+                End If
+
+                Dim hasExpectedBoundary As Boolean = boundaryIndex < value.Length AndAlso IsLatexSectionBoundary(value(boundaryIndex))
+                If hasExpectedBoundary AndAlso Not IsLikelyFilesystemPathToken(value, tokenStart, tokenEnd) Then
+                    output.Append(replacement)
+                Else
+                    output.Append(token)
+                End If
+                index = tokenEnd
+            End While
+
+            Return output.ToString()
+        End Function
+
+        Private Shared Function IsLatexSectionBoundary(ch As Char) As Boolean
+            Return Char.IsWhiteSpace(ch) OrElse Char.IsDigit(ch) OrElse ch = "("c OrElse ch = ")"c OrElse
+                   ch = "."c OrElse ch = ","c OrElse ch = ":"c OrElse ch = ";"c
+        End Function
+
+        Private Shared Function IsAsciiLetter(ch As Char) As Boolean
+            Return (ch >= "A"c AndAlso ch <= "Z"c) OrElse (ch >= "a"c AndAlso ch <= "z"c)
+        End Function
+
+        Private Shared Function IsLikelyFilesystemPathToken(value As String, tokenStart As Integer, tokenEnd As Integer) As Boolean
+            If String.IsNullOrEmpty(value) OrElse tokenStart < 0 OrElse tokenStart >= value.Length Then Return False
+
+            ' A following path separator makes the token a filesystem path segment, not a LaTeX command.
+            If tokenEnd < value.Length AndAlso (value(tokenEnd) = "\"c OrElse value(tokenEnd) = "/"c) Then Return True
+
+            Dim segmentStart As Integer = tokenStart - 1
+            While segmentStart >= 0 AndAlso Not Char.IsWhiteSpace(value(segmentStart))
+                segmentStart -= 1
+            End While
+            segmentStart += 1
+
+            Dim prefixLength As Integer = tokenStart - segmentStart
+            If prefixLength <= 0 Then Return False
+            Dim prefix As String = value.Substring(segmentStart, prefixLength)
+
+            If prefix.IndexOf(":\", StringComparison.Ordinal) >= 0 OrElse
+               prefix.IndexOf(":/", StringComparison.Ordinal) >= 0 OrElse
+               prefix.IndexOf("%", StringComparison.Ordinal) >= 0 OrElse
+               prefix.StartsWith("\\", StringComparison.Ordinal) Then
+                Return True
+            End If
+
+            Return False
+        End Function
+
+        Private Shared Function RemoveKnownLatexMathWrappers(value As String) As String
+            If String.IsNullOrEmpty(value) Then Return If(value, String.Empty)
+
+            Dim result As String = value
+            result = RemoveKnownLatexMathWrapper(result, "\(", "\)")
+            result = RemoveKnownLatexMathWrapper(result, "\[", "\]")
+            result = RemoveKnownDollarMathWrappers(result)
+            Return result
+        End Function
+
+        Private Shared Function RemoveKnownLatexMathWrapper(value As String, openToken As String, closeToken As String) As String
+            Dim output As New System.Text.StringBuilder(value.Length)
+            Dim index As Integer = 0
+
+            While index < value.Length
+                Dim openIndex As Integer = value.IndexOf(openToken, index, StringComparison.Ordinal)
+                If openIndex < 0 Then
+                    output.Append(value.Substring(index))
+                    Exit While
+                End If
+
+                output.Append(value.Substring(index, openIndex - index))
+                Dim contentStart As Integer = openIndex + openToken.Length
+                Dim closeIndex As Integer = value.IndexOf(closeToken, contentStart, StringComparison.Ordinal)
+                If closeIndex < 0 Then
+                    output.Append(value.Substring(openIndex))
+                    Exit While
+                End If
+
+                Dim content As String = value.Substring(contentStart, closeIndex - contentStart)
+                If ContainsKnownLatexReplacementSymbol(content) AndAlso content.IndexOf(ControlChars.Cr) < 0 AndAlso content.IndexOf(ControlChars.Lf) < 0 Then
+                    output.Append(content)
+                Else
+                    output.Append(openToken)
+                    output.Append(content)
+                    output.Append(closeToken)
+                End If
+                index = closeIndex + closeToken.Length
+            End While
+
+            Return output.ToString()
+        End Function
+
+        Private Shared Function RemoveKnownDollarMathWrappers(value As String) As String
+            Dim output As New System.Text.StringBuilder(value.Length)
+            Dim index As Integer = 0
+
+            While index < value.Length
+                Dim openIndex As Integer = FindNextUnescapedSingleDollar(value, index)
+                If openIndex < 0 Then
+                    output.Append(value.Substring(index))
+                    Exit While
+                End If
+
+                output.Append(value.Substring(index, openIndex - index))
+                Dim closeIndex As Integer = FindNextUnescapedSingleDollar(value, openIndex + 1)
+                If closeIndex < 0 Then
+                    output.Append(value.Substring(openIndex))
+                    Exit While
+                End If
+
+                Dim content As String = value.Substring(openIndex + 1, closeIndex - openIndex - 1)
+                If ContainsKnownLatexReplacementSymbol(content) AndAlso content.IndexOf(ControlChars.Cr) < 0 AndAlso content.IndexOf(ControlChars.Lf) < 0 Then
+                    output.Append(content)
+                Else
+                    output.Append("$")
+                    output.Append(content)
+                    output.Append("$")
+                End If
+                index = closeIndex + 1
+            End While
+
+            Return output.ToString()
+        End Function
+
+        Private Shared Function FindNextUnescapedSingleDollar(value As String, startIndex As Integer) As Integer
+            For index As Integer = Math.Max(0, startIndex) To value.Length - 1
+                If value(index) <> "$"c Then Continue For
+                If index > 0 AndAlso value(index - 1) = "\"c Then Continue For
+                If index > 0 AndAlso value(index - 1) = "$"c Then Continue For
+                If index + 1 < value.Length AndAlso value(index + 1) = "$"c Then Continue For
+                Return index
+            Next
+            Return -1
+        End Function
+
+        Private Shared Function ContainsKnownLatexReplacementSymbol(value As String) As Boolean
+            If String.IsNullOrEmpty(value) Then Return False
+            Const knownSymbols As String = "≤≥≠≈≡∝≪≫→←↔⇒⇐⇔⟹⟸⟺↦↑↓↕⇑⇓⇕✓★•∈∉⊂⊆⊃⊇∩∪∀∃∧∨¬±∓×·÷°§¶"
+            For Each symbol As Char In knownSymbols
+                If value.IndexOf(symbol) >= 0 Then Return True
+            Next
+            Return False
+        End Function
+
+        Private Shared Function FindNextMarkdownLinkStart(value As String, startIndex As Integer) As Integer
+            For i As Integer = Math.Max(0, startIndex) To value.Length - 2
+                ' Escaped brackets include the LaTeX display wrapper \[...\]; they are not Markdown links.
+                Dim escapedBracket As Boolean = (i > 0 AndAlso value(i - 1) = "\"c)
+                If value(i) = "["c AndAlso Not escapedBracket Then Return i
+                If value(i) = "!"c AndAlso value(i + 1) = "["c Then Return i
+            Next
+            Return -1
+        End Function
+
+        Private Shared Function FindUnescapedMarkdownDelimiter(value As String, startIndex As Integer, delimiter As Char) As Integer
+            Dim escaped As Boolean = False
+            For i As Integer = Math.Max(0, startIndex) To value.Length - 1
+                Dim ch As Char = value(i)
+                If escaped Then
+                    escaped = False
+                ElseIf ch = "\"c Then
+                    escaped = True
+                ElseIf ch = delimiter Then
+                    Return i
+                End If
+            Next
+            Return -1
+        End Function
+
+        Private Shared Function FindMarkdownLinkDestinationClose(value As String, startIndex As Integer) As Integer
+            Dim depth As Integer = 0
+            Dim escaped As Boolean = False
+            For i As Integer = Math.Max(0, startIndex) To value.Length - 1
+                Dim ch As Char = value(i)
+                If escaped Then
+                    escaped = False
+                    Continue For
+                End If
+                If ch = "\"c Then
+                    escaped = True
+                    Continue For
+                End If
+                If ch = "("c Then
+                    depth += 1
+                ElseIf ch = ")"c Then
+                    If depth = 0 Then Return i
+                    depth -= 1
+                End If
+            Next
+            Return -1
+        End Function
+
+        Private Shared Function NormalizeSimpleLatexSubscriptsAndSuperscripts(value As String) As String
+            If String.IsNullOrEmpty(value) Then Return If(value, String.Empty)
+            Dim result As String = value
+            Dim subDigits As String() = {"₀", "₁", "₂", "₃", "₄", "₅", "₆", "₇", "₈", "₉"}
+            Dim superDigits As String() = {"⁰", "¹", "²", "³", "⁴", "⁵", "⁶", "⁷", "⁸", "⁹"}
+            For digit As Integer = 0 To 9
+                result = result.Replace("_" & digit.ToString(Globalization.CultureInfo.InvariantCulture), subDigits(digit))
+                result = result.Replace("_{" & digit.ToString(Globalization.CultureInfo.InvariantCulture) & "}", subDigits(digit))
+                result = result.Replace("^" & digit.ToString(Globalization.CultureInfo.InvariantCulture), superDigits(digit))
+                result = result.Replace("^{" & digit.ToString(Globalization.CultureInfo.InvariantCulture) & "}", superDigits(digit))
+            Next
+            Return result
+        End Function
+
+        ''' <summary>
+        ''' Validates heading and list nesting against an optional native paragraph-style map.
+        ''' When a native body-style map is present, headings and lists are strict: every
+        ''' encountered heading/list level must have an explicit semantic mapping.
+        ''' </summary>
+        Public Shared Function ValidateMarkdownParagraphStyleMap(
+            markdownText As String,
+            paragraphStyleMap As System.Collections.Generic.IDictionary(Of String, String),
+            ByRef validationError As String
+        ) As Boolean
+            validationError = System.String.Empty
+            If paragraphStyleMap Is Nothing OrElse paragraphStyleMap.Count = 0 OrElse System.String.IsNullOrWhiteSpace(markdownText) Then Return True
+
+            Try
+                Dim pipeline As Markdig.MarkdownPipeline = CreateMarkdownHtmlPipeline(useSoftlineBreakAsHardlineBreak:=True)
+                Dim html As String = Markdig.Markdown.ToHtml(NormalizeMarkdownForHtmlDisplay(markdownText), pipeline)
+                Dim htmlDoc As New HtmlAgilityPack.HtmlDocument()
+                htmlDoc.LoadHtml(html)
+
+                Dim headings As HtmlAgilityPack.HtmlNodeCollection = htmlDoc.DocumentNode.SelectNodes("//h1 | //h2 | //h3 | //h4 | //h5 | //h6")
+                If headings IsNot Nothing Then
+                    For Each heading As HtmlAgilityPack.HtmlNode In headings
+                        If HtmlNodeHasAncestor(heading, "table") Then Continue For
+                        Dim level As Integer = 0
+                        If heading.Name.Length = 2 AndAlso System.Int32.TryParse(heading.Name.Substring(1), level) Then
+                            Dim semantic As String = "heading" & level.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                            If Not paragraphStyleMap.ContainsKey(semantic) Then
+                                validationError = "The selected Word design does not permit Markdown heading level " & level.ToString(System.Globalization.CultureInfo.InvariantCulture) & ". Allowed heading levels are: " & BuildMappedStyleLevelList(paragraphStyleMap, "heading") & "."
+                                Return False
+                            End If
+                        End If
+                    Next
+                End If
+
+                Dim listItems As HtmlAgilityPack.HtmlNodeCollection = htmlDoc.DocumentNode.SelectNodes("//li")
+                If listItems IsNot Nothing Then
+                    For Each item As HtmlAgilityPack.HtmlNode In listItems
+                        If HtmlNodeHasAncestor(item, "table") Then Continue For
+                        Dim owningList As HtmlAgilityPack.HtmlNode = item.ParentNode
+                        If owningList Is Nothing Then Continue For
+
+                        Dim isBullet As Boolean = owningList.Name.Equals("ul", System.StringComparison.OrdinalIgnoreCase)
+                        Dim isNumbered As Boolean = owningList.Name.Equals("ol", System.StringComparison.OrdinalIgnoreCase)
+                        If Not isBullet AndAlso Not isNumbered Then Continue For
+
+                        Dim level As Integer = 1
+                        Dim ancestor As HtmlAgilityPack.HtmlNode = owningList.ParentNode
+                        While ancestor IsNot Nothing
+                            If ancestor.Name.Equals("ul", System.StringComparison.OrdinalIgnoreCase) OrElse ancestor.Name.Equals("ol", System.StringComparison.OrdinalIgnoreCase) Then level += 1
+                            ancestor = ancestor.ParentNode
+                        End While
+
+                        Dim prefix As String = If(isBullet, "bullet", "numbered")
+                        Dim semantic As String = prefix & level.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                        If Not paragraphStyleMap.ContainsKey(semantic) Then
+                            validationError = "The selected Word design does not permit " & If(isBullet, "bullet", "numbered-list") & " nesting level " & level.ToString(System.Globalization.CultureInfo.InvariantCulture) & ". Allowed " & prefix & " levels are: " & BuildMappedStyleLevelList(paragraphStyleMap, prefix) & "."
+                            Return False
+                        End If
+                    Next
+                End If
+
+                Dim hasQuoteStyle As Boolean = paragraphStyleMap.Keys.Any(
+                    Function(key As String) System.Text.RegularExpressions.Regex.IsMatch(If(key, ""), "^quote[1-9]$", System.Text.RegularExpressions.RegexOptions.IgnoreCase Or System.Text.RegularExpressions.RegexOptions.CultureInvariant))
+                If hasQuoteStyle Then
+                    Dim blockQuotes As HtmlAgilityPack.HtmlNodeCollection = htmlDoc.DocumentNode.SelectNodes("//blockquote")
+                    If blockQuotes IsNot Nothing Then
+                        For Each blockQuote As HtmlAgilityPack.HtmlNode In blockQuotes
+                            If HtmlNodeHasAncestor(blockQuote, "table") Then Continue For
+                            Dim level As Integer = 1
+                            Dim ancestor As HtmlAgilityPack.HtmlNode = blockQuote.ParentNode
+                            While ancestor IsNot Nothing
+                                If ancestor.Name.Equals("blockquote", System.StringComparison.OrdinalIgnoreCase) Then level += 1
+                                ancestor = ancestor.ParentNode
+                            End While
+
+                            Dim semantic As String = "quote" & level.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                            If Not paragraphStyleMap.ContainsKey(semantic) Then
+                                validationError = "The selected Word design does not permit block-quote nesting level " & level.ToString(System.Globalization.CultureInfo.InvariantCulture) & ". Allowed quote levels are: " & BuildMappedStyleLevelList(paragraphStyleMap, "quote") & "."
+                                Return False
+                            End If
+                        Next
+                    End If
+                End If
+
+                Return True
+            Catch ex As System.Exception
+                validationError = "Markdown body-style validation failed: " & ex.Message
+                Return False
+            End Try
+        End Function
+
+        Private Shared Function HtmlNodeHasAncestor(node As HtmlAgilityPack.HtmlNode, ancestorName As String) As Boolean
+            If node Is Nothing OrElse System.String.IsNullOrWhiteSpace(ancestorName) Then Return False
+            Dim current As HtmlAgilityPack.HtmlNode = node.ParentNode
+            While current IsNot Nothing
+                If System.String.Equals(current.Name, ancestorName, System.StringComparison.OrdinalIgnoreCase) Then Return True
+                current = current.ParentNode
+            End While
+            Return False
+        End Function
+
+        Private Shared Function BuildMappedStyleLevelList(
+            paragraphStyleMap As System.Collections.Generic.IDictionary(Of String, String),
+            prefix As String
+        ) As String
+            Dim levels As New System.Collections.Generic.List(Of Integer)()
+            If paragraphStyleMap Is Nothing Then Return "none"
+            For Each key As String In paragraphStyleMap.Keys
+                If key Is Nothing OrElse Not key.StartsWith(prefix, System.StringComparison.OrdinalIgnoreCase) Then Continue For
+                Dim suffix As String = key.Substring(prefix.Length)
+                Dim level As Integer = 0
+                If System.Int32.TryParse(suffix, level) AndAlso level > 0 Then levels.Add(level)
+            Next
+            If levels.Count = 0 Then Return "none"
+            Return System.String.Join(", ", levels.Distinct().OrderBy(Function(level As Integer) level).Select(Function(level As Integer) level.ToString(System.Globalization.CultureInfo.InvariantCulture)))
+        End Function
+
+        ''' <summary>
+        ''' Removes renderer-only boundary whitespace introduced by Markdown-to-HTML formatting.
+        ''' Internal whitespace between inline nodes is preserved. This is intentionally shared by
+        ''' both legacy Word HTML insertion and OOXML Word rendering so Markdig formatting newlines
+        ''' cannot become visible leading/trailing spaces in generated document paragraphs.
+        ''' </summary>
+        Public Shared Sub NormalizeMarkdigHtmlBlockBoundaryWhitespace(htmlDoc As HtmlAgilityPack.HtmlDocument)
+            If htmlDoc Is Nothing OrElse htmlDoc.DocumentNode Is Nothing Then Return
+
+            Dim blocks As HtmlAgilityPack.HtmlNodeCollection =
+                htmlDoc.DocumentNode.SelectNodes("//p | //li | //h1 | //h2 | //h3 | //h4 | //h5 | //h6 | //td | //th | //blockquote")
+            If blocks Is Nothing Then Return
+
+            For Each block As HtmlAgilityPack.HtmlNode In blocks
+                If block Is Nothing Then Continue For
+
+                Dim textNodes As System.Collections.Generic.List(Of HtmlAgilityPack.HtmlNode) =
+                    block.DescendantsAndSelf().Where(
+                        Function(candidate As HtmlAgilityPack.HtmlNode)
+                            If candidate Is Nothing OrElse candidate.NodeType <> HtmlAgilityPack.HtmlNodeType.Text Then Return False
+
+                            Dim ancestor As HtmlAgilityPack.HtmlNode = candidate.ParentNode
+                            Do While ancestor IsNot Nothing AndAlso ancestor IsNot block
+                                Dim name As String = If(ancestor.Name, "").ToLowerInvariant()
+                                If name = "ul" OrElse name = "ol" OrElse name = "table" OrElse name = "pre" OrElse
+                                   name = "p" OrElse name = "blockquote" OrElse System.Text.RegularExpressions.Regex.IsMatch(name, "^h[1-6]$") Then
+                                    Return False
+                                End If
+                                ancestor = ancestor.ParentNode
+                            Loop
+                            Return True
+                        End Function).ToList()
+
+                If textNodes.Count = 0 Then Continue For
+
+                Dim firstMeaningful As Integer = textNodes.FindIndex(
+                    Function(item As HtmlAgilityPack.HtmlNode) Not System.String.IsNullOrWhiteSpace(HtmlAgilityPack.HtmlEntity.DeEntitize(item.InnerText)))
+                Dim lastMeaningful As Integer = textNodes.FindLastIndex(
+                    Function(item As HtmlAgilityPack.HtmlNode) Not System.String.IsNullOrWhiteSpace(HtmlAgilityPack.HtmlEntity.DeEntitize(item.InnerText)))
+
+                If firstMeaningful < 0 Then Continue For
+
+                For index As Integer = 0 To firstMeaningful - 1
+                    textNodes(index).InnerHtml = System.String.Empty
+                Next
+                For index As Integer = lastMeaningful + 1 To textNodes.Count - 1
+                    textNodes(index).InnerHtml = System.String.Empty
+                Next
+
+                Dim firstValue As String = HtmlAgilityPack.HtmlEntity.DeEntitize(textNodes(firstMeaningful).InnerText).TrimStart()
+                textNodes(firstMeaningful).InnerHtml = HtmlAgilityPack.HtmlEntity.Entitize(firstValue)
+
+                Dim lastValue As String = HtmlAgilityPack.HtmlEntity.DeEntitize(textNodes(lastMeaningful).InnerText).TrimEnd()
+                textNodes(lastMeaningful).InnerHtml = HtmlAgilityPack.HtmlEntity.Entitize(lastValue)
+            Next
+        End Sub
+
         ''' <summary>
         ''' Converts the provided Markdown text to HTML and inserts it into the given Word selection.
         ''' </summary>
@@ -161,7 +797,8 @@ Namespace SharedLibrary
         Public Shared Sub InsertTextWithMarkdown(selection As Object,
                                                  gptResult As String,
                                                  TrailingCR As Boolean,
-                                                 Optional UseHostDefaultFontColor As Boolean = False)
+                                                 Optional UseHostDefaultFontColor As Boolean = False,
+                                                 Optional PreserveDestinationParagraphFormatting As Boolean = False)
 
             Dim wordSelection As Microsoft.Office.Interop.Word.Selection = CType(selection, Microsoft.Office.Interop.Word.Selection)
             Dim wordRange As Microsoft.Office.Interop.Word.Range = wordSelection.Range
@@ -191,25 +828,9 @@ Namespace SharedLibrary
                                                           End Function)
 
 
-            Dim builder As New MarkdownPipelineBuilder()
+            Dim pipeline As MarkdownPipeline = CreateMarkdownHtmlPipeline(useSoftlineBreakAsHardlineBreak:=True)
 
-            builder.UsePipeTables()
-            builder.UseGridTables()
-            builder.UseSoftlineBreakAsHardlineBreak()
-            builder.UseListExtras()
-            builder.UseFootnotes()
-            builder.UseDefinitionLists()
-            builder.UseAbbreviations()
-            builder.UseAutoLinks()
-            builder.UseTaskLists()
-            builder.UseMathematics()
-            builder.UseFigures()
-            builder.UseAdvancedExtensions()
-            builder.UseGenericAttributes()
-
-            Dim pipeline As MarkdownPipeline = builder.Build()
-
-            Dim htmlresult As String = Markdown.ToHtml(gptResult, pipeline)
+            Dim htmlresult As String = Markdown.ToHtml(NormalizeMarkdownForHtmlDisplay(gptResult), pipeline)
 
 
             htmlresult = htmlresult _
@@ -222,12 +843,13 @@ Namespace SharedLibrary
             Dim htmlDoc As New HtmlAgilityPack.HtmlDocument()
             Dim fullhtml As String
             htmlDoc.LoadHtml(htmlresult)
+            NormalizeMarkdigHtmlBlockBoundaryWhitespace(htmlDoc)
 
             fullhtml = htmlDoc.DocumentNode.OuterHtml
 
             Debug.WriteLine("ITWM: " & fullhtml)
 
-            InsertTextWithFormat(fullhtml, wordRange, True, Not TrailingCR, UseHostDefaultFontColor)
+            InsertTextWithFormat(fullhtml, wordRange, True, Not TrailingCR, UseHostDefaultFontColor, PreserveDestinationParagraphFormatting)
 
         End Sub
 
@@ -243,7 +865,8 @@ Namespace SharedLibrary
                                                ByRef range As Microsoft.Office.Interop.Word.Range,
                                                ReplaceSelection As Boolean,
                                                Optional NoTrailingCR As Boolean = False,
-                                               Optional UseHostDefaultFontColor As Boolean = False)
+                                               Optional UseHostDefaultFontColor As Boolean = False,
+                                               Optional PreserveDestinationParagraphFormatting As Boolean = False)
             Try
                 If formattedText Is Nothing OrElse formattedText.Trim() = "" Then
                     Return
@@ -375,7 +998,7 @@ Namespace SharedLibrary
 
                 ' --- 4) Apply inline styles ---
                 Dim allTextContainers As HtmlAgilityPack.HtmlNodeCollection = doc.DocumentNode.SelectNodes("//p | //li")
-                If allTextContainers IsNot Nothing Then
+                If allTextContainers IsNot Nothing AndAlso Not PreserveDestinationParagraphFormatting Then
                     For Each n As HtmlAgilityPack.HtmlNode In allTextContainers
                         n.SetAttributeValue("style", cssPara)
                     Next
@@ -386,7 +1009,7 @@ Namespace SharedLibrary
                 ' headings match what the user defined instead of the HTML importer's oversized
                 ' browser-default heading sizing. Reads the built-in heading styles directly.
                 Dim headings As HtmlAgilityPack.HtmlNodeCollection = doc.DocumentNode.SelectNodes("//h1 | //h2 | //h3 | //h4 | //h5 | //h6")
-                If headings IsNot Nothing Then
+                If headings IsNot Nothing AndAlso Not PreserveDestinationParagraphFormatting Then
                     For Each h As HtmlAgilityPack.HtmlNode In headings
                         ' Resolve the built-in heading style for this level.
                         Dim headingLevel As Integer = 1
@@ -536,12 +1159,16 @@ Namespace SharedLibrary
                     Dim pasted As Boolean = False
                     For attempt As Integer = 1 To 4
                         Try
+                            Dim recoveryType As Microsoft.Office.Interop.Word.WdRecoveryType =
+                                If(PreserveDestinationParagraphFormatting,
+                                   Microsoft.Office.Interop.Word.WdRecoveryType.wdUseDestinationStylesRecovery,
+                                   Microsoft.Office.Interop.Word.WdRecoveryType.wdFormatOriginalFormatting)
                             If ReplaceSelection Then
-                                range.Application.Selection.PasteAndFormat(Microsoft.Office.Interop.Word.WdRecoveryType.wdFormatOriginalFormatting)
+                                range.Application.Selection.PasteAndFormat(recoveryType)
                             Else
                                 range.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
                                 range.Select()
-                                range.Application.Selection.PasteAndFormat(Microsoft.Office.Interop.Word.WdRecoveryType.wdFormatOriginalFormatting)
+                                range.Application.Selection.PasteAndFormat(recoveryType)
                             End If
                             pasted = True
                             Exit For
@@ -632,6 +1259,7 @@ Namespace SharedLibrary
                 End Try
 
             Catch ex As System.Exception
+                If PreserveDestinationParagraphFormatting Then Throw
                 System.Windows.Forms.MessageBox.Show("InsertTextWithFormat Error: " & ex.Message)
             End Try
         End Sub

@@ -1,6 +1,20 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
-' Purpose: Debug-only interactive test helpers for license system.
+'
+' =============================================================================
+' File: SharedMethods.License.Testing.vb
+' Purpose:
+'   DEBUG-only interactive harness for exercising license-system states and support
+'   operations during development; it is excluded from release behavior by #If DEBUG.
+'
+' Architecture / Function:
+'   - Adds test UI/actions to the SharedMethods partial class without changing the
+'     production license validation path.
+'   - Invokes the same license APIs/state used by production code so developers can
+'     inspect and simulate scenarios from one control panel.
+'   - Must remain side-effect-aware because tests can modify local development license
+'     state; no test entry point is compiled into non-DEBUG builds.
+' =============================================================================
 
 #If DEBUG Then
 
@@ -94,7 +108,18 @@ Namespace SharedLibrary
 
                 mainLayout.Controls.Add(lblStatus, 0, 2)
 
-                form.ShowDialog()
+                AddHandler form.Shown,
+                    Sub()
+                        form.TopMost = True
+                        Global.SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(form)
+                        Global.SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(form)
+                    End Sub
+                Dim __safeDialogOwner97 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If __safeDialogOwner97 IsNot Nothing Then
+                    form.ShowDialog(__safeDialogOwner97)
+                Else
+                    form.ShowDialog()
+                End If
             End Using
         End Sub
 
@@ -565,7 +590,7 @@ Namespace SharedLibrary
                 form.AutoScaleDimensions = New SizeF(96.0F, 96.0F)
                 form.Text = title
                 form.ClientSize = New Size(400, 130)
-                form.StartPosition = FormStartPosition.CenterParent
+                form.StartPosition = FormStartPosition.CenterScreen
                 form.FormBorderStyle = FormBorderStyle.FixedDialog
                 form.MaximizeBox = False
                 form.MinimizeBox = False
@@ -612,7 +637,14 @@ Namespace SharedLibrary
                 form.AcceptButton = btnOk
                 form.CancelButton = btnCancel
 
-                If form.ShowDialog() = DialogResult.OK Then
+                AddHandler form.Shown,
+                    Sub()
+                        form.TopMost = True
+                        Global.SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(form)
+                        Global.SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(form)
+                    End Sub
+                Dim __safeDialogOwner615 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If If(__safeDialogOwner615 IsNot Nothing, form.ShowDialog(__safeDialogOwner615), form.ShowDialog()) = DialogResult.OK Then
                     Return txt.Text
                 End If
                 Return Nothing
@@ -625,7 +657,7 @@ Namespace SharedLibrary
                 form.AutoScaleDimensions = New SizeF(96.0F, 96.0F)
                 form.Text = title
                 form.ClientSize = New Size(500, 300)
-                form.StartPosition = FormStartPosition.CenterParent
+                form.StartPosition = FormStartPosition.CenterScreen
                 form.FormBorderStyle = FormBorderStyle.Sizable
                 form.MinimumSize = New Size(400, 200)
                 form.TopMost = True
@@ -672,7 +704,14 @@ Namespace SharedLibrary
                 form.AcceptButton = btnOk
                 form.CancelButton = btnCancel
 
-                If form.ShowDialog() = DialogResult.OK Then
+                AddHandler form.Shown,
+                    Sub()
+                        form.TopMost = True
+                        Global.SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(form)
+                        Global.SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(form)
+                    End Sub
+                Dim __safeDialogOwner675 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If If(__safeDialogOwner675 IsNot Nothing, form.ShowDialog(__safeDialogOwner675), form.ShowDialog()) = DialogResult.OK Then
                     Return txt.Text
                 End If
                 Return Nothing
@@ -685,7 +724,7 @@ Namespace SharedLibrary
                 form.AutoScaleDimensions = New SizeF(96.0F, 96.0F)
                 form.Text = title
                 form.ClientSize = New Size(350, 300)
-                form.StartPosition = FormStartPosition.CenterParent
+                form.StartPosition = FormStartPosition.CenterScreen
                 form.FormBorderStyle = FormBorderStyle.FixedDialog
                 form.MaximizeBox = False
                 form.MinimizeBox = False
@@ -737,7 +776,14 @@ Namespace SharedLibrary
 
                 AddHandler lst.DoubleClick, Sub() form.DialogResult = DialogResult.OK
 
-                If form.ShowDialog() = DialogResult.OK AndAlso lst.SelectedItem IsNot Nothing Then
+                AddHandler form.Shown,
+                    Sub()
+                        form.TopMost = True
+                        Global.SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(form)
+                        Global.SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(form)
+                    End Sub
+                Dim __safeDialogOwner740 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If If(__safeDialogOwner740 IsNot Nothing, form.ShowDialog(__safeDialogOwner740), form.ShowDialog()) = DialogResult.OK AndAlso lst.SelectedItem IsNot Nothing Then
                     Return lst.SelectedItem.ToString()
                 End If
                 Return Nothing
@@ -750,7 +796,7 @@ Namespace SharedLibrary
                 form.AutoScaleDimensions = New SizeF(96.0F, 96.0F)
                 form.Text = title
                 form.ClientSize = New Size(600, 500)
-                form.StartPosition = FormStartPosition.CenterParent
+                form.StartPosition = FormStartPosition.CenterScreen
                 form.FormBorderStyle = FormBorderStyle.Sizable
                 form.MinimumSize = New Size(400, 300)
                 form.TopMost = True
@@ -801,7 +847,18 @@ Namespace SharedLibrary
                 form.Controls.Add(pnlButtons)
                 form.CancelButton = btnClose
 
-                form.ShowDialog()
+                AddHandler form.Shown,
+                    Sub()
+                        form.TopMost = True
+                        Global.SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(form)
+                        Global.SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(form)
+                    End Sub
+                Dim __safeDialogOwner804 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If __safeDialogOwner804 IsNot Nothing Then
+                    form.ShowDialog(__safeDialogOwner804)
+                Else
+                    form.ShowDialog()
+                End If
             End Using
         End Sub
 

@@ -4,11 +4,13 @@
 ' =============================================================================
 ' File: ThisAddIn.Tooling.Logging.vb
 ' Purpose: Reduced file-based logger for tooling operations with nested session depth support.
-'          Writes per-run log file with system prompt snapshots, LLM calls, and diagnostic traces.
+'          Writes per-run log file with system prompt snapshots, LLM calls, diagnostic traces,
+'          and optional caller-supplied archive run bundles for unattended AutoPilot runs.
 '
 ' Architecture:
 '  - Session Management:
-'      - StartSession(): Enables logging (when INI_APIDebug=True) and increments _sessionDepth.
+'      - StartSession(): Enables normal diagnostics logging when configured and can additionally
+'        mirror a top-level unattended run to a caller-supplied archive path.
 '          - Tracks nested tooling sessions (prevents sub-agent runs from tearing down parent log).
 '          - WriteHeader(): Creates stable overwrite-per-run log file on Desktop.
 '  - Logging API:
@@ -91,31 +93,64 @@ Partial Public Class ThisAddIn
         ''' <summary>Optional Desktop mirror path for sub-agent returns so the stable Desktop file keeps updating even in diagnostics mode.</summary>
         Private Shared _desktopSubAgentMirrorPath As String = Nothing
 
+        ''' <summary>Optional per-run archive mirror used by unattended AutoPilot tooling runs.</summary>
+        Private Shared _archiveMirrorPath As String = Nothing
+
+        ''' <summary>Optional companion archive path for full sub-agent returns belonging to the same AutoPilot run.</summary>
+        Private Shared _archiveSubAgentMirrorPath As String = Nothing
+
+        ''' <summary>Whether the caller-supplied AutoPilot archive is the primary/only log target.</summary>
+        Private Shared _archivePrimaryMode As Boolean = False
+
         ''' <summary>Nested tooling-session depth. Prevents sub-agent runs from tearing down the parent log session.</summary>
         Private Shared _sessionDepth As Integer = 0
 
         ''' <summary>
-        ''' Starts a tooling log session and writes the log header.
-        ''' Logging is enabled only when <c>INI_APIDebug</c> is <c>True</c>.
+        ''' Starts a tooling log session and writes the log header. A top-level caller may additionally
+        ''' provide an archive path. Nested/sub-agent sessions automatically remain in the same log.
         ''' </summary>
-        Public Shared Sub StartSession()
+        ''' <param name="archiveLogPath">Optional absolute archive file path for this top-level run.</param>
+        Public Shared Sub StartSession(Optional archiveLogPath As String = Nothing)
             SyncLock _lock
-                Dim authorActive As Boolean = SharedLibrary.Agents.SkillAuthorMode.IsActive
-                Dim shouldEnable As Boolean = INI_APIDebug OrElse authorActive
-                If Not shouldEnable Then Return
-
-                _isEnabled = True
-                _sessionDepth += 1
-
-                If _started AndAlso Not String.IsNullOrWhiteSpace(_logPath) Then
+                ' A nested tooling loop must join an already-active parent session even when
+                ' APIDebug/SkillAuthor is off and the nested caller did not repeat the archive path.
+                If _started AndAlso _isEnabled AndAlso Not String.IsNullOrWhiteSpace(_logPath) Then
+                    _sessionDepth += 1
                     WriteLine("STEP", $"Nested tooling session started (depth={_sessionDepth})")
                     Return
                 End If
 
-                ' Choose the base directory. In skill-author mode with a configured local
-                ' resource root, write into <local>\diagnostics\ so the skill-author skill
-                ' can read the last run's log. Otherwise fall back to the Desktop, but only
-                ' when APIDebug is on (avoid cluttering the Desktop when it is off).
+                Dim authorActive As Boolean = SharedLibrary.Agents.SkillAuthorMode.IsActive
+                Dim requestedArchivePath As String = If(archiveLogPath, "").Trim()
+                Dim archiveRequested As Boolean = Not String.IsNullOrWhiteSpace(requestedArchivePath)
+                Dim shouldEnable As Boolean = INI_APIDebug OrElse authorActive OrElse archiveRequested
+                If Not shouldEnable Then Return
+
+                _isEnabled = True
+                _sessionDepth = 1
+                _archiveMirrorPath = Nothing
+                _archiveSubAgentMirrorPath = Nothing
+                _archivePrimaryMode = False
+
+                If archiveRequested Then
+                    Try
+                        requestedArchivePath = Path.GetFullPath(requestedArchivePath)
+                        Dim archiveDirectory As String = Path.GetDirectoryName(requestedArchivePath)
+                        If String.IsNullOrWhiteSpace(archiveDirectory) Then
+                            Throw New System.ArgumentException("The tooling archive path must include a directory.", NameOf(archiveLogPath))
+                        End If
+                        If Not Directory.Exists(archiveDirectory) Then Directory.CreateDirectory(archiveDirectory)
+                        _archiveSubAgentMirrorPath = BuildArchiveSubAgentPath(requestedArchivePath)
+                    Catch
+                        requestedArchivePath = ""
+                        archiveRequested = False
+                        _archiveSubAgentMirrorPath = Nothing
+                    End Try
+                End If
+
+                ' Choose the normal diagnostics/Desktop target. The AutoPilot archive becomes
+                ' the primary target only when no normal diagnostics target is active; otherwise
+                ' it is an additional mirror so existing logging behavior is unchanged.
                 Dim baseDir As String = Nothing
                 _isDiagnosticsMode = False
 
@@ -133,13 +168,7 @@ Partial Public Class ThisAddIn
                     End If
                 End If
 
-                If baseDir Is Nothing Then
-                    If Not INI_APIDebug Then
-                        ' Author mode without a usable local root: skip logging entirely.
-                        _isEnabled = False
-                        _sessionDepth = 0
-                        Return
-                    End If
+                If baseDir Is Nothing AndAlso INI_APIDebug Then
                     baseDir = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
                 End If
 
@@ -147,7 +176,16 @@ Partial Public Class ThisAddIn
                 _desktopMirrorPath = Nothing
                 _desktopSubAgentMirrorPath = Nothing
 
-                If _isDiagnosticsMode Then
+                If baseDir Is Nothing Then
+                    If Not archiveRequested Then
+                        _isEnabled = False
+                        _sessionDepth = 0
+                        Return
+                    End If
+                    _diagRunStamp = Nothing
+                    _logPath = requestedArchivePath
+                    _archivePrimaryMode = True
+                ElseIf _isDiagnosticsMode Then
                     _diagRunStamp = DateTime.Now.ToString("yyyyMMdd-HHmmss")
                     _logPath = Path.Combine(baseDir, $"{AN5}_Tooling_Log__{_diagRunStamp}.txt")
 
@@ -161,15 +199,24 @@ Partial Public Class ThisAddIn
                             _desktopSubAgentMirrorPath = Nothing
                         End Try
                     End If
+
+                    If archiveRequested AndAlso
+                       Not String.Equals(_logPath, requestedArchivePath, StringComparison.OrdinalIgnoreCase) Then
+                        _archiveMirrorPath = requestedArchivePath
+                    End If
                 Else
                     _diagRunStamp = Nothing
                     _logPath = Path.Combine(baseDir, StableLogFileName)
+                    If archiveRequested AndAlso
+                       Not String.Equals(_logPath, requestedArchivePath, StringComparison.OrdinalIgnoreCase) Then
+                        _archiveMirrorPath = requestedArchivePath
+                    End If
                 End If
 
                 Try
                     WriteHeader()
                     _started = True
-                Catch ex As Exception
+                Catch ex As System.Exception
                     _isEnabled = False
                     _started = False
                     _logPath = Nothing
@@ -177,6 +224,9 @@ Partial Public Class ThisAddIn
                     _isDiagnosticsMode = False
                     _desktopMirrorPath = Nothing
                     _desktopSubAgentMirrorPath = Nothing
+                    _archiveMirrorPath = Nothing
+                    _archiveSubAgentMirrorPath = Nothing
+                    _archivePrimaryMode = False
                 End Try
             End SyncLock
         End Sub
@@ -203,6 +253,12 @@ Partial Public Class ThisAddIn
             If Not String.IsNullOrWhiteSpace(_desktopMirrorPath) Then
                 Try
                     File.WriteAllText(_desktopMirrorPath, header.ToString())
+                Catch
+                End Try
+            End If
+            If Not String.IsNullOrWhiteSpace(_archiveMirrorPath) Then
+                Try
+                    File.WriteAllText(_archiveMirrorPath, header.ToString())
                 Catch
                 End Try
             End If
@@ -459,6 +515,9 @@ Partial Public Class ThisAddIn
                 _isDiagnosticsMode = False
                 _desktopMirrorPath = Nothing
                 _desktopSubAgentMirrorPath = Nothing
+                _archiveMirrorPath = Nothing
+                _archiveSubAgentMirrorPath = Nothing
+                _archivePrimaryMode = False
                 _sessionDepth = 0
             End SyncLock
         End Sub
@@ -481,6 +540,12 @@ Partial Public Class ThisAddIn
                     Catch
                     End Try
                 End If
+                If Not String.IsNullOrWhiteSpace(_archiveMirrorPath) Then
+                    Try
+                        File.AppendAllText(_archiveMirrorPath, entry & Environment.NewLine)
+                    Catch
+                    End Try
+                End If
             End SyncLock
         End Sub
 
@@ -499,6 +564,12 @@ Partial Public Class ThisAddIn
                 If Not String.IsNullOrWhiteSpace(_desktopMirrorPath) Then
                     Try
                         File.AppendAllText(_desktopMirrorPath, raw)
+                    Catch
+                    End Try
+                End If
+                If Not String.IsNullOrWhiteSpace(_archiveMirrorPath) Then
+                    Try
+                        File.AppendAllText(_archiveMirrorPath, raw)
                     Catch
                     End Try
                 End If
@@ -576,16 +647,48 @@ Partial Public Class ThisAddIn
                         Catch
                         End Try
                     End If
+                    If Not String.IsNullOrWhiteSpace(_archiveSubAgentMirrorPath) AndAlso
+                       Not String.Equals(_subAgentLogPath, _archiveSubAgentMirrorPath, System.StringComparison.OrdinalIgnoreCase) Then
+                        Try
+                            IO.File.AppendAllText(_archiveSubAgentMirrorPath, sb.ToString(), System.Text.Encoding.UTF8)
+                        Catch
+                        End Try
+                    End If
                 End SyncLock
             Catch
                 ' Never throw from logger.
             End Try
         End Sub
 
+        Private Shared Function BuildArchiveSubAgentPath(primaryArchivePath As String) As String
+            If String.IsNullOrWhiteSpace(primaryArchivePath) Then Return Nothing
+            Try
+                Dim directory As String = IO.Path.GetDirectoryName(primaryArchivePath)
+                Dim stem As String = IO.Path.GetFileNameWithoutExtension(primaryArchivePath)
+                If String.IsNullOrWhiteSpace(directory) OrElse String.IsNullOrWhiteSpace(stem) Then Return Nothing
+
+                Const toolingSuffix As String = "__Tooling"
+                If stem.EndsWith(toolingSuffix, System.StringComparison.OrdinalIgnoreCase) Then
+                    stem = stem.Substring(0, stem.Length - toolingSuffix.Length)
+                End If
+
+                Return IO.Path.Combine(directory, stem & "__SubAgent_Returns.txt")
+            Catch
+                Return Nothing
+            End Try
+        End Function
+
         Private Shared Sub EnsureSubAgentLogPath()
             If Not String.IsNullOrEmpty(_subAgentLogPath) Then Return
             If String.IsNullOrEmpty(_logPath) Then Return
             Try
+                If _archivePrimaryMode Then
+                    ' AutoPilot archives are run bundles: keep full sub-agent returns in a companion
+                    ' file sharing the exact same sortable run prefix as the primary tooling log.
+                    _subAgentLogPath = _archiveSubAgentMirrorPath
+                    Return
+                End If
+
                 Dim dir As String = IO.Path.GetDirectoryName(_logPath)
                 If _isDiagnosticsMode AndAlso Not String.IsNullOrWhiteSpace(_diagRunStamp) Then
                     _subAgentLogPath = IO.Path.Combine(dir, $"{AN5}_SubAgent_Returns__{_diagRunStamp}.txt")

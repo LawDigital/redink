@@ -18,6 +18,7 @@
 '  - Authentication flows:
 '      - Uses device authorization flow when advertised.
 '      - Otherwise runs interactive authorization-code flow.
+'      - Requires HTTPS for all MCP OAuth server endpoints; loopback redirect URIs remain exempt.
 '  - Token lifecycle:
 '      - Caches acquired tokens by client and endpoint configuration.
 '      - Exposes helpers for lookup, storage, and debug logging.
@@ -76,6 +77,19 @@ Namespace SharedLibrary
 
         Public Shared Function BuildMCPTokenCacheKey(clientId As String, oauthEndpointConfig As String) As String
             Return (If(clientId, "") & "|" & If(oauthEndpointConfig, "")).ToLowerInvariant()
+        End Function
+
+        Private Shared Function RequireMcpOAuthHttpsEndpoint(endpointUrl As String, endpointName As String) As String
+            Dim trimmedEndpoint As String = If(endpointUrl, String.Empty).Trim()
+            Dim parsedEndpoint As System.Uri = Nothing
+
+            If String.IsNullOrWhiteSpace(trimmedEndpoint) OrElse
+               Not System.Uri.TryCreate(trimmedEndpoint, System.UriKind.Absolute, parsedEndpoint) OrElse
+               Not String.Equals(parsedEndpoint.Scheme, System.Uri.UriSchemeHttps, System.StringComparison.OrdinalIgnoreCase) Then
+                Throw New System.Exception("MCP OAuth " & endpointName & " must use an absolute https:// URL.")
+            End If
+
+            Return trimmedEndpoint
         End Function
 
         Public Shared Function GetCachedMCPToken(cacheKey As String) As MCPCachedToken
@@ -153,6 +167,7 @@ Namespace SharedLibrary
                 Throw New Exception("The MCP server requires OAuth, but no authorization server could be discovered.")
             End If
 
+            authorizationServer = RequireMcpOAuthHttpsEndpoint(authorizationServer, "authorization server")
             LogMCPOAuth("Authorization server candidate", authorizationServer)
 
             Dim authorizationServerMetadata = Await GetAuthorizationServerMetadataAsync(authorizationServer).ConfigureAwait(False)
@@ -167,6 +182,10 @@ Namespace SharedLibrary
             If String.IsNullOrWhiteSpace(tokenEndpoint) Then
                 Throw New Exception("The OAuth authorization server metadata is missing token_endpoint.")
             End If
+
+            ' token_endpoint is always used. Optional endpoints are validated immediately before use
+            ' so an unused legacy metadata field cannot break an otherwise secure OAuth flow.
+            tokenEndpoint = RequireMcpOAuthHttpsEndpoint(tokenEndpoint, "token_endpoint")
 
             Dim scope As String = configuredScope
             If String.IsNullOrWhiteSpace(scope) Then
@@ -224,6 +243,9 @@ Namespace SharedLibrary
 
                 If String.IsNullOrWhiteSpace(deviceAuthorizationEndpoint) Then
                     deviceAuthorizationEndpoint = If(registration("device_authorization_endpoint")?.ToString(), "")
+                    If Not String.IsNullOrWhiteSpace(deviceAuthorizationEndpoint) Then
+                        deviceAuthorizationEndpoint = RequireMcpOAuthHttpsEndpoint(deviceAuthorizationEndpoint, "device_authorization_endpoint")
+                    End If
                 End If
 
                 LogMCPOAuth("Registration succeeded", $"client_id={clientId}; acceptedRedirectUri={acceptedRedirectUri}")
@@ -269,6 +291,8 @@ Namespace SharedLibrary
                 Dim deviceAuthorizationEndpoint As String = parts(0).Substring("device:".Length).Trim()
                 Dim deviceTokenEndpoint As String = parts(1).Trim()
                 Dim deviceResource As String = If(parts.Length >= 3, parts(2).Trim(), "")
+                deviceAuthorizationEndpoint = RequireMcpOAuthHttpsEndpoint(deviceAuthorizationEndpoint, "device_authorization_endpoint")
+                deviceTokenEndpoint = RequireMcpOAuthHttpsEndpoint(deviceTokenEndpoint, "token_endpoint")
 
                 Return Await RunDeviceAuthorizationFlowAsync(
                     clientId, clientSecret, deviceAuthorizationEndpoint,
@@ -278,6 +302,8 @@ Namespace SharedLibrary
             Dim authorizationEndpoint As String = parts(0).Trim()
             Dim authCodeTokenEndpoint As String = parts(1).Trim()
             Dim authCodeResource As String = If(parts.Length >= 3, parts(2).Trim(), "")
+            authorizationEndpoint = RequireMcpOAuthHttpsEndpoint(authorizationEndpoint, "authorization_endpoint")
+            authCodeTokenEndpoint = RequireMcpOAuthHttpsEndpoint(authCodeTokenEndpoint, "token_endpoint")
 
             ' Use OOB flow with https://localhost/callback (the redirect URI accepted at registration time).
             Return Await RunOobAuthorizationCodeFlowAsync(
@@ -428,6 +454,8 @@ Namespace SharedLibrary
         End Function
 
         Private Shared Async Function GetAuthorizationServerMetadataAsync(authorizationServer As String) As Task(Of JObject)
+            authorizationServer = RequireMcpOAuthHttpsEndpoint(authorizationServer, "authorization server")
+
             Dim candidates As New List(Of String) From {
                 authorizationServer.TrimEnd("/"c),
                 authorizationServer.TrimEnd("/"c) & "/.well-known/oauth-authorization-server",
@@ -480,6 +508,8 @@ Namespace SharedLibrary
                 registrationEndpoint As String,
                 redirectUri As String) As Task(Of JObject)
 
+            registrationEndpoint = RequireMcpOAuthHttpsEndpoint(registrationEndpoint, "registration_endpoint")
+
             Dim payload As New JObject From {
                 {"client_name", "Red Ink"},
                 {"application_type", "native"},
@@ -527,6 +557,9 @@ Namespace SharedLibrary
                 resource As String,
                 silent As Boolean) As Task(Of MCPProtectedResourceOAuthResult)
 
+            authorizationEndpoint = RequireMcpOAuthHttpsEndpoint(authorizationEndpoint, "authorization_endpoint")
+            tokenEndpoint = RequireMcpOAuthHttpsEndpoint(tokenEndpoint, "token_endpoint")
+
             Dim state As String = GenerateOAuthRandomValue()
             Dim codeVerifier As String = GenerateOAuthRandomValue()
             Dim codeChallenge As String = CreateOAuthCodeChallenge(codeVerifier)
@@ -558,7 +591,8 @@ Namespace SharedLibrary
             End If
 
             Using browserForm As New MCPOAuthBrowserForm(authUrl.ToString(), redirectUri)
-                Dim dlgResult As Windows.Forms.DialogResult = browserForm.ShowDialog()
+                Dim __safeDialogOwner561 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                Dim dlgResult As Windows.Forms.DialogResult = If(__safeDialogOwner561 IsNot Nothing, browserForm.ShowDialog(__safeDialogOwner561), browserForm.ShowDialog())
 
                 If dlgResult <> Windows.Forms.DialogResult.OK OrElse
                    String.IsNullOrWhiteSpace(browserForm.CapturedRedirectUrl) Then
@@ -650,6 +684,9 @@ Namespace SharedLibrary
                 resource As String,
                 silent As Boolean) As Task(Of MCPProtectedResourceOAuthResult)
 
+            deviceAuthorizationEndpoint = RequireMcpOAuthHttpsEndpoint(deviceAuthorizationEndpoint, "device_authorization_endpoint")
+            tokenEndpoint = RequireMcpOAuthHttpsEndpoint(tokenEndpoint, "token_endpoint")
+
             If String.IsNullOrWhiteSpace(clientId) Then
                 Throw New Exception("OAuth client_id is missing.")
             End If
@@ -699,6 +736,7 @@ Namespace SharedLibrary
                     Throw New Exception("OAuth device authorization response did not contain the required device_code or verification URI.")
                 End If
 
+                openUrl = RequireMcpOAuthHttpsEndpoint(openUrl, "verification_uri")
                 Process.Start(New ProcessStartInfo(openUrl) With {.UseShellExecute = True})
 
                 If String.IsNullOrWhiteSpace(verificationUriComplete) AndAlso
@@ -813,6 +851,9 @@ Namespace SharedLibrary
                 scope As String,
                 resource As String,
                 silent As Boolean) As Task(Of MCPProtectedResourceOAuthResult)
+
+            authorizationEndpoint = RequireMcpOAuthHttpsEndpoint(authorizationEndpoint, "authorization_endpoint")
+            tokenEndpoint = RequireMcpOAuthHttpsEndpoint(tokenEndpoint, "token_endpoint")
 
             If String.IsNullOrWhiteSpace(clientId) Then
                 Throw New Exception("OAuth client_id is missing.")

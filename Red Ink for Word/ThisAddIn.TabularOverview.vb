@@ -522,7 +522,8 @@ Partial Public Class ThisAddIn
             Dim selectedIsDirectory As Boolean = False
             Try
                 Using form As New DragDropForm(DragDropMode.FileOrDirectory)
-                    If form.ShowDialog() <> DialogResult.OK OrElse String.IsNullOrWhiteSpace(form.SelectedFilePath) Then
+                    Dim __safeDialogOwner525 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                    If If(__safeDialogOwner525 IsNot Nothing, form.ShowDialog(__safeDialogOwner525), form.ShowDialog()) <> DialogResult.OK OrElse String.IsNullOrWhiteSpace(form.SelectedFilePath) Then
                         Return
                     End If
                     selectedPath = form.SelectedFilePath.Trim()

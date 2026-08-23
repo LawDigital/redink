@@ -261,18 +261,23 @@ Partial Public Class ThisAddIn
         Catch
         End Try
 
-        Try
-            Dim policyRoot = SharedLibrary.Agents.PathPolicy.WorkspaceRoot
+        ' Do not fall back to PathPolicy.WorkspaceRoot here. WorkspaceTools.Active is the
+        ' authoritative permission-bearing state; using the mirrored path alone would allow
+        ' download_web_files to bypass a read-only workspace.
 
-            If Not String.IsNullOrWhiteSpace(policyRoot) AndAlso Directory.Exists(policyRoot) Then
-                Return Path.GetFullPath(policyRoot)
+        ' No explicit writable workspace: use the host-owned per-run staging root. This keeps
+        ' downloaded inputs/outputs inside the same bounded run area that ArtifactDelivery
+        ' observes and later publishes to Desktop\Inky\<timestamp>.
+        Try
+            Dim stagingRoot As String = SharedLibrary.Agents.PathPolicy.SessionStagingRoot
+            If Not String.IsNullOrWhiteSpace(stagingRoot) AndAlso Directory.Exists(stagingRoot) Then
+                Return Path.GetFullPath(stagingRoot)
             End If
         Catch
         End Try
 
         Throw New InvalidOperationException(
-            "No writable workspace is available for download_web_files. " &
-            "Connect a writable workspace first, or provide an explicit absolute target_directory.")
+            "No writable workspace or session staging area is available for download_web_files.")
     End Function
 
     Private Function ResolveDownloadTargetDirectory(requestedDirectory As String) As String
@@ -282,24 +287,27 @@ Partial Public Class ThisAddIn
             Return workspaceRoot
         End If
 
-        If Path.IsPathRooted(requestedDirectory) Then
-            Dim absoluteTarget = Path.GetFullPath(requestedDirectory)
-            Dim absoluteDir = Path.GetDirectoryName(absoluteTarget)
+        Dim root As String = GetSafeDownloadRoot()
 
-            If String.IsNullOrWhiteSpace(absoluteDir) Then
-                Throw New UnauthorizedAccessException("The absolute target_directory is invalid.")
+        If Path.IsPathRooted(requestedDirectory) Then
+            Dim absoluteTarget As String = Path.GetFullPath(requestedDirectory)
+
+            If Not absoluteTarget.Equals(root, StringComparison.OrdinalIgnoreCase) AndAlso
+               Not absoluteTarget.StartsWith(root & Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) Then
+
+                Throw New UnauthorizedAccessException(
+                    "Absolute target_directory is outside the active writable workspace/session staging root.")
             End If
 
             If Not Directory.Exists(absoluteTarget) Then Directory.CreateDirectory(absoluteTarget)
             Return absoluteTarget
         End If
 
-        Dim root As String = GetSafeDownloadRoot()
         Dim fullPath As String = Path.GetFullPath(Path.Combine(root, requestedDirectory))
 
         If Not fullPath.Equals(root, StringComparison.OrdinalIgnoreCase) AndAlso
            Not fullPath.StartsWith(root & Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) Then
-            Throw New UnauthorizedAccessException("Download target directory is outside the permitted workspace root.")
+            Throw New UnauthorizedAccessException("Download target directory is outside the permitted workspace/session staging root.")
         End If
 
         If Not Directory.Exists(fullPath) Then Directory.CreateDirectory(fullPath)

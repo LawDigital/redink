@@ -1305,7 +1305,8 @@ Partial Public Class ThisAddIn
 
         Try
             Using frm As New DragDropForm(DragDropMode.FileOnly)
-                If frm.ShowDialog() = DialogResult.OK Then
+                Dim __safeDialogOwner1308 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If If(__safeDialogOwner1308 IsNot Nothing, frm.ShowDialog(__safeDialogOwner1308), frm.ShowDialog()) = DialogResult.OK Then
                     Dim selectedPath As String = frm.SelectedFilePath
                     If File.Exists(selectedPath) AndAlso
                        Path.GetExtension(selectedPath).Equals(".docx", StringComparison.OrdinalIgnoreCase) Then

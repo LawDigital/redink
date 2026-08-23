@@ -13,11 +13,11 @@
 ' Security model:
 '   - Storage key is derived from the AUTHENTICATED inbound sender address and
 '     the conversation identity — never from user-supplied path input.
-'       {INI dir}/autopilot_users/{sanitized_email}/threads/{conversationKey}/
+'       {INI dir}/autopilot_users/{canonical_email_identity}/threads/{conversationKey}/
 '           files/       — retained inbound attachments
 '           meta.json    — DeleteAfterUtc / LastTouchedUtc / ConversationId / Subject
 '   - Cross-sender isolation: the folder is a deterministic function of the
-'     sender's SMTP address (SanitizeEmailToFolderName). A different sender maps
+'     sender's SMTP address through GetUserDir() (SHA-256-backed canonical identity). A different sender maps
 '     to a different folder and physically cannot read another sender's files.
 '   - Topic binding: files are only reloaded when the ConversationID (or, as a
 '     fallback, the normalized subject) matches, so an unrelated new mail from
@@ -371,7 +371,7 @@ Partial Public Class ThisAddIn
             If Not Directory.Exists(rootDir) Then Return
 
             Dim purged As Integer = 0
-            For Each userDir In Directory.GetDirectories(rootDir)
+            For Each userDir As String In EnumerateUserStorageDirectoriesForAdminAndMaintenance()
                 Dim threadsRoot = Path.Combine(userDir, AP_ThreadRetentionSubdir)
                 If Not Directory.Exists(threadsRoot) Then Continue For
 

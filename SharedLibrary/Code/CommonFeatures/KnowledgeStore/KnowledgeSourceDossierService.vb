@@ -1,4 +1,21 @@
-﻿Option Strict On
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: KnowledgeSourceDossierService.vb
+' Purpose:
+'   Maintains stable Knowledge Store source dossiers and deduplicated source
+'   blobs under the store wiki, returning durable references that other
+'   indexing and wiki services can link to.
+'
+' Architecture:
+'   Resolves source paths against the Knowledge Store root, hashes/copies the
+'   source into the configured blob folder, derives a stable dossier slug, and
+'   creates or reuses the corresponding Markdown dossier page. It is a shared
+'   persistence helper; retrieval/ranking and LLM processing live elsewhere.
+' =============================================================================
+
+Option Strict On
 Option Explicit On
 
 Imports System.IO

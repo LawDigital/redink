@@ -398,7 +398,7 @@ Partial Public Class ThisAddIn
 
                 ' Hits above threshold
                 Dim scoredHits = rawHits.Where(Function(r) r.Score >= Min_Score).ToList()
-                Dim hits As List(Of SearchResult)
+                Dim hits As New List(Of SearchResult)()
                 If scoredHits.Count > 0 Then
                     hits = scoredHits.Take(Top_K).ToList()
                 ElseIf Fallback Then
@@ -434,7 +434,7 @@ Partial Public Class ThisAddIn
 
                 ' Hits above threshold
                 Dim scoredHits = rawHits.Where(Function(r) r.Score >= Min_Score).ToList()
-                Dim hits As List(Of SearchResult)
+                Dim hits As New List(Of SearchResult)()
                 If scoredHits.Count > 0 Then
                     hits = scoredHits.Take(Top_K).ToList()
                 ElseIf Fallback Then

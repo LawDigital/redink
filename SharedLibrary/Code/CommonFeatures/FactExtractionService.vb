@@ -767,7 +767,25 @@ Namespace SharedLibrary
             If sortColumn > 0 Then SortAggregate(agg, sortColumn, sortDirection)
 
             If progressCallback IsNot Nothing Then
-                progressCallback(filePaths.Count, filePaths.Count, If(cancellationRequested IsNot Nothing AndAlso cancellationRequested(), "Cancelled.", "Completed."))
+                Dim finalStatus As String
+                If cancellationRequested IsNot Nothing AndAlso cancellationRequested() Then
+                    finalStatus = $"Cancelled: {agg.ProcessedFiles}/{filePaths.Count} file(s) extracted."
+                ElseIf agg.FailedFiles = 0 Then
+                    finalStatus = $"Completed: {agg.ProcessedFiles}/{filePaths.Count} file(s) extracted successfully."
+                Else
+                    Dim failureDetails As New System.Collections.Generic.List(Of String)()
+                    For Each failedName In agg.FailedFileNames.Take(3)
+                        Dim reason As String = Nothing
+                        If agg.FailedFileReasons IsNot Nothing Then
+                            agg.FailedFileReasons.TryGetValue(failedName, reason)
+                        End If
+                        If String.IsNullOrWhiteSpace(reason) Then reason = "UNKNOWN"
+                        failureDetails.Add($"{failedName}: {reason}")
+                    Next
+                    Dim suffix As String = If(agg.FailedFiles > failureDetails.Count, $"; +{agg.FailedFiles - failureDetails.Count} more", "")
+                    finalStatus = $"Completed: {agg.ProcessedFiles}/{filePaths.Count} file(s) extracted; {agg.FailedFiles} failed ({String.Join("; ", failureDetails)}{suffix})."
+                End If
+                progressCallback(filePaths.Count, filePaths.Count, finalStatus)
             End If
 
             Return agg

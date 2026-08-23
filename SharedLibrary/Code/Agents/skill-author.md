@@ -1,6 +1,6 @@
-﻿---
+---
 name: skill-author
-description: Runs in Word or Outlook Local Chat to draft, review, revise, convert, and diagnose Red Ink skills and agents for Word, Outlook Local Chat, and Outlook AutoPilot using host-verified tools and disciplined resource handling.
+description: Runs in Word or Outlook Local Chat to draft, review, revise, convert, diagnose, and explain how to author Red Ink skills, agents, and recipe-backed resource packages (including reference/design resources) for Word, Outlook Local Chat, and Outlook AutoPilot using host-verified tools and disciplined resource handling.
 allowed-tools:
   - text_read
   - text_write
@@ -22,7 +22,7 @@ model: agentdefaultmodel
 
 # Skill Author
 
-Use this skill to CREATE, REVISE, REVIEW, CONVERT, or DIAGNOSE Red Ink skills and agents so they run
+Use this skill to CREATE, REVISE, REVIEW, CONVERT, DIAGNOSE, or EXPLAIN HOW TO AUTHOR Red Ink skills, agents, and recipe-backed resource packages so they run
 reliably in the tooling loops. **This skill itself executes only in interactive Word and Outlook Local
 Chat.** It may author resources targeting any of the three tooling surfaces, including Outlook AutoPilot,
 and is the authority on how those target surfaces differ.
@@ -32,15 +32,18 @@ and is the authority on how those target surfaces differ.
 - **Purpose:** produce or repair a skill/agent resource that only references host-verified tools,
   knows which host it is running on, blocks cleanly on incompatible hosts, and manages its output
   files so the user is never left guessing which file is final.
-- **Inputs:** the user's request (new resource, revision, review, or conversion of a Claude/other
-  skill), the target host(s), and — for edits/conversions — the exact existing file.
+- **Inputs:** the user's request (new resource, revision, synchronization, review, conversion of a Claude/other
+  skill, or a how-to question), the target host(s), and — for edits/conversions — the exact existing file.
 - **Output:** the written resource(s) at exact absolute paths, plus a one-line confirmation and a
-  short summary of what changed and why. When not writing, a concise patch plan.
+  short summary of what changed and why. When not writing, a concise patch plan or copy/paste-ready authoring instructions.
 
 ### Foundation design contract
 
 When this skill authors or revises a resource for this foundation, preserve these cross-cutting rules unless the user explicitly requests a different architecture:
 
+- **Tool dependency semantics:** for agents, frontmatter `allowed-tools` means hard runtime dependencies. Use `optional-tools` for host/config-dependent capabilities that improve the worker but whose absence must not block the sub-agent. Never make `python_execute` a standard dependency; it exists only when the external Python helper is installed/configured.
+- **Interaction ownership:** `ask_user` belongs to an interactive parent skill/orchestrator, never to a sub-agent. Author parent skills to call it only when advertised; AutoPilot and other non-interactive runs must surface the minimum clarification requirement without calling it.
+- **Sub-agent call contract:** every authored parent workflow that invokes an `agent_<name>` must supply stable `subagent_task_id` and `expected_artifacts` on every invocation. Use `expected_artifacts: []` for non-file-producing workers.
 - **Context safety:** keep the parent context compact. Large-document reduction, bounded research, comparison, requirement checking, row extraction, and other source-heavy work should be delegated to the appropriate isolated agent when available rather than dumping raw source material into the parent.
 - **Bounded research:** research one concrete unresolved question at a time, prefer authoritative/primary sources, reassess after each round, and stop when additional retrieval is unlikely to change the answer materially.
 - **Bounded mutation recovery:** exact-anchor document edits get one initial attempt plus at most two recovery attempts per logical operation. Once unresolved, do not reopen the same logical edit in the parent. Host-side circuit breakers may enforce stricter limits.
@@ -114,6 +117,14 @@ and must branch on the resolved value — not on assumptions.
 
 ## 3. Compatibility gating (block, don't fail messily)
 
+For **agents**, distinguish required and optional capabilities explicitly:
+
+- `allowed-tools`: every listed tool is a hard dependency; the host may block the isolated run if any required exact tool is absent.
+- `optional-tools`: the host includes only names that exist in the authoritative registry snapshot; missing optional tools are ignored.
+- Put host-specific source access (`m365_*`, attachment-only tools, `agent_workspace_*`) and configuration-dependent helpers such as `js_run` under `optional-tools` unless the agent genuinely cannot perform its defined job without them.
+- Do not use `python_execute` as a generic fallback.
+
+
 If a skill uses a tool that exists on only some hosts, it MUST check availability and block cleanly
 when the host cannot support it, instead of calling a tool that isn't there.
 
@@ -182,6 +193,56 @@ Before chaining tools, verify the artifact each step *produces* is the represent
 and that it survives into the next turn. Add an explicit bridge (save/copy/register) when needed, or
 do not author the chain. Confirm with `tool_describe` when uncertain.
 
+
+## 5a. Resource-specific authoring recipes (generic extension mechanism)
+
+The core skill-author must remain resource-agnostic. Resource-specific creation, compilation,
+synchronization, migration, expert-review, sample-library, or reference-package conventions belong
+in this skill's own `references/` directory, not as hard-coded branches in the generic workflow.
+
+When creating, revising, synchronizing, reviewing, or explaining how to maintain a resource:
+
+1. Inspect this skill's `resource_index` for its own reference files. If `authoring_recipes.json` is
+   available, read it before drafting the change. Do not guess or invent a recipe path.
+2. Match the target resource and requested operation against that registry. A recipe may match a
+   particular resource name/type or another explicit registry condition.
+3. If exactly one recipe matches, read its referenced instruction file and apply it as an extension
+   of this SKILL.md. The recipe may define derived artifacts, synchronization rules, review mirrors,
+   stable-id policies, validation, sample disclaimers, multilingual conventions, or package structure.
+4. If no recipe matches, use the generic authoring workflow in this skill. If multiple recipes match
+   materially and the registry does not define precedence, stop and resolve the ambiguity rather
+   than combining incompatible recipes.
+5. A recipe may **narrow or specialize** authoring behavior, but it may not override host/tool
+   availability, author-mode permissions, safe-failure, real-file finalization, or other foundation
+   safety contracts in this SKILL.md.
+6. Keep resource-specific names, schemas and transformation logic in the recipe/reference files.
+   Do not add a new hard-coded branch to this core skill merely because one resource family needs a
+   special authoring process.
+7. Treat maintainer-only HTML comments in sample/reference Markdown as non-runtime metadata. Preserve
+   them when revising a package unless the user asks to remove them, but do not compile them into
+   executable JSON, user-facing prompts, reports, actions, or runtime explanations.
+
+This mechanism is also the preferred place for future resource-specific authoring adapters.
+
+## 5b. How-to / command guidance mode
+
+When the user asks **how to proceed**, **what to type**, **which command/prompt to enter**, **which
+files to give Red Ink**, or **how an expert revision should be fed back**, answer that question
+without modifying resources unless the user also explicitly asks for the change.
+
+1. Resolve the applicable recipe under Section 5a and read the target resource's README/reference
+   authoring guidance when available.
+2. Explain the simplest supported Red Ink workflow in ordinary language. Prefer the human-readable
+   source-first path over manual JSON editing whenever the recipe supports it.
+3. Give one or more short, copy/paste-ready natural-language prompts the user can enter in Word or
+   Outlook Local Chat. These are user prompts, not internal tool calls.
+4. State which source file(s) should be attached or made available, what Red Ink will update, and
+   which human-readable file the expert should review.
+5. For synchronization, make clear whether stable ids are preserved, what is regenerated, and when
+   Red Ink must ask a subject-matter question instead of guessing.
+6. Do not require users to understand or hand-edit generated JSON merely because the runtime package
+   uses JSON internally.
+
 ## 6. Converting Claude / foreign skills to this platform
 
 When asked to convert an existing (e.g. Claude) SKILL.md, or to check whether a skill needs adapting:
@@ -189,8 +250,9 @@ When asked to convert an existing (e.g. Claude) SKILL.md, or to check whether a 
 1. Read the source with `text_read`.
 2. **Map every tool** it references to a real Red Ink tool via `Red_Ink_Tool_List.md`. Foreign tool
    names (bash, filesystem, code execution, web fetch, etc.) rarely exist here — replace them with
-   verified equivalents (`js_run`/`python_execute` for computation, `file_*`/`text_*`/`workspace_*`
-   for files, the web tools for retrieval) or remove the capability and note the loss.
+   verified equivalents (`js_run` for deterministic computation when it is actually advertised; `file_*`/`text_*`/`workspace_*`
+   for files; the web tools for retrieval) or remove the capability and note the loss. Do not assume
+   `python_execute`: it is available only when the external Python helper is installed/configured.
 3. **Rewrite the frontmatter** to this schema (Section 7); drop unsupported keys; set `allowed-tools`
    to verified names only.
 4. **Add host resolution + compatibility gating** (Sections 2–3) if the converted workflow uses any
@@ -206,7 +268,8 @@ When asked to convert an existing (e.g. Claude) SKILL.md, or to check whether a 
 
 - `name`: unique resource name (kebab-case).
 - `description`: one concise sentence used in the skill/agent listing.
-- `allowed-tools`: list of registered tool names (verified against `Red_Ink_Tool_List.md`).
+- `allowed-tools`: list of registered tool names. For agents these are hard execution dependencies; for skills they define the permitted/declarable helper surface.
+- `optional-tools` (agents only, optional): host/config-dependent registered tool names that may be used when present but whose absence must not block the isolated run.
 - `model` (optional): a special-task-model key, e.g. `agentdefaultmodel` or `researchmodel`.
 - `network` (optional, default false): opt-in for tools that touch the network (`js_run` with navigation, web tools).
 - `timeout` (optional): seconds; 0 = default.
@@ -214,6 +277,38 @@ When asked to convert an existing (e.g. Claude) SKILL.md, or to check whether a 
 
 Never add `enabled: false` on your own initiative. A disabled resource stays on disk and editable in
 "Manage Skills & Agents" but is not offered to the model until re-enabled.
+
+### 7a. Dependency declaration contract — make every skill runnable on its own
+
+A skill's `allowed-tools` is an **execution dependency contract**, not documentation decoration. When
+authoring or revising a skill, derive this list from the workflow and declare every helper the skill may
+need on any supported host. This is especially important for Outlook AutoPilot sender policies using
+`ONLY skill_<name>`: the host may retain only the named skill plus helpers declared here.
+
+Binding rules:
+
+- If the skill reads any text/JSON/Markdown file under `references/` or `scripts/`, include `text_read`.
+- If the skill may ask a live user for outcome-determinative information in Word or Outlook Local Chat,
+  include `ask_user` and author an explicit unattended AutoPilot branch that does **not** call it.
+- If the skill creates or finalizes a user-facing file, include the actual create/save/export/finalizer tool
+  that proves the file exists (for example `word_apply_template`, `word_save_as`, or the relevant
+  create/export tool). Do not rely on prose or a helper agent to create the final file.
+- If the skill reads attachments, active Word content, workspace files, or performs deterministic
+  computation, include the exact corresponding tools it actually uses.
+- Dynamic `agent_*` helpers may be declared when useful, but a user-facing skill must remain capable of
+  completing its **core workflow without an optional agent** unless the user explicitly requested an
+  agent-dependent architecture. Put the fallback behavior in the skill body.
+- Never add broad unused helper families merely 'just in case'. Verify every declared static tool for each
+  target host. Host-unavailable optional tools may remain in a multi-host skill only when the skill gates
+  their use by resolved host/tool availability.
+- For a skill intended for `ONLY skill_<name>` AutoPilot use, test that the skill itself is selected for the
+  AutoPilot session and that every **required AutoPilot helper** is both declared in `allowed-tools` and
+  available on AutoPilot. The sender policy narrows an existing authorized session; it must not be treated
+  as a way to enable an otherwise unselected skill or external service.
+
+Before writing a skill, make a compact dependency table internally: `workflow step -> tool -> host ->
+required/optional`. Use it to build the smallest complete `allowed-tools` list. During review, a missing
+required helper is a blocking defect because the skill may load successfully yet be unable to execute.
 
 ## 8. Runtime contract & safe failure
 
@@ -383,10 +478,11 @@ call `tool_loader` again later in the same run.
    immediately if author mode is off.
 2. Read `Red_Ink_Tool_List.md`; verify every intended tool for every target host; compare overlaps
    with `tool_describe`.
-3. For edits/conversions, read the exact existing file first (Section 12 / Section 6).
+3. For edits/conversions, read the exact existing file first (Section 12 / Section 6). For any create/revise/sync/review/how-to operation, also resolve and read an applicable resource-specific authoring recipe under Section 5a before drafting or advising.
 4. Draft/revise the body with: purpose, inputs, target host(s), host resolution + compatibility
    gating, workflow, tool usage, file/output management (single final output), output format,
-   limitations/safe-failure.
+   limitations/safe-failure. Build the Section 7a dependency table and make `allowed-tools` the smallest
+   complete set that lets the skill execute its own core workflow on every claimed host.
 5. Validate deterministically with `js_run` where useful.
 6. Write NEW resources to an absolute path under `new_resource_root`; edit EXISTING resources at their
    exact `file` path. Ensure required `references/`/`scripts/` assets exist (binaries via `file_*`).
@@ -408,12 +504,16 @@ call `tool_loader` again later in the same run.
    no relative `.inky` paths.
 10. Required `references/`/`scripts/` assets exist; binaries via `file_*`, not `text_write`.
 11. Frontmatter valid; `name` unique/kebab-case; `description` one sentence; `enabled:false` only on
-    explicit request.
+    explicit request. `allowed-tools` satisfies the Section 7a dependency contract: references have their
+    reader, interactive clarification has `ask_user`, real outputs have a finalizer, and optional agents are
+    not the sole implementation of the core workflow.
 12. Task-status footer contract and safe-failure behavior included; completion reflects the user task.
 13. File-producing workflows create/finalize a real output; Word-return flows finalize after the last mutation; no model-visible host registry/delivery state is invented.
 14. Context-heavy work is delegated/compacted appropriately; research and edit retries are bounded.
 15. New review metadata defaults to author/reviewer `Inky` unless the user overrides it.
-16. For consequential architecture changes, consider an isolated `agent_advisor` second pass when available; never use it as a substitute for host/tool verification.
+16. Applicable resource-specific authoring recipe resolved and followed; resource-specific logic remains in references rather than being hard-coded into this generic skill.
+17. For how-to questions, provide copy/paste-ready natural-language prompts and required inputs without changing files unless requested.
+18. For consequential architecture changes, consider an isolated `agent_advisor` second pass when available; never use it as a substitute for host/tool verification.
 
 ## 15. Output format
 
@@ -422,3 +522,12 @@ absolute path created/changed and whether it went to the local or central root. 
 final response with a one-line confirmation, e.g.
 "Applied skill-author: converted Claude skill 'deadline-calc' to run on Word + Outlook Local Chat."
 
+
+
+## Orchestrator compatibility
+
+- Use `ask_user` only when it is actually advertised and the current run is interactive. Ask one material question per call where the workflow requires incremental clarification. In AutoPilot or any non-interactive run, do not call `ask_user`; return/send the minimum concrete clarification needed or mark the affected branch blocked instead of guessing.
+- Do not assume `python_execute` exists. The Python helper is installation-dependent and is not a standard foundation capability. Use deterministic host tools or configured scripts that are actually advertised; never substitute model-estimated computation for a missing deterministic tool.
+- The parent skill owns end-user interaction. Sub-agents must receive a bounded task and must not be expected to ask the user.
+- Every `agent_<name>` call must include a stable opaque `subagent_task_id` for that logical delegated task and `expected_artifacts`. Use `expected_artifacts: []` for analysis-only workers. If a delegated file-producing task is expected, pass the complete opaque artifact contract required by the host before the run; do not invent or broaden artifact identities later.
+- Treat an agent's missing optional host capability as a reason to adapt the bounded task or return a limitation, not as permission to bypass the selected workflow.

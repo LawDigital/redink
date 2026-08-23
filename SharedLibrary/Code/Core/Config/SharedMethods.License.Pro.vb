@@ -830,7 +830,12 @@ Namespace SharedLibrary
                                                  End If
                                              End Sub
 
-                form.ShowDialog()
+                Dim __safeDialogOwner833 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If __safeDialogOwner833 IsNot Nothing Then
+                    form.ShowDialog(__safeDialogOwner833)
+                Else
+                    form.ShowDialog()
+                End If
                 Return dialogResult
             End Using
         End Function

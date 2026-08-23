@@ -249,9 +249,7 @@ Partial Public Class ThisAddIn
                 End If
 
                 ' ── Register as output file for attachment to reply ──
-                If _apCurrentAttachments IsNot Nothing AndAlso _apCurrentAttachments.Count > 0 Then
-                    _apCurrentAttachments(0).OutputFiles.Add(savedImagePath)
-                End If
+                RegisterAutoPilotGeneratedOutputFile(savedImagePath)
 
                 Dim finalFileName = Path.GetFileName(savedImagePath)
                 Dim sizeKb = New FileInfo(savedImagePath).Length / 1024
@@ -1029,7 +1027,9 @@ Partial Public Class ThisAddIn
                     End If
                     response.Success = False
                     response.Response = errMsg
-                    ApDashboardLog($"⚠ Fact extraction returned no data", "warn")
+                    ' The shared extraction service already emitted one compact final status line
+                    ' with processed/failed counts and structured failure reason(s). Avoid a second,
+                    ' generic dashboard warning that would duplicate and obscure that diagnosis.
                     Return response
                 End If
 
@@ -1467,9 +1467,19 @@ Partial Public Class ThisAddIn
             Return task.CreatedBy.Trim().Equals(ownerAddress.Trim(), StringComparison.OrdinalIgnoreCase)
         End If
 
-        Return task.DeliverTo IsNot Nothing AndAlso
-            task.DeliverTo.Any(Function(addr) Not String.IsNullOrWhiteSpace(addr) AndAlso
-                                             addr.Trim().Equals(ownerAddress.Trim(), StringComparison.OrdinalIgnoreCase))
+        ' Legacy tasks created before CreatedBy existed are only user-addressable when
+        ' exactly one distinct non-empty recipient proves an unambiguous owner. A
+        ' multi-recipient legacy task must be repaired by the local administrator;
+        ' otherwise any recipient could claim another user's scheduled workspace.
+        Dim legacyRecipients As List(Of String) =
+            If(task.DeliverTo, New List(Of String)()).
+                Where(Function(addr) Not String.IsNullOrWhiteSpace(addr)).
+                Select(Function(addr) addr.Trim()).
+                Distinct(StringComparer.OrdinalIgnoreCase).
+                ToList()
+
+        Return legacyRecipients.Count = 1 AndAlso
+               legacyRecipients(0).Equals(ownerAddress.Trim(), StringComparison.OrdinalIgnoreCase)
     End Function
 
     Private Function FindOwnedScheduledTask(idOrQuery As String, ownerAddress As String) As ScheduledTask

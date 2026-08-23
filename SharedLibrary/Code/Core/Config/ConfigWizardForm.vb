@@ -43,6 +43,14 @@ Namespace SharedLibrary
     Public Class ConfigWizardForm
         Inherits Form
 
+        Protected Overrides Sub OnShown(e As System.EventArgs)
+            MyBase.OnShown(e)
+            Me.TopMost = True
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(Me)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(Me)
+        End Sub
+
+
         Private ReadOnly _context As ISharedContext
         Private ReadOnly _definition As WizardDefinition
         Private _iniPath As String

@@ -31,6 +31,14 @@ Namespace Transcription
     Public Class TranscriptionOptionsDialog
         Inherits Form
 
+        Protected Overrides Sub OnShown(e As System.EventArgs)
+            MyBase.OnShown(e)
+            Me.TopMost = True
+            SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(Me)
+            SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(Me)
+        End Sub
+
+
         Private Class NamedValueItem
             Public Property Name As String
             Public Property Value As String

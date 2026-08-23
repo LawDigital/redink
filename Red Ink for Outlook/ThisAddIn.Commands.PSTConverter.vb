@@ -252,7 +252,8 @@ Partial Public Class ThisAddIn
                 fbd.SelectedPath = desktopPath
             End If
 
-            If fbd.ShowDialog() <> DialogResult.OK Then
+            Dim __safeDialogOwner255 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            If If(__safeDialogOwner255 IsNot Nothing, fbd.ShowDialog(__safeDialogOwner255), fbd.ShowDialog()) <> DialogResult.OK Then
                 Return Nothing
             End If
 
@@ -321,7 +322,8 @@ Partial Public Class ThisAddIn
             ofd.Title = "Select a PST File"
             ofd.Multiselect = False
 
-            If ofd.ShowDialog() <> DialogResult.OK Then
+            Dim __safeDialogOwner324 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            If If(__safeDialogOwner324 IsNot Nothing, ofd.ShowDialog(__safeDialogOwner324), ofd.ShowDialog()) <> DialogResult.OK Then
                 Return Nothing
             End If
 

@@ -133,7 +133,8 @@ Partial Public Class ThisAddIn
 
         Try
             Using form As New DragDropForm(DragDropMode.FileOnly)
-                If form.ShowDialog() <> DialogResult.OK Then
+                Dim __safeDialogOwner136 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If If(__safeDialogOwner136 IsNot Nothing, form.ShowDialog(__safeDialogOwner136), form.ShowDialog()) <> DialogResult.OK Then
                     Return
                 End If
 
@@ -906,7 +907,8 @@ Partial Public Class ThisAddIn
                     Dim selectedFile As String = ""
 
                     Using frm As New DragDropForm(DragDropMode.FileOnly)
-                        If frm.ShowDialog() = DialogResult.OK Then
+                        Dim __safeDialogOwner909 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                        If If(__safeDialogOwner909 IsNot Nothing, frm.ShowDialog(__safeDialogOwner909), frm.ShowDialog()) = DialogResult.OK Then
                             selectedFile = frm.SelectedFilePath
                         End If
                     End Using
@@ -974,7 +976,8 @@ Partial Public Class ThisAddIn
                     Dim selectedDir As String = ""
 
                     Using frm As New DragDropForm(DragDropMode.DirectoryOnly)
-                        If frm.ShowDialog() = DialogResult.OK Then
+                        Dim __safeDialogOwner977 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                        If If(__safeDialogOwner977 IsNot Nothing, frm.ShowDialog(__safeDialogOwner977), frm.ShowDialog()) = DialogResult.OK Then
                             selectedDir = frm.SelectedFilePath
                         End If
                     End Using
@@ -2794,7 +2797,12 @@ SkipPromptInput:
 
             If String.Equals(OtherPrompt.Trim(), "kbstore", StringComparison.OrdinalIgnoreCase) Then
                 Using frm As New KnowledgeStoreForm(_context)
-                    frm.ShowDialog()
+                    Dim __safeDialogOwner2797 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                    If __safeDialogOwner2797 IsNot Nothing Then
+                        frm.ShowDialog(__safeDialogOwner2797)
+                    Else
+                        frm.ShowDialog()
+                    End If
                 End Using
                 Return
             End If
@@ -3255,7 +3263,8 @@ SkipPromptInput:
             ' Select cloud text-to-speech voices (multi-voice mode)
             If OtherPrompt.StartsWith("voices2", StringComparison.OrdinalIgnoreCase) Then
                 Using frm As New TTSSelectionForm("Select the voices you wish to use.", $"{AN} Text-to-Speech - Select Voices", True)
-                    If frm.ShowDialog() = DialogResult.OK Then
+                    Dim __safeDialogOwner3258 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                    If If(__safeDialogOwner3258 IsNot Nothing, frm.ShowDialog(__safeDialogOwner3258), frm.ShowDialog()) = DialogResult.OK Then
                         Dim selectedVoices As List(Of String) = frm.SelectedVoices
                         Dim outputPath As String = frm.SelectedOutputPath
                         If selectedVoices.Count > 0 Then
@@ -3280,7 +3289,8 @@ SkipPromptInput:
             ' Select cloud text-to-speech voices (single-voice mode)
             If String.Equals(OtherPrompt.Trim(), "voices", StringComparison.OrdinalIgnoreCase) Then
                 Using frm As New TTSSelectionForm("Select the voices you wish to use.", $"{AN} Text-to-Speech - Select Voices", False)
-                    If frm.ShowDialog() = DialogResult.OK Then
+                    Dim __safeDialogOwner3283 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                    If If(__safeDialogOwner3283 IsNot Nothing, frm.ShowDialog(__safeDialogOwner3283), frm.ShowDialog()) = DialogResult.OK Then
                         Dim selectedVoices As List(Of String) = frm.SelectedVoices
                         Dim outputPath As String = frm.SelectedOutputPath
                         If selectedVoices.Count > 0 Then

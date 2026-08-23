@@ -473,6 +473,17 @@ Partial Public Class ThisAddIn
                 Select(Function(g) g.First()).
                 ToList()
 
+        Dim routingManifests As List(Of SharedLibrary.Agents.ToolManifest) = Nothing
+        If allowedRegistry IsNot Nothing Then
+            routingManifests = allowedRegistry.ListManifests().
+                Where(Function(m) m IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(m.Name)).
+                ToList()
+            Dim capabilityRouter As ModelConfig = SharedLibrary.Agents.CapabilityRoutingTool.Build(routingManifests)
+            If capabilityRouter IsNot Nothing Then
+                result.Add(capabilityRouter)
+            End If
+        End If
+
         If Not SharedLibrary.Agents.ToolLoaderTool.ShouldUseLazyLoading(deduplicatedTools) Then
             result.AddRange(deduplicatedTools)
             Return result

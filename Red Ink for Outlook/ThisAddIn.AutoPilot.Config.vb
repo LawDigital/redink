@@ -529,7 +529,8 @@ Partial Public Class ThisAddIn
                             resetChecked:=False,
                             preselectMany:=previousToolNames,
                             instruction:=$"Select the optional {Globals.ThisAddIn.ToolFriendlyName.ToLower} to enable for AutoPilot:")
-                            If dlg.ShowDialog() = DialogResult.OK Then
+                            Dim __safeDialogOwner532 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                            If If(__safeDialogOwner532 IsNot Nothing, dlg.ShowDialog(__safeDialogOwner532), dlg.ShowDialog()) = DialogResult.OK Then
                                 config.SelectedExternalTools = dlg.SelectedModels
                             End If
                         End Using
