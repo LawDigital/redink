@@ -33,9 +33,12 @@
 '      * Attachment-based category classification (text/light/heavy-doc/heavy-pdf).
 '      * Rolling timing estimates and queue position notifications for delayed jobs.
 '      * Active-job progress notifications for long-running tool executions.
+'      * Voicemail preprocessing treats empty/unusable transcription output as a failed contract and always notifies a mapped caller.
+'      * AutoPilot tooling runs archive the latest 50 logical run bundles under %APPDATA%\RedInk\autopilot-logs.
 '  - Tooling integration:
 '      * Uses existing `ExecuteToolingLoop` and AutoPilot internal tools.
 '      * Supports per-mail `#model:` override with tooling-capability checks.
+'      * Archives the most recent AutoPilot tooling runs under `%APPDATA%\RedInk\autopilot-logs`.
 '  - Reply handling:
 '      * Sends HTML replies with optional generated attachments.
 '      * Optional approval dialog and "Sources used" footer.
@@ -50,7 +53,8 @@
 '  - Voicemail processing:
 '      * When enabled, incoming voicemails are identified by sender address,
 '        transcribed via the model's audio capability, and processed as instructions.
-'        Responses are delivered to the mapped e-mail address from the caller ID CSV.
+'        Empty/unusable transcription output generates a user-facing failure notice instead of
+'        silently abandoning the voicemail. Responses are delivered to the mapped e-mail address from the caller ID CSV.
 '
 ' Security Model for Attachments:
 '  - Per-mail isolated temp directory under `%TEMP%` (GUID-based).
@@ -112,6 +116,144 @@ Partial Public Class ThisAddIn
     Private Const AP_DefaultMaxRepliesPerSession As Integer = 200
     Private Const AP_DefaultMaxAttachmentBytes As Long = 10 * 1024 * 1024
     Private Const AP_TempPrefix As String = AN2 & "_autopilot_"
+
+
+    ''' <summary>Maximum number of archived unattended AutoPilot tooling logs retained per user profile.</summary>
+    Private Const AP_ToolingLogArchiveRetentionCount As Integer = 50
+
+    ''' <summary>Maximum filename segment length used for user/subject labels in archived tooling logs.</summary>
+    Private Const AP_ToolingLogArchiveSegmentMaxLength As Integer = 80
+
+    ''' <summary>
+    ''' Builds a per-run AutoPilot tooling-log archive path under the current user's roaming AppData.
+    ''' The sortable timestamp is first, followed by sanitized user and subject labels. Old archives
+    ''' are pruned before the new run so that at most 50 completed/current run bundles remain.
+    ''' Failure to prepare the archive is non-fatal and returns <c>Nothing</c>.
+    ''' </summary>
+    Private Function BuildAutoPilotToolingLogArchivePath(userLabel As String,
+                                                         subjectLabel As String) As String
+        Try
+            Dim appDataRoot As String =
+                System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData)
+            If String.IsNullOrWhiteSpace(appDataRoot) Then Return Nothing
+
+            Dim archiveDirectory As String =
+                System.IO.Path.Combine(appDataRoot, "RedInk", "autopilot-logs")
+            If Not System.IO.Directory.Exists(archiveDirectory) Then
+                System.IO.Directory.CreateDirectory(archiveDirectory)
+            End If
+
+            PruneAutoPilotToolingLogArchives(archiveDirectory, AP_ToolingLogArchiveRetentionCount - 1)
+
+            Dim safeUser As String = SanitizeAutoPilotToolingLogFileSegment(userLabel, "unknown-user")
+            Dim safeSubject As String = SanitizeAutoPilotToolingLogFileSegment(subjectLabel, "no-subject")
+            Dim stamp As String = System.DateTime.Now.ToString("yyyyMMdd_HHmmss_fff", Globalization.CultureInfo.InvariantCulture)
+            Dim baseName As String = $"{stamp}__{safeUser}__{safeSubject}"
+            Dim candidate As String = System.IO.Path.Combine(archiveDirectory, baseName & "__Tooling.txt")
+
+            If System.IO.File.Exists(candidate) Then
+                candidate = System.IO.Path.Combine(
+                    archiveDirectory,
+                    baseName & "__" & System.Guid.NewGuid().ToString("N").Substring(0, 8) & "__Tooling.txt")
+            End If
+
+            Return candidate
+        Catch ex As System.Exception
+            ApDashboardLog("AutoPilot tooling-log archive unavailable: " & ex.Message, "warn")
+            Return Nothing
+        End Try
+    End Function
+
+    ''' <summary>Normalizes a human-readable value so it is safe and bounded inside a Windows filename.</summary>
+    Private Shared Function SanitizeAutoPilotToolingLogFileSegment(value As String,
+                                                                   fallbackValue As String) As String
+        Dim text As String = If(value, "").Trim()
+        If String.IsNullOrWhiteSpace(text) Then text = fallbackValue
+
+        Dim invalidChars As System.Collections.Generic.HashSet(Of Char) =
+            New System.Collections.Generic.HashSet(Of Char)(System.IO.Path.GetInvalidFileNameChars())
+        Dim sb As New System.Text.StringBuilder(text.Length)
+
+        For Each ch As Char In text
+            If invalidChars.Contains(ch) OrElse System.Char.IsControl(ch) Then
+                sb.Append("_"c)
+            ElseIf System.Char.IsWhiteSpace(ch) Then
+                sb.Append("_"c)
+            Else
+                sb.Append(ch)
+            End If
+        Next
+
+        Dim normalized As String = System.Text.RegularExpressions.Regex.Replace(sb.ToString(), "_+", "_").Trim("_"c, "."c)
+        If String.IsNullOrWhiteSpace(normalized) Then normalized = fallbackValue
+        If normalized.Length > AP_ToolingLogArchiveSegmentMaxLength Then
+            normalized = normalized.Substring(0, AP_ToolingLogArchiveSegmentMaxLength).TrimEnd("_"c, "."c)
+        End If
+        Return normalized
+    End Function
+
+    ''' <summary>
+    ''' Best-effort retention cleanup for AutoPilot tooling-log archives. Retention counts logical
+    ''' runs, not files: a run consists of its __Tooling log plus any companion __SubAgent_Returns log.
+    ''' </summary>
+    Private Shared Sub PruneAutoPilotToolingLogArchives(archiveDirectory As String,
+                                                        keepExistingRunCount As Integer)
+        Try
+            Dim keepCount As Integer = System.Math.Max(0, keepExistingRunCount)
+            Dim existingFiles As System.Collections.Generic.List(Of System.IO.FileInfo) =
+                New System.IO.DirectoryInfo(archiveDirectory).
+                    GetFiles("*.txt", System.IO.SearchOption.TopDirectoryOnly).
+                    OrderByDescending(Function(fileInfo) fileInfo.Name, System.StringComparer.OrdinalIgnoreCase).
+                    ThenByDescending(Function(fileInfo) fileInfo.LastWriteTimeUtc).
+                    ToList()
+
+            Dim runGroups As New System.Collections.Generic.Dictionary(Of String, System.Collections.Generic.List(Of System.IO.FileInfo))(System.StringComparer.OrdinalIgnoreCase)
+            For Each fileInfo As System.IO.FileInfo In existingFiles
+                Dim runKey As String = GetAutoPilotToolingLogRunKey(fileInfo.Name)
+                Dim group As System.Collections.Generic.List(Of System.IO.FileInfo) = Nothing
+                If Not runGroups.TryGetValue(runKey, group) Then
+                    group = New System.Collections.Generic.List(Of System.IO.FileInfo)()
+                    runGroups(runKey) = group
+                End If
+                group.Add(fileInfo)
+            Next
+
+            Dim orderedRuns As System.Collections.Generic.List(Of System.Collections.Generic.KeyValuePair(Of String, System.Collections.Generic.List(Of System.IO.FileInfo))) =
+                runGroups.
+                    OrderByDescending(Function(pair) pair.Key, System.StringComparer.OrdinalIgnoreCase).
+                    ToList()
+
+            For runIndex As Integer = keepCount To orderedRuns.Count - 1
+                For Each fileInfo As System.IO.FileInfo In orderedRuns(runIndex).Value
+                    Try
+                        fileInfo.Delete()
+                    Catch
+                    End Try
+                Next
+            Next
+        Catch
+            ' Retention is best-effort and must never block AutoPilot execution.
+        End Try
+    End Sub
+
+    ''' <summary>Returns the shared sortable run prefix for a tooling/sub-agent archive filename.</summary>
+    Private Shared Function GetAutoPilotToolingLogRunKey(fileName As String) As String
+        Dim stem As String = System.IO.Path.GetFileNameWithoutExtension(If(fileName, ""))
+        If String.IsNullOrWhiteSpace(stem) Then Return ""
+
+        Const toolingSuffix As String = "__Tooling"
+        Const subAgentSuffix As String = "__SubAgent_Returns"
+
+        If stem.EndsWith(toolingSuffix, System.StringComparison.OrdinalIgnoreCase) Then
+            Return stem.Substring(0, stem.Length - toolingSuffix.Length)
+        End If
+        If stem.EndsWith(subAgentSuffix, System.StringComparison.OrdinalIgnoreCase) Then
+            Return stem.Substring(0, stem.Length - subAgentSuffix.Length)
+        End If
+
+        ' Legacy single-file archives from earlier builds are treated as one logical run each.
+        Return stem
+    End Function
 
     ''' <summary>Maximum recursion depth for unpacking nested embedded mails.</summary>
     Private Const AP_MaxEmbeddedMailDepth As Integer = 5
@@ -2773,7 +2915,10 @@ Partial Public Class ThisAddIn
                             binaryOutputDirectory:=_apCurrentTempDir,
                             workflowId:=SharedLibrary.Agents.WorkflowContinuity.CreateWorkflowId(),
                             memoryGroundingMode:=SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None,
-                            memoryGroundingModeIsExplicit:=True)
+                            memoryGroundingModeIsExplicit:=True,
+                            toolingLogArchivePath:=BuildAutoPilotToolingLogArchivePath(
+                                If(String.IsNullOrWhiteSpace(mailInfo.SenderName), mailInfo.SenderEmail, mailInfo.SenderName),
+                                mailInfo.Subject))
                     Else
                         ' Use no-tools system prompt when tooling is disabled
                         Dim effectiveSystemPrompt = If(useToolsForThisMail, systemPrompt, InterpolateAtRuntime(SP_AutoPilot_NoTools))
@@ -7299,7 +7444,66 @@ Partial Public Class ThisAddIn
                 EnsureUI:=False)
 
             If String.IsNullOrWhiteSpace(transcription) Then
-                ApDashboardLog("SKIP (voicemail: transcription returned empty)", "warn")
+                If ct.IsCancellationRequested Then
+                    Throw New System.OperationCanceledException(ct)
+                End If
+
+                ' The LLM abstraction intentionally remains provider/model agnostic here.
+                ' An empty/unusable transcription is a failed transcription contract, regardless
+                ' of whether the upstream cause was policy rejection, malformed provider output,
+                ' no speech, or another provider-side condition.
+                ApDashboardLog("ERROR (voicemail: transcription returned no usable text)", "error")
+
+                Dim failureMailInfo As New AutoPilotMailInfo() With {
+                    .EntryID = entryId,
+                    .Subject = $"Voicemail from {rawCallerId}",
+                    .SenderName = recipientName,
+                    .SenderEmail = recipientEmail,
+                    .Body = "",
+                    .ReceivedTime = mailInfo.ReceivedTime,
+                    .SentOn = mailInfo.SentOn,
+                    .HasAutoReplyHeader = False,
+                    .ThreadAIReplyCount = 0,
+                    .AttachmentCount = 1,
+                    .AttachmentNames = New List(Of String) From {audioFileName},
+                    .FolderPath = mailInfo.FolderPath,
+                    .MessageClass = mailInfo.MessageClass,
+                    .InternetHeaders = ""
+                }
+
+                Dim failureResponse As String = Nothing
+                Try
+                    failureResponse = Await GenerateHelpfulFailureResponseAsync(
+                        failureMailInfo,
+                        Nothing,
+                        "The voicemail audio could not be transcribed into usable text.",
+                        ct)
+                Catch ex As System.Exception
+                    ApDashboardLog("Voicemail failure-response generation error: " & ex.Message, "warn")
+                End Try
+
+                If String.IsNullOrWhiteSpace(failureResponse) Then
+                    failureResponse =
+                        $"I'm sorry, but I could not transcribe the voicemail, so I was unable to process the request. " &
+                        $"Please try the voicemail again or contact the operator for assistance. — {AN6}"
+                End If
+
+                Await SwitchToUi(
+                    Sub()
+                        SendVoicemailReply(
+                            mi,
+                            recipientEmail,
+                            recipientName,
+                            failureMailInfo.Subject,
+                            failureResponse,
+                            Nothing,
+                            "",
+                            $"This notice relates to a voicemail received on {mailInfo.ReceivedTime:yyyy-MM-dd HH:mm} from caller {rawCallerId}.")
+                    End Sub)
+                Await SwitchToUi(Sub() TagOriginalMailAsProcessed(mi))
+                Interlocked.Increment(_apSessionReplyCount)
+                RecordLastProcessedTime()
+                ApDashboardLog($"✓ SENT voicemail transcription-failure notice to: {recipientEmail} (caller: {rawCallerId})", "warn")
                 Return
             End If
 
@@ -7416,7 +7620,8 @@ Partial Public Class ThisAddIn
                         binaryOutputDirectory:=tempDir,
                         workflowId:=SharedLibrary.Agents.WorkflowContinuity.CreateWorkflowId(),
                         memoryGroundingMode:=SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None,
-                        memoryGroundingModeIsExplicit:=True)
+                        memoryGroundingModeIsExplicit:=True,
+                        toolingLogArchivePath:=BuildAutoPilotToolingLogArchivePath(recipientName, voicemailMailInfo.Subject))
                 Else
                     Dim effectiveSystemPrompt = If(modelCanCallTools, systemPrompt, InterpolateAtRuntime(SP_AutoPilot_NoTools))
                     response = Await LLM(effectiveSystemPrompt, userPrompt,
@@ -7440,7 +7645,38 @@ Partial Public Class ThisAddIn
             End Try
 
             If String.IsNullOrWhiteSpace(response) Then
-                ApDashboardLog("WARNING: LLM returned empty response for voicemail", "warn")
+                ApDashboardLog("WARNING: LLM/tooling returned empty response for voicemail", "warn")
+                Dim errorMessage As String = Nothing
+                Try
+                    errorMessage = Await GenerateHelpfulFailureResponseAsync(
+                        voicemailMailInfo,
+                        savedAttachments,
+                        "The voicemail was transcribed, but the subsequent AI processing returned no usable response.",
+                        ct)
+                Catch ex As System.Exception
+                    ApDashboardLog("Voicemail processing failure-response generation error: " & ex.Message, "warn")
+                End Try
+                If String.IsNullOrWhiteSpace(errorMessage) Then
+                    errorMessage =
+                        $"I'm sorry, but I could not complete the processing of your voicemail. " &
+                        $"Please try again or contact the operator for assistance. — {AN6}"
+                End If
+                Await SwitchToUi(
+                    Sub()
+                        SendVoicemailReply(
+                            mi,
+                            recipientEmail,
+                            recipientName,
+                            voicemailMailInfo.Subject,
+                            errorMessage,
+                            Nothing,
+                            "",
+                            $"This notice relates to a voicemail received on {mailInfo.ReceivedTime:yyyy-MM-dd HH:mm} from caller {rawCallerId}.")
+                    End Sub)
+                Await SwitchToUi(Sub() TagOriginalMailAsProcessed(mi))
+                Interlocked.Increment(_apSessionReplyCount)
+                RecordLastProcessedTime()
+                ApDashboardLog($"✓ SENT voicemail processing-failure notice to: {recipientEmail} (caller: {rawCallerId})", "warn")
                 Return
             End If
 

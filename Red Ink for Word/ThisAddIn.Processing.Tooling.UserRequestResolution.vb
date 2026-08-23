@@ -10,8 +10,8 @@
 ' Architecture / Function:
 '   - Derives the authoritative latest user request and detects the requested response
 '     language through the configured LLM when necessary.
-'   - Performs the bootstrap preflight that can resolve memory-grounding mode and the
-'     initial capability route (specific skill, top-level agent, or normal tooling).
+'   - Performs the bootstrap preflight that can resolve memory-grounding mode, source-format
+'     authority, and the initial capability route (specific skill, top-level agent, or normal tooling).
 '   - Normalizes and applies the bootstrap result to ToolExecutionContext so later turns
 '     do not repeat routing/language decisions or infer them from stale prompt history.
 '   - This file determines bootstrap intent/state; prompt assembly and actual tool
@@ -115,7 +115,7 @@ Partial Public Class ThisAddIn
             context.LatestUserRequestRaw,
             context.HostTaskSummary)
 
-        context.Log("Bootstrap preflight started: response language, memory grounding, capability routing, and first capability load.")
+        context.Log("Bootstrap preflight started: response language, memory grounding, source-format authority, capability routing, and first capability load.")
         ToolingFileLogger.LogStep("[PERF] Bootstrap preflight LLM request started.")
         LogLatestUserRequestDiagnostic(context, "bootstrap")
 
@@ -173,6 +173,15 @@ Partial Public Class ThisAddIn
             context.SequencingState.UserLanguage = decision.Language
             decision.LanguageApplied = True
             context.Log("Bootstrap response language applied: " & decision.Language, "diag")
+        End If
+
+        If decision.SourceFormatAuthorityValid AndAlso context.SequencingState IsNot Nothing Then
+            context.SequencingState.UserSuppliedSourceFormatAuthority = decision.SourceFormatAuthority
+            context.SequencingState.UserSuppliedSourceFormatAuthorityReason = decision.SourceFormatAuthorityReason
+            decision.SourceFormatAuthorityApplied = True
+            context.Log("Bootstrap source-format authority applied: authoritative=" &
+                        decision.SourceFormatAuthority.ToString().ToLowerInvariant() &
+                        "; reason=" & decision.SourceFormatAuthorityReason, "diag")
         End If
 
         If memoryGroundingModeIsExplicit Then
@@ -265,6 +274,8 @@ Partial Public Class ThisAddIn
 
         context.Log("Bootstrap preflight completed: languageApplied=" & decision.LanguageApplied.ToString().ToLowerInvariant() &
                     "; memoryApplied=" & decision.MemoryApplied.ToString().ToLowerInvariant() &
+                    "; sourceFormatAuthorityApplied=" & decision.SourceFormatAuthorityApplied.ToString().ToLowerInvariant() &
+                    "; sourceFormatAuthority=" & If(context.SequencingState Is Nothing, "false", context.SequencingState.UserSuppliedSourceFormatAuthority.ToString().ToLowerInvariant()) &
                     "; routeApplied=" & decision.RouteApplied.ToString().ToLowerInvariant() &
                     "; route=" & If(context.CapabilityRoutingName, ""), "diag")
 

@@ -8,6 +8,7 @@
 '   in a JSON file alongside the redink.ini configuration file. Tasks are
 '   created, queried, updated, and deleted via natural language commands
 '   processed by the LLM through the manage_scheduled_tasks internal tool.
+'   Tooling executions are routed into the same rolling AutoPilot tooling-log archive used by mail/voicemail runs.
 '
 ' Key Features:
 '  - Persistent Storage:
@@ -33,6 +34,7 @@
 '
 '  - Execution Pipeline:
 '      * Due tasks processed through LLM + tooling with instruction as user prompt
+'      * Tool-enabled scheduled runs use the same rolling AutoPilot tooling-log archive
 '      * Input attachments and prior workspace files loaded into temp directory
 '      * A persistent task-specific workspace is available for optional cross-run state
 '      * Generated outputs automatically persisted to workspace for next execution
@@ -1066,7 +1068,10 @@ Partial Public Class ThisAddIn
                         systemPrompt, userPrompt.ToString(),
                         schedulerTools, executionUseSecondApi,
                         hideSplash:=True, hideLogWindow:=True,
-                        cancellationToken:=ct, binaryOutputDirectory:=tempDir)
+                        cancellationToken:=ct, binaryOutputDirectory:=tempDir,
+                        toolingLogArchivePath:=BuildAutoPilotToolingLogArchivePath(
+                            task.CreatedBy,
+                            If(String.IsNullOrWhiteSpace(task.Subject), task.Instruction, task.Subject)))
                 Else
                     response = Await LLM(systemPrompt, userPrompt.ToString(),
                                          UseSecondAPI:=executionUseSecondApi,

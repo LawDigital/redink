@@ -9,8 +9,8 @@
 '
 ' Architecture / Function:
 '   - Resolves active design-set catalogs, design metadata, carriers, guidance and style
-'     policies before document generation; explicit document type has routing priority,
-'     then language, then configured defaults.
+'     policies before document generation; bootstrap-classified user/source format carriers
+'     suppress implicit repository defaults and are validated before creator execution.
 '   - Word creation is OOXML-first: slot-bound DOCX designs and generic no-template Word
 '     documents are generated without starting Word. Legacy non-slot carriers remain a
 '     bounded compatibility path; live Excel workbook tools are isolated in Office.Interop.
@@ -87,6 +87,34 @@ Partial Public Class ThisAddIn
         Public Property SampleSlides As JArray = New JArray()
     End Class
 
+    Private Shared Function GetSourceFormatCreatorRoutingError(args As System.Collections.Generic.Dictionary(Of System.String, System.Object),
+                                                                    applicationName As System.String,
+                                                                    context As ToolExecutionContext) As System.String
+        If context Is Nothing OrElse context.SequencingState Is Nothing OrElse
+           Not context.SequencingState.UserSuppliedSourceFormatAuthority Then
+            Return System.String.Empty
+        End If
+
+        Dim explicitRepositoryDesign As System.Boolean =
+            Not System.String.IsNullOrWhiteSpace(GetArgString(args, "design_name"))
+        Dim explicitExternalTemplateCarrier As System.Boolean =
+            System.String.Equals(applicationName, "PowerPoint", System.StringComparison.OrdinalIgnoreCase) AndAlso
+            Not System.String.IsNullOrWhiteSpace(GetArgString(args, "template_attachment_name"))
+        Dim repositoryDefaultsExplicitlyDisabled As System.Boolean =
+            Not GetArgBool(args, "use_repository_default_design", True)
+
+        If explicitRepositoryDesign OrElse explicitExternalTemplateCarrier OrElse repositoryDefaultsExplicitlyDisabled Then
+            Return System.String.Empty
+        End If
+
+        Dim reason As System.String = If(context.SequencingState.UserSuppliedSourceFormatAuthorityReason, System.String.Empty).Trim()
+        Dim detail As System.String = If(reason = System.String.Empty, System.String.Empty, " Reason: " & reason)
+        Return "The user designated a supplied artifact as the authoritative formatting/layout/structure source. " &
+               applicationName & " creation with an implicit repository/default design is therefore blocked. " &
+               "Preserve or transform the supplied artifact with the appropriate conversion/native transformation path. " &
+               "Only if structure-preserving reuse is not possible and a controlled reconstruction is intended, retry the creator with use_repository_default_design=false." & detail
+    End Function
+
     Private Shared Function BuildDesignExecutionNote(design As AutoPilotDesignResolution) As String
         If design Is Nothing OrElse String.IsNullOrWhiteSpace(design.RequestedName) Then Return ""
         If design.Descriptor Is Nothing Then
@@ -121,6 +149,29 @@ Partial Public Class ThisAddIn
         Dim typedWordRouteRequested As System.Boolean =
             System.String.Equals(applicationName, "Word", System.StringComparison.OrdinalIgnoreCase) AndAlso
             Not System.String.IsNullOrWhiteSpace(GetArgString(args, "document_type"))
+        Dim useRepositoryDefaultDesign As System.Boolean = GetArgBool(args, "use_repository_default_design", True)
+        Dim hasExplicitExternalTemplateCarrier As System.Boolean =
+            System.String.Equals(applicationName, "PowerPoint", System.StringComparison.OrdinalIgnoreCase) AndAlso
+            Not System.String.IsNullOrWhiteSpace(GetArgString(args, "template_attachment_name"))
+        Dim sourceFormatAuthorityActive As System.Boolean =
+            context IsNot Nothing AndAlso
+            context.SequencingState IsNot Nothing AndAlso
+            context.SequencingState.UserSuppliedSourceFormatAuthority
+
+        If result.RequestedName = "" AndAlso (Not useRepositoryDefaultDesign OrElse hasExplicitExternalTemplateCarrier OrElse sourceFormatAuthorityActive) Then
+            If context IsNot Nothing Then
+                Dim reason As System.String
+                If hasExplicitExternalTemplateCarrier Then
+                    reason = "an explicit user/template attachment carrier is present"
+                ElseIf sourceFormatAuthorityActive Then
+                    reason = "the bootstrap classified the user-supplied artifact as the authoritative format source"
+                Else
+                    reason = "use_repository_default_design=false"
+                End If
+                context.Log("Implicit " & applicationName & " repository design suppressed because " & reason & ".", "diag")
+            End If
+            Return result
+        End If
 
         If result.RequestedName = "" Then
             If System.String.Equals(applicationName, "Word", System.StringComparison.OrdinalIgnoreCase) Then
@@ -463,6 +514,15 @@ Partial Public Class ThisAddIn
                 New String() {"style_preset", "accent_color", "secondary_color", "font_name", "aspect_ratio", "footer_text", "show_slide_numbers", "text_color", "muted_color", "light_color", "line_color", "green_color", "red_color", "amber_color", "preserve_template_slides"},
                 New String() {".pptx", ".potx"},
                 context)
+
+            Dim sourceFormatRoutingError As System.String = GetSourceFormatCreatorRoutingError(toolCall.Arguments, "PowerPoint", context)
+            If Not System.String.IsNullOrWhiteSpace(sourceFormatRoutingError) Then
+                response.Success = False
+                response.ErrorMessage = sourceFormatRoutingError
+                response.Response = sourceFormatRoutingError
+                If context IsNot Nothing Then context.Log(sourceFormatRoutingError, "warn")
+                Return response
+            End If
 
             If context IsNot Nothing AndAlso context.SequencingState IsNot Nothing Then
                 SharedLibrary.Agents.ToolCallSequencing.CaptureRetryInvariantArguments(toolCall.ToolName, toolCall.Arguments, context.SequencingState)
@@ -6124,6 +6184,15 @@ Partial Public Class ThisAddIn
                 New String() {".xltx"},
                 context)
 
+            Dim sourceFormatRoutingError As System.String = GetSourceFormatCreatorRoutingError(toolCall.Arguments, "Excel", context)
+            If Not System.String.IsNullOrWhiteSpace(sourceFormatRoutingError) Then
+                response.Success = False
+                response.ErrorMessage = sourceFormatRoutingError
+                response.Response = sourceFormatRoutingError
+                If context IsNot Nothing Then context.Log(sourceFormatRoutingError, "warn")
+                Return response
+            End If
+
             If context IsNot Nothing AndAlso context.SequencingState IsNot Nothing Then
                 SharedLibrary.Agents.ToolCallSequencing.CaptureRetryInvariantArguments(toolCall.ToolName, toolCall.Arguments, context.SequencingState)
             End If
@@ -11513,11 +11582,21 @@ Partial Public Class ThisAddIn
                 New String() {".dotx", ".dotm", ".docx"},
                 context)
 
+            Dim sourceFormatRoutingError As System.String = GetSourceFormatCreatorRoutingError(toolCall.Arguments, "Word", context)
+            If Not System.String.IsNullOrWhiteSpace(sourceFormatRoutingError) Then
+                response.Success = False
+                response.ErrorMessage = sourceFormatRoutingError
+                response.Response = sourceFormatRoutingError
+                If context IsNot Nothing Then context.Log(sourceFormatRoutingError, "warn")
+                Return response
+            End If
+
             If context IsNot Nothing AndAlso context.SequencingState IsNot Nothing Then
                 SharedLibrary.Agents.ToolCallSequencing.CaptureRetryInvariantArguments(toolCall.ToolName, toolCall.Arguments, context.SequencingState)
             End If
 
-            If HasMeaningfulToolArgument(toolCall.Arguments, "document_type") AndAlso
+            If GetArgBool(toolCall.Arguments, "use_repository_default_design", True) AndAlso
+               HasMeaningfulToolArgument(toolCall.Arguments, "document_type") AndAlso
                (design Is Nothing OrElse design.Descriptor Is Nothing) Then
                 response.Success = False
                 response.ErrorMessage = If(If(design Is Nothing, System.String.Empty, design.TemplateWarning), System.String.Empty)

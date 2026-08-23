@@ -3,9 +3,11 @@
 '
 ' =============================================================================
 ' File: ThisAddin.Tooling.vb
+' Note: ExecuteToolingLoop can optionally mirror the complete top-level run into an AutoPilot archive bundle; nested subagents stay in that run.
 ' Purpose: Core model-agnostic tooling loop for LLM tool/function calling.
 '          Orchestrates tool selection, call detection/extraction, execution, response injection,
 '          and host-owned major-step progress reporting in both main and isolated sub-agent loops.
+'          Bootstrap also carries semantic source-format authority into host validation.
 '
 ' Architecture:
 '  - Tooling Execution Loop (ExecuteToolingLoop):
@@ -433,7 +435,7 @@ Partial Public Class ThisAddIn
             context.LatestUserRequestRaw,
             context.HostTaskSummary)
 
-        context.Log("Bootstrap preflight started: response language, memory grounding, capability routing, and first capability load.")
+        context.Log("Bootstrap preflight started: response language, memory grounding, source-format authority, capability routing, and first capability load.")
         ToolingFileLogger.LogStep("[PERF] Bootstrap preflight LLM request started.")
         LogLatestUserRequestDiagnostic(context, "bootstrap")
 
@@ -491,6 +493,15 @@ Partial Public Class ThisAddIn
             context.SequencingState.UserLanguage = decision.Language
             decision.LanguageApplied = True
             context.Log("Bootstrap response language applied: " & decision.Language, "diag")
+        End If
+
+        If decision.SourceFormatAuthorityValid AndAlso context.SequencingState IsNot Nothing Then
+            context.SequencingState.UserSuppliedSourceFormatAuthority = decision.SourceFormatAuthority
+            context.SequencingState.UserSuppliedSourceFormatAuthorityReason = decision.SourceFormatAuthorityReason
+            decision.SourceFormatAuthorityApplied = True
+            context.Log("Bootstrap source-format authority applied: authoritative=" &
+                        decision.SourceFormatAuthority.ToString().ToLowerInvariant() &
+                        "; reason=" & decision.SourceFormatAuthorityReason, "diag")
         End If
 
         If memoryGroundingModeIsExplicit Then
@@ -583,6 +594,8 @@ Partial Public Class ThisAddIn
 
         context.Log("Bootstrap preflight completed: languageApplied=" & decision.LanguageApplied.ToString().ToLowerInvariant() &
                     "; memoryApplied=" & decision.MemoryApplied.ToString().ToLowerInvariant() &
+                    "; sourceFormatAuthorityApplied=" & decision.SourceFormatAuthorityApplied.ToString().ToLowerInvariant() &
+                    "; sourceFormatAuthority=" & If(context.SequencingState Is Nothing, "false", context.SequencingState.UserSuppliedSourceFormatAuthority.ToString().ToLowerInvariant()) &
                     "; routeApplied=" & decision.RouteApplied.ToString().ToLowerInvariant() &
                     "; route=" & If(context.CapabilityRoutingName, ""), "diag")
 
@@ -680,14 +693,15 @@ Partial Public Class ThisAddIn
         Optional memoryGroundingModeIsExplicit As Boolean = False,
         Optional finalResponseContract As SharedLibrary.Agents.ToolingFinalResponseContract = SharedLibrary.Agents.ToolingFinalResponseContract.UserFacingTaskStatus,
         Optional progressSink As Action(Of String) = Nothing,
-        Optional subAgentExpectedArtifactsJson As String = Nothing) As Task(Of String)
+        Optional subAgentExpectedArtifactsJson As String = Nothing,
+        Optional toolingLogArchivePath As String = Nothing) As Task(Of String)
 
         ' Check for power transition BEFORE starting (matches RunLlmAsync pattern)
         If System.Threading.Interlocked.CompareExchange(powerChanging, 0, 0) <> 0 Then
             Return "Operation cancelled due to power transition."
         End If
 
-        ToolingFileLogger.StartSession()
+        ToolingFileLogger.StartSession(toolingLogArchivePath)
 
         ' Per-run deliverable tracking reset. Local Chat retains its session files but
         ' marks prior-turn outputs as already surfaced. AutoPilot MUST start from empty

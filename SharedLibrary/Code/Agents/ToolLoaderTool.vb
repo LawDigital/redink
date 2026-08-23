@@ -11,7 +11,10 @@
 ' Architecture:
 '  - Lazy-loading trigger: ShouldUseLazyLoading(selectedTools) returns true
 '    when tool count exceeds DefaultLazyLoadThreshold (8).
-'  - Build(manifests) creates the loader config with tool index.
+'  - Build(manifests) creates the loader config with tool index and binding routing
+'    guidance, including source-format preservation before artifact creation.
+'  - Bootstrap preflight also classifies whether a user-supplied artifact is the
+'    authoritative format/layout carrier so hosts can validate creator routing.
 '  - ExtractRequestedToolNames(arguments) parses tool/tools array from request.
 ' =============================================================================
 
@@ -68,11 +71,17 @@ Namespace Agents
             sb.Append("If a tool is already exposed with its full schema this turn, call it directly and do NOT load it again via tool_loader. ")
             sb.Append("If you decide to use a skill or an agent, load it first; once its instructions list the tools it needs, load ALL of those required tools together in a single tool_loader call before invoking them. ")
 
-            Dim hasProcessWordDocument As Boolean =
+            Dim hasProcessWordDocument As System.Boolean =
                 items.Any(Function(m) m.Name.Equals("process_word_document", System.StringComparison.OrdinalIgnoreCase))
+            Dim hasPdfToWord As System.Boolean =
+                items.Any(Function(m) m.Name.Equals("pdf_to_word", System.StringComparison.OrdinalIgnoreCase))
 
             If hasProcessWordDocument Then
-                sb.Append("EXISTING OFFICE DOCUMENT TRANSFORMATION ROUTING (BINDING): When the user asks to translate, correct, proofread, anonymize, replace text/data in, or otherwise transform an EXISTING Word, PowerPoint, or Excel file and wants a revised/versioned copy that preserves the source document's structure and formatting, use process_word_document. This includes requests phrased as 'create an English version of this Word document'. Do not rebuild such an existing document with create_word_document merely because the user asks for a new output file. Use create_word_document only when the task is genuinely to author a new Word document from content rather than transform an existing Office file. ")
+                sb.Append("SOURCE FORMAT / EXISTING ARTIFACT ROUTING (BINDING): When the user identifies an attachment or other supplied artifact as the formatting, layout, design, master, style, or structural model for the requested output, treat that source as a FORMAT CARRIER, not merely as content. This remains true when the user says create, new, template, boilerplate, sample, generic, or similar wording. A user-selected source format carrier takes precedence over any implicit/default DESIGN REPOSITORY design or template. Turning an existing Word, PowerPoint, or Excel artifact into a generic/template version by replacing substantive content with placeholders or generic text is a TRANSFORMATION and should preserve the existing native structure; use process_word_document or the appropriate native mutation tools rather than rebuilding with create_word_document, create_powerpoint, or create_excel_spreadsheet. ")
+                If hasPdfToWord Then
+                    sb.Append("When a PDF is the requested format/layout carrier for a Word deliverable, use pdf_to_word FIRST and then transform the resulting DOCX with process_word_document or native Word tools. Do not choose extract_pdf_text + create_word_document for a format-preservation request merely because text extraction is easier; that path loses the source layout. Use OCR/text reconstruction only as a controlled fallback when structure-preserving conversion cannot provide a usable editable source, and do not claim exact format preservation after such a fallback. ")
+                End If
+                sb.Append("If a creator genuinely remains necessary while the user-supplied source is the intended visual/format authority, set use_repository_default_design=false unless the user explicitly requested a particular repository design. Do not silently mix an implicit repository default with a user-supplied format carrier. ")
             End If
 
             sb.Append("WEB TOOL ROUTING (BINDING): Use web_grounding to discover relevant public pages when the site or URL is not yet known. Use retrieve_web_content for a known, mostly static URL when readable text and ordinary links are sufficient. Load the Playwright browser tools lazily only when the task needs them. Prefer browser_open -> browser_snapshot, then browser_interact only when needed, followed by a fresh browser_snapshot when the task is to explore or scan a specific website, find links/pages/downloads on that site, inspect menus/navigation, follow pagination, or handle JavaScript/dynamically rendered content that simple retrieval may miss. If retrieve_web_content reports navigation failure, no links, or incomplete client-side content for a specific site, load browser_open, browser_snapshot and browser_interact together via tool_loader, then use browser_open + browser_snapshot next instead of repeating web_grounding. If a browser_snapshot already exposes the needed link/control, continue through the browser instead of restarting with web_grounding. ")
@@ -301,6 +310,10 @@ Namespace Agents
             Public Property RouteName As String = ""
             Public Property RouteReason As String = ""
             Public Property BootstrapLoad As String = ""
+            Public Property SourceFormatAuthority As System.Boolean
+            Public Property SourceFormatAuthorityReason As System.String = ""
+            Public Property SourceFormatAuthorityValid As System.Boolean
+            Public Property SourceFormatAuthorityApplied As System.Boolean
             Public Property RoutingSyntaxValid As Boolean
             Public Property LanguageApplied As Boolean
             Public Property MemoryApplied As Boolean
@@ -327,15 +340,16 @@ Namespace Agents
                 ToList()
 
             Dim sb As New StringBuilder()
-            sb.Append("BOOTSTRAP PREFLIGHT: make four bounded decisions for the latest user request in one pass: ")
-            sb.Append("(1) response language, (2) session-memory grounding mode, (3) capability route, and (4) the first safe bootstrap load. ")
+            sb.Append("BOOTSTRAP PREFLIGHT: make five bounded decisions for the latest user request in one pass: ")
+            sb.Append("(1) response language, (2) session-memory grounding mode, (3) capability route, (4) the first safe bootstrap load, and (5) whether a user-supplied artifact is explicitly authoritative for output formatting/layout/structure. ")
             sb.Append("Do not perform the substantive task. Do not use external knowledge. Treat <LATEST_USER_REQUEST_RAW> as authoritative. ")
             sb.Append("Return EXACTLY one raw JSON object and nothing else, with exactly these fields: ")
-            sb.Append("{""language"":""de-CH"",""memoryGroundingMode"":""none"",""memoryReason"":""short reason"",""shouldExposeRecentMemoryStubs"":false,""explicitStoredMemoryRequired"":false,""routeKind"":""none"",""routeName"":"""",""routeReason"":""short reason"",""bootstrapLoad"":""""}. ")
+            sb.Append("{""language"":""de-CH"",""memoryGroundingMode"":""none"",""memoryReason"":""short reason"",""shouldExposeRecentMemoryStubs"":false,""explicitStoredMemoryRequired"":false,""routeKind"":""none"",""routeName"":"""",""routeReason"":""short reason"",""bootstrapLoad"":"""",""sourceFormatAuthority"":false,""sourceFormatReason"":""short reason""}. ")
             sb.Append("LANGUAGE: identify the language in which the assistant should answer the latest request; prefer a BCP-47 tag when clear. ")
             sb.Append("MEMORY: memoryGroundingMode MUST be exactly one of none, optional, or required. Use required ONLY when the latest request explicitly requires stored Memory, remembered stored content, prior saved results, or previous saved workflow outputs. If stored Memory may help but is not explicitly demanded, use optional. New self-contained tasks normally use none. Set explicitStoredMemoryRequired=true only for an explicit demand. Base this decision on semantic meaning, not language-specific keywords. ")
             sb.Append("ROUTING: routeKind MUST be exactly one of skill, agent, or none. A specifically applicable workflow skill has semantic precedence. Choose a skill only when its description clearly matches the workflow/task type, not merely the topic. Only if no skill specifically applies may you select a top-level agent whose description fits the whole task. Do not select bounded worker/helper agents for broader tasks. Otherwise choose none. ")
             sb.Append("BOOTSTRAP LOAD: when routeKind is skill or agent, bootstrapLoad MUST equal routeName exactly. When routeKind is none, bootstrapLoad MUST be empty. Do not propose ordinary tools here; they remain available through normal lazy loading after bootstrap. ")
+            sb.Append("SOURCE FORMAT AUTHORITY: set sourceFormatAuthority=true ONLY when the latest request explicitly makes a supplied/attached/current artifact authoritative for the requested output formatting, layout, design, master, styles, or native structure (for example preserve/copy/keep that format while genericizing or replacing content). Do not set it merely because an attachment supplies facts/content/reference material. Base this on semantic intent, not language-specific keywords. sourceFormatReason is one short reason. ")
             sb.Append("Use only the advertised capability metadata below; do not preload or infer resource bodies. Candidates:")
 
             For Each item In candidates
@@ -403,6 +417,13 @@ Namespace Agents
                 result.RouteReason = If(obj.Value(Of String)("routeReason"), "").Trim()
                 result.BootstrapLoad = If(obj.Value(Of String)("bootstrapLoad"), "").Trim()
 
+                Dim sourceFormatToken As JToken = obj("sourceFormatAuthority")
+                If sourceFormatToken IsNot Nothing AndAlso sourceFormatToken.Type = JTokenType.Boolean Then
+                    result.SourceFormatAuthority = sourceFormatToken.Value(Of System.Boolean)()
+                    result.SourceFormatAuthorityValid = True
+                End If
+                result.SourceFormatAuthorityReason = If(obj.Value(Of System.String)("sourceFormatReason"), System.String.Empty).Trim()
+
                 If result.RouteKind = CapabilityRoutingTool.KindNone Then
                     result.RoutingSyntaxValid =
                         String.IsNullOrWhiteSpace(result.RouteName) AndAlso
@@ -421,6 +442,7 @@ Namespace Agents
                 If Not result.LanguageValid Then result.ParseError = AppendError(result.ParseError, "invalid_language")
                 If Not result.MemoryValid Then result.ParseError = AppendError(result.ParseError, "invalid_memory_decision")
                 If Not result.RoutingSyntaxValid Then result.ParseError = AppendError(result.ParseError, "invalid_route_or_bootstrap_load")
+                If Not result.SourceFormatAuthorityValid Then result.ParseError = AppendError(result.ParseError, "invalid_source_format_authority")
 
                 Return result
             Catch ex As System.Exception

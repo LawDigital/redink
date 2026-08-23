@@ -8,6 +8,7 @@
 '           - Enforces <TASK_STATUS> footer contract (Q13).
 '           - Guards against action promises without invocation (Q10).
 '           - Manages memory grounding modes (required/optional/none).
+'           - Carries bootstrap-classified source-format authority for deterministic host validation.
 '           - Detects unresolved tool failures and orchestrates repair prompts.
 '
 ' Architecture:
@@ -294,6 +295,8 @@ Namespace Agents
             Public Property ToolRequiredModeUsed As Boolean
 
             Public Property UserLanguage As String
+            Public Property UserSuppliedSourceFormatAuthority As System.Boolean = False
+            Public Property UserSuppliedSourceFormatAuthorityReason As System.String = System.String.Empty
             Public Property LastStructuredToolResult As String
             Public Property LastStructuredToolResultKind As String
             Public Property LastStructuredToolName As String
