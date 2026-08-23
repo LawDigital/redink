@@ -199,6 +199,12 @@
     <Reference Include="DiffPlex, Version=1.9.0.0, Culture=neutral, PublicKeyToken=1d35e91d1bd7bc0f, processorArchitecture=MSIL">
       <HintPath>..\packages\DiffPlex.1.9.0\lib\net45\DiffPlex.dll</HintPath>
     </Reference>
+    <Reference Include="DocumentFormat.OpenXml, Version=3.5.1.0, Culture=neutral, PublicKeyToken=8fb06cb64d019a17, processorArchitecture=MSIL">
+      <HintPath>..\packages\DocumentFormat.OpenXml.3.5.1\lib\net46\DocumentFormat.OpenXml.dll</HintPath>
+    </Reference>
+    <Reference Include="DocumentFormat.OpenXml.Framework, Version=3.5.1.0, Culture=neutral, PublicKeyToken=8fb06cb64d019a17, processorArchitecture=MSIL">
+      <HintPath>..\packages\DocumentFormat.OpenXml.Framework.3.5.1\lib\net46\DocumentFormat.OpenXml.Framework.dll</HintPath>
+    </Reference>
     <Reference Include="HtmlAgilityPack, Version=1.12.4.0, Culture=neutral, PublicKeyToken=bd319b19eaf3b43a, processorArchitecture=MSIL">
       <HintPath>..\packages\HtmlAgilityPack.1.12.4\lib\Net45\HtmlAgilityPack.dll</HintPath>
     </Reference>
@@ -340,8 +346,9 @@
     <Reference Include="System.Threading.Tasks.Extensions, Version=4.2.4.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
       <HintPath>..\packages\System.Threading.Tasks.Extensions.4.6.3\lib\net462\System.Threading.Tasks.Extensions.dll</HintPath>
     </Reference>
-    <Reference Include="System.ValueTuple">
-      <HintPath>C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\PublicAssemblies\System.ValueTuple.dll</HintPath>
+    <Reference Include="System.ValueTuple, Version=4.0.5.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.ValueTuple.4.6.2\lib\net47\System.ValueTuple.dll</HintPath>
+      <Private>True</Private>
     </Reference>
     <Reference Include="System.Windows.Forms" />
     <Reference Include="System.Xml" />
@@ -380,6 +387,7 @@
     <Reference Include="System.Runtime.InteropServices.WindowsRuntime, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a" Condition="Exists('$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.26100.0\Windows.winmd')">
       <Private>False</Private>
     </Reference>
+    <Reference Include="WindowsBase" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="Microsoft.Office.Tools.v4.0.Framework, Version=10.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
@@ -497,6 +505,7 @@
     <Compile Include="ThisAddIn.AutoPilot.DocProcessor.vb" />
     <Compile Include="ThisAddIn.AutoPilot.PDFCommentProcessor.vb" />
     <Compile Include="ThisAddIn.AutoPilot.PdfRedactor.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.OutgoingDelivery.vb" />
     <Compile Include="ThisAddIn.AutoPilot.RegistryBackup.vb" />
     <Compile Include="ThisAddIn.AutoPilot.Scheduler.vb" />
     <Compile Include="ThisAddIn.AutoPilot.SenderToolPolicy.vb" />
@@ -506,6 +515,8 @@
     <Compile Include="ThisAddIn.AutoPIlot.Tools.Other.vb" />
     <Compile Include="ThisAddIn.AutoPIlot.Tools.PDF.vb" />
     <Compile Include="ThisAddIn.AutoPIlot.Tools.Office.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.Tools.Office.OpenXmlVisuals.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.Tools.Office.OpenXmlTemplate.vb" />
     <Compile Include="ThisAddIn.AutoPIlot.Tools.vb" />
     <Compile Include="ThisAddIn.AutoPilot.UserStorage.vb" />
     <Compile Include="ThisAddIn.AutoPilot.UserStorageDashboard.vb" />
@@ -545,6 +556,7 @@
     <Compile Include="ThisAddIn.WebExtension.FileHelpers.vb" />
     <Compile Include="ThisAddIn.WebExtension.InkyPlay.vb" />
     <Compile Include="ThisAddIn.WebExtension.ListenerAndPower.vb" />
+    <Compile Include="ThisAddIn.WebExtension.Security.vb" />
     <Compile Include="ThisAddIn.WebExtension.vb" />
     <EmbeddedResource Include="Ribbon1.resx">
       <DependentUpon>Ribbon1.vb</DependentUpon>

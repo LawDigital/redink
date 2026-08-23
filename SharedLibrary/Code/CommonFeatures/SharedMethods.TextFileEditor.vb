@@ -424,16 +424,10 @@ Namespace SharedLibrary
                                     ShowCustomMessageBox("The AI did not provide any response (which is an error).")
                                 Else
                                     ' Convert Markdown to HTML using Markdig
-                                    Dim pipeline = New MarkdownPipelineBuilder() _
-                                    .UseAdvancedExtensions() _
-                                    .UseEmphasisExtras() _
-                                    .UseFootnotes() _
-                                    .UsePipeTables() _
-                                    .UseTaskLists() _
-                                    .UseAutoLinks() _
-                                    .Build()
+                                    Dim pipeline As Markdig.MarkdownPipeline =
+                                        Global.SharedLibrary.SharedLibrary.SharedMethods.CreateMarkdownHtmlPipeline()
 
-                                    Dim htmlResult As String = Markdown.ToHtml(result, pipeline)
+                                    Dim htmlResult As String = Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(result), pipeline)
 
                                     ' Display result
                                     ShowHTMLCustomMessageBox(htmlResult, "AI Analysis Result")
@@ -544,10 +538,9 @@ Namespace SharedLibrary
                         End Try
 
                         Try
-                            editorForm.BringToFront()
-                            editorForm.Activate()
-                            NativeMethods.SetForegroundWindow(editorForm.Handle)
-                        Catch
+                            Global.SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(editorForm)
+                            Global.SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(editorForm)
+                        Catch ex As System.Exception
                         End Try
                     End Sub
 

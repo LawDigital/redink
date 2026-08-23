@@ -175,10 +175,9 @@ Namespace Agents
                 .ModelDescription = "Open or navigate the shared Playwright browser session",
                 .ToolDefinition = BuildBrowserOpenDefinition(),
                 .ToolInstructionsPrompt =
-                    "Use browser_open when the task requires an interactive browser. " &
-                    "Pass an absolute http:// or https:// URL. This tool navigates only; " &
-                    "after it succeeds, call browser_snapshot before attempting any interaction. " &
-                    "Do not invent element refs."
+                    "Use browser_open when a specific website must be explored as a rendered browser page, especially to find links, menus, sections, downloads, pagination, JavaScript-rendered content, or controls that simple HTTP text retrieval may miss. " &
+                    "Prefer web_grounding when the relevant site/page is not yet known and public-web discovery is required. Prefer retrieve_web_content for a known mostly-static URL when readable text/ordinary links are sufficient. " &
+                    "Pass an absolute http:// or https:// URL. The browser runs headless by default. This tool navigates only; after it succeeds, call browser_snapshot to inspect the rendered page before attempting interaction. The runtime may conservatively dismiss common reject/necessary-only cookie banners, but never grants optional tracking by clicking accept-all. Do not invent element refs."
             }
         End Function
 
@@ -191,9 +190,9 @@ Namespace Agents
                 .ModelDescription = "Observe the current browser through an AI-optimized ARIA snapshot",
                 .ToolDefinition = BuildBrowserSnapshotDefinition(),
                 .ToolInstructionsPrompt =
-                    "Use browser_snapshot to observe the current browser page. The returned YAML snapshot " &
-                    "contains Playwright refs such as [ref=e7]. Treat those refs as short-lived handles. " &
-                    "Only refs from the most recent successful browser_snapshot may be passed to browser_interact."
+                    "Use browser_snapshot to inspect the actually rendered page structure, including accessible links, buttons, menus, headings, form controls and other interactive elements. It is especially useful for scanning a specific website for relevant links/pages or for content/navigation produced by JavaScript. " &
+                    "The returned YAML snapshot contains Playwright refs such as [ref=e7]. Treat those refs as short-lived handles. Only refs from the most recent successful browser_snapshot may be passed to browser_interact. " &
+                    "If a cookie/consent overlay is still present, deal with that overlay FIRST before unrelated navigation; prefer reject/necessary-only choices over accept-all. Then take a fresh browser_snapshot. If the relevant link is already visible in the snapshot, use its current ref rather than falling back to a new web_grounding search."
             }
         End Function
 
@@ -206,11 +205,9 @@ Namespace Agents
                 .ModelDescription = "Perform one Playwright action against a ref from the latest browser snapshot",
                 .ToolDefinition = BuildBrowserInteractDefinition(),
                 .ToolInstructionsPrompt =
-                    "Use browser_interact for exactly one action against a ref from the latest browser_snapshot. " &
-                    "Supported actions are click, double_click, fill, clear, press, select, check, uncheck, hover and focus. " &
-                    "The value argument is required for fill, press and select and must be omitted for the other actions. " &
-                    "After every successful or attempted interaction, call browser_snapshot again before another browser_interact. " &
-                    "Interactions can change remote state, submit forms or trigger navigation; apply the user's intent and normal safety rules."
+                    "Use browser_interact only when navigation or another browser action is actually needed after inspecting a browser_snapshot. For site exploration, click the relevant link/menu/pagination ref rather than restarting discovery with web_grounding. " &
+                    "Supported actions are click, double_click, fill, clear, press, select, check, uncheck, hover and focus. The value argument is required for fill, press and select and must be omitted for the other actions. " &
+                    "After every successful or attempted interaction, call browser_snapshot again before another browser_interact. Interactions can change remote state, submit forms or trigger navigation; apply the user's intent and normal safety rules."
             }
         End Function
 

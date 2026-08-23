@@ -17,7 +17,9 @@
 '    * "redink_sendtoword": Inserts text and URL into current Word selection/cursor.
 '  - Error Recovery: Tracks consecutive failures; restarts listener after 10
 '    consecutive errors with 5-second delay.
-'  - CORS Support: Handles OPTIONS preflight requests for cross-origin scenarios.
+'  - Security/CORS: Accepts loopback traffic only and handles OPTIONS/POST requests
+'    only for browser-extension origins explicitly approved by the user; request bodies
+'    are byte-bounded before command dispatch.
 '  - Lifecycle: StartupHttpListener/ShutdownHttpListener manage listener state;
 '    isShuttingDown flag prevents restart during add-in shutdown.
 '  - COM Hygiene: Explicitly releases COM objects (Selection) to prevent leaks.
@@ -196,7 +198,6 @@ Partial Public Class ThisAddIn
             res.StatusCode = 403
             res.ContentLength64 = msgBytes.LongLength
             res.ContentType = "text/plain; charset=utf-8"
-            res.AddHeader("Access-Control-Allow-Origin", "*")
 
             Using os As System.IO.Stream = res.OutputStream
                 Await os.WriteAsync(msgBytes, 0, msgBytes.Length).ConfigureAwait(False)
@@ -206,20 +207,83 @@ Partial Public Class ThisAddIn
             Return
         End If
 
-        ' CORS pre-flight
-        If req.HttpMethod = "OPTIONS" Then
-            res.AddHeader("Access-Control-Allow-Origin", "*")
+        If Not IsLocalLoopbackRequest(req) Then
+            Dim forbiddenBytes() As System.Byte = System.Text.Encoding.UTF8.GetBytes("Forbidden: localhost access required.")
+            res.StatusCode = 403
+            res.ContentType = "text/plain; charset=utf-8"
+            res.ContentLength64 = forbiddenBytes.LongLength
+            Using os As System.IO.Stream = res.OutputStream
+                Await os.WriteAsync(forbiddenBytes, 0, forbiddenBytes.Length).ConfigureAwait(False)
+            End Using
+            res.Close()
+            Return
+        End If
+
+        ' CORS pre-flight: only the explicitly approved Chromium extension origin.
+        If req.HttpMethod.Equals("OPTIONS", System.StringComparison.OrdinalIgnoreCase) Then
+            Dim approvedOrigin As System.String =
+                Await EnsureApprovedBrowserExtensionOriginAsync(req).ConfigureAwait(False)
+
+            If System.String.IsNullOrWhiteSpace(approvedOrigin) Then
+                Dim forbiddenBytes() As System.Byte = System.Text.Encoding.UTF8.GetBytes("Forbidden browser origin.")
+                res.StatusCode = 403
+                res.ContentType = "text/plain; charset=utf-8"
+                res.ContentLength64 = forbiddenBytes.LongLength
+                Using os As System.IO.Stream = res.OutputStream
+                    Await os.WriteAsync(forbiddenBytes, 0, forbiddenBytes.Length).ConfigureAwait(False)
+                End Using
+                res.Close()
+                Return
+            End If
+
+            AddExplicitCorsOrigin(res, approvedOrigin)
             res.AddHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
             res.AddHeader("Access-Control-Allow-Headers", "Content-Type, Authorization")
-            res.StatusCode = 204 : res.Close() : Return
+            res.StatusCode = 204
+            res.Close()
+            Return
         End If
+
+        Dim requestOrigin As System.String =
+            Await EnsureApprovedBrowserExtensionOriginAsync(req).ConfigureAwait(False)
+
+        If System.String.IsNullOrWhiteSpace(requestOrigin) Then
+            Dim forbiddenBytes() As System.Byte = System.Text.Encoding.UTF8.GetBytes("Forbidden browser origin.")
+            res.StatusCode = 403
+            res.ContentType = "text/plain; charset=utf-8"
+            res.ContentLength64 = forbiddenBytes.LongLength
+            Using os As System.IO.Stream = res.OutputStream
+                Await os.WriteAsync(forbiddenBytes, 0, forbiddenBytes.Length).ConfigureAwait(False)
+            End Using
+            res.Close()
+            Return
+        End If
+
+        AddExplicitCorsOrigin(res, requestOrigin)
 
         ' Read body (if any)
         Dim body As String = ""
+        Dim requestTooLarge As System.Boolean = False
         If req.HasEntityBody Then
-            Using rdr As New IO.StreamReader(req.InputStream, System.Text.Encoding.UTF8)
-                body = Await rdr.ReadToEndAsync().ConfigureAwait(False)
+            Try
+                body = Await SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.ReadUtf8RequestBodyBoundedAsync(
+                    req,
+                    SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.MaxStandardRequestBytes).ConfigureAwait(False)
+            Catch exTooLarge As SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.LocalHttpRequestTooLargeException
+                requestTooLarge = True
+            End Try
+        End If
+
+        If requestTooLarge Then
+            Dim tooLargeBytes() As System.Byte = System.Text.Encoding.UTF8.GetBytes("Request is too large.")
+            res.StatusCode = 413
+            res.ContentType = "text/plain; charset=utf-8"
+            res.ContentLength64 = tooLargeBytes.LongLength
+            Using os As System.IO.Stream = res.OutputStream
+                Await os.WriteAsync(tooLargeBytes, 0, tooLargeBytes.Length).ConfigureAwait(False)
             End Using
+            res.Close()
+            Return
         End If
 
         ' Dispatch to add-in logic
@@ -230,7 +294,6 @@ Partial Public Class ThisAddIn
         Dim buf = System.Text.Encoding.UTF8.GetBytes(responseText)
         res.ContentLength64 = buf.Length
         res.ContentType = "text/plain; charset=utf-8"
-        res.AddHeader("Access-Control-Allow-Origin", "*")
         Using os = res.OutputStream
             Await os.WriteAsync(buf, 0, buf.Length).ConfigureAwait(False)
         End Using

@@ -28,9 +28,16 @@
 '
 ' Security / behavior notes:
 '  - Only absolute HTTP and HTTPS navigation is accepted by browser_open.
+'  - Explicit navigation to loopback/private/link-local targets requires a user
+'    approval that is kept only in memory for the current Office host process.
+'  - Direct link clicks are preflighted through the same session-only policy;
+'    public Internet navigation keeps the existing behavior without extra prompts.
 '  - A browser context is non-persistent by default; cookies/session state live
 '    for the lifetime of the current host process only.
 '  - browser_interact is write-capable and may submit forms or mutate remote data.
+'  - Browser sessions are headless by default. After navigation, the runtime makes a
+'    conservative best-effort attempt to dismiss common cookie/consent overlays using
+'    only reject/necessary-only actions; it never auto-clicks accept-all.
 ' =============================================================================
 
 Option Explicit On
@@ -40,7 +47,7 @@ Option Infer On
 Namespace Agents
 
     Public NotInheritable Class BrowserToolOptions
-        Public Property Headless As System.Boolean = False
+        Public Property Headless As System.Boolean = True
         Public Property BrowserChannel As System.String = "msedge"
         Public Property FallbackToBundledChromium As System.Boolean = True
         Public Property IgnoreHTTPSErrors As System.Boolean = False
@@ -62,6 +69,8 @@ Namespace Agents
     Friend NotInheritable Class BrowserToolRuntime
         Private Shared ReadOnly Gate As New System.Threading.SemaphoreSlim(1, 1)
         Private Shared ReadOnly ConfigurationLock As New System.Object()
+        Private Shared ReadOnly PrivateNetworkApprovalLock As New System.Object()
+        Private Shared ReadOnly SessionApprovedPrivateOrigins As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
         Private Shared ReadOnly SnapshotRefRegex As New System.Text.RegularExpressions.Regex(
             "\[ref=(e[0-9]+)\]",
             System.Text.RegularExpressions.RegexOptions.Compiled Or System.Text.RegularExpressions.RegexOptions.CultureInvariant)
@@ -158,6 +167,15 @@ Namespace Agents
                     False)
             End If
 
+            If Not EnsurePrivateNavigationApproved(url) Then
+                Return CreateErrorPayload(
+                    BrowserTools.BrowserOpenToolName,
+                    "PRIVATE_NETWORK_ACCESS_DENIED",
+                    "Access to the local or private network target was not authorized by the user.",
+                    False,
+                    False)
+            End If
+
             Dim options As BrowserToolOptions = GetOptionsSnapshot()
             Dim waitUntilText As System.String = GetOptionalString(arguments, "wait_until", "domcontentloaded")
             Dim waitUntil As Microsoft.Playwright.WaitUntilState
@@ -198,6 +216,7 @@ Namespace Agents
 
                 Await CurrentPage.GotoAsync(url, gotoOptions).ConfigureAwait(False)
                 SelectNewestOpenPage()
+                Await TryDismissCommonCookieConsentAsync(CurrentPage, cancellationToken).ConfigureAwait(False)
 
                 Dim title As System.String = Await CurrentPage.TitleAsync().ConfigureAwait(False)
                 Return New Newtonsoft.Json.Linq.JObject(
@@ -366,14 +385,28 @@ Namespace Agents
                         False)
                 End If
 
-                ' Invalidate before attempting the action. Even a failed Playwright action may have
-                ' partially changed focus, input state, navigation or page content.
-                InvalidateSnapshot()
-
                 SelectNewestOpenPage()
                 Dim locator As Microsoft.Playwright.ILocator = CurrentPage.Locator("aria-ref=" & refValue)
+
+                If action = "click" OrElse action = "double_click" Then
+                    Dim directNavigationUrl As System.String = Await TryGetDirectNavigationUrlAsync(locator, CurrentPage.Url).ConfigureAwait(False)
+                    If Not System.String.IsNullOrWhiteSpace(directNavigationUrl) AndAlso
+                       Not EnsurePrivateNavigationApproved(directNavigationUrl) Then
+                        Return CreateErrorPayload(
+                            BrowserTools.BrowserInteractToolName,
+                            "PRIVATE_NETWORK_ACCESS_DENIED",
+                            "Access to the local or private network target was not authorized by the user.",
+                            False,
+                            False)
+                    End If
+                End If
+
+                ' Invalidate only after security preflight. A denied click has not changed page state,
+                ' while an attempted Playwright action may have partially changed it even on failure.
+                InvalidateSnapshot()
                 Await ExecuteLocatorActionAsync(locator, action, value, timeoutMs).ConfigureAwait(False)
                 SelectNewestOpenPage()
+                Await TryDismissCommonCookieConsentAsync(CurrentPage, cancellationToken).ConfigureAwait(False)
 
                 Dim title As System.String = Await CurrentPage.TitleAsync().ConfigureAwait(False)
                 Return New Newtonsoft.Json.Linq.JObject(
@@ -402,6 +435,85 @@ Namespace Agents
             Finally
                 Gate.Release()
             End Try
+        End Function
+
+        Private Shared Async Function TryDismissCommonCookieConsentAsync(
+            page As Microsoft.Playwright.IPage,
+            cancellationToken As System.Threading.CancellationToken
+        ) As System.Threading.Tasks.Task
+            If page Is Nothing OrElse page.IsClosed Then
+                Return
+            End If
+
+            cancellationToken.ThrowIfCancellationRequested()
+
+            ' Deliberately conservative: only reject / necessary-only wording.
+            ' Never auto-click "accept all", because that would grant optional tracking.
+            Dim preferredLabels As System.String() = {
+                "Nur notwendige",
+                "Nur erforderliche",
+                "Nur notwendige Cookies",
+                "Nur erforderliche Cookies",
+                "Nicht notwendige ablehnen",
+                "Alle ablehnen",
+                "Ablehnen",
+                "Reject all",
+                "Reject optional",
+                "Decline all",
+                "Decline",
+                "Necessary only",
+                "Essential only",
+                "Only necessary",
+                "Only essential",
+                "Tout refuser",
+                "Refuser tout",
+                "Refuser",
+                "Uniquement nécessaires",
+                "Solo necessari",
+                "Rifiuta tutto",
+                "Rifiuta"
+            }
+
+            For Each label As System.String In preferredLabels
+                cancellationToken.ThrowIfCancellationRequested()
+
+                Try
+                    Dim locator As Microsoft.Playwright.ILocator =
+                        page.GetByRole(
+                            Microsoft.Playwright.AriaRole.Button,
+                            New Microsoft.Playwright.PageGetByRoleOptions() With {
+                                .Name = label,
+                                .Exact = True
+                            })
+
+                    Dim count As System.Int32 =
+                        Await locator.CountAsync().ConfigureAwait(False)
+
+                    If count <= 0 Then
+                        Continue For
+                    End If
+
+                    Dim candidate As Microsoft.Playwright.ILocator = locator.First
+
+                    If Not Await candidate.IsVisibleAsync().ConfigureAwait(False) Then
+                        Continue For
+                    End If
+
+                    Await candidate.ClickAsync(
+                        New Microsoft.Playwright.LocatorClickOptions() With {
+                            .Timeout = 1500.0F
+                        }).ConfigureAwait(False)
+
+                    ' Consent UIs usually disappear immediately; a short delay lets
+                    ' the DOM settle without waiting for network-idle trackers.
+                    Await page.WaitForTimeoutAsync(150).ConfigureAwait(False)
+                    Return
+                Catch ex As System.Exception
+                    ' Consent handling is best effort only. A failure must never make
+                    ' browser_open/browser_interact fail; the next snapshot can expose
+                    ' the banner so the model can handle it explicitly.
+                End Try
+            Next
         End Function
 
         Private Shared Async Function ExecuteLocatorActionAsync(
@@ -647,6 +759,181 @@ Namespace Agents
             End If
 
             Return System.String.Empty
+        End Function
+
+        Private Shared Function EnsurePrivateNavigationApproved(rawUrl As System.String) As System.Boolean
+            Dim parsedUri As System.Uri = Nothing
+            Dim privateAddresses As System.Collections.Generic.List(Of System.String) = Nothing
+            If Not TryClassifyPrivateNetworkTarget(rawUrl, parsedUri, privateAddresses) Then
+                Return True
+            End If
+
+            Dim origin As System.String = parsedUri.GetLeftPart(System.UriPartial.Authority)
+            SyncLock PrivateNetworkApprovalLock
+                If SessionApprovedPrivateOrigins.Contains(origin) Then
+                    Return True
+                End If
+            End SyncLock
+
+            Dim details As System.String = System.String.Empty
+            If privateAddresses IsNot Nothing AndAlso privateAddresses.Count > 0 Then
+                details = System.Environment.NewLine & System.Environment.NewLine &
+                          "Resolved private/local address: " & System.String.Join(", ", privateAddresses.ToArray())
+            End If
+
+            Dim message As System.String =
+                "The Red Ink browser agent wants to open a local or private network address:" &
+                System.Environment.NewLine & System.Environment.NewLine &
+                parsedUri.AbsoluteUri &
+                details &
+                System.Environment.NewLine & System.Environment.NewLine &
+                "Private network addresses can provide access to services on this computer or your internal network." &
+                System.Environment.NewLine & System.Environment.NewLine &
+                "Allow this exact origin for the current Office session?"
+
+            Dim choice As System.Int32 = SharedLibrary.SharedMethods.ShowCustomYesNoBox(
+                message,
+                "Allow for this session",
+                "Deny",
+                "Red Ink Browser Agent - Private Network Access")
+
+            If choice <> 1 Then
+                Return False
+            End If
+
+            SyncLock PrivateNetworkApprovalLock
+                SessionApprovedPrivateOrigins.Add(origin)
+            End SyncLock
+            Return True
+        End Function
+
+        Private Shared Function TryClassifyPrivateNetworkTarget(
+            rawUrl As System.String,
+            ByRef parsedUri As System.Uri,
+            ByRef privateAddresses As System.Collections.Generic.List(Of System.String)
+        ) As System.Boolean
+            parsedUri = Nothing
+            privateAddresses = New System.Collections.Generic.List(Of System.String)()
+
+            If System.String.IsNullOrWhiteSpace(rawUrl) OrElse
+               Not System.Uri.TryCreate(rawUrl, System.UriKind.Absolute, parsedUri) Then
+                Return False
+            End If
+
+            If Not System.String.Equals(parsedUri.Scheme, System.Uri.UriSchemeHttp, System.StringComparison.OrdinalIgnoreCase) AndAlso
+               Not System.String.Equals(parsedUri.Scheme, System.Uri.UriSchemeHttps, System.StringComparison.OrdinalIgnoreCase) Then
+                Return False
+            End If
+
+            If parsedUri.IsLoopback Then
+                Return True
+            End If
+
+            Dim host As System.String = If(parsedUri.DnsSafeHost, System.String.Empty).Trim()
+            If host.Length = 0 Then
+                Return False
+            End If
+
+            Dim hostLower As System.String = host.ToLowerInvariant()
+            Dim sensitiveName As System.Boolean =
+                hostLower = "localhost" OrElse
+                hostLower.EndsWith(".localhost", System.StringComparison.OrdinalIgnoreCase) OrElse
+                hostLower.EndsWith(".local", System.StringComparison.OrdinalIgnoreCase) OrElse
+                hostLower.EndsWith(".internal", System.StringComparison.OrdinalIgnoreCase) OrElse
+                hostLower.EndsWith(".home", System.StringComparison.OrdinalIgnoreCase)
+
+            Dim literalAddress As System.Net.IPAddress = Nothing
+            If System.Net.IPAddress.TryParse(host, literalAddress) Then
+                If IsPrivateOrLocalAddress(literalAddress) Then
+                    privateAddresses.Add(literalAddress.ToString())
+                    Return True
+                End If
+                Return sensitiveName
+            End If
+
+            Try
+                Dim seen As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+                For Each resolvedAddress As System.Net.IPAddress In System.Net.Dns.GetHostAddresses(host)
+                    If IsPrivateOrLocalAddress(resolvedAddress) Then
+                        Dim addressText As System.String = resolvedAddress.ToString()
+                        If seen.Add(addressText) Then
+                            privateAddresses.Add(addressText)
+                        End If
+                    End If
+                Next
+            Catch ex As System.Net.Sockets.SocketException
+                ' Preserve existing navigation behavior if DNS cannot be resolved during preflight.
+                ' The browser will perform its normal navigation attempt and surface reachability errors.
+            Catch ex As System.Exception
+                System.Diagnostics.Trace.WriteLine(ex.ToString())
+            End Try
+
+            Return sensitiveName OrElse privateAddresses.Count > 0
+        End Function
+
+        Private Shared Function IsPrivateOrLocalAddress(address As System.Net.IPAddress) As System.Boolean
+            If address Is Nothing Then Return True
+
+            If address.IsIPv4MappedToIPv6 Then
+                address = address.MapToIPv4()
+            End If
+
+            If System.Net.IPAddress.IsLoopback(address) Then Return True
+
+            Dim bytes As System.Byte() = address.GetAddressBytes()
+            If address.AddressFamily = System.Net.Sockets.AddressFamily.InterNetwork Then
+                If bytes.Length <> 4 Then Return True
+                If bytes(0) = 0 Then Return True
+                If bytes(0) = 10 Then Return True
+                If bytes(0) = 100 AndAlso bytes(1) >= 64 AndAlso bytes(1) <= 127 Then Return True
+                If bytes(0) = 127 Then Return True
+                If bytes(0) = 169 AndAlso bytes(1) = 254 Then Return True
+                If bytes(0) = 172 AndAlso bytes(1) >= 16 AndAlso bytes(1) <= 31 Then Return True
+                If bytes(0) = 192 AndAlso bytes(1) = 168 Then Return True
+                Return False
+            End If
+
+            If address.AddressFamily = System.Net.Sockets.AddressFamily.InterNetworkV6 Then
+                If address.Equals(System.Net.IPAddress.IPv6Any) OrElse
+                   address.Equals(System.Net.IPAddress.IPv6None) OrElse
+                   address.IsIPv6LinkLocal OrElse
+                   address.IsIPv6SiteLocal Then
+                    Return True
+                End If
+
+                If bytes.Length = 16 AndAlso (bytes(0) And &HFE) = &HFC Then
+                    Return True
+                End If
+                Return False
+            End If
+
+            Return True
+        End Function
+
+        Private Shared Async Function TryGetDirectNavigationUrlAsync(
+            locator As Microsoft.Playwright.ILocator,
+            currentPageUrl As System.String
+        ) As System.Threading.Tasks.Task(Of System.String)
+            Try
+                Dim href As System.String = Await locator.GetAttributeAsync("href").ConfigureAwait(False)
+                If System.String.IsNullOrWhiteSpace(href) Then
+                    Return Nothing
+                End If
+
+                Dim directUri As System.Uri = Nothing
+                If System.Uri.TryCreate(href, System.UriKind.Absolute, directUri) Then
+                    Return directUri.AbsoluteUri
+                End If
+
+                Dim baseUri As System.Uri = Nothing
+                If System.Uri.TryCreate(currentPageUrl, System.UriKind.Absolute, baseUri) AndAlso
+                   System.Uri.TryCreate(baseUri, href, directUri) Then
+                    Return directUri.AbsoluteUri
+                End If
+            Catch ex As System.Exception
+                System.Diagnostics.Trace.WriteLine(ex.ToString())
+            End Try
+            Return Nothing
         End Function
 
         Private Shared Function ValidateAction(action As System.String, value As System.String) As System.String

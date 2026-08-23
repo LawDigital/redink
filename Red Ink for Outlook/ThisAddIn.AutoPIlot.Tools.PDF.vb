@@ -250,10 +250,7 @@ Partial Public Class ThisAddIn
             Await Task.Run(Sub() File.WriteAllText(outputPath, content, Encoding.UTF8), ct)
 
             If File.Exists(outputPath) Then
-                ' Register as output on the first attachment if available
-                If _apCurrentAttachments IsNot Nothing AndAlso _apCurrentAttachments.Count > 0 Then
-                    _apCurrentAttachments(0).OutputFiles.Add(outputPath)
-                End If
+                RegisterAutoPilotGeneratedOutputFile(outputPath)
 
                 Dim sizeKb = New FileInfo(outputPath).Length / 1024
                 Dim lineCount = content.Split({vbCrLf, vbLf, vbCr}, StringSplitOptions.None).Length
@@ -506,10 +503,7 @@ Partial Public Class ThisAddIn
                 doc.Save(outputPath)
             End Using
 
-            ' Register as output
-            If _apCurrentAttachments IsNot Nothing AndAlso _apCurrentAttachments.Count > 0 Then
-                _apCurrentAttachments(0).OutputFiles.Add(outputPath)
-            End If
+            RegisterAutoPilotGeneratedOutputFile(outputPath)
 
             response.Success = True
             response.Response = $"PDF created: {outputName} ({New FileInfo(outputPath).Length / 1024:F0} KB)"
@@ -540,6 +534,8 @@ Partial Public Class ThisAddIn
 
     ''' <summary>Page layout state shared while rendering Markdown content to a PDF.</summary>
     Private NotInheritable Class ApPdfLayout
+        Implements System.IDisposable
+
         Public Doc As PdfSharp.Pdf.PdfDocument
         Public Gfx As PdfSharp.Drawing.XGraphics
         Public Page As PdfSharp.Pdf.PdfPage
@@ -547,6 +543,9 @@ Partial Public Class ThisAddIn
         Public ReadOnly Margin As Double = 50.0
         Public ReadOnly PageWidth As Double = 595.0  ' A4
         Public ReadOnly PageHeight As Double = 842.0
+
+        Private _disposed As Boolean
+
         Public ReadOnly Property UsableWidth As Double
             Get
                 Return PageWidth - 2 * Margin
@@ -554,6 +553,10 @@ Partial Public Class ThisAddIn
         End Property
 
         Public Sub NewPage()
+            ' PDFsharp permits only one live XGraphics instance per PdfPage.
+            ' Release the previous page graphics before moving to the next page.
+            DisposeGraphics()
+
             Page = Doc.AddPage()
             Page.Width = PageWidth
             Page.Height = PageHeight
@@ -561,16 +564,29 @@ Partial Public Class ThisAddIn
             Y = Margin
         End Sub
 
+        Public Sub DisposeGraphics()
+            If Gfx IsNot Nothing Then
+                Gfx.Dispose()
+                Gfx = Nothing
+            End If
+        End Sub
+
         ''' <summary>Ensures the given vertical space fits, adding a page if needed.</summary>
         Public Sub EnsureSpace(requiredHeight As Double)
             If Y + requiredHeight > PageHeight - Margin Then NewPage()
+        End Sub
+
+        Public Sub Dispose() Implements System.IDisposable.Dispose
+            If _disposed Then Return
+            DisposeGraphics()
+            _disposed = True
         End Sub
     End Class
 
     ''' <summary>Renders Markdown-formatted content to the PDF with word wrapping and inline styling.</summary>
     Private Sub RenderMarkdownToPdf(doc As PdfSharp.Pdf.PdfDocument, title As String, content As String)
-        Dim layout As New ApPdfLayout() With {.Doc = doc}
-        layout.NewPage()
+        Using layout As New ApPdfLayout() With {.Doc = doc}
+            layout.NewPage()
 
         If Not String.IsNullOrWhiteSpace(title) Then
             Dim titleFont = New PdfSharp.Drawing.XFont("Arial", 16, PdfSharp.Drawing.XFontStyleEx.Bold)
@@ -609,7 +625,11 @@ Partial Public Class ThisAddIn
             End If
         End While
 
-        DrawPageNumbers(layout)
+            ' The last page still has a live drawing context at this point.
+            ' Dispose it before reopening pages to append page-number footers.
+            layout.DisposeGraphics()
+            DrawPageNumbers(layout)
+        End Using
     End Sub
 
     ''' <summary>Returns True when a line looks like a Markdown pipe-table row.</summary>

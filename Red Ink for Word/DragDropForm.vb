@@ -55,6 +55,14 @@ End Enum
 
 Public Class DragDropForm
 
+    Protected Overrides Sub OnShown(e As System.EventArgs)
+        MyBase.OnShown(e)
+        Me.TopMost = True
+        SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(Me)
+        SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(Me)
+    End Sub
+
+
     Private _selectedFilePath As String = String.Empty
     Private _selectionMode As DragDropMode = DragDropMode.FileOnly
     Private _allowUseActiveDocument As Boolean = False
@@ -304,9 +312,6 @@ Public Class DragDropForm
         Me.BringToFront()
         Me.Activate()
 
-        ' Surface any same-process native host prompt (e.g. Word's "Save changes?")
-        ' that would otherwise stay hidden behind this TopMost modal dialog.
-        SharedMethods.AttachForeignForegroundWatchdog(Me)
     End Sub
 
     ''' <summary>
@@ -564,7 +569,8 @@ Public Class DragDropForm
             ofd.Title = "Select a File"
             ofd.Multiselect = False
 
-            If ofd.ShowDialog() = DialogResult.OK Then
+            Dim __safeDialogOwner567 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            If If(__safeDialogOwner567 IsNot Nothing, ofd.ShowDialog(__safeDialogOwner567), ofd.ShowDialog()) = DialogResult.OK Then
                 _selectedFilePath = ofd.FileName
                 Me.DialogResult = DialogResult.OK
                 Me.Close()
@@ -580,7 +586,8 @@ Public Class DragDropForm
             fbd.Description = "Select a Folder"
             fbd.ShowNewFolderButton = True
 
-            If fbd.ShowDialog() = DialogResult.OK Then
+            Dim __safeDialogOwner583 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            If If(__safeDialogOwner583 IsNot Nothing, fbd.ShowDialog(__safeDialogOwner583), fbd.ShowDialog()) = DialogResult.OK Then
                 _selectedFilePath = fbd.SelectedPath
                 Me.DialogResult = DialogResult.OK
                 Me.Close()

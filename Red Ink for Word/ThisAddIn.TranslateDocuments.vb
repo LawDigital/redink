@@ -16,15 +16,16 @@
 '    stay within LLM token/character limits. Each batch contains a bounded
 '    number of paragraphs (TranslateParagraphsPerBatch) and is further reduced
 '    if the combined character count would exceed TranslateMaxCharsPerBatch.
-'  - Context Windows: Each batch includes a small window of already-processed
-'    preceding paragraphs and unprocessed following paragraphs to help the LLM
-'    preserve meaning, terminology, and tone across batch boundaries.
+'  - Context Windows: Each independent LLM batch includes a small window of already-processed
+'    preceding paragraphs and unprocessed following paragraphs. The model is explicitly told
+'    that it does not see or remember the rest of the document; global instructions/dictionaries
+'    remain authoritative across all batches.
 '  - Pure Text to LLM: Only plain, visible text is sent to the LLM—no XML, no
 '    formatting codes, and no markup—ensuring maximum formatting preservation.
-'  - Formatting Marker Mode (optional): When enabled, inserts | markers at run
-'    boundaries so the LLM can preserve formatting alignment. The LLM returns
-'    markers in the same positions relative to the translated text, and the
-'    redistribution uses these markers instead of proportional character splitting.
+'  - Formatting Preservation (default): Inserts | markers only at
+'    real formatting-group boundaries (not every internal Word run split). The LLM
+'    preserves those boundaries, and text is redistributed only within runs that
+'    have identical formatting. Manual Word breaks are protected as structural anchors.
 '  - Correction Mode: When correcting, creates a Word compare document showing
 '    all changes between original and corrected versions.
 ' =============================================================================
@@ -96,7 +97,7 @@ Partial Public Class ThisAddIn
     Private Const RunBoundaryMarker As String = "|"
 
     ''' <summary>
-    ''' Marker inserted at footnote/endnote reference boundaries in text sent to the LLM.
+    ''' Marker inserted at protected structural boundaries in text sent to the LLM.
     ''' U+2016 DOUBLE VERTICAL LINE — virtually never appears in legal documents.
     ''' </summary>
     Private Const NoteRefMarker As String = "‖"
@@ -129,6 +130,7 @@ Partial Public Class ThisAddIn
         Public Property TextNode As System.Xml.XmlNode
         Public Property OriginalText As String
         Public Property HasNoteReferenceBefore As Boolean
+        Public Property FormattingKey As String
     End Class
 
     ''' <summary>
@@ -138,10 +140,88 @@ Partial Public Class ThisAddIn
         Public Property Index As Integer
         Public Property TextRuns As List(Of TranslateTextRunInfo)
         Public Property FullText As String  ' Combined text from all runs (plain text only)
-        Public Property MarkerText As String ' Text with | markers at run boundaries (Nothing if single-run or formatting markers disabled)
+        Public Property MarkerText As String ' Text with | markers at real formatting boundaries
         Public Property TranslatedText As String
         Public Property IsEmpty As Boolean
     End Class
+
+
+    ''' <summary>
+    ''' Returns a stable key for run formatting and structural scope. Adjacent runs with
+    ''' the same key can be treated as one formatting group even if Word split them internally.
+    ''' </summary>
+    Private Shared Function GetTranslateRunFormattingKey(textNode As System.Xml.XmlNode) As String
+        If textNode Is Nothing Then Return ""
+
+        Dim runNode As System.Xml.XmlNode = textNode.ParentNode
+        While runNode IsNot Nothing AndAlso runNode.LocalName <> "r"
+            runNode = runNode.ParentNode
+        End While
+        If runNode Is Nothing Then Return ""
+
+        Dim sb As New System.Text.StringBuilder()
+
+        For Each child As System.Xml.XmlNode In runNode.ChildNodes
+            If child.NodeType = System.Xml.XmlNodeType.Element AndAlso child.LocalName = "rPr" Then
+                sb.Append(child.OuterXml)
+                Exit For
+            End If
+        Next
+
+        ' Never merge across structural wrappers such as hyperlinks, tracked changes,
+        ' content controls, etc., even when visible formatting is identical.
+        Dim ancestor As System.Xml.XmlNode = runNode.ParentNode
+        While ancestor IsNot Nothing AndAlso ancestor.LocalName <> "p"
+            If ancestor.NodeType = System.Xml.XmlNodeType.Element Then
+                sb.Append("|scope:")
+                sb.Append(ancestor.LocalName)
+                sb.Append(":")
+                sb.Append(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(ancestor).ToString())
+            End If
+            ancestor = ancestor.ParentNode
+        End While
+
+        Return sb.ToString()
+    End Function
+
+    Private Shared Function BuildTranslateFormattingGroups(
+        textRuns As List(Of TranslateTextRunInfo),
+        Optional runIndices As List(Of Integer) = Nothing) As List(Of List(Of Integer))
+
+        Dim groups As New List(Of List(Of Integer))()
+        If textRuns Is Nothing OrElse textRuns.Count = 0 Then Return groups
+
+        Dim indices As New List(Of Integer)()
+        If runIndices Is Nothing Then
+            For i As Integer = 0 To textRuns.Count - 1
+                indices.Add(i)
+            Next
+        Else
+            indices.AddRange(runIndices)
+        End If
+
+        Dim currentGroup As List(Of Integer) = Nothing
+        Dim previousKey As String = Nothing
+        Dim havePrevious As Boolean = False
+
+        For Each runIdx As Integer In indices
+            If runIdx < 0 OrElse runIdx >= textRuns.Count Then Continue For
+            Dim run As TranslateTextRunInfo = textRuns(runIdx)
+            If run Is Nothing OrElse String.IsNullOrEmpty(run.OriginalText) Then Continue For
+
+            Dim currentKey As String = If(run.FormattingKey, "")
+            If Not havePrevious OrElse Not String.Equals(previousKey, currentKey, StringComparison.Ordinal) Then
+                currentGroup = New List(Of Integer)()
+                groups.Add(currentGroup)
+            End If
+
+            currentGroup.Add(runIdx)
+            previousKey = currentKey
+            havePrevious = True
+        Next
+
+        Return groups
+    End Function
 
 
     Private Shared Function IsRemoteDocumentPath(documentPath As String) As Boolean
@@ -484,7 +564,7 @@ Partial Public Class ThisAddIn
         Dim usedActiveDocument As Boolean = False
         Dim activeDocumentTempFolder As String = Nothing
         Dim keepActiveDocumentTempFolder As Boolean = False
-        Dim desktopResultPaths As New List(Of String)()
+        Dim resultFilePaths As New List(Of String)()
 
         Dim modeVerb As String = If(mode = DocumentProcessMode.Translate, "translate", If(_isFreestyle, "adapt", "correct"))
         Dim modeVerbPast As String = If(mode = DocumentProcessMode.Translate, "translated", If(_isFreestyle, "adapted", "corrected"))
@@ -504,7 +584,8 @@ Partial Public Class ThisAddIn
 
         Try
             Using frm As New DragDropForm(DragDropMode.FileOrDirectory, allowUseActiveDocument:=True)
-                If frm.ShowDialog() = DialogResult.OK Then
+                Dim __safeDialogOwner507 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If If(__safeDialogOwner507 IsNot Nothing, frm.ShowDialog(__safeDialogOwner507), frm.ShowDialog()) = DialogResult.OK Then
                     selectedPath = frm.SelectedFilePath
                     usedActiveDocument = frm.UsedActiveDocument
 
@@ -742,16 +823,10 @@ Partial Public Class ThisAddIn
             Exit Function
         End If
 
-        ' Ask about formatting-aware marker mode
-        Dim fmtChoice As Integer = ShowCustomYesNoBox(
-            "Would you like to enable formatting-aware mode?" & vbCrLf & vbCrLf &
-            "This mode uses markers to help the AI preserve the alignment of bold, italic, " &
-            "and other formatting changes within paragraphs. It produces better formatting " &
-            "results but may increase processing time and not work with all models." & vbCrLf & vbCrLf &
-            "Standard mode uses proportional text distribution which may shift formatting boundaries.",
-            "Yes, preserve formatting alignment", "No, use standard mode")
-        If fmtChoice = 0 Then Exit Function
-        _useFormattingMarkers = (fmtChoice = 1)
+        ' Formatting preservation is the default for interactive processing.
+        ' The reduced marker model exposes only real formatting transitions, so there is no
+        ' separate user choice and no additional LLM call.
+        _useFormattingMarkers = True
 
         ' Confirm if many files to process
         If filesToProcess.Count > 10 Then
@@ -820,27 +895,31 @@ Partial Public Class ThisAddIn
                     End If
 
                     If success Then
-                        ' For correction mode on Word docs, create compare document
+                        Dim compareCreated As Boolean = False
+
+                        ' For correction mode on Word docs, create compare document.
                         If mode = DocumentProcessMode.Correct AndAlso Not isPptx Then
-                            Dim compareSuccess As Boolean = CreateWordCompareDocument(filePath, outputPath)
-                            If Not compareSuccess Then
+                            compareCreated = CreateWordCompareDocument(filePath, outputPath)
+                            If Not compareCreated Then
                                 failedFiles.Add($"{fileName}: Corrected but compare document creation failed")
                             End If
                         End If
 
                         Dim desktopMoveSucceeded As Boolean = True
+                        Dim finalOutputPath As String = outputPath
+                        Dim finalComparePath As String = If(compareCreated, compareOutputPath, Nothing)
 
                         If usedActiveDocument Then
                             Try
                                 Dim movedOutputPath As String = MoveFileToDesktop(outputPath)
                                 If Not String.IsNullOrWhiteSpace(movedOutputPath) Then
-                                    desktopResultPaths.Add(movedOutputPath)
+                                    finalOutputPath = movedOutputPath
                                 End If
 
-                                If Not String.IsNullOrWhiteSpace(compareOutputPath) AndAlso File.Exists(compareOutputPath) Then
+                                If compareCreated AndAlso Not String.IsNullOrWhiteSpace(compareOutputPath) AndAlso File.Exists(compareOutputPath) Then
                                     Dim movedComparePath As String = MoveFileToDesktop(compareOutputPath)
                                     If Not String.IsNullOrWhiteSpace(movedComparePath) Then
-                                        desktopResultPaths.Add(movedComparePath)
+                                        finalComparePath = movedComparePath
                                     End If
                                 End If
                             Catch ex As Exception
@@ -851,6 +930,12 @@ Partial Public Class ThisAddIn
                         End If
 
                         If desktopMoveSucceeded Then
+                            If Not String.IsNullOrWhiteSpace(finalOutputPath) AndAlso File.Exists(finalOutputPath) Then
+                                resultFilePaths.Add(finalOutputPath)
+                            End If
+                            If Not String.IsNullOrWhiteSpace(finalComparePath) AndAlso File.Exists(finalComparePath) Then
+                                resultFilePaths.Add(finalComparePath)
+                            End If
                             successCount += 1
                         End If
                     Else
@@ -893,14 +978,19 @@ Partial Public Class ThisAddIn
             End If
         End If
 
-        If usedActiveDocument AndAlso desktopResultPaths.Count > 0 Then
+        Dim distinctResultPaths As List(Of String) = resultFilePaths.
+            Where(Function(p) Not String.IsNullOrWhiteSpace(p)).
+            Distinct(StringComparer.OrdinalIgnoreCase).
+            ToList()
+
+        If distinctResultPaths.Count > 0 Then
             summary.AppendLine()
-            summary.AppendLine("Result files saved to Desktop:")
-            For Each resultPath In desktopResultPaths.Take(10)
+            summary.AppendLine(If(usedActiveDocument, "Result files saved to Desktop:", "Created result files:"))
+            For Each resultPath In distinctResultPaths.Take(20)
                 summary.AppendLine($"  • {Path.GetFileName(resultPath)}")
             Next
-            If desktopResultPaths.Count > 10 Then
-                summary.AppendLine($"  ... and {desktopResultPaths.Count - 10} more")
+            If distinctResultPaths.Count > 20 Then
+                summary.AppendLine($"  ... and {distinctResultPaths.Count - 20} more")
             End If
         End If
 
@@ -961,16 +1051,21 @@ Partial Public Class ThisAddIn
         Dim tempCompareDir As String = Nothing
 
         Try
-            wordApp = Globals.ThisAddIn.Application
-            Dim wasScreenUpdating As Boolean = wordApp.ScreenUpdating
+            ' The comparison owns its Word instance. Do not reuse Globals.ThisAddIn.Application:
+            ' the hidden comparison process must be closed deterministically and must not leave
+            ' comparison documents or state in the user's interactive Word instance.
+            wordApp = New Word.Application()
+            wordApp.Visible = False
+            wordApp.DisplayAlerts = WdAlertLevel.wdAlertsNone
             wordApp.ScreenUpdating = False
+            Try : wordApp.Options.UpdateLinksAtOpen = False : Catch : End Try
 
-            ' Determine final compare output path
+            ' Determine final compare output path.
             Dim comparePath As String = GetCompareFilePath(correctedPath)
 
             ' Work entirely on local copies inside a private %TEMP% folder so the compare
             ' interop never opens documents that live in a document-management or cloud-synced
-            ' location (a known source of crashes / event re-entrancy).
+            ' location.
             tempCompareDir = Path.Combine(Path.GetTempPath(), $"{AN2}_compare_{Guid.NewGuid():N}")
             Directory.CreateDirectory(tempCompareDir)
 
@@ -981,12 +1076,18 @@ Partial Public Class ThisAddIn
             File.Copy(originalPath, tempOriginalPath, overwrite:=True)
             File.Copy(correctedPath, tempCorrectedPath, overwrite:=True)
 
-            ' Open the local copies only (never the original DMS/synced paths)
-            originalDoc = wordApp.Documents.Open(tempOriginalPath, ReadOnly:=True, Visible:=False, AddToRecentFiles:=False)
-            correctedDoc = wordApp.Documents.Open(tempCorrectedPath, ReadOnly:=True, Visible:=False, AddToRecentFiles:=False)
+            originalDoc = wordApp.Documents.Open(
+                FileName:=tempOriginalPath,
+                ReadOnly:=True,
+                Visible:=False,
+                AddToRecentFiles:=False)
 
-            ' Create comparison document using Word's built-in compare feature
-            ' This preserves all formatting and shows changes as tracked changes
+            correctedDoc = wordApp.Documents.Open(
+                FileName:=tempCorrectedPath,
+                ReadOnly:=True,
+                Visible:=False,
+                AddToRecentFiles:=False)
+
             compareDoc = wordApp.CompareDocuments(
                 OriginalDocument:=originalDoc,
                 RevisedDocument:=correctedDoc,
@@ -1005,23 +1106,21 @@ Partial Public Class ThisAddIn
                 IgnoreAllComparisonWarnings:=True
             )
 
-            ' Save the compare document to the local temp path first
             compareDoc.SaveAs2(tempComparePath, WdSaveFormat.wdFormatXMLDocument)
 
-            ' Close documents
             compareDoc.Close(WdSaveOptions.wdDoNotSaveChanges)
+            Try : Marshal.FinalReleaseComObject(compareDoc) : Catch : End Try
             compareDoc = Nothing
 
             correctedDoc.Close(WdSaveOptions.wdDoNotSaveChanges)
+            Try : Marshal.FinalReleaseComObject(correctedDoc) : Catch : End Try
             correctedDoc = Nothing
 
             originalDoc.Close(WdSaveOptions.wdDoNotSaveChanges)
+            Try : Marshal.FinalReleaseComObject(originalDoc) : Catch : End Try
             originalDoc = Nothing
 
-            wordApp.ScreenUpdating = wasScreenUpdating
-
-            ' Move the finished compare file to its final destination (plain file I/O only —
-            ' no Word interop against the destination folder).
+            ' Move the finished compare file to its final destination with plain file I/O.
             File.Copy(tempComparePath, comparePath, overwrite:=True)
 
             Return File.Exists(comparePath)
@@ -1030,18 +1129,21 @@ Partial Public Class ThisAddIn
             Debug.WriteLine($"CreateWordCompareDocument error: {ex.Message}")
             Return False
         Finally
-            ' Cleanup
             If compareDoc IsNot Nothing Then
                 Try : compareDoc.Close(WdSaveOptions.wdDoNotSaveChanges) : Catch : End Try
+                Try : Marshal.FinalReleaseComObject(compareDoc) : Catch : End Try
             End If
             If correctedDoc IsNot Nothing Then
                 Try : correctedDoc.Close(WdSaveOptions.wdDoNotSaveChanges) : Catch : End Try
+                Try : Marshal.FinalReleaseComObject(correctedDoc) : Catch : End Try
             End If
             If originalDoc IsNot Nothing Then
                 Try : originalDoc.Close(WdSaveOptions.wdDoNotSaveChanges) : Catch : End Try
+                Try : Marshal.FinalReleaseComObject(originalDoc) : Catch : End Try
             End If
             If wordApp IsNot Nothing Then
-                Try : wordApp.ScreenUpdating = True : Catch : End Try
+                Try : wordApp.Quit(WdSaveOptions.wdDoNotSaveChanges) : Catch : End Try
+                Try : Marshal.FinalReleaseComObject(wordApp) : Catch : End Try
             End If
             If Not String.IsNullOrWhiteSpace(tempCompareDir) AndAlso Directory.Exists(tempCompareDir) Then
                 Try : Directory.Delete(tempCompareDir, recursive:=True) : Catch : End Try
@@ -1367,7 +1469,7 @@ Partial Public Class ThisAddIn
     ''' Only extracts plain text - no formatting codes sent to LLM.
     ''' Preserves space information for accurate redistribution.
     ''' When formatting markers are enabled, also builds marker-annotated text.
-    ''' Detects footnote/endnote references AND complex field boundaries (cross-references,
+    ''' Detects footnote/endnote references, manual line breaks, AND complex field boundaries (cross-references,
     ''' merge fields, etc.) so that text redistribution never shifts content across them.
     ''' </summary>
     Private Function ExtractTranslateParagraphsFromXml(xmlDoc As System.Xml.XmlDocument, nsMgr As System.Xml.XmlNamespaceManager) As List(Of TranslateParagraphInfo)
@@ -1489,6 +1591,31 @@ Partial Public Class ThisAddIn
                 Next
             End If
 
+            ' Protect manual Word line breaks (w:br / w:cr) as structural boundaries.
+            ' They are not text nodes, so without an explicit boundary the LLM sees both sides
+            ' as one continuous string and redistribution can move words across the break.
+            Dim manualBreakBeforeTextNodes As New HashSet(Of System.Xml.XmlNode)()
+            Dim orderedTextAndBreakNodes As System.Xml.XmlNodeList =
+                paraNode.SelectNodes(".//w:t | .//w:br | .//w:cr", nsMgr)
+            Dim havePreviousProcessableText As Boolean = False
+            Dim manualBreakPending As Boolean = False
+
+            For Each orderedNode As System.Xml.XmlNode In orderedTextAndBreakNodes
+                If orderedNode.LocalName = "br" OrElse orderedNode.LocalName = "cr" Then
+                    If havePreviousProcessableText Then manualBreakPending = True
+                    Continue For
+                End If
+
+                If orderedNode.LocalName = "t" Then
+                    If refNodes.Contains(orderedNode) Then Continue For
+                    If manualBreakPending Then
+                        manualBreakBeforeTextNodes.Add(orderedNode)
+                    End If
+                    havePreviousProcessableText = True
+                    manualBreakPending = False
+                End If
+            Next
+
             ' Find all w:t (text) elements within this paragraph
             Dim textNodes As System.Xml.XmlNodeList = paraNode.SelectNodes(".//w:t", nsMgr)
             Dim fullTextBuilder As New StringBuilder()
@@ -1503,7 +1630,8 @@ Partial Public Class ThisAddIn
                 ' Determine if a footnoteReference/endnoteReference run OR a fldChar run
                 ' exists between the previous w:t's w:r and this w:t's w:r.
                 ' Walk backward from this run's parent through preceding sibling w:r elements.
-                Dim hasNoteRefBefore As Boolean = False
+                Dim hasNoteRefBefore As Boolean =
+                    paraInfo.TextRuns.Count > 0 AndAlso manualBreakBeforeTextNodes.Contains(textNode)
                 If paraInfo.TextRuns.Count > 0 AndAlso (bodyRefRunNodes.Count > 0 OrElse fldCharRuns.Count > 0) Then
                     Dim thisRun As System.Xml.XmlNode = textNode.ParentNode ' w:r containing this w:t
                     ' Walk backward through preceding sibling elements
@@ -1548,7 +1676,8 @@ Partial Public Class ThisAddIn
                 paraInfo.TextRuns.Add(New TranslateTextRunInfo() With {
                     .TextNode = textNode,
                     .OriginalText = text,
-                    .HasNoteReferenceBefore = hasNoteRefBefore
+                    .HasNoteReferenceBefore = hasNoteRefBefore,
+                    .FormattingKey = GetTranslateRunFormattingKey(textNode)
                 })
                 ' Insert note-reference marker into FullText at the boundary
                 If hasNoteRefBefore Then
@@ -1576,7 +1705,7 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Builds a marker-annotated version of a paragraph's text by inserting | at run boundaries.
     ''' Only inserts markers between non-empty runs where formatting actually changes.
-    ''' Also preserves ‖ (note-reference) markers at footnote/endnote boundaries.
+    ''' Also preserves ‖ markers at protected structural boundaries (notes, fields, manual breaks).
     ''' </summary>
     ''' <param name="textRuns">The text runs of the paragraph.</param>
     ''' <returns>The annotated text with | markers, or Nothing if only one effective run.</returns>
@@ -1585,37 +1714,41 @@ Partial Public Class ThisAddIn
 
         Dim sb As New StringBuilder()
         Dim markerCount As Integer = 0
+        Dim previousFormattingKey As String = Nothing
+        Dim havePreviousVisibleRun As Boolean = False
+        Dim hardBoundarySincePreviousVisibleRun As Boolean = False
 
         For i As Integer = 0 To textRuns.Count - 1
-            Dim runText As String = textRuns(i).OriginalText
+            Dim run As TranslateTextRunInfo = textRuns(i)
+            Dim runText As String = If(run.OriginalText, "")
 
-            ' Insert ‖ marker BEFORE the | marker if this run has a note reference before it.
-            ' The ‖ must appear in the text sent to the LLM so it can preserve it.
-            If textRuns(i).HasNoteReferenceBefore Then
+            ' A note/field reference or manual break already is a hard positional boundary. Do not add
+            ' a redundant formatting marker across it; markers inside each side still work.
+            If run.HasNoteReferenceBefore Then
                 sb.Append(NoteRefMarker)
+                hardBoundarySincePreviousVisibleRun = True
             End If
 
-            ' Insert marker between runs, but only when both sides are non-empty
-            ' (empty runs don't carry visible formatting, so a marker would be misleading)
-            If i > 0 AndAlso runText.Length > 0 Then
-                ' Check if previous run was non-empty
-                Dim prevNonEmpty As Boolean = False
-                For j As Integer = i - 1 To 0 Step -1
-                    If textRuns(j).OriginalText.Length > 0 Then
-                        prevNonEmpty = True
-                        Exit For
-                    End If
-                Next
-                If prevNonEmpty Then
+            If runText.Length > 0 Then
+                Dim currentFormattingKey As String = If(run.FormattingKey, "")
+
+                If havePreviousVisibleRun AndAlso
+                   Not hardBoundarySincePreviousVisibleRun AndAlso
+                   Not String.Equals(previousFormattingKey, currentFormattingKey, StringComparison.Ordinal) Then
                     sb.Append(RunBoundaryMarker)
                     markerCount += 1
                 End If
-            End If
 
-            sb.Append(runText)
+                sb.Append(runText)
+                previousFormattingKey = currentFormattingKey
+                havePreviousVisibleRun = True
+                hardBoundarySincePreviousVisibleRun = False
+            Else
+                sb.Append(runText)
+            End If
         Next
 
-        ' If no markers were inserted, there's no benefit to using marker mode
+        ' No real formatting transition: do not expose Word's internal run fragmentation.
         If markerCount = 0 Then Return Nothing
 
         Return sb.ToString()
@@ -1653,6 +1786,14 @@ Partial Public Class ThisAddIn
             systemPrompt = InterpolateAtRuntime(effectivePrompt)
         End If
 
+        systemPrompt = systemPrompt & vbCrLf & vbCrLf &
+            "BATCH SCOPE / DOCUMENT-WIDE CONSISTENCY: This document is processed in independent sequential batches. " &
+            "In this model call you do NOT have access to the full document and you do NOT retain hidden memory of earlier or later batches. " &
+            "You see only the current [TEXTTOPROCESS] plus the small [CONTEXT BEFORE] and [CONTEXT AFTER] windows supplied with this call. " &
+            "Treat the processing instruction, target language, translation dictionary, configured correction rules, and any user-supplied instruction as document-wide rules that apply consistently to every batch. " &
+            "Use terminology and style choices visible in [CONTEXT BEFORE] as processed precedent unless a document-wide rule says otherwise; [CONTEXT AFTER] is unprocessed source context. " &
+            "Do not invent facts, definitions, terminology choices, or other conventions based on parts of the document you cannot see."
+
         If _useFormattingMarkers Then
             systemPrompt = systemPrompt & vbCrLf & vbCrLf & SP_Add_Markers
         End If
@@ -1661,7 +1802,7 @@ Partial Public Class ThisAddIn
         If hasNoteRefMarkers Then
             systemPrompt = systemPrompt & vbCrLf & vbCrLf &
             "Some paragraphs contain the character ‖ (double vertical line). " &
-            "This marks the position of a footnote or endnote reference. " &
+            "This marks a protected structural boundary such as a footnote/endnote reference, field boundary, or manual Word line break. " &
             "CRITICAL: Keep each ‖ at EXACTLY the same position relative to the surrounding words. " &
             "Do NOT move, add, or remove any ‖ characters."
         End If
@@ -1886,12 +2027,12 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Applies translated/corrected text back to XML nodes, preserving all formatting.
-    ''' Partitions runs at footnote/endnote reference boundaries so that text
+    ''' Partitions runs at protected structural boundaries so that text
     ''' redistribution never moves content across a reference anchor.
     ''' When the LLM preserves ‖ markers, splits directly at their position (they are
     ''' authoritative). Falls back to anchor + word-boundary logic only when ‖ markers
     ''' are missing. The ‖ character is purely a positional placeholder — it indicates
-    ''' where a footnote/endnote/field reference sits but does not create an additional
+    ''' where a footnote/endnote/field reference or manual line break sits but does not create an additional
     ''' formatting split beyond the existing run partition.
     ''' </summary>
     Private Sub ApplyTranslationsToXml(paragraphs As List(Of TranslateParagraphInfo))
@@ -1916,7 +2057,7 @@ Partial Public Class ThisAddIn
                 Continue For
             End If
 
-            ' ─── Check if any note-reference boundaries exist ───
+            ' ─── Check if any protected structural boundaries exist ───
             Dim hasNoteRefBoundaries As Boolean = para.TextRuns.Any(Function(r) r.HasNoteReferenceBefore)
 
             ' ─── DIAGNOSTIC: Log paragraph state ───
@@ -1932,9 +2073,8 @@ Partial Public Class ThisAddIn
                 Next
             End If
 
-            ' Try marker-based distribution if formatting markers were used
-            ' BUT only when NO footnote boundaries exist — otherwise the | markers
-            ' are unaware of footnote positions and will shift text across them.
+            ' Fast path for paragraphs without note/field/manual-break anchors. Paragraphs with anchors
+            ' are handled below segment-by-segment, where formatting markers can also be used safely.
             If Not hasNoteRefBoundaries Then
                 If _useFormattingMarkers AndAlso para.MarkerText IsNot Nothing Then
                     Dim markerApplied As Boolean = TryApplyMarkerBasedDistribution(para, translatedText)
@@ -1952,14 +2092,10 @@ Partial Public Class ThisAddIn
                 Continue For
             End If
 
-            ' ─── From here: paragraph HAS footnote/endnote reference boundaries ───
-            ' Strip formatting markers — the ‖ partitioning handles distribution
-            If _useFormattingMarkers Then
-                translatedText = translatedText.Replace(RunBoundaryMarker, "")
-                Debug.WriteLine($"  After stripping |: [{translatedText}]")
-            End If
+            ' ─── From here: paragraph HAS protected structural boundaries ───
+            ' Keep formatting markers until each note-delimited segment is applied.
 
-            ' Partition runs into segments at note-reference boundaries
+            ' Partition runs into segments at protected structural boundaries
             Dim segments As New List(Of List(Of Integer))()
             Dim currentSegment As New List(Of Integer)()
 
@@ -1985,6 +2121,9 @@ Partial Public Class ThisAddIn
             ' Safety: if partitioning produced only 1 segment, fall back to proportional
             If segments.Count <= 1 Then
                 Debug.WriteLine($"  → Only 1 segment, falling back to proportional")
+                If _useFormattingMarkers Then
+                    translatedText = translatedText.Replace(RunBoundaryMarker, "")
+                End If
                 translatedText = translatedText.Replace(NoteRefMarker, "")
                 DistributeProportional(para, translatedText)
                 Continue For
@@ -2033,6 +2172,9 @@ Partial Public Class ThisAddIn
 
             If segmentTexts Is Nothing Then
                 Debug.WriteLine($"  → Using ANCHOR FALLBACK")
+                If _useFormattingMarkers Then
+                    translatedText = translatedText.Replace(RunBoundaryMarker, "")
+                End If
                 translatedText = translatedText.Replace(NoteRefMarker, "")
 
                 Dim totalOrigLen As Integer = para.FullText.Replace(NoteRefMarker, "").Length
@@ -2106,6 +2248,13 @@ Partial Public Class ThisAddIn
             For segIdx As Integer = 0 To segments.Count - 1
                 Dim segText As String = segmentTexts(segIdx)
                 Dim segRunIndices As List(Of Integer) = segments(segIdx)
+
+                If _useFormattingMarkers Then
+                    If TryApplyMarkerBasedDistributionToRuns(para, segRunIndices, segText) Then
+                        Continue For
+                    End If
+                    segText = segText.Replace(RunBoundaryMarker, "")
+                End If
 
                 If segRunIndices.Count = 1 Then
                     Debug.WriteLine($"  Assign Segment[{segIdx}] → Run[{segRunIndices(0)}]: [{segText}]")
@@ -2396,73 +2545,145 @@ Partial Public Class ThisAddIn
     ''' <param name="translatedText">The translated text potentially containing | markers.</param>
     ''' <returns>True if markers were successfully applied; False to fall back to proportional mode.</returns>
     Private Function TryApplyMarkerBasedDistribution(para As TranslateParagraphInfo, translatedText As String) As Boolean
-        ' Count expected markers: number of boundaries between non-empty runs
-        Dim expectedMarkerCount As Integer = 0
-        If para.MarkerText IsNot Nothing Then
-            For Each ch As Char In para.MarkerText
-                If ch = RunBoundaryMarker(0) Then expectedMarkerCount += 1
-            Next
-        End If
+        If para Is Nothing OrElse para.TextRuns Is Nothing Then Return False
 
-        If expectedMarkerCount = 0 Then Return False
+        Dim runIndices As New List(Of Integer)()
+        For i As Integer = 0 To para.TextRuns.Count - 1
+            runIndices.Add(i)
+        Next
 
-        ' Count actual markers in translated text
+        Return TryApplyMarkerBasedDistributionToRuns(para, runIndices, translatedText)
+    End Function
+
+    ''' <summary>
+    ''' Applies marker-delimited text to real formatting groups rather than to every raw Word run.
+    ''' Internal run splits with identical formatting therefore cannot move bold/italic boundaries.
+    ''' </summary>
+    Private Function TryApplyMarkerBasedDistributionToRuns(
+        para As TranslateParagraphInfo,
+        runIndices As List(Of Integer),
+        translatedText As String) As Boolean
+
+        If para Is Nothing OrElse para.TextRuns Is Nothing OrElse runIndices Is Nothing Then Return False
+
+        Dim groups As List(Of List(Of Integer)) = BuildTranslateFormattingGroups(para.TextRuns, runIndices)
+        If groups.Count = 0 Then Return False
+
+        Dim expectedMarkerCount As Integer = groups.Count - 1
         Dim actualMarkerCount As Integer = 0
         For Each ch As Char In translatedText
             If ch = RunBoundaryMarker(0) Then actualMarkerCount += 1
         Next
 
-        ' If marker count doesn't match, fall back to proportional
         If actualMarkerCount <> expectedMarkerCount Then
-            Debug.WriteLine($"Marker count mismatch for paragraph {para.Index}: expected {expectedMarkerCount}, got {actualMarkerCount}. Falling back to proportional.")
+            Debug.WriteLine($"Formatting marker mismatch for paragraph {para.Index}: expected {expectedMarkerCount}, got {actualMarkerCount}. Falling back.")
             Return False
         End If
 
-        ' Split translated text by markers
         Dim segments As String() = translatedText.Split(New String() {RunBoundaryMarker}, StringSplitOptions.None)
+        If segments.Length <> groups.Count Then Return False
 
-        ' Map segments back to non-empty runs
-        ' Build list of (runIndex, isNonEmpty) pairs to identify which runs receive segments
-        Dim nonEmptyRunIndices As New List(Of Integer)()
-        Dim lastNonEmptyIndex As Integer = -1
-
-        ' Determine which run indices correspond to marker boundaries
-        ' A marker is placed between consecutive non-empty runs (skipping empty ones)
-        For i As Integer = 0 To para.TextRuns.Count - 1
-            If para.TextRuns(i).OriginalText.Length > 0 Then
-                nonEmptyRunIndices.Add(i)
-            End If
-        Next
-
-        ' We should have exactly (expectedMarkerCount + 1) segments for (expectedMarkerCount + 1) non-empty run groups
-        ' But non-empty runs may not equal segment count - we need segments = nonEmptyRunIndices.Count
-        If segments.Length <> nonEmptyRunIndices.Count Then
-            ' Segments don't match non-empty run count - this can happen when
-            ' multiple consecutive non-empty runs exist but only some boundaries had markers
-            Debug.WriteLine($"Segment count {segments.Length} <> non-empty run count {nonEmptyRunIndices.Count} for paragraph {para.Index}. Falling back.")
-            Return False
-        End If
-
-        ' Apply segments to non-empty runs, clear empty runs
-        Dim segmentIdx As Integer = 0
-        For runIdx As Integer = 0 To para.TextRuns.Count - 1
-            Dim run = para.TextRuns(runIdx)
-            If run.OriginalText.Length = 0 Then
-                ' Empty run stays empty
-                SetTextNodeWithSpacePreserve(run.TextNode, "")
-            Else
-                ' Non-empty run gets the corresponding segment
-                If segmentIdx < segments.Length Then
-                    SetTextNodeWithSpacePreserve(run.TextNode, segments(segmentIdx))
-                    segmentIdx += 1
-                Else
-                    SetTextNodeWithSpacePreserve(run.TextNode, "")
-                End If
-            End If
+        For groupIdx As Integer = 0 To groups.Count - 1
+            DistributeTextAcrossTranslateRuns(para, groups(groupIdx), segments(groupIdx))
         Next
 
         Return True
     End Function
+
+    ''' <summary>
+    ''' Redistributes one formatting-group text only across runs that all have the same formatting.
+    ''' Any approximation remains inside an identical formatting group.
+    ''' </summary>
+    Private Sub DistributeTextAcrossTranslateRuns(
+        para As TranslateParagraphInfo,
+        runIndices As List(Of Integer),
+        text As String)
+
+        If runIndices Is Nothing OrElse runIndices.Count = 0 Then Return
+
+        If runIndices.Count = 1 Then
+            SetTextNodeWithSpacePreserve(para.TextRuns(runIndices(0)).TextNode, text)
+            Return
+        End If
+
+        Dim totalOrigLen As Integer = 0
+        For Each runIdx As Integer In runIndices
+            totalOrigLen += para.TextRuns(runIdx).OriginalText.Length
+        Next
+
+        If totalOrigLen <= 0 Then
+            SetTextNodeWithSpacePreserve(para.TextRuns(runIndices(0)).TextNode, text)
+            For i As Integer = 1 To runIndices.Count - 1
+                SetTextNodeWithSpacePreserve(para.TextRuns(runIndices(i)).TextNode, "")
+            Next
+            Return
+        End If
+
+        Dim translatedLen As Integer = text.Length
+        Dim currentPos As Integer = 0
+        Dim cumulativeOriginal As Integer = 0
+
+        For groupRunPos As Integer = 0 To runIndices.Count - 1
+            Dim runIdx As Integer = runIndices(groupRunPos)
+            Dim run As TranslateTextRunInfo = para.TextRuns(runIdx)
+            cumulativeOriginal += run.OriginalText.Length
+
+            If groupRunPos = runIndices.Count - 1 Then
+                Dim remaining As String = If(currentPos < translatedLen, text.Substring(currentPos), "")
+                SetTextNodeWithSpacePreserve(run.TextNode, remaining)
+                Continue For
+            End If
+
+            Dim targetEndPos As Integer = CInt(Math.Round((cumulativeOriginal / CDbl(totalOrigLen)) * translatedLen))
+            targetEndPos = Math.Min(targetEndPos, translatedLen)
+
+            If targetEndPos <= currentPos Then
+                SetTextNodeWithSpacePreserve(run.TextNode, "")
+                Continue For
+            End If
+
+            Dim endPos As Integer = targetEndPos
+            Dim foundSpace As Boolean = False
+
+            If endPos < translatedLen AndAlso endPos > currentPos Then
+                If text(endPos) = " "c Then
+                    endPos += 1
+                    foundSpace = True
+                Else
+                    Dim searchMax As Integer = Math.Min(endPos + 15, translatedLen - 1)
+                    For searchPos As Integer = endPos To searchMax
+                        If text(searchPos) = " "c Then
+                            endPos = searchPos + 1
+                            foundSpace = True
+                            Exit For
+                        End If
+                    Next
+
+                    If Not foundSpace Then
+                        For searchPos As Integer = endPos - 1 To currentPos Step -1
+                            If text(searchPos) = " "c Then
+                                endPos = searchPos + 1
+                                foundSpace = True
+                                Exit For
+                            End If
+                        Next
+                    End If
+
+                    If Not foundSpace Then
+                        Dim wordEnd As Integer = endPos
+                        While wordEnd < translatedLen AndAlso text(wordEnd) <> " "c
+                            wordEnd += 1
+                        End While
+                        endPos = wordEnd
+                    End If
+                End If
+            End If
+
+            endPos = Math.Min(endPos, translatedLen)
+            SetTextNodeWithSpacePreserve(run.TextNode, text.Substring(currentPos, endPos - currentPos))
+            currentPos = endPos
+        Next
+    End Sub
 
     ''' <summary>
     ''' Sets the text content of a WordprocessingML <c>w:t</c> node and ensures

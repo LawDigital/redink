@@ -30,6 +30,14 @@ Namespace Agents
     Public Class AgentResourcesViewerForm
         Inherits Form
 
+        Protected Overrides Sub OnShown(e As System.EventArgs)
+            MyBase.OnShown(e)
+            Me.TopMost = True
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(Me)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(Me)
+        End Sub
+
+
         Private Const EM_SETCUEBANNER As Integer = &H1501
 
         <System.Runtime.InteropServices.DllImport("user32.dll", CharSet:=System.Runtime.InteropServices.CharSet.Unicode)>

@@ -82,6 +82,9 @@ Partial Public Class ThisAddIn
         Public Property NormalizedCallSignature As String
         Public Property WasDuplicateReplay As Boolean
 
+        ''' <summary>True when a tool classifies a failed result as recoverable planning/input feedback that should not count toward the generic host failure circuit breaker.</summary>
+        Public Property RepairLoopRecoverable As Boolean
+
         ''' <summary>True when a repair-loop advisor determined the failure is terminal (budget exhausted or non-recoverable).</summary>
         Public Property RepairLoopTerminal As Boolean
 

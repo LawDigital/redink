@@ -1,6 +1,18 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
+' =============================================================================
+' File: Ribbon1.vb
+' Purpose:
+'   Outlook Ribbon callback surface for mail-processing, search, settings,
+'   AutoPilot, and other user-invoked Red Ink workflows.
+'
+' Architecture:
+'   Thin VSTO UI adapter over ThisAddIn services. Ribbon1.Designer.vb owns the
+'   generated controls; this file owns callbacks, dynamic visibility, theme-aware
+'   icons, and routing from Ribbon actions into host workflows.
+' =============================================================================
+
 Imports System.Diagnostics
 Imports Microsoft.Office.Tools.Ribbon
 Imports Microsoft.Win32
@@ -945,7 +957,12 @@ Public Class Ribbon2
     Private Sub RI_KnowledgeStores_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_KnowledgeStores.Click
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "KnowledgeStores_Outlook invoked")
         Using frm As New KnowledgeStoreForm(ThisAddIn._context)
-            frm.ShowDialog()
+            Dim __safeDialogOwner948 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            If __safeDialogOwner948 IsNot Nothing Then
+                frm.ShowDialog(__safeDialogOwner948)
+            Else
+                frm.ShowDialog()
+            End If
         End Using
     End Sub
 

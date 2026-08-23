@@ -648,7 +648,12 @@ Namespace SharedLibrary
                         form.MaximumSize = form.Size
                     End Sub
 
-                form.ShowDialog()
+                Dim __safeDialogOwner651 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                If __safeDialogOwner651 IsNot Nothing Then
+                    form.ShowDialog(__safeDialogOwner651)
+                Else
+                    form.ShowDialog()
+                End If
                 Return dialogResult
             End Using
         End Function

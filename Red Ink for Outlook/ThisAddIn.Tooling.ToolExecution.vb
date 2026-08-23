@@ -425,7 +425,17 @@ Partial Public Class ThisAddIn
                 context.Log($"Calling external service for tool: {toolCall.ToolName}")
                 ToolingFileLogger.LogPreToolLlmCallSnapshot(_context)
 
-                Dim result = Await LLM("", "", "", "", 0, True, True, "", "", cancellationToken, EnsureUI:=False)
+                Dim configuredToolTimeoutMs As Long = If(_context.INI_Timeout_2 > 0, _context.INI_Timeout_2, 60000)
+                Dim perCallToolTimeoutMs As Integer = SharedLibrary.Agents.HostToolRegistration.GetPerCallLlmTimeoutMs(
+                    configuredToolTimeoutMs,
+                    New String() {toolCall.ToolName},
+                    If(_context.INI_APICall_ToolInstructions_2, "").Length,
+                    If(_context.INI_APICall_ToolResponses_2, "").Length)
+                If perCallToolTimeoutMs <> configuredToolTimeoutMs Then
+                    context.Log($"[PERF] Tool LLM timeout elevated: tool={toolCall.ToolName}; baseMs={configuredToolTimeoutMs}; effectiveMs={perCallToolTimeoutMs}.", "diag")
+                End If
+
+                Dim result = Await LLM("", "", "", "", perCallToolTimeoutMs, True, True, "", "", cancellationToken, EnsureUI:=False)
 
                 ToolingFileLogger.LogRawResponseStub($"Tool LLM() result ({toolCall.ToolName})", result)
 

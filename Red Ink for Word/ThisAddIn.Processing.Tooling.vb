@@ -5,8 +5,9 @@
 ' File: ThisAddIn.Processing.Tooling.vb
 ' Purpose: Implements a model-agnostic "tooling loop" for LLM tool/function
 '          calling, including tool selection, tool call detection/extraction,
-'          per-tool execution, and response injection back into subsequent LLM
-'          iterations.
+'          per-tool execution, response injection back into subsequent LLM
+'          iterations, and host-owned major-step progress reporting in both main
+'          and isolated sub-agent loops.
 '
 ' Architecture:
 '  - Tooling execution loop (`ExecuteToolingLoop`):
@@ -199,7 +200,8 @@ Partial Public Class ThisAddIn
         Optional memoryGroundingMode As SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode = SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None,
         Optional memoryGroundingModeIsExplicit As Boolean = False,
         Optional finalResponseContract As SharedLibrary.Agents.ToolingFinalResponseContract = SharedLibrary.Agents.ToolingFinalResponseContract.UserFacingTaskStatus,
-        Optional progressSink As Action(Of String) = Nothing) As Task(Of String)
+        Optional progressSink As Action(Of String) = Nothing,
+        Optional subAgentExpectedArtifactsJson As String = Nothing) As Task(Of String)
 
 
         ToolingFileLogger.StartSession()
@@ -208,28 +210,24 @@ Partial Public Class ThisAddIn
         Dim parentStagingRoot As String = SharedLibrary.Agents.PathPolicy.SessionStagingRoot
         Dim workflowScope As IDisposable = Nothing
         Dim acceptedFinalStatus As String = ""
+        Dim wordDeliveryFailure As System.Exception = Nothing
 
-        ' Initialize the Word agent workspace (persisted; falls back to active doc folder, then Desktop).
+        ' Load only an explicitly persisted Word workspace. An active document folder or
+        ' Desktop is NOT an implicit agent workspace: when the user has not connected a
+        ' workspace, file-producing tools must use this run's SessionStagingRoot so the
+        ' bounded artifact/legacy collector can publish the complete output set atomically
+        ' to Desktop\Inky\<timestamp> at finalization.
         Try
-            Dim ws = SharedLibrary.Agents.WorkspaceStore.Load("word")
-            If String.IsNullOrWhiteSpace(ws.RootPath) OrElse Not Directory.Exists(ws.RootPath) Then
-                Try
-                    Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
-                    Try : doc = Globals.ThisAddIn.Application.ActiveDocument : Catch : End Try
-                    If doc IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(doc.Path) AndAlso Directory.Exists(doc.Path) Then
-                        ws = New SharedLibrary.Agents.WorkspaceState() With {
-                            .RootPath = doc.Path,
-                            .PersistUntilRevoked = False,
-                            .AllowRead = True, .AllowWrite = True,
-                            .AllowMoveCopyRename = True, .AllowDelete = False
-                        }
-                    End If
-                Catch
-                End Try
+            Dim ws As SharedLibrary.Agents.WorkspaceState = SharedLibrary.Agents.WorkspaceStore.Load("word")
+            If ws Is Nothing OrElse
+               String.IsNullOrWhiteSpace(ws.RootPath) OrElse
+               Not Directory.Exists(ws.RootPath) Then
+                ws = New SharedLibrary.Agents.WorkspaceState()
             End If
             SharedLibrary.Agents.WorkspaceTools.SetActive(ws)
-        Catch
+        Catch ex As System.Exception
             SharedLibrary.Agents.WorkspaceTools.SetActive(New SharedLibrary.Agents.WorkspaceState())
+            ToolingFileLogger.LogWarn("Failed to load explicit Word workspace; using per-run session staging instead.", ex:=ex)
         End Try
 
         ' Sub-agents inherit the parent run's staging root; only a top-level run owns one.
@@ -268,6 +266,48 @@ Partial Public Class ThisAddIn
             .MaxIterations = INI_ToolingMaximumIterations
         }
 
+        If subAgentMode AndAlso
+           (parentToolingContext Is Nothing OrElse
+            parentToolingContext.SequencingState Is Nothing OrElse
+            parentToolingContext.SequencingState.OperationRegistry Is Nothing OrElse
+            parentToolingContext.SequencingState.SubAgentTaskRegistry Is Nothing OrElse
+            parentToolingContext.SequencingState.RegisteredDeliverableArtifacts Is Nothing) Then
+
+            Throw New System.InvalidOperationException(
+                "Nested sub-agent execution requires the parent's shared operation, task, and artifact registries.")
+        End If
+
+        ' Nested sub-agents share the parent's explicit logical-operation registry
+        ' and the exact same artifact list. Both are explicit-state handoffs only;
+        ' no task, prompt, filename, path, anchor, or semantic similarity is used.
+        If subAgentMode AndAlso
+           parentToolingContext IsNot Nothing AndAlso
+           parentToolingContext.SequencingState IsNot Nothing Then
+
+            If parentToolingContext.SequencingState.OperationRegistry IsNot Nothing Then
+                context.SequencingState.OperationRegistry =
+                    parentToolingContext.SequencingState.OperationRegistry
+            End If
+
+            If parentToolingContext.SequencingState.SubAgentTaskRegistry IsNot Nothing Then
+                context.SequencingState.SubAgentTaskRegistry =
+                    parentToolingContext.SequencingState.SubAgentTaskRegistry
+            End If
+
+            If parentToolingContext.SequencingState.RegisteredDeliverableArtifacts IsNot Nothing Then
+                context.SequencingState.RegisteredDeliverableArtifacts =
+                    parentToolingContext.SequencingState.RegisteredDeliverableArtifacts
+            End If
+
+            ' ExpectedDeliverableSlots is intentionally NOT shared with nested runs.
+            ' Expected output completeness is scoped to the current tooling run,
+            ' whereas produced artifact state is shared across parent/nested runs.
+        End If
+
+        If subAgentMode Then
+            context.SequencingState.LockExpectedDeliverableContractFromJson(subAgentExpectedArtifactsJson)
+        End If
+
         context.FinalResponseContract = finalResponseContract
         context.Log(
             "Final response contract initialized: " &
@@ -277,12 +317,7 @@ Partial Public Class ThisAddIn
         context.SequencingState.UserLanguage =
             If(Not String.IsNullOrWhiteSpace(userLanguage),
                userLanguage.Trim(),
-               Await ResolveToolingUserLanguageAsync(
-                   userText,
-                   otherPrompt,
-                   fullPromptOverride,
-                   useSecondAPI,
-                   hideSplash))
+               "")
 
         context.LatestUserRequestRaw =
             ResolveLatestUserRequestRaw(
@@ -313,7 +348,7 @@ Partial Public Class ThisAddIn
 
         Try
             SharedLibrary.Agents.AgentResources.SetPaths(INI_AgentResourcesPath, INI_AgentResourcesPathLocal)
-            SharedLibrary.Agents.AgentResources.Refresh()
+            SharedLibrary.Agents.AgentResources.EnsureFresh()
         Catch
         End Try
 
@@ -330,7 +365,7 @@ Partial Public Class ThisAddIn
             ' This keeps Word aligned with Outlook and prevents unselected skills/agents
             ' from becoming callable just because they exist on disk.
             Try
-                SharedLibrary.Agents.AgentResources.Refresh()
+                SharedLibrary.Agents.AgentResources.EnsureFresh()
 
                 Dim selectedToolNames As New HashSet(Of String)(
             If(fullAllowedTools, New List(Of ModelConfig)()).
@@ -344,7 +379,7 @@ Partial Public Class ThisAddIn
                     Where(Function(sk)
                               Return sk IsNot Nothing AndAlso
                                      Not String.IsNullOrWhiteSpace(sk.Name) AndAlso
-                                     selectedToolNames.Contains("skill_" & sk.Name.Trim())
+                                     selectedToolNames.Contains(SharedLibrary.Agents.ToolRegistryBuilder.BuildSkillToolName(sk.Name))
                           End Function)
 
                     Dim selectedAgents =
@@ -352,7 +387,7 @@ Partial Public Class ThisAddIn
                     Where(Function(ag)
                               Return ag IsNot Nothing AndAlso
                                      Not String.IsNullOrWhiteSpace(ag.Name) AndAlso
-                                     selectedToolNames.Contains("agent_" & ag.Name.Trim())
+                                     selectedToolNames.Contains(SharedLibrary.Agents.ToolRegistryBuilder.BuildAgentToolName(ag.Name))
                           End Function)
 
                     SharedLibrary.Agents.ToolRegistryBuilder.AddSkills(authoritativeRegistrySource, selectedSkills)
@@ -373,7 +408,8 @@ Partial Public Class ThisAddIn
         context.SequencingState.DeliverableCapableToolNames =
             New HashSet(Of String)(
                 SharedLibrary.Agents.HostToolRegistration.GetDeliverableCapableToolNames(
-                    SharedLibrary.Agents.ToolingHostKind.Word),
+                    SharedLibrary.Agents.ToolingHostKind.Word,
+                    selectedTools),
                 StringComparer.OrdinalIgnoreCase)
         context.EnforceAllowedToolScope = subAgentMode
         context.SequencingState.ActiveToolingSession = True
@@ -473,6 +509,19 @@ Partial Public Class ThisAddIn
             context.AllowedToolRegistry = scopeInit.NarrowedRegistry
             context.SelectedTools = New List(Of ModelConfig)(scopeInit.ResolvedTools)
 
+            ' report_progress is an internal host-control no-op, not part of the sub-agent's
+            ' substantive tool capability scope. Expose it explicitly so isolated sub-agents
+            ' can report major phases without widening their allowed business/tool registry.
+            Dim subAgentProgressReportTool As ModelConfig = GetInternalProgressReportTool()
+            If subAgentProgressReportTool IsNot Nothing AndAlso
+               Not context.SelectedTools.Any(
+                   Function(t)
+                       Return t IsNot Nothing AndAlso
+                              IsReportProgressToolName(t.ToolName)
+                   End Function) Then
+                context.SelectedTools.Insert(0, subAgentProgressReportTool)
+            End If
+
             Dim requestedNamesText As String =
                 If(scopeInit.RequestedToolNames Is Nothing OrElse scopeInit.RequestedToolNames.Count = 0,
                    "(none)",
@@ -537,6 +586,18 @@ Partial Public Class ThisAddIn
                                Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
                                t.ToolName.Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase)
                     End Function)
+        End If
+
+        If Not subAgentMode Then
+            context.CapabilityRoutingRequired =
+                context.SelectedTools IsNot Nothing AndAlso
+                context.SelectedTools.Any(Function(t) t IsNot Nothing AndAlso SharedLibrary.Agents.CapabilityRoutingTool.IsResolverToolName(t.ToolName))
+            context.CapabilityRoutingResolved = Not context.CapabilityRoutingRequired
+            context.CapabilityRoutingKind = If(context.CapabilityRoutingRequired, "", SharedLibrary.Agents.CapabilityRoutingTool.KindNone)
+            context.CapabilityRoutingName = ""
+            context.CapabilityRoutingEntered = Not context.CapabilityRoutingRequired
+            context.Log("Capability routing initialized: required=" & context.CapabilityRoutingRequired.ToString().ToLowerInvariant() &
+                        "; resolved=" & context.CapabilityRoutingResolved.ToString().ToLowerInvariant(), "diag")
         End If
 
         selectedTools = New List(Of ModelConfig)(context.SelectedTools)
@@ -605,8 +666,18 @@ Partial Public Class ThisAddIn
 
         _activeToolingContext = context
 
-        context.ProgressSink = progressSink
-        context.ReportProgress("Getting started...")
+        ' Isolated sub-agents share the parent's user-facing progress channel unless a
+        ' caller deliberately supplies a different sink. This keeps progress reporting
+        ' visible without coupling the sub-agent runtime to a specific Office host/UI.
+        Dim effectiveProgressSink As Action(Of String) = progressSink
+        If effectiveProgressSink Is Nothing AndAlso
+           subAgentMode AndAlso
+           parentToolingContext IsNot Nothing Then
+            effectiveProgressSink = parentToolingContext.ProgressSink
+        End If
+
+        context.ProgressSink = effectiveProgressSink
+        context.ReportProgress("Preparing request: determining language, context and workflow...")
 
         context.Log("Starting tooling session...")
         If selectedTools IsNot Nothing Then
@@ -616,16 +687,68 @@ Partial Public Class ThisAddIn
         End If
 
         Try
-            Await ResolveMemoryGroundingModeAsync(
-                context,
-                userText,
-                otherPrompt,
-                fullPromptOverride,
-                useSecondAPI,
-                hideSplash,
-                memoryGroundingMode,
-                memoryGroundingModeIsExplicit,
-                subAgentMode)
+            Dim bootstrapDecision As SharedLibrary.Agents.ToolingBootstrapPreflight.Decision = Nothing
+
+            If Not subAgentMode Then
+                Dim bootstrapAttempt As Integer = 0
+                Do
+                    bootstrapAttempt += 1
+                    ToolingFileLogger.LogStep($"[PERF] Bootstrap preflight attempt {bootstrapAttempt}/2.")
+                    Try
+                        bootstrapDecision = Await ResolveToolingBootstrapPreflightAsync(
+                            context,
+                            useSecondAPI,
+                            hideSplash,
+                            cancellationToken,
+                            userLanguage,
+                            memoryGroundingMode,
+                            memoryGroundingModeIsExplicit,
+                            subAgentMode)
+                        Exit Do
+                    Catch ex As System.TimeoutException
+                        If bootstrapAttempt >= 2 Then
+                            context.LogError("Bootstrap preflight timed out twice; stopping instead of entering a timeout cascade.", ex:=ex)
+                            ToolingFileLogger.EndSession(False, "Bootstrap preflight timeout")
+                            Return "The AI model did not respond while preparing the request. Please try again."
+                        End If
+
+                        context.LogWarn(
+                            "Bootstrap preflight timed out; retrying once.",
+                            details:=$"host={context.HostKind}; attempt={bootstrapAttempt}/2; error={ex.Message}")
+                        context.ReportProgress("The AI model is taking longer than expected. Retrying request preparation once...")
+                    End Try
+                Loop
+            End If
+
+            If String.IsNullOrWhiteSpace(context.SequencingState.UserLanguage) Then
+                context.SequencingState.UserLanguage = Await ResolveToolingUserLanguageAsync(
+                    userText,
+                    otherPrompt,
+                    fullPromptOverride,
+                    useSecondAPI,
+                    hideSplash)
+                context.Log("Fallback response-language resolution applied after bootstrap did not provide a usable language.", "diag")
+            End If
+
+            If bootstrapDecision Is Nothing OrElse Not bootstrapDecision.MemoryApplied Then
+                Await ResolveMemoryGroundingModeAsync(
+                    context,
+                    userText,
+                    otherPrompt,
+                    fullPromptOverride,
+                    useSecondAPI,
+                    hideSplash,
+                    memoryGroundingMode,
+                    memoryGroundingModeIsExplicit,
+                    subAgentMode)
+            End If
+
+            selectedTools = New List(Of ModelConfig)(If(context.SelectedTools, New List(Of ModelConfig)()))
+            If Not subAgentMode Then
+                ToolingFileLogger.LogStep("[PERF] Post-bootstrap selected tools: " &
+                                          If(selectedTools.Count = 0, "(none)", String.Join(", ", selectedTools.Select(Function(t) t.ToolName))))
+            End If
+            context.ReportProgress("Request prepared. Starting workflow...")
 
             If Not subAgentMode Then
                 Await TryPrimeRecentMemoryStubsAsync(context, cancellationToken)
@@ -908,15 +1031,51 @@ Partial Public Class ThisAddIn
 
                 Debug.WriteLine($"[WORD-TOOLING] BEFORE LLM subAgentMode={subAgentMode} iteration={iteration} sysLen={If(sysPromptForThisCall, "").Length} userLen={If(fullUserPrompt, "").Length} tools={If(selectedTools?.Count, 0)} gateBusy={SharedLibrary.Agents.AgentGate.IsBusy} thread={Threading.Thread.CurrentThread.ManagedThreadId}")
 
-                currentResponse = Await LLM(
-                    sysPromptForThisCall,
-                    userPromptForThisCall,
-                    "", "", 0,
-                    useSecondAPI,
-                    hideSplash,
-                    otherPrompt,
-                    fileObject,
-                    True)
+                Try
+                    cancellationToken.ThrowIfCancellationRequested()
+
+                    Dim configuredTimeoutMs As Long = If(useSecondAPI AndAlso INI_Timeout_2 > 0, INI_Timeout_2, INI_Timeout)
+                    Dim exposedToolNames As IEnumerable(Of String) =
+                        If(context.SelectedTools, New List(Of ModelConfig)()).
+                            Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
+                            Select(Function(t) t.ToolName.Trim())
+                    Dim perCallTimeoutMs As Integer = SharedLibrary.Agents.HostToolRegistration.GetPerCallLlmTimeoutMs(
+                        configuredTimeoutMs,
+                        exposedToolNames,
+                        If(INI_APICall_ToolInstructions_2, "").Length,
+                        If(INI_APICall_ToolResponses_2, "").Length)
+                    If SharedLibrary.Agents.HostToolRegistration.GetLlmTimeoutMultiplier(
+                            exposedToolNames,
+                            If(INI_APICall_ToolInstructions_2, "").Length,
+                            If(INI_APICall_ToolResponses_2, "").Length) > 1 Then
+                        context.Log($"Heavy LLM timeout policy applied: timeoutMs={perCallTimeoutMs}.", "diag")
+                    End If
+
+                    currentResponse = Await LLM(
+                        sysPromptForThisCall,
+                        userPromptForThisCall,
+                        "", "", perCallTimeoutMs,
+                        useSecondAPI,
+                        hideSplash,
+                        otherPrompt,
+                        fileObject,
+                        ToolExecution:=True,
+                        cancellationToken:=cancellationToken,
+                        EnsureUI:=True)
+
+                    cancellationToken.ThrowIfCancellationRequested()
+
+                Catch ex As System.TimeoutException
+                    context.LogError("LLM call timed out.", ex:=ex)
+                    ToolingFileLogger.EndSession(False, "LLM timeout")
+                    Return "The AI request timed out before a response was received. Please try again."
+
+                Catch ex As System.OperationCanceledException
+                    context.IsCancelled = True
+                    context.LogWarn("Operation was cancelled by the user.")
+                    ToolingFileLogger.EndSession(False, "Cancelled by user")
+                    Return "Operation was canceled by the user."
+                End Try
 
                 Debug.WriteLine($"[WORD-TOOLING] AFTER LLM subAgentMode={subAgentMode} iteration={iteration} responseLen={If(currentResponse, "").Length} gateBusy={SharedLibrary.Agents.AgentGate.IsBusy} thread={Threading.Thread.CurrentThread.ManagedThreadId}")
 
@@ -929,6 +1088,7 @@ Partial Public Class ThisAddIn
                        lastSuccess IsNot Nothing AndAlso
                        context.SequencingState IsNot Nothing AndAlso
                        context.SequencingState.RequestRequiresCreatedDeliverable AndAlso
+                       SharedLibrary.Agents.ToolCallSequencing.HasProducedUserDeliverable(context.SequencingState) AndAlso
                        SharedLibrary.Agents.ToolCallSequencing.IsSuccessfulDeliverableResult(
                            If(lastSuccess.Response, "")) Then
 
@@ -1002,7 +1162,7 @@ Partial Public Class ThisAddIn
                             Exit While
                         End If
 
-                        If context.PrematureTextRetryCount < ToolExecutionContext.MaxContinuationRetries Then
+                        If context.PrematureTextRetryCount < ToolExecutionContext.MaxEmptyResponseRetries Then
                             context.PrematureTextRetryCount += 1
                             context.PendingContinuationGuardPrompt =
                                 BuildEmptyResponseAfterProgressRecoveryPrompt(context)
@@ -1018,7 +1178,7 @@ Partial Public Class ThisAddIn
                             LogLatestUserRequestDiagnostic(context, "continuation")
 
                             context.LogWarn(
-                                $"Empty main-model response after successful partial progress; retrying with preserved current request ({context.PrematureTextRetryCount}/{ToolExecutionContext.MaxContinuationRetries}).",
+                                $"Empty main-model response after successful partial progress; retrying with preserved current request ({context.PrematureTextRetryCount}/{ToolExecutionContext.MaxEmptyResponseRetries}).",
                                 details:=$"host={context.HostKind}; lastTool={If(lastSuccess.ToolName, "")}")
 
                             Continue While
@@ -1027,7 +1187,7 @@ Partial Public Class ThisAddIn
 
                     If Not subAgentMode AndAlso
                        lastSuccess IsNot Nothing AndAlso
-                       context.PrematureTextRetryCount < ToolExecutionContext.MaxContinuationRetries Then
+                       context.PrematureTextRetryCount < ToolExecutionContext.MaxEmptyResponseRetries Then
 
                         context.PrematureTextRetryCount += 1
                         context.PendingContinuationGuardPrompt =
@@ -1044,7 +1204,7 @@ Partial Public Class ThisAddIn
                         LogLatestUserRequestDiagnostic(context, "continuation")
 
                         context.LogWarn(
-                            $"Empty main-model response after successful partial progress; retrying with preserved current request ({context.PrematureTextRetryCount}/{ToolExecutionContext.MaxContinuationRetries}).",
+                            $"Empty main-model response after successful partial progress; retrying with preserved current request ({context.PrematureTextRetryCount}/{ToolExecutionContext.MaxEmptyResponseRetries}).",
                             details:=$"host={context.HostKind}; lastTool={If(lastSuccess.ToolName, "")}")
 
                         Continue While
@@ -1083,6 +1243,37 @@ Partial Public Class ThisAddIn
 
                 Dim detectionPattern = context.ToolingModel.ToolCallDetectionPattern
 
+                If Not subAgentMode AndAlso
+                   context.CapabilityRoutingRequired AndAlso
+                   ShouldBlockForCapabilityRouting("", context) AndAlso
+                   Not ContainsToolCalls(currentResponse, detectionPattern) Then
+
+                    If context.PrematureTextRetryCount < ToolExecutionContext.MaxContinuationRetries Then
+                        context.PrematureTextRetryCount += 1
+                        context.PendingContinuationGuardPrompt = BuildCapabilityRoutingGuardPrompt(context)
+                        context.PendingGuardTitle = "HOST CAPABILITY ROUTING GUARD"
+                        context.PendingRejectedTurnExplanation = "The previous turn attempted to finalize before mandatory capability routing was complete."
+                        context.PendingRejectedAssistantTurn = If(currentResponse, "")
+                        context.LogWarn("Final text blocked by capability-routing gate.", details:="host=" & context.HostKind & "; resolved=" & context.CapabilityRoutingResolved.ToString().ToLowerInvariant() & "; selected=" & If(context.CapabilityRoutingName, ""))
+                        Continue While
+                    End If
+
+                    context.FinalizationBlocked = True
+                    context.FinalizationBlockedReason = "capability_routing_unresolved"
+                    currentResponse = Await BuildBlockedToolingResultAsync(
+                        context,
+                        "capability_routing_unresolved",
+                        "The tooling run could not complete mandatory capability routing before finalization.",
+                        useSecondAPI,
+                        hideSplash,
+                        cancellationToken)
+                    If context.SequencingState IsNot Nothing Then
+                        context.SequencingState.FinalResponseOrigin = "host_generated"
+                        context.SequencingState.HasOpenToolWorkflow = False
+                    End If
+                    Exit While
+                End If
+
                 If ContainsToolCalls(currentResponse, detectionPattern) Then
                     context.Log("Tool calls detected in response")
 
@@ -1104,6 +1295,7 @@ Partial Public Class ThisAddIn
                     Dim restartForRequiredMemoryGrounding As Boolean = False
                     Dim restartAfterToolLoader As Boolean = False
                     Dim restartAfterExposureMiss As Boolean = False
+                    Dim restartForCapabilityRouting As Boolean = False
                     Dim turnVisibleToolNames As HashSet(Of String) =
                         BuildTurnVisibleToolNameSet(context.SelectedTools)
 
@@ -1134,6 +1326,25 @@ Partial Public Class ThisAddIn
 
                             context.Log("Progress update reported to the user.", "diag")
                             Continue For
+                        End If
+
+                        If SharedLibrary.Agents.CapabilityRoutingTool.IsResolverToolName(tc.ToolName) Then
+                            Dim routingResponse As ToolResponse = ResolveCapabilityRoutingCall(tc, context)
+                            context.AllToolResponses.Add(routingResponse)
+                            restartForCapabilityRouting = True
+                            Exit For
+                        End If
+
+                        If ShouldBlockForCapabilityRouting(tc.ToolName, context) Then
+                            Dim blockedRoutingResponse As ToolResponse = BuildCapabilityRoutingBlockedResponse(tc, context)
+                            context.AllToolResponses.Add(blockedRoutingResponse)
+                            context.PendingContinuationGuardPrompt = BuildCapabilityRoutingGuardPrompt(context)
+                            context.PendingGuardTitle = "HOST CAPABILITY ROUTING GUARD"
+                            context.PendingRejectedTurnExplanation = "The previous turn attempted substantive tooling before mandatory capability routing was completed."
+                            context.PendingRejectedAssistantTurn = If(currentResponse, "")
+                            restartForCapabilityRouting = True
+                            context.LogWarn("Blocked tool call by capability-routing gate.", details:="host=" & context.HostKind & "; tool=" & If(tc.ToolName, "") & "; resolved=" & context.CapabilityRoutingResolved.ToString().ToLowerInvariant() & "; selected=" & If(context.CapabilityRoutingName, ""))
+                            Exit For
                         End If
 
                         context.ReportProgress(BuildFriendlyProgressText(tc, context))
@@ -1204,6 +1415,22 @@ Partial Public Class ThisAddIn
 
                             Dim hiddenResponse As ToolResponse =
                                 BuildToolNotExposedThisTurnResponse(tc, turnVisibleToolNames)
+
+                            ' A lazy-load exposure miss is a turn-boundary deferral, not a tool failure.
+                            ' Returning an error-shaped tool response after the host has successfully prepared
+                            ' the tool can mislead the next model turn into declaring the tool unavailable.
+                            ' Convert that response to an explicit host-status result while preserving the call id.
+                            If preparedForNextTurn Then
+                                hiddenResponse.Success = True
+                                hiddenResponse.ErrorMessage = ""
+                                hiddenResponse.ErrorCode = ""
+                                hiddenResponse.ResultKind = "status"
+                                hiddenResponse.Response = JsonConvert.SerializeObject(New With {
+                                    Key .summary = $"Tool '{tc.ToolName}' is available and has been prepared for the next assistant turn.",
+                                    Key .result = New With {Key .tool = tc.ToolName, Key .callable_next_turn = True},
+                                    Key .resultKind = "status"
+                                })
+                            End If
 
                             context.AllToolResponses.Add(hiddenResponse)
 
@@ -1344,54 +1571,249 @@ Partial Public Class ThisAddIn
                             Exit For
                         End If
 
-                        ' Pre-execution no-op circuit breaker: once a mutation target has returned zero
-                        ' changes ZeroChangeOperationAbortThreshold times, do NOT invoke the tool again.
-                        ' Return a synthetic suppressed/unresolved result so the model stops retrying.
-                        Dim opPathArg As String = ""
-                        If tc.Arguments IsNot Nothing AndAlso tc.Arguments.ContainsKey("path") AndAlso tc.Arguments("path") IsNot Nothing Then
-                            opPathArg = tc.Arguments("path").ToString()
+                        ' Exact sub-agent task guard MUST run before expected-output
+                        ' registration. A terminal delegated task must not mutate the
+                        ' current run's expected-artifact contract.
+                        If tc.ToolName IsNot Nothing AndAlso
+                           tc.ToolName.StartsWith(
+                               SharedLibrary.Agents.AgentToolRouter.AgentToolPrefix,
+                               StringComparison.OrdinalIgnoreCase) AndAlso
+                           context.SequencingState IsNot Nothing AndAlso
+                           context.SequencingState.SubAgentTaskRegistry IsNot Nothing Then
+
+                            Dim subAgentTaskId As String = ""
+
+                            If tc.Arguments IsNot Nothing AndAlso
+                               tc.Arguments.ContainsKey("subagent_task_id") AndAlso
+                               tc.Arguments("subagent_task_id") IsNot Nothing Then
+
+                                subAgentTaskId =
+                                    System.Convert.ToString(
+                                        tc.Arguments("subagent_task_id")).Trim()
+                            End If
+
+                            Dim agentName As String =
+                                tc.ToolName.Substring(
+                                    SharedLibrary.Agents.AgentToolRouter.AgentToolPrefix.Length)
+
+                            If subAgentTaskId <> "" AndAlso
+                               context.SequencingState.SubAgentTaskRegistry.IsTerminal(
+                                   agentName,
+                                   subAgentTaskId) Then
+
+                                Dim syntheticSubAgentTerminal As New ToolResponse() With {
+                                    .CallId = tc.CallId,
+                                    .ToolName = tc.ToolName,
+                                    .Success = False,
+                                    .ResultKind = "error",
+                                    .ErrorCode = "subagent_task_terminal",
+                                    .ErrorMessage =
+                                        "Sub-agent task '" & subAgentTaskId &
+                                        "' for agent '" & agentName &
+                                        "' is already terminal and must not be invoked again.",
+                                    .Response =
+                                        "{""summary"":""The requested sub-agent task is already terminal.""," &
+                                        """result"":{""status"":""unresolved""," &
+                                        """reason"":""subagent_task_terminal""," &
+                                        """subagent_task_id"":" &
+                                        JsonConvert.SerializeObject(subAgentTaskId) &
+                                        ",""agent"":" &
+                                        JsonConvert.SerializeObject(agentName) &
+                                        "}}",
+                                    .OriginalCallJson = tc.RawJson,
+                                    .NormalizedCallSignature = normalizedToolCallSignature
+                                }
+
+                                context.AllToolResponses.Add(syntheticSubAgentTerminal)
+
+                                context.SequencingState.NoteToolFailure(
+                                    tc.ToolName,
+                                    "subagent_task_terminal",
+                                    syntheticSubAgentTerminal.ErrorMessage)
+
+                                context.PendingContinuationGuardPrompt =
+                                    BuildToolFailureReassessmentGuardPrompt(tc.ToolName)
+                                context.PendingGuardTitle =
+                                    "HOST SUB-AGENT TASK BREAKER"
+                                context.PendingRejectedTurnExplanation =
+                                    "This explicitly identified delegated task is already terminal. " &
+                                    "Do not invoke it again or assign a new id to the same logical task."
+                                context.PendingRejectedAssistantTurn = ""
+                                context.PrematureTextRetryCount = 0
+                                stopCurrentBatchAfterTool = True
+
+                                Exit For
+                            End If
                         End If
-                        Dim opTargetKey As String =
-                            SharedLibrary.Agents.ToolCallSequencing.BuildOperationTargetKeyFromPath(tc.ToolName, opPathArg)
 
-                        Dim suppressedNoOpCount As Integer = 0
-                        If Not String.IsNullOrEmpty(opPathArg) AndAlso
-                           context.ZeroChangeOperationCounts.TryGetValue(opTargetKey, suppressedNoOpCount) AndAlso
-                           suppressedNoOpCount >= ToolExecutionContext.ZeroChangeOperationAbortThreshold Then
+                        ' Exact logical-operation guard.
+                        ' Only caller-supplied operation_id values participate.
+                        ' No filename, path, prompt, target, or anchor heuristic is used.
+                        '
+                        ' A mixed tasks[] batch may contain an already-terminal operation and
+                        ' independent still-executable operations. Remove only the terminal
+                        ' task items before physical execution; if every task is terminal the
+                        ' normal whole-call rejection below remains authoritative.
+                        Dim skippedTerminalOperationIds As New System.Collections.Generic.List(Of String)()
 
-                            Dim synthetic As New ToolResponse() With {
+                        If context.SequencingState IsNot Nothing AndAlso
+                           context.SequencingState.OperationRegistry IsNot Nothing AndAlso
+                           context.SequencingState.OperationRegistry.TryFilterTerminalTaskOperations(
+                               tc.Arguments,
+                               skippedTerminalOperationIds) Then
+
+                            context.LogWarn(
+                                "Skipped already-terminal operation item(s) from a mixed explicit-operation batch.",
+                                details:=
+                                    "host=" & context.HostKind &
+                                    "; tool=" & tc.ToolName &
+                                    "; operation_ids=" &
+                                    System.String.Join(",", skippedTerminalOperationIds))
+                        End If
+
+                        Dim terminalExplicitOperationId As String = ""
+
+                        If context.SequencingState IsNot Nothing AndAlso
+                           context.SequencingState.OperationRegistry IsNot Nothing AndAlso
+                           context.SequencingState.OperationRegistry.TryGetFirstTerminalOperationId(
+                               tc.Arguments,
+                               terminalExplicitOperationId) Then
+
+                            Dim syntheticExplicitTerminal As New ToolResponse() With {
                                 .CallId = tc.CallId,
                                 .ToolName = tc.ToolName,
                                 .Success = False,
                                 .ResultKind = "error",
-                                .ErrorCode = "no_change_suppressed",
-                                .ErrorMessage = "Repeated no-op edit suppressed by host circuit breaker; this anchor is unresolved.",
-                                .Response = "{""status"":""suppressed"",""applied_count"":0,""reason"":""no_change_suppressed"",""message"":""The host stopped re-executing this edit because it repeatedly matched nothing. Do not retry this anchor. Re-read the current document text, choose a different anchor, or save/finalize what has already been applied.""}",
+                                .ErrorCode = "explicit_operation_terminal",
+                                .ErrorMessage =
+                                    "Logical operation '" & terminalExplicitOperationId &
+                                    "' is already terminal and must not be retried.",
+                                .Response =
+                                    "{""status"":""unresolved"",""reason"":""explicit_operation_terminal"",""operation_id"":" &
+                                    JsonConvert.SerializeObject(terminalExplicitOperationId) &
+                                    ",""message"":""This explicitly identified logical operation is already terminal. Do not retry it unchanged.""}",
                                 .OriginalCallJson = tc.RawJson,
                                 .NormalizedCallSignature = normalizedToolCallSignature
                             }
-                            context.AllToolResponses.Add(synthetic)
 
-                            If context.SequencingState IsNot Nothing Then
-                                context.SequencingState.NoteToolFailure(
-                                    tc.ToolName, "no_change_suppressed",
-                                    "Repeated no-op edit suppressed; anchor unresolved.")
-                            End If
+                            context.AllToolResponses.Add(syntheticExplicitTerminal)
 
-                            context.PendingContinuationGuardPrompt = BuildToolFailureReassessmentGuardPrompt(tc.ToolName)
-                            context.PendingGuardTitle = "HOST NO-OP EDIT BREAKER"
+                            context.SequencingState.NoteToolFailure(
+                                tc.ToolName,
+                                "explicit_operation_terminal",
+                                syntheticExplicitTerminal.ErrorMessage)
+
+                            context.PendingContinuationGuardPrompt =
+                                BuildToolFailureReassessmentGuardPrompt(tc.ToolName)
+                            context.PendingGuardTitle =
+                                "HOST LOGICAL OPERATION BREAKER"
                             context.PendingRejectedTurnExplanation =
-                                "The same edit target returned no changes repeatedly and is now suppressed. Do not retry this anchor; re-read the current document text or save/finalize what has already been applied."
+                                "An explicitly identified logical operation is already terminal. " &
+                                "Do not retry that operation; continue with other operations or finalize."
                             context.PendingRejectedAssistantTurn = ""
                             context.PrematureTextRetryCount = 0
                             stopCurrentBatchAfterTool = True
 
-                            context.LogWarn(
-                                "Suppressed repeated no-op mutation before execution.",
-                                details:=$"host={context.HostKind}; tool={tc.ToolName}; target={opTargetKey}; noOpCount={suppressedNoOpCount}")
-                            ToolingFileLogger.LogWarn(
-                                "No-op edit circuit breaker suppressed execution.",
-                                details:=$"host={context.HostKind}; tool={tc.ToolName}; target={opTargetKey}; noOpCount={suppressedNoOpCount}")
+                            Exit For
+                        End If
+
+                        ' Locked nested expected-artifact contracts are enforced BEFORE physical
+                        ' tool execution. This prevents an unexpected explicit output slot from
+                        ' creating a file first and being rejected only after the side effect.
+                        ' Validation uses only the exact opaque ids supplied in the tool call.
+                        Dim lockedArtifactContractFailureReason As String = ""
+
+                        If context.SequencingState IsNot Nothing AndAlso
+                           Not context.SequencingState.ValidateLockedExpectedArtifactArguments(
+                               tc.Arguments,
+                               lockedArtifactContractFailureReason) Then
+
+                            Dim lockedArtifactErrorCode As String =
+                                If(String.IsNullOrWhiteSpace(lockedArtifactContractFailureReason),
+                                   "locked_expected_artifact_contract_mismatch",
+                                   lockedArtifactContractFailureReason)
+
+                            Dim syntheticLockedArtifactContract As New ToolResponse() With {
+                                .CallId = tc.CallId,
+                                .ToolName = tc.ToolName,
+                                .Success = False,
+                                .ResultKind = "error",
+                                .ErrorCode = lockedArtifactErrorCode,
+                                .ErrorMessage =
+                                    "The tool call's explicit artifact contract does not match the locked delegated expected_artifacts contract.",
+                                .Response =
+                                    "{""status"":""unresolved"",""reason"":" &
+                                    JsonConvert.SerializeObject(lockedArtifactErrorCode) &
+                                    ",""message"":""The explicit logical_deliverable_id/output_slot_id/expected_artifacts values must match the locked delegated contract exactly. No file was created."" }",
+                                .OriginalCallJson = tc.RawJson,
+                                .NormalizedCallSignature = normalizedToolCallSignature
+                            }
+
+                            context.AllToolResponses.Add(syntheticLockedArtifactContract)
+
+                            context.SequencingState.NoteToolFailure(
+                                tc.ToolName,
+                                lockedArtifactErrorCode,
+                                syntheticLockedArtifactContract.ErrorMessage)
+
+                            context.PendingContinuationGuardPrompt =
+                                "HOST LOCKED EXPECTED-ARTIFACT CONTRACT: The previous tool call was rejected before execution because its explicit artifact slot/contract did not exactly match the delegated locked expected_artifacts set. Reuse the locked opaque ids unchanged. Do not add, remove, rename, normalize, or substitute slots."
+                            context.PendingGuardTitle =
+                                "HOST LOCKED EXPECTED-ARTIFACT CONTRACT"
+                            context.PendingRejectedTurnExplanation =
+                                "The tool call's explicit artifact contract conflicted with the locked delegated contract."
+                            context.PendingRejectedAssistantTurn = ""
+                            context.PrematureTextRetryCount = 0
+                            stopCurrentBatchAfterTool = True
+
+                            Exit For
+                        End If
+
+                        ' Explicit artifact-id preflight. The same opaque artifact_id may not
+                        ' be rebound to another logical slot/revision edge or physically re-executed
+                        ' after it is already Final/Superseded. This check happens before tool side effects.
+                        Dim explicitArtifactIdentityFailureReason As String = ""
+
+                        If context.SequencingState IsNot Nothing AndAlso
+                           Not context.SequencingState.ValidateExplicitArtifactIdentityArguments(
+                               tc.Arguments,
+                               explicitArtifactIdentityFailureReason) Then
+
+                            Dim explicitArtifactErrorCode As String =
+                                If(String.IsNullOrWhiteSpace(explicitArtifactIdentityFailureReason),
+                                   "explicit_artifact_identity_conflict",
+                                   explicitArtifactIdentityFailureReason)
+
+                            Dim syntheticExplicitArtifactIdentity As New ToolResponse() With {
+                                .CallId = tc.CallId,
+                                .ToolName = tc.ToolName,
+                                .Success = False,
+                                .ResultKind = "error",
+                                .ErrorCode = explicitArtifactErrorCode,
+                                .ErrorMessage =
+                                    "The tool call conflicts with an already registered explicit artifact identity.",
+                                .Response =
+                                    "{""status"":""unresolved"",""reason"":" &
+                                    JsonConvert.SerializeObject(explicitArtifactErrorCode) &
+                                    ",""message"":""The opaque artifact_id/logical_deliverable_id/output_slot_id/supersedes_artifact_id contract is immutable. No file was created.""}",
+                                .OriginalCallJson = tc.RawJson,
+                                .NormalizedCallSignature = normalizedToolCallSignature
+                            }
+
+                            context.AllToolResponses.Add(syntheticExplicitArtifactIdentity)
+                            context.SequencingState.NoteToolFailure(
+                                tc.ToolName,
+                                explicitArtifactErrorCode,
+                                syntheticExplicitArtifactIdentity.ErrorMessage)
+
+                            context.PendingContinuationGuardPrompt =
+                                "HOST EXPLICIT ARTIFACT IDENTITY: The previous output-producing tool call was rejected before execution because its opaque artifact identity conflicts with registered state or is already terminal. Reuse an existing Final by finalizing the task; use a new artifact_id only for a genuinely new physical revision. Never rename/rebind an existing artifact_id."
+                            context.PendingGuardTitle = "HOST EXPLICIT ARTIFACT IDENTITY"
+                            context.PendingRejectedTurnExplanation =
+                                "The output-producing tool call conflicted with immutable explicit artifact state."
+                            context.PendingRejectedAssistantTurn = ""
+                            context.PrematureTextRetryCount = 0
+                            stopCurrentBatchAfterTool = True
 
                             Exit For
                         End If
@@ -1455,8 +1877,17 @@ Partial Public Class ThisAddIn
                         End If
 
                         Dim toolResponse As ToolResponse = Nothing
+                        Dim legacyCompatibilityRoots As System.Collections.Generic.List(Of String) = Nothing
+                        Dim legacyCompatibilitySnapshot As System.Collections.Generic.Dictionary(Of String, String) = Nothing
+                        Dim legacyNormalizedExcludedPaths As System.Collections.Generic.List(Of String) = Nothing
 
-                        If TryBuildDuplicateSuccessfulToolReplay(tc, normalizedToolCallSignature, context, toolResponse) Then
+                        Dim hasNonTerminalExplicitOperation As Boolean =
+                            context.SequencingState IsNot Nothing AndAlso
+                            context.SequencingState.OperationRegistry IsNot Nothing AndAlso
+                            context.SequencingState.OperationRegistry.HasAnyNonTerminalOperationId(tc.Arguments)
+
+                        If Not hasNonTerminalExplicitOperation AndAlso
+                           TryBuildDuplicateSuccessfulToolReplay(tc, normalizedToolCallSignature, context, toolResponse) Then
                             context.LogWarn(
                                 $"Skipped duplicate successful tool call for '{tc.ToolName}' and replayed the prior result.",
                                 details:=$"CallId={tc.CallId}; Signature='{normalizedToolCallSignature}'")
@@ -1465,8 +1896,120 @@ Partial Public Class ThisAddIn
                                 "Skipped duplicate successful tool call and replayed prior result.",
                                 details:=$"ToolName='{tc.ToolName}'; CallId={tc.CallId}; Signature='{normalizedToolCallSignature}'")
                         Else
-                            toolResponse = Await ExecuteToolCall(tc, toolConfig, context, cancellationToken)
+                            legacyCompatibilityRoots = GetWordLegacyCompatibilitySnapshotRoots()
+
+                            legacyCompatibilitySnapshot =
+                                SharedLibrary.Agents.ArtifactDelivery.CaptureLegacyCompatibilityFileSnapshot(
+                                    context.SequencingState,
+                                    tc.ToolName,
+                                    legacyCompatibilityRoots)
+
+                            Dim executionToolCall As ToolCall = tc
+                            If SharedLibrary.Agents.ExplicitOperationToolContract.HasCapability(toolConfig) Then
+                                executionToolCall = New ToolCall() With {
+                                    .CallId = tc.CallId,
+                                    .ToolName = tc.ToolName,
+                                    .Arguments = SharedLibrary.Agents.ExplicitOperationToolContract.BuildExecutionArguments(toolConfig, tc.Arguments),
+                                    .RawJson = tc.RawJson
+                                }
+                            End If
+
+                            toolResponse = Await ExecuteToolCall(executionToolCall, toolConfig, context, cancellationToken)
+
+                            If toolResponse IsNot Nothing AndAlso
+                               toolResponse.Success AndAlso
+                               SharedLibrary.Agents.ArtifactDelivery.ResponseDeclaresExplicitArtifacts(
+                                   toolResponse.Response) Then
+
+                                Dim artifactFailureCode As String = ""
+                                Dim artifactFailureMessage As String = ""
+
+                                If Not SharedLibrary.Agents.ArtifactDelivery.TryRegisterExplicitArtifactsFromResponse(
+                                    context.SequencingState,
+                                    toolResponse.Response,
+                                    tc.ToolName,
+                                    artifactFailureCode,
+                                    artifactFailureMessage) Then
+
+                                    ' The physical mutation already succeeded. Preserve explicit operation
+                                    ' idempotency before converting the tool result into a protocol failure,
+                                    ' so a repair turn cannot accidentally replay the same mutation.
+                                    If context.SequencingState IsNot Nothing AndAlso
+                                       context.SequencingState.OperationRegistry IsNot Nothing Then
+
+                                        context.SequencingState.OperationRegistry.ApplyToolResult(
+                                            tc.Arguments,
+                                            toolResponse.Response,
+                                            ToolExecutionContext.ZeroChangeOperationAbortThreshold)
+                                        SharedLibrary.Agents.ExplicitOperationToolContract.MarkSucceededAfterSuccessfulExecution(
+                                            toolConfig,
+                                            tc.Arguments,
+                                            toolResponse.Response,
+                                            context.SequencingState.OperationRegistry)
+                                    End If
+
+                                    toolResponse.Success = False
+                                    toolResponse.ErrorCode = artifactFailureCode
+                                    toolResponse.ErrorMessage = artifactFailureMessage
+                                    toolResponse.ResultKind = "error"
+                                End If
+                            End If
+
+                            ' A syntactically valid expected_artifacts contract becomes
+                            ' authoritative only after this producer call has succeeded.
+                            ' Register it before legacy delta attribution so even an explicit
+                            ' empty contract [] prevents same-call legacy surfacing.
+                            If toolResponse IsNot Nothing AndAlso
+                               toolResponse.Success AndAlso
+                               context.SequencingState IsNot Nothing AndAlso
+                               Not SharedLibrary.Agents.ToolCallSequencing.ToolingRunState.IsExplicitSubAgentDelegationCall(
+                                   tc.ToolName,
+                                   tc.Arguments) Then
+
+                                ' agent_<name>.expected_artifacts is the CHILD delegation contract.
+                                ' The nested run receives and locks that contract separately; copying it
+                                ' into the parent ExpectedDeliverableSlots would couple two run scopes and,
+                                ' for expected_artifacts=[], could incorrectly disable parent Legacy output.
+                                context.SequencingState.RegisterExpectedDeliverablesFromArguments(
+                                    tc.Arguments)
+                            End If
+
+                            If toolResponse IsNot Nothing AndAlso
+                               toolResponse.Success AndAlso
+                               Not SharedLibrary.Agents.ArtifactDelivery.ResponseDeclaresExplicitArtifacts(
+                                   toolResponse.Response) Then
+
+                                ' External/legacy creation tools may return an exact output path while
+                                ' writing outside the host-selected workspace/staging root. Normalize such
+                                ' declared outputs into the Word host's preferred writable root before the
+                                ' bounded delta is evaluated. The path remains legacy telemetry only; no
+                                ' opaque identity or Final state is inferred from it.
+                                legacyNormalizedExcludedPaths =
+                                    WordNormalizeDeclaredLegacyOutputsToPreferredRoot(
+                                        tc.ToolName,
+                                        toolResponse.Response,
+                                        context.SequencingState)
+
+                                SharedLibrary.Agents.ArtifactDelivery.RegisterLegacyCompatibilityFileDelta(
+                                    context.SequencingState,
+                                    tc.ToolName,
+                                    legacyCompatibilityRoots,
+                                    legacyCompatibilitySnapshot,
+                                    excludedPaths:=legacyNormalizedExcludedPaths)
+                            End If
                         End If
+                        If toolResponse IsNot Nothing AndAlso
+                           toolResponse.Success AndAlso
+                           skippedTerminalOperationIds.Count > 0 AndAlso
+                           context.SequencingState IsNot Nothing AndAlso
+                           context.SequencingState.OperationRegistry IsNot Nothing Then
+
+                            toolResponse.Response =
+                                context.SequencingState.OperationRegistry.AnnotateSkippedTerminalOperations(
+                                    toolResponse.Response,
+                                    skippedTerminalOperationIds)
+                        End If
+
                         Dim skippedStructuredAgentFailure As Boolean =
                             IsSkippedStructuredAgentFailure(tc, toolResponse, toolConfig, subAgentMode)
 
@@ -1506,22 +2049,31 @@ Partial Public Class ThisAddIn
                                                     returnedToParent:=skippedStructuredAgentFailure)
                                 End If
                             Else
-                                ' Transport success is not operation success: a mutation tool that applied
-                                ' zero changes (status=none/no_match or applied_count=0) must not count as
-                                ' progress, and repeated no-ops against the same target are circuit-broken.
+                                ' Feed exact caller-supplied logical operation ids and their
+                                ' structured outcomes into the shared operation registry.
+                                ' Calls without operation_id are unaffected.
+                                If context.SequencingState IsNot Nothing AndAlso
+                                   context.SequencingState.OperationRegistry IsNot Nothing Then
+
+                                    context.SequencingState.OperationRegistry.ApplyToolResult(
+                                        tc.Arguments,
+                                        toolResponse.Response,
+                                        ToolExecutionContext.ZeroChangeOperationAbortThreshold)
+                                    SharedLibrary.Agents.ExplicitOperationToolContract.MarkSucceededAfterSuccessfulExecution(
+                                        toolConfig,
+                                        tc.Arguments,
+                                        toolResponse.Response,
+                                        context.SequencingState.OperationRegistry)
+                                End If
+
+                                ' Transport success is not logical operation success. Zero-change mutation
+                                ' results are recorded as non-progress. Retry/terminal semantics are owned ONLY
+                                ' by ExplicitOperationRegistry using the explicit opaque operation_id; no path,
+                                ' anchor, response-content, or other inferred identity is used here.
                                 Dim isZeroChangeOp As Boolean =
                                     SharedLibrary.Agents.ToolCallSequencing.IsZeroChangeOperationResult(toolResponse.Response)
 
                                 If isZeroChangeOp Then
-                                    Dim targetKey As String = opTargetKey
-                                    If String.IsNullOrEmpty(opPathArg) Then
-                                        targetKey = SharedLibrary.Agents.ToolCallSequencing.BuildOperationTargetKey(tc.ToolName, toolResponse.Response)
-                                    End If
-                                    Dim noOpCount As Integer = 0
-                                    context.ZeroChangeOperationCounts.TryGetValue(targetKey, noOpCount)
-                                    noOpCount += 1
-                                    context.ZeroChangeOperationCounts(targetKey) = noOpCount
-
                                     If context.SequencingState IsNot Nothing Then
                                         context.SequencingState.NoteToolFailure(
                                             tc.ToolName,
@@ -1531,47 +2083,19 @@ Partial Public Class ThisAddIn
 
                                     context.LogWarn(
                                         "Tool executed with zero changes applied; not counted as progress.",
-                                        details:=$"host={context.HostKind}; tool={tc.ToolName}; target={targetKey}; noOpCount={noOpCount}")
-
-                                    If noOpCount >= ToolExecutionContext.ZeroChangeOperationAbortThreshold Then
-                                        If context.SequencingState IsNot Nothing Then
-                                            context.SequencingState.NoteFailureFatal()
-                                        End If
-                                        context.PendingContinuationGuardPrompt = BuildToolFailureReassessmentGuardPrompt(tc.ToolName)
-                                        context.PendingGuardTitle = "HOST NO-OP EDIT BREAKER"
-                                        context.PendingRejectedTurnExplanation =
-                                            "The same edit target returned no changes repeatedly. Stop retrying this anchor; re-read the current document text or proceed to save/finalize what has already been applied."
-                                        context.PendingRejectedAssistantTurn = ""
-                                        context.PrematureTextRetryCount = 0
-                                        stopCurrentBatchAfterTool = True
-
-                                        ToolingFileLogger.LogWarn(
-                                            "No-op edit circuit breaker tripped; marking edit unresolved.",
-                                            details:=$"host={context.HostKind}; tool={tc.ToolName}; target={targetKey}; noOpCount={noOpCount}")
-                                    End If
+                                        details:=$"host={context.HostKind}; tool={tc.ToolName}")
                                 Else
                                     If context.SequencingState IsNot Nothing Then
-                                        context.SequencingState.NoteSuccessfulProgress()
+                                        context.SequencingState.NoteSuccessfulProgress(tc.ToolName)
 
                                         If toolConfig IsNot Nothing AndAlso toolConfig.PrefersSingleInvocation Then
                                             context.SequencingState.NoteConsolidatableToolSuccess(tc.ToolName)
                                         End If
                                     End If
                                 End If
-
-                                If isZeroChangeOp AndAlso stopCurrentBatchAfterTool Then
-                                    UpdateWorkflowContinuityAfterToolExecution(context, tc, toolResponse)
-                                    Exit For
-                                End If
                             End If
 
                             UpdateWorkflowContinuityAfterToolExecution(context, tc, toolResponse)
-
-                            SharedLibrary.Agents.ToolCallSequencing.NoteMemoryGroundingToolResult(
-                                context.SequencingState,
-                                tc.ToolName,
-                                toolResponse.Response,
-                                toolResponse.Success)
 
                             SharedLibrary.Agents.ToolCallSequencing.NoteMemoryGroundingToolResult(
                                 context.SequencingState,
@@ -1601,6 +2125,17 @@ Partial Public Class ThisAddIn
                                 details:=$"host={context.HostKind}; tool={tc.ToolName}; signature={normalizedToolCallSignature}")
 
                             Exit For
+                        End If
+
+                        If toolResponse.Success AndAlso
+                           context.CapabilityRoutingRequired AndAlso
+                           context.CapabilityRoutingResolved AndAlso
+                           Not context.CapabilityRoutingEntered AndAlso
+                           Not String.IsNullOrWhiteSpace(context.CapabilityRoutingName) AndAlso
+                           tc.ToolName.Equals(context.CapabilityRoutingName, StringComparison.OrdinalIgnoreCase) Then
+                            context.CapabilityRoutingEntered = True
+                            context.Log("Capability route entered: kind=" & context.CapabilityRoutingKind & "; name=" & context.CapabilityRoutingName, "diag")
+                            ToolingFileLogger.LogStep("[ROUTE] entered kind=" & context.CapabilityRoutingKind & "; name=" & context.CapabilityRoutingName & "; host=" & context.HostKind)
                         End If
 
                         If toolResponse.Success AndAlso
@@ -1641,21 +2176,22 @@ Partial Public Class ThisAddIn
 
 
                         If RegisterToolFailureLoopState(tc, toolResponse, context) Then
+                            Dim repeatedFailureReason As String =
+                                $"Tool '{tc.ToolName}' failed {context.ConsecutiveFailedToolCount} consecutive times without a successful recovery. Further automatic retries of this tool have been stopped."
+
                             context.LogWarn(
-                                    $"Tool '{tc.ToolName}' failed {context.ConsecutiveFailedToolCount} consecutive times. Forcing a recovery round to reassess the tool choice.")
+                                $"Tool '{tc.ToolName}' reached the consecutive-failure terminal threshold ({context.ConsecutiveFailedToolCount}).",
+                                details:=repeatedFailureReason)
 
                             ToolingFileLogger.LogWarn(
-                                    "Forcing recovery round after repeated consecutive tool failures.",
-                                    details:=$"ToolName='{tc.ToolName}'; Count={context.ConsecutiveFailedToolCount}")
+                                "Stopping automatic retries after repeated consecutive tool failures.",
+                                details:=$"ToolName='{tc.ToolName}'; Count={context.ConsecutiveFailedToolCount}; Terminal=true")
 
-                            context.PendingContinuationGuardPrompt = BuildToolFailureReassessmentGuardPrompt(tc.ToolName)
-                            context.PendingGuardTitle = "HOST TOOL FAILURE RECOVERY"
-                            context.PendingRejectedTurnExplanation =
-                                "Your previous tool step failed repeatedly. Reassess the tool choice before continuing."
-                            context.PendingRejectedAssistantTurn = ""
-                            context.PrematureTextRetryCount = 0
-                            stopCurrentBatchAfterTool = True
-                            Exit For
+                            ' Generic circuit breaker: the tool implementation is irrelevant here.
+                            ' Mark the current response terminal and let the existing no-tool finalization
+                            ' path produce a concise blocked status instead of another tool retry.
+                            toolResponse.RepairLoopTerminal = True
+                            toolResponse.RepairLoopTerminalReason = repeatedFailureReason
                         End If
 
                         Dim executedSignature As String = BuildExecutedToolSignature(tc, toolResponse)
@@ -1667,17 +2203,34 @@ Partial Public Class ThisAddIn
                             context.LastToolExecutionRepeatCount = 1
                         End If
 
-                        If context.LastToolExecutionRepeatCount >= context.DuplicateToolExecutionAbortThreshold Then
-                            context.LogWarn($"Detected repeated identical tool execution for '{tc.ToolName}'. Forcing a recovery round to reassess the tool choice.")
+                        If Not toolResponse.RepairLoopTerminal AndAlso
+                           context.LastToolExecutionRepeatCount >= context.DuplicateToolExecutionAbortThreshold Then
+                            context.LogWarn($"Detected repeated identical tool execution for '{tc.ToolName}'. Terminating this tooling run to prevent an execution loop.")
                             ToolingFileLogger.LogWarn(
-                                    "Forcing recovery round after repeated identical tool execution.",
+                                    "Terminating tooling run after repeated identical tool execution.",
                                     details:=$"ToolName='{tc.ToolName}'; RepeatCount={context.LastToolExecutionRepeatCount}; Signature='{executedSignature}'")
-                            context.PendingContinuationGuardPrompt = BuildToolFailureReassessmentGuardPrompt(tc.ToolName)
-                            context.PendingGuardTitle = "HOST TOOL FAILURE RECOVERY"
-                            context.PendingRejectedTurnExplanation =
-                                "The same tool step repeated without progress. Reassess the tool choice before continuing."
-                            context.PendingRejectedAssistantTurn = ""
-                            context.PrematureTextRetryCount = 0
+
+                            abortDueToRepeatedToolLoop = True
+                            context.FinalizationBlocked = True
+                            context.FinalizationBlockedReason = "repeated_identical_tool_execution"
+
+                            If context.SequencingState IsNot Nothing Then
+                                context.SequencingState.NoteToolFailure(
+                                    tc.ToolName,
+                                    "repeated_identical_tool_execution",
+                                    "The same successful tool execution repeated without progress and the host circuit breaker terminated the run.")
+                                context.SequencingState.FinalResponseOrigin = "host_generated"
+                                context.SequencingState.HasOpenToolWorkflow = False
+                            End If
+
+                            currentResponse = Await BuildBlockedToolingResultAsync(
+                                context,
+                                "repeated_identical_tool_execution",
+                                "The tooling run was stopped because the same tool execution repeated without progress.",
+                                useSecondAPI,
+                                hideSplash,
+                                cancellationToken)
+
                             stopCurrentBatchAfterTool = True
                             Exit For
                         End If
@@ -1776,6 +2329,16 @@ Partial Public Class ThisAddIn
                         End If
                     Next
 
+                    If restartForCapabilityRouting Then
+                        Dim preparedRoutingResponses As String = BuildToolResponsesForModelBudgeted(
+                            context.AllToolResponses,
+                            context.ToolingModel,
+                            compactForSubAgent:=subAgentMode)
+                        INI_APICall_ToolResponses_2 = preparedRoutingResponses
+                        context.Log("Capability routing completed/guarded; restarting next iteration.", "diag")
+                        Continue While
+                    End If
+
                     If restartAfterExposureMiss Then
                         Dim preparedToolResponsesAfterExposureMiss As String = BuildToolResponsesForModelBudgeted(
                             context.AllToolResponses,
@@ -1823,6 +2386,60 @@ Partial Public Class ThisAddIn
                     INI_APICall_ToolResponses_2 = toolResponses
                     context.Log("Tool responses prepared for next iteration", "diag")
                 Else
+                    If subAgentMode Then
+                        currentResponse = StripTaskStatus(currentResponse)
+
+                        Dim nestedExpectedContractIncomplete As Boolean =
+                            context.SequencingState IsNot Nothing AndAlso
+                            context.SequencingState.ExpectedDeliverableContractLocked AndAlso
+                            context.SequencingState.ExpectedDeliverableSlots IsNot Nothing AndAlso
+                            context.SequencingState.ExpectedDeliverableSlots.Count > 0 AndAlso
+                            Not context.SequencingState.HasAllExpectedDeliverableSlots
+
+                        If nestedExpectedContractIncomplete Then
+                            Dim nestedReturnedStructuredError As Boolean = False
+                            Try
+                                Dim nestedObj As Newtonsoft.Json.Linq.JObject =
+                                    Newtonsoft.Json.Linq.JObject.Parse(currentResponse)
+                                nestedReturnedStructuredError =
+                                    String.Equals(If(CStr(nestedObj("resultKind")), ""), "error", StringComparison.OrdinalIgnoreCase) OrElse
+                                    nestedObj("error") IsNot Nothing
+                            Catch ex As System.Exception
+                                nestedReturnedStructuredError = False
+                            End Try
+
+                            If Not nestedReturnedStructuredError Then
+                                If context.PrematureTextRetryCount < ToolExecutionContext.MaxContinuationRetries Then
+                                    context.PrematureTextRetryCount += 1
+                                    context.PendingContinuationGuardPrompt =
+                                        "HOST EXPECTED-ARTIFACT CONTRACT: One or more locked expected_artifacts slots do not yet have a current registered Final. Continue with tools and create/register the remaining exact logical_deliverable_id/output_slot_id values. Do not invent, rename, normalize, or substitute IDs. If the contract cannot be completed, return a structured error object."
+                                    context.PendingGuardTitle = "HOST EXPECTED-ARTIFACT CONTRACT"
+                                    context.PendingRejectedTurnExplanation =
+                                        "The delegated task cannot complete while its locked expected_artifacts contract is incomplete."
+                                    context.PendingRejectedAssistantTurn = If(currentResponse, "")
+                                    Continue While
+                                End If
+
+                                context.FinalizationBlocked = True
+                                context.FinalizationBlockedReason =
+                                    SharedLibrary.Agents.ToolCallSequencing.RequestedDeliverableSlotsIncompleteCode
+                                acceptedFinalStatus = "blocked"
+                                currentResponse =
+                                    "{""summary"":""The delegated task could not satisfy its locked expected-artifact contract."",""result"":null,""resultKind"":""error"",""error"":{""code"":""requested_deliverable_slots_incomplete"",""phase"":""subagent_finalization"",""message"":""One or more locked expected_artifacts slots do not have a current registered Final.""}}"
+
+                                If context.SequencingState IsNot Nothing Then
+                                    context.SequencingState.FinalResponseOrigin = "host_generated"
+                                    context.SequencingState.HasOpenToolWorkflow = False
+                                End If
+                            Else
+                                acceptedFinalStatus = "blocked"
+                            End If
+                        End If
+
+                        context.Log("Sub-agent final text response accepted (no tool calls)")
+                        Exit While
+                    End If
+
                     If context.FinalResponseContract = SharedLibrary.Agents.ToolingFinalResponseContract.RawCallerText Then
                         context.PrematureTextRetryCount = 0
 
@@ -1918,7 +2535,7 @@ Partial Public Class ThisAddIn
                                     SharedLibrary.Agents.ToolCallSequencing.HasProducedUserDeliverable(context.SequencingState)
                             Dim _ftGateValidatedDeliverable_C As Boolean =
                                     context.SequencingState IsNot Nothing AndAlso
-                                    context.SequencingState.HasValidatedFinalDeliverable
+                                    context.SequencingState.HasValidatedDeliverableForCompletion
 
                             Dim _ftGateEval_C As Agents.FinalTurnEvaluation =
                                     Agents.ToolingOrchestrator.EvaluateFinalTurn(
@@ -2127,7 +2744,8 @@ Partial Public Class ThisAddIn
                         otherPrompt,
                         fileObject,
                         useSecondAPI,
-                        hideSplash)
+                        hideSplash,
+                        cancellationToken)
 
                 If Not String.IsNullOrWhiteSpace(forcedFinalResponse) Then
                     currentResponse = forcedFinalResponse
@@ -2145,23 +2763,30 @@ Partial Public Class ThisAddIn
                         ContainsToolCalls(currentResponse, context.ToolingModel.ToolCallDetectionPattern) OrElse
                         SharedLibrary.Agents.ToolCallSequencing.ContainsProviderToolEnvelope(currentResponse)
 
+                    Dim forcedFinalDeliverableFailureReason As String =
+                        SharedLibrary.Agents.ToolCallSequencing.GetRequestedDeliverableFailureReason(
+                            context.SequencingState,
+                            forcedValidation.TurnKind)
+
                     Dim forcedFinalDeliverableMissing As Boolean =
-                        forcedValidation.TurnKind = SharedLibrary.Agents.ToolCallSequencing.ActiveToolingTurnKind.FinalCompleteTurn AndAlso
-                        context.SequencingState IsNot Nothing AndAlso
-                        context.SequencingState.RequestRequiresCreatedDeliverable AndAlso
-                        Not context.SequencingState.HasValidatedFinalDeliverable
+                        Not String.IsNullOrWhiteSpace(forcedFinalDeliverableFailureReason)
 
                     If forcedFinalIsEnvelope OrElse forcedFinalDeliverableMissing Then
                         context.FinalizationBlocked = True
                         context.FinalizationBlockedReason =
-                            If(forcedFinalIsEnvelope, "forced_final_tool_envelope", "forced_final_missing_validated_deliverable")
+                            If(forcedFinalIsEnvelope, "forced_final_tool_envelope", forcedFinalDeliverableFailureReason)
+
+                        Dim forcedFinalBlockCode As String =
+                            If(forcedFinalIsEnvelope,
+                               SharedLibrary.Agents.ToolCallSequencing.InvalidTextOnlyFinalizationCode,
+                               forcedFinalDeliverableFailureReason)
 
                         currentResponse = Await BuildBlockedToolingResultAsync(
                             context,
-                            SharedLibrary.Agents.ToolCallSequencing.InvalidTextOnlyFinalizationCode,
+                            forcedFinalBlockCode,
                             If(forcedFinalIsEnvelope,
                                "The tooling run ended because the forced finalization response was a tool-call/provider envelope, not a user-facing answer.",
-                               "The tooling run ended because completion was claimed without a validated final deliverable."),
+                               "The tooling run ended because the requested final deliverable contract is incomplete."),
                             useSecondAPI,
                             hideSplash,
                             cancellationToken)
@@ -2269,6 +2894,7 @@ Partial Public Class ThisAddIn
                 ToolingFileLogger.LogPreMainLlmCallSnapshot()
 
                 Try
+                    cancellationToken.ThrowIfCancellationRequested()
                     Dim finalResponse As String = Await LLM(
                         finalSysPrompt,
                         fullUserPrompt,
@@ -2277,7 +2903,9 @@ Partial Public Class ThisAddIn
                         hideSplash,
                         otherPrompt,
                         fileObject,
-                        True)
+                        ToolExecution:=True,
+                        cancellationToken:=cancellationToken,
+                        EnsureUI:=True)
 
                     If Not String.IsNullOrWhiteSpace(finalResponse) AndAlso
                                Not ContainsToolCalls(finalResponse, context.ToolingModel.ToolCallDetectionPattern) AndAlso
@@ -2298,7 +2926,14 @@ Partial Public Class ThisAddIn
                               details:=$"host={context.HostKind}; iteration={iteration}")
                     End If
 
-                Catch ex As Exception
+                Catch ex As System.TimeoutException
+                    context.LogWarn("Forced final LLM call timed out.", details:=ex.Message)
+                    currentResponse = ""
+                Catch ex As System.OperationCanceledException
+                    context.IsCancelled = True
+                    context.LogWarn("Forced final call was cancelled")
+                    Return "Operation was canceled by the user."
+                Catch ex As System.Exception
                     ' Do not fall back to the previous raw response on error; force a safe blocked message.
                     context.EmptyMainModelResponse = True
                     currentResponse = ""
@@ -2317,6 +2952,51 @@ Partial Public Class ThisAddIn
                 context.LogWarn($"Maximum iterations ({context.MaxIterations}) reached")
                 ShowCustomMessageBox($"Maximum tool iterations ({context.MaxIterations}) reached. The response may be incomplete.")
                 ToolingFileLogger.LogWarn("Maximum iterations reached.", details:=$"MaxIterations={context.MaxIterations}")
+
+                ' Deliverable completion is authoritative even at the hard iteration boundary.
+                ' A presentable text response must never hide a missing/partial final artifact contract.
+                Dim maxIterationDeliverableFailureReason As String =
+                    SharedLibrary.Agents.ToolCallSequencing.GetRequestedDeliverableFailureReason(
+                        context.SequencingState,
+                        SharedLibrary.Agents.ToolCallSequencing.ActiveToolingTurnKind.FinalCompleteTurn)
+
+                If Not context.FinalizationBlocked AndAlso
+                   Not String.IsNullOrWhiteSpace(maxIterationDeliverableFailureReason) Then
+
+                    context.FinalizationBlocked = True
+                    context.FinalizationBlockedReason = maxIterationDeliverableFailureReason
+                    acceptedFinalStatus = "blocked"
+
+                    If subAgentMode Then
+                        Dim maxError As New Newtonsoft.Json.Linq.JObject()
+                        Dim maxErrorDetail As New Newtonsoft.Json.Linq.JObject()
+                        maxErrorDetail("code") = maxIterationDeliverableFailureReason
+                        maxErrorDetail("phase") = "max_iterations"
+                        maxErrorDetail("message") = "The delegated task reached its iteration limit before satisfying the required final artifact contract."
+                        maxError("summary") = "The delegated task could not complete its required final artifact contract."
+                        maxError("result") = Newtonsoft.Json.Linq.JValue.CreateNull()
+                        maxError("resultKind") = "error"
+                        maxError("error") = maxErrorDetail
+                        currentResponse = maxError.ToString(Newtonsoft.Json.Formatting.None)
+                    Else
+                        currentResponse = Await BuildBlockedToolingResultAsync(
+                            context,
+                            maxIterationDeliverableFailureReason,
+                            "The tool-assisted run reached its iteration limit before satisfying the requested final deliverable contract.",
+                            useSecondAPI,
+                            hideSplash,
+                            cancellationToken)
+                    End If
+
+                    If context.SequencingState IsNot Nothing Then
+                        context.SequencingState.FinalResponseOrigin = "host_generated"
+                        context.SequencingState.HasOpenToolWorkflow = False
+                    End If
+
+                    context.LogWarn(
+                        "Max-iteration finalization blocked because the requested deliverable contract is incomplete.",
+                        details:=$"host={context.HostKind}; reason={maxIterationDeliverableFailureReason}")
+                End If
 
                 ' Guarantee user-understandable output: if the (possibly forced) final response is not
                 ' presentable user-facing text, summarize what was achieved as a blocked result instead
@@ -2352,7 +3032,7 @@ Partial Public Class ThisAddIn
                 currentResponse = Await BuildBlockedToolingResultAsync(
                     context,
                     SharedLibrary.Agents.SubAgentRuntimeHardening.ModelEmptyResponseCode,
-                    "The tooling run ended because the model returned no valid content.", useSecondAPI, hideSplash, cancellationToken)
+                    "The tooling run ended because the model returned no valid content. Tool loading or preparation is not execution. Only tools with a successful execution result may be described as completed. If the requested artifact was not created, state explicitly that no output file was created.", useSecondAPI, hideSplash, cancellationToken)
 
                 If context.SequencingState IsNot Nothing Then
                     context.SequencingState.FinalResponseOrigin = "host_generated"
@@ -2534,14 +3214,30 @@ Partial Public Class ThisAddIn
             If Not subAgentMode Then
                 Try
                     WordCollectAndCopyOutputs()
-                Catch ex As Exception
-                    ToolingFileLogger.LogWarn("Failed to deliver Word session outputs.", ex:=ex)
+                Catch ex As System.Exception
+                    wordDeliveryFailure = ex
+                    ToolingFileLogger.LogError(
+                        "Failed to deliver one or more registered Word session outputs. Staging will be preserved for recovery.",
+                        ex:=ex)
                 End Try
-                Try
-                    WordCleanupAgentTempDir(parentStagingRoot)
-                Catch ex As Exception
-                    ToolingFileLogger.LogWarn("Failed to clean up Word session staging directory.", ex:=ex)
-                End Try
+
+                If wordDeliveryFailure Is Nothing Then
+                    Try
+                        WordCleanupAgentTempDir(parentStagingRoot)
+                    Catch ex As System.Exception
+                        ToolingFileLogger.LogWarn("Failed to clean up Word session staging directory.", ex:=ex)
+                    End Try
+                Else
+                    ' Preserve the physical staging files on delivery failure, but restore the
+                    ' parent PathPolicy boundary so a later run never inherits this staging root.
+                    Dim preservedWordStaging As String = If(_wordAgentTempDir, "")
+                    _wordAgentTempDir = Nothing
+                    SharedLibrary.Agents.PathPolicy.SetSessionStagingRoot(parentStagingRoot)
+                    context.LogError(
+                        "Word deliverable transport failed; staging was preserved for recovery.",
+                        details:=$"staging={preservedWordStaging}",
+                        ex:=wordDeliveryFailure)
+                End If
             End If
 
             _activeToolingContext = parentToolingContext
@@ -2575,7 +3271,83 @@ Partial Public Class ThisAddIn
                     context.Log($"Log saved to: {ToolingFileLogger.LogFilePath}")
                 End If
             End If
+
+            If wordDeliveryFailure IsNot Nothing Then
+                Throw New System.IO.IOException(
+                    "Word deliverable transport failed. Source deliverables remain at their original staging/workspace locations; session staging was preserved when applicable.",
+                    wordDeliveryFailure)
+            End If
         End Try
+    End Function
+
+
+    ''' <summary>
+    ''' Returns the host-controlled Word staging roots used by the bounded legacy
+    ''' compatibility fallback. The physical delta never establishes artifact identity
+    ''' or Final state; it is attributed only to the exact successful deliverable-capable
+    ''' legacy tool call.
+    ''' </summary>
+    Private Function GetWordLegacyCompatibilitySnapshotRoots() As System.Collections.Generic.List(Of String)
+        Dim roots As New System.Collections.Generic.List(Of String)()
+        Dim seen As New System.Collections.Generic.HashSet(Of String)(
+            System.StringComparer.OrdinalIgnoreCase)
+
+        For Each rawRoot As String In New String() {
+            _wordAgentTempDir,
+            SharedLibrary.Agents.PathPolicy.SessionStagingRoot
+        }
+            If System.String.IsNullOrWhiteSpace(rawRoot) Then Continue For
+
+            Try
+                Dim fullRoot As String = System.IO.Path.GetFullPath(rawRoot)
+                If System.IO.Directory.Exists(fullRoot) AndAlso seen.Add(fullRoot) Then
+                    roots.Add(fullRoot)
+                End If
+            Catch ex As System.Exception
+            End Try
+        Next
+
+        ' Observe the persisted/connected workspace for bounded legacy side effects.
+        ' If no explicit workspace exists, the active document directory is observation-only:
+        ' it is NOT activated as a writable workspace. This preserves legacy detection for
+        ' tools that inherently mutate beside a source document without changing the default
+        ' destination for newly created files, which remains SessionStagingRoot.
+        Try
+            Dim workspaceRoot As String = ""
+            Dim wordWorkspace As SharedLibrary.Agents.WorkspaceState =
+                SharedLibrary.Agents.WorkspaceStore.Load("word")
+
+            If wordWorkspace IsNot Nothing AndAlso
+               Not System.String.IsNullOrWhiteSpace(wordWorkspace.RootPath) AndAlso
+               System.IO.Directory.Exists(wordWorkspace.RootPath) Then
+
+                workspaceRoot = wordWorkspace.RootPath
+            Else
+                Dim activeDocument As Microsoft.Office.Interop.Word.Document = Nothing
+                Try
+                    activeDocument = Globals.ThisAddIn.Application.ActiveDocument
+                Catch ex As System.Exception
+                    activeDocument = Nothing
+                End Try
+
+                If activeDocument IsNot Nothing AndAlso
+                   Not System.String.IsNullOrWhiteSpace(activeDocument.Path) AndAlso
+                   System.IO.Directory.Exists(activeDocument.Path) Then
+
+                    workspaceRoot = activeDocument.Path
+                End If
+            End If
+
+            If Not System.String.IsNullOrWhiteSpace(workspaceRoot) Then
+                Dim fullWorkspaceRoot As String = System.IO.Path.GetFullPath(workspaceRoot)
+                If System.IO.Directory.Exists(fullWorkspaceRoot) AndAlso seen.Add(fullWorkspaceRoot) Then
+                    roots.Add(fullWorkspaceRoot)
+                End If
+            End If
+        Catch ex As System.Exception
+        End Try
+
+        Return roots
     End Function
 
 
@@ -2638,58 +3410,445 @@ Partial Public Class ThisAddIn
     End Sub
 
     ''' <summary>
-    ''' Delivers files produced into the Word staging directory to Desktop\Inky\yyMMdd_HH-mm\
-    ''' and opens the folder, mirroring the Outlook Local Agent. Since a Word session is one
-    ''' tooling run into a fresh staging dir, every file present is a produced deliverable.
+    ''' Normalizes exact output paths explicitly declared by a successful legacy
+    ''' file-producing tool into the Word host's preferred writable root. This closes the
+    ''' compatibility gap for externally configured creation/download tools that return an
+    ''' output path but do not yet implement artifacts[]. No artifact identity or Final state
+    ''' is inferred from the path; the ordinary bounded legacy delta collector remains the
+    ''' only component that records the copied file.
     ''' </summary>
-    Private Function WordCollectAndCopyOutputs() As List(Of String)
-        Dim copiedFiles As New List(Of String)()
+    Private Function WordNormalizeDeclaredLegacyOutputsToPreferredRoot(
+        toolName As String,
+        responseJson As String,
+        runState As SharedLibrary.Agents.ToolCallSequencing.ToolingRunState) As System.Collections.Generic.List(Of String)
 
-        If String.IsNullOrWhiteSpace(_wordAgentTempDir) OrElse Not Directory.Exists(_wordAgentTempDir) Then
-            Return copiedFiles
+        Dim excludedOriginalPaths As New System.Collections.Generic.List(Of String)()
+
+        If runState Is Nothing OrElse
+           runState.HasExpectedDeliverableContract OrElse
+           runState.DeliverableCapableToolNames Is Nothing OrElse
+           Not runState.DeliverableCapableToolNames.Contains(If(toolName, "").Trim()) OrElse
+           System.String.IsNullOrWhiteSpace(responseJson) Then
+
+            Return excludedOriginalPaths
         End If
 
-        Dim filesToCopy = Directory.GetFiles(_wordAgentTempDir, "*.*", SearchOption.AllDirectories).
-            Select(Function(p) Path.GetFullPath(p)).
-            Distinct(StringComparer.OrdinalIgnoreCase).
-            ToList()
+        Dim preferredRoot As String = WordGetPreferredGeneratedFileRoot()
+        If System.String.IsNullOrWhiteSpace(preferredRoot) OrElse
+           Not System.IO.Directory.Exists(preferredRoot) Then
 
-        If filesToCopy.Count = 0 Then Return copiedFiles
+            Return excludedOriginalPaths
+        End If
 
-        Dim desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
-        Dim timestamp = DateTime.Now.ToString("yyMMdd_HH-mm")
-        Dim outputDir = Path.Combine(desktopPath, "Inky", timestamp)
+        Dim rootToken As Newtonsoft.Json.Linq.JToken = Nothing
+        Try
+            rootToken = Newtonsoft.Json.Linq.JToken.Parse(responseJson)
+        Catch ex As System.Exception
+            Return excludedOriginalPaths
+        End Try
 
-        Dim counter = 1
-        While Directory.Exists(outputDir)
-            outputDir = Path.Combine(desktopPath, "Inky", timestamp & $"_{counter}")
-            counter += 1
-        End While
+        Dim declaredPaths As New System.Collections.Generic.List(Of String)()
+        WordCollectDeclaredLegacyOutputPaths(
+            rootToken,
+            WordIsKnownLegacyCreationTool(toolName),
+            declaredPaths)
 
-        Directory.CreateDirectory(outputDir)
+        Dim seen As New System.Collections.Generic.HashSet(Of String)(
+            System.StringComparer.OrdinalIgnoreCase)
 
-        For Each srcPath In filesToCopy
+        For Each rawPath As String In declaredPaths
+            If System.String.IsNullOrWhiteSpace(rawPath) Then Continue For
+
             Try
-                Dim destName = Path.GetFileName(srcPath)
-                Dim destPath = Path.Combine(outputDir, destName)
+                If Not System.IO.Path.IsPathRooted(rawPath) Then Continue For
 
-                Dim fileCounter = 1
-                While File.Exists(destPath)
-                    Dim baseName = Path.GetFileNameWithoutExtension(destName)
-                    Dim ext = Path.GetExtension(destName)
-                    destPath = Path.Combine(outputDir, baseName & $"_{fileCounter}{ext}")
-                    fileCounter += 1
+                Dim sourcePath As String = System.IO.Path.GetFullPath(rawPath)
+                If Not System.IO.File.Exists(sourcePath) OrElse Not seen.Add(sourcePath) Then Continue For
+
+                If WordIsPathInsideRoot(sourcePath, preferredRoot) Then
+                    Continue For
+                End If
+
+                Dim destinationName As String = System.IO.Path.GetFileName(sourcePath)
+                If System.String.IsNullOrWhiteSpace(destinationName) Then Continue For
+
+                Dim destinationPath As String = System.IO.Path.Combine(preferredRoot, destinationName)
+                Dim counter As Integer = 1
+
+                While System.IO.File.Exists(destinationPath)
+                    Dim baseName As String = System.IO.Path.GetFileNameWithoutExtension(destinationName)
+                    Dim extension As String = System.IO.Path.GetExtension(destinationName)
+                    destinationPath = System.IO.Path.Combine(
+                        preferredRoot,
+                        baseName & "_" & counter.ToString(System.Globalization.CultureInfo.InvariantCulture) & extension)
+                    counter += 1
                 End While
 
-                File.Copy(srcPath, destPath, overwrite:=False)
-                copiedFiles.Add(destPath)
-            Catch
+                System.IO.File.Copy(sourcePath, destinationPath, overwrite:=False)
+                excludedOriginalPaths.Add(sourcePath)
+
+                ToolingFileLogger.LogStep(
+                    $"Normalized declared legacy Word-tool output into the host writable root: tool={toolName}; source={sourcePath}; normalized={destinationPath}")
+            Catch ex As System.Exception
+                ToolingFileLogger.LogWarn(
+                    "Failed to normalize a declared legacy Word-tool output path; bounded legacy observation will continue.",
+                    details:=$"tool={toolName}; path={rawPath}",
+                    ex:=ex)
             End Try
         Next
 
+        Return excludedOriginalPaths
+    End Function
+
+    ''' <summary>
+    ''' Returns the explicit connected Word workspace when it is writable; otherwise the
+    ''' current per-run session staging directory. The active document directory is never a
+    ''' default destination for newly generated files.
+    ''' </summary>
+    Private Function WordGetPreferredGeneratedFileRoot() As String
+        Try
+            Dim workspace As SharedLibrary.Agents.WorkspaceState =
+                SharedLibrary.Agents.WorkspaceTools.Active
+
+            If workspace IsNot Nothing AndAlso
+               workspace.AllowWrite AndAlso
+               Not System.String.IsNullOrWhiteSpace(workspace.RootPath) AndAlso
+               System.IO.Directory.Exists(workspace.RootPath) Then
+
+                Return System.IO.Path.GetFullPath(workspace.RootPath)
+            End If
+        Catch ex As System.Exception
+        End Try
+
+        Try
+            Dim stagingRoot As String = SharedLibrary.Agents.PathPolicy.SessionStagingRoot
+            If Not System.String.IsNullOrWhiteSpace(stagingRoot) AndAlso
+               System.IO.Directory.Exists(stagingRoot) Then
+
+                Return System.IO.Path.GetFullPath(stagingRoot)
+            End If
+        Catch ex As System.Exception
+        End Try
+
+        Return ""
+    End Function
+
+    Private Function WordIsKnownLegacyCreationTool(toolName As String) As Boolean
+        Select Case If(toolName, "").Trim().ToLowerInvariant()
+            Case "download_web_files",
+                 "create_word_document",
+                 "create_excel_spreadsheet",
+                 "create_powerpoint",
+                 "create_code_file",
+                 "create_pdf_from_text",
+                 "merge_pdfs",
+                 "add_pdf_watermark",
+                 "word_to_pdf",
+                 "pdf_to_word",
+                 "redact_pdf",
+                 "overlay_pdf",
+                 "create_audio_file",
+                 "generate_image",
+                 "word_doc_create",
+                 "word_doc_export_pdf"
+                Return True
+            Case Else
+                Return False
+        End Select
+    End Function
+
+    Private Sub WordCollectDeclaredLegacyOutputPaths(
+        token As Newtonsoft.Json.Linq.JToken,
+        allowGenericPath As Boolean,
+        outputPaths As System.Collections.Generic.List(Of String))
+
+        If token Is Nothing OrElse outputPaths Is Nothing Then Return
+
+        Dim obj As Newtonsoft.Json.Linq.JObject = TryCast(token, Newtonsoft.Json.Linq.JObject)
+        If obj Is Nothing Then Return
+
+        For Each key As String In New String() {
+            "outputFilePath", "output_file_path", "output_path", "file_path",
+            "saved_path", "savedPath", "local_path", "localPath"
+        }
+            Dim valueToken As Newtonsoft.Json.Linq.JToken = obj(key)
+            If valueToken IsNot Nothing AndAlso
+               valueToken.Type = Newtonsoft.Json.Linq.JTokenType.String Then
+
+                outputPaths.Add(valueToken.ToString())
+            End If
+        Next
+
+        If allowGenericPath Then
+            Dim pathToken As Newtonsoft.Json.Linq.JToken = obj("path")
+            If pathToken IsNot Nothing AndAlso
+               pathToken.Type = Newtonsoft.Json.Linq.JTokenType.String Then
+
+                outputPaths.Add(pathToken.ToString())
+            End If
+        End If
+
+        For Each key As String In New String() {
+            "outputFiles", "output_files", "savedFiles", "saved_files", "paths", "files"
+        }
+            Dim listToken As Newtonsoft.Json.Linq.JToken = obj(key)
+            If listToken Is Nothing OrElse listToken.Type <> Newtonsoft.Json.Linq.JTokenType.Array Then Continue For
+
+            For Each item As Newtonsoft.Json.Linq.JToken In DirectCast(listToken, Newtonsoft.Json.Linq.JArray)
+                If item Is Nothing Then Continue For
+
+                If item.Type = Newtonsoft.Json.Linq.JTokenType.String Then
+                    outputPaths.Add(item.ToString())
+                ElseIf item.Type = Newtonsoft.Json.Linq.JTokenType.Object Then
+                    WordCollectDeclaredLegacyOutputPaths(item, True, outputPaths)
+                End If
+            Next
+        Next
+
+        Dim resultToken As Newtonsoft.Json.Linq.JToken = obj("result")
+        If resultToken IsNot Nothing AndAlso resultToken.Type = Newtonsoft.Json.Linq.JTokenType.Object Then
+            WordCollectDeclaredLegacyOutputPaths(resultToken, allowGenericPath, outputPaths)
+        End If
+    End Sub
+
+    Private Function WordIsPathInsideRoot(pathValue As String, rootValue As String) As Boolean
+        If System.String.IsNullOrWhiteSpace(pathValue) OrElse
+           System.String.IsNullOrWhiteSpace(rootValue) Then
+
+            Return False
+        End If
+
+        Try
+            Dim fullPath As String = System.IO.Path.GetFullPath(pathValue)
+            Dim fullRoot As String = System.IO.Path.GetFullPath(rootValue).TrimEnd(
+                System.IO.Path.DirectorySeparatorChar,
+                System.IO.Path.AltDirectorySeparatorChar)
+
+            Return fullPath.Equals(fullRoot, System.StringComparison.OrdinalIgnoreCase) OrElse
+                   fullPath.StartsWith(
+                       fullRoot & System.IO.Path.DirectorySeparatorChar,
+                       System.StringComparison.OrdinalIgnoreCase)
+        Catch ex As System.Exception
+            Return False
+        End Try
+    End Function
+
+
+    ''' <summary>
+    ''' Resolves explicit current Finals plus bounded path-only legacy compatibility
+    ''' outputs and publishes the complete set atomically to Desktop\Inky\yyMMdd_HH-mm\.
+    ''' Explicit sibling identity is preserved; legacy paths are path-deduplicated. Files
+    ''' may originate from staging or a connected workspace, and storage location never
+    ''' establishes Final state.
+    ''' </summary>
+    Private Function WordCollectAndCopyOutputs() As List(Of String)
+        Dim copiedFiles As New System.Collections.Generic.List(Of String)()
+
+        Dim runState As SharedLibrary.Agents.ToolCallSequencing.ToolingRunState = Nothing
+
+        If _activeToolingContext IsNot Nothing Then
+            runState = _activeToolingContext.SequencingState
+        End If
+
+        ' Explicit current Finals remain authoritative. Until every file-producing tool
+        ' has migrated to artifacts[], append only bounded path-only compatibility outputs
+        ' that were attributed to an exact successful deliverable-capable legacy tool.
+        ' No recursive staging scan and no path-derived Final promotion is permitted.
+        Dim filesToCopy As System.Collections.Generic.List(Of String) =
+            SharedLibrary.Agents.ArtifactDelivery.ResolvePathsForDelivery(
+                runState,
+                legacyCandidates:=Nothing)
+
+        Dim explicitDeliveryPaths As New System.Collections.Generic.HashSet(Of String)(
+            System.StringComparer.OrdinalIgnoreCase)
+
+        For Each explicitPath As String In filesToCopy
+            If System.String.IsNullOrWhiteSpace(explicitPath) Then Continue For
+
+            Try
+                explicitDeliveryPaths.Add(System.IO.Path.GetFullPath(explicitPath))
+            Catch ex As System.Exception
+            End Try
+        Next
+
+        If runState IsNot Nothing AndAlso
+           runState.ExplicitArtifactProtocolOwnedPaths IsNot Nothing Then
+
+            explicitDeliveryPaths.UnionWith(runState.ExplicitArtifactProtocolOwnedPaths)
+        End If
+
+        Dim legacyCompatibilityPaths As System.Collections.Generic.List(Of String) =
+            SharedLibrary.Agents.ArtifactDelivery.ResolveLegacyCompatibilityPaths(
+                runState,
+                explicitDeliveryPaths)
+
+        For Each legacyPath As String In legacyCompatibilityPaths
+            If System.String.IsNullOrWhiteSpace(legacyPath) Then Continue For
+
+            Try
+                Dim normalizedLegacyPath As String = System.IO.Path.GetFullPath(legacyPath)
+
+                If System.IO.File.Exists(normalizedLegacyPath) AndAlso
+                   explicitDeliveryPaths.Add(normalizedLegacyPath) Then
+
+                    filesToCopy.Add(normalizedLegacyPath)
+                End If
+            Catch ex As System.Exception
+            End Try
+        Next
+
+        If filesToCopy.Count = 0 Then
+            Return copiedFiles
+        End If
+
+        Dim desktopPath As String =
+            System.Environment.GetFolderPath(System.Environment.SpecialFolder.DesktopDirectory)
+
+        Dim publishRoot As String =
+            System.IO.Path.Combine(desktopPath, "Inky")
+
+        System.IO.Directory.CreateDirectory(publishRoot)
+
+        Dim timestamp As String =
+            System.DateTime.Now.ToString("yyMMdd_HH-mm")
+
+        Dim outputDir As String =
+            System.IO.Path.Combine(publishRoot, timestamp)
+
+        Dim counter As Integer = 1
+
+        While System.IO.Directory.Exists(outputDir)
+            outputDir =
+                System.IO.Path.Combine(
+                    publishRoot,
+                    timestamp & "_" & counter.ToString(System.Globalization.CultureInfo.InvariantCulture))
+
+            counter += 1
+        End While
+
+        ' Build the complete sibling set in a non-final publish directory first.
+        ' The final Desktop\Inky folder becomes visible only after every copy succeeded.
+        Dim pendingDir As String =
+            System.IO.Path.Combine(
+                publishRoot,
+                ".partial_" & System.Guid.NewGuid().ToString("N"))
+
+        Dim publishedFileNames As New System.Collections.Generic.List(Of String)()
+        Dim deliveryErrors As New System.Collections.Generic.List(Of String)()
+
+        Try
+            System.IO.Directory.CreateDirectory(pendingDir)
+
+            For Each srcPath As String In filesToCopy
+                Try
+                    If System.String.IsNullOrWhiteSpace(srcPath) Then
+                        deliveryErrors.Add("A delivery artifact resolved to an empty path.")
+                        Continue For
+                    End If
+
+                    If Not System.IO.File.Exists(srcPath) Then
+                        deliveryErrors.Add(
+                            "Delivery artifact no longer exists: " & srcPath)
+                        Continue For
+                    End If
+
+                    Dim destName As String =
+                        System.IO.Path.GetFileName(srcPath)
+
+                    If System.String.IsNullOrWhiteSpace(destName) Then
+                        deliveryErrors.Add(
+                            "Delivery artifact has no valid file name: " & srcPath)
+                        Continue For
+                    End If
+
+                    Dim destPath As String =
+                        System.IO.Path.Combine(pendingDir, destName)
+
+                    Dim fileCounter As Integer = 1
+
+                    While System.IO.File.Exists(destPath)
+                        Dim baseName As String =
+                            System.IO.Path.GetFileNameWithoutExtension(destName)
+
+                        Dim ext As String =
+                            System.IO.Path.GetExtension(destName)
+
+                        destPath =
+                            System.IO.Path.Combine(
+                                pendingDir,
+                                baseName &
+                                "_" &
+                                fileCounter.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                ext)
+
+                        fileCounter += 1
+                    End While
+
+                    System.IO.File.Copy(srcPath, destPath, overwrite:=False)
+                    publishedFileNames.Add(System.IO.Path.GetFileName(destPath))
+                Catch ex As System.Exception
+                    deliveryErrors.Add(
+                        "Failed to copy delivery artifact '" &
+                        If(srcPath, "") &
+                        "': " &
+                        ex.Message)
+                End Try
+            Next
+
+            If deliveryErrors.Count > 0 OrElse
+               publishedFileNames.Count <> filesToCopy.Count Then
+
+                If deliveryErrors.Count = 0 Then
+                    deliveryErrors.Add(
+                        "The number of staged Word deliverables does not match the authoritative delivery set.")
+                End If
+
+                Throw New System.IO.IOException(
+                    "One or more delivery artifacts could not be staged for Word delivery: " &
+                    System.String.Join(" | ", deliveryErrors))
+            End If
+
+            ' Re-check the target immediately before publish in case another process
+            ' created the minute-based directory after the initial selection.
+            While System.IO.Directory.Exists(outputDir)
+                outputDir =
+                    System.IO.Path.Combine(
+                        publishRoot,
+                        timestamp & "_" & counter.ToString(System.Globalization.CultureInfo.InvariantCulture))
+
+                counter += 1
+            End While
+
+            System.IO.Directory.Move(pendingDir, outputDir)
+
+            For Each fileName As String In publishedFileNames
+                copiedFiles.Add(System.IO.Path.Combine(outputDir, fileName))
+            Next
+        Catch ex As System.Exception
+            Try
+                If System.IO.Directory.Exists(pendingDir) Then
+                    System.IO.Directory.Delete(pendingDir, recursive:=True)
+                End If
+            Catch cleanupEx As System.Exception
+                Throw New System.IO.IOException(
+                    "Word deliverable publication failed and the temporary publish directory could not be removed: " &
+                    pendingDir &
+                    " | publish error: " &
+                    ex.Message &
+                    " | cleanup error: " &
+                    cleanupEx.Message,
+                    ex)
+            End Try
+
+            Throw New System.IO.IOException(
+                "Word deliverable publication failed before the final output folder was published: " &
+                ex.Message,
+                ex)
+        End Try
+
         If copiedFiles.Count > 0 Then
             Try
-                Process.Start("explorer.exe", outputDir)
+                System.Diagnostics.Process.Start("explorer.exe", outputDir)
             Catch
             End Try
         End If
@@ -2793,6 +3952,12 @@ Partial Public Class ThisAddIn
 
     Private Function IsToolAllowedForCurrentContext(toolName As String, context As ToolExecutionContext) As Boolean
         If context Is Nothing OrElse String.IsNullOrWhiteSpace(toolName) Then Return False
+
+        ' report_progress is a host-owned, side-effect-free control channel. It must remain
+        ' available inside isolated sub-agent loops without becoming part of the sub-agent's
+        ' substantive allowed-tool registry.
+        If IsReportProgressToolName(toolName) Then Return True
+
         If Not context.EnforceAllowedToolScope Then Return True
         If context.AllowedToolNames Is Nothing Then Return False
         Return context.AllowedToolNames.Contains(toolName.Trim())
@@ -2994,6 +4159,8 @@ Partial Public Class ThisAddIn
                    normalizedToolName &
                    "' was not exposed with its full schema at the start of the previous assistant turn. " &
                    "It has now been loaded and is exposed in THIS turn. " &
+                   "Reconstruct the call from the full schema exposed in THIS turn; do not replay the previous argument object unchanged. " &
+                   "Supply every parameter marked required by the current schema. " &
                    "If you still need that tool, call '" & normalizedToolName & "' now through the native tool-calling mechanism. " &
                    "Do NOT call tool_loader for this tool again. " &
                    "Do NOT postpone this tool call to a later turn. " &
@@ -3515,36 +4682,7 @@ Partial Public Class ThisAddIn
     End Function
 
     Private Function IsSelectedOnlineSourceToolName(toolName As String) As Boolean
-        If String.IsNullOrWhiteSpace(toolName) Then Return False
-
-        Dim name As String = toolName.Trim()
-
-        If name.StartsWith("skill_", StringComparison.OrdinalIgnoreCase) OrElse
-       name.StartsWith("agent_", StringComparison.OrdinalIgnoreCase) Then
-            Return False
-        End If
-
-        If name.Equals(InternalWebToolName, StringComparison.OrdinalIgnoreCase) OrElse
-       name.Equals(InternalDownloadWebFilesToolName, StringComparison.OrdinalIgnoreCase) OrElse
-       name.Equals(InternalSearchToolName, StringComparison.OrdinalIgnoreCase) OrElse
-       name.Equals(SharedLibrary.Agents.SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) OrElse
-       name.Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase) Then
-            Return False
-        End If
-
-        If IsInternalKnowledgeToolName(name) OrElse
-       SharedLibrary.Agents.WebGroundingTool.IsWebGroundingTool(name) OrElse
-       SharedLibrary.SharedLibrary.M365ToolService.IsM365ToolName(name) OrElse
-       SharedLibrary.Agents.MemoryTools.IsMemoryTool(name) OrElse
-       SharedLibrary.Agents.TextTools.IsTextTool(name) OrElse
-       SharedLibrary.Agents.WorkspaceTools.IsWorkspaceTool(name) OrElse
-       SharedLibrary.Agents.WordTools.IsWordTool(name) OrElse
-       SharedLibrary.Agents.WordDocTools.IsWordDocTool(name) OrElse
-       SharedLibrary.Agents.JsRunTool.IsJsTool(name) Then
-            Return False
-        End If
-
-        Return True
+        Return SharedLibrary.Agents.HostToolRegistration.IsSelectedOnlineSourceToolName(toolName)
     End Function
 
 
@@ -3713,7 +4851,8 @@ Partial Public Class ThisAddIn
 
         Dim deliverableCandidates As New HashSet(Of String)(
             SharedLibrary.Agents.HostToolRegistration.GetDeliverableCapableToolNames(
-                SharedLibrary.Agents.ToolingHostKind.Word),
+                SharedLibrary.Agents.ToolingHostKind.Word,
+                ctx.SelectedTools),
             StringComparer.OrdinalIgnoreCase)
 
         Dim available As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
@@ -4300,6 +5439,16 @@ Partial Public Class ThisAddIn
 
         sb.AppendLine(SharedLibrary.Agents.ToolCallSequencing.DependentBatchingInstruction)
 
+        sb.AppendLine()
+        sb.AppendLine("CAPABILITY ROUTING (HOST-ENFORCED):")
+        sb.AppendLine("- On a top-level tooling run, capability routing is mandatory before substantive work; normally use resolve_capability_route when the host has not already resolved the route during bootstrap.")
+        sb.AppendLine("- If a host bootstrap/continuation guard already identifies a selected capability, do NOT call resolve_capability_route again; invoke that selected capability first.")
+        sb.AppendLine("- Use only advertised skill/agent names and descriptions for this decision; do not preload their bodies or gather background first.")
+        sb.AppendLine("- A specifically applicable workflow skill takes precedence over agents and generic tools. Choose a skill only when its description matches the requested workflow/task type, not merely a broad topic.")
+        sb.AppendLine("- Only when no skill specifically applies may you select a specifically applicable top-level agent. Do not select an evidently bounded worker/helper agent for a broader request unless the whole request is exactly that bounded task.")
+        sb.AppendLine("- If neither a skill nor a top-level agent specifically applies, resolve kind='none'; normal tool planning begins only after that decision.")
+        sb.AppendLine("- If a skill or agent is selected, invoke that selected capability before any other substantive tool. Once entered, follow its instructions; a skill may delegate to agents/tools as its workflow requires.")
+
         If selectedTools IsNot Nothing AndAlso selectedTools.Any(
                 Function(t) t IsNot Nothing AndAlso
                             (SharedLibrary.Agents.ContextExpandTool.IsContextExpandTool(t.ToolName) OrElse
@@ -4703,6 +5852,12 @@ Partial Public Class ThisAddIn
             Return False
         End If
 
+        If toolResponse.RepairLoopRecoverable Then
+            context.ConsecutiveFailedToolName = ""
+            context.ConsecutiveFailedToolCount = 0
+            Return False
+        End If
+
         Dim failedName As String = If(toolCall.ToolName, "").Trim()
 
         If failedName.Equals(context.ConsecutiveFailedToolName, StringComparison.OrdinalIgnoreCase) Then
@@ -4814,7 +5969,8 @@ Partial Public Class ThisAddIn
         otherPrompt As String,
         fileObject As Object,
         useSecondAPI As Boolean,
-        hideSplash As Boolean) As Task(Of String)
+        hideSplash As Boolean,
+        cancellationToken As System.Threading.CancellationToken) As Task(Of String)
 
         INI_APICall_ToolInstructions_2 = ""
 
@@ -4834,6 +5990,7 @@ Partial Public Class ThisAddIn
         ToolingFileLogger.LogPreMainLlmCallSnapshot()
 
         Try
+            cancellationToken.ThrowIfCancellationRequested()
             Dim forcedFinalResponse As String = Await LLM(
                 forcedSysPrompt,
                 fullUserPrompt,
@@ -4842,7 +5999,9 @@ Partial Public Class ThisAddIn
                 hideSplash,
                 otherPrompt,
                 fileObject,
-                True)
+                ToolExecution:=True,
+                cancellationToken:=cancellationToken,
+                EnsureUI:=True)
 
             If Not String.IsNullOrWhiteSpace(forcedFinalResponse) Then
                 ToolingFileLogger.LogRawResponseStub("Main LLM() - Forced Final After Invalid Turn", forcedFinalResponse)
@@ -4853,12 +6012,165 @@ Partial Public Class ThisAddIn
             End If
 
             Return If(forcedFinalResponse, "")
-        Catch ex As Exception
+        Catch ex As System.TimeoutException
+            context.LogWarn("Forced no-tool finalization timed out.", details:=ex.Message)
+            Return ""
+        Catch ex As System.OperationCanceledException
+            context.IsCancelled = True
+            context.LogWarn("Forced no-tool finalization was cancelled.")
+            Return ""
+        Catch ex As System.Exception
             context.LogError($"Error during forced no-tool finalization: {ex.Message}", ex:=ex)
             Return ""
         End Try
     End Function
 
+
+    Private Function ResolveCapabilityRoutingCall(toolCall As ToolCall,
+                                                  context As ToolExecutionContext) As ToolResponse
+        Dim response As New ToolResponse() With {
+            .CallId = If(toolCall?.CallId, ""),
+            .ToolName = SharedLibrary.Agents.CapabilityRoutingTool.ResolverToolName,
+            .OriginalCallJson = If(toolCall?.RawJson, ""),
+            .Timestamp = DateTime.Now
+        }
+
+        If context Is Nothing OrElse Not context.CapabilityRoutingRequired Then
+            response.Success = False
+            response.ErrorCode = "capability_routing_not_required"
+            response.ErrorMessage = "Capability routing is not required for this run."
+            response.Response = "{""ok"":false,""error"":""capability_routing_not_required""}"
+            Return response
+        End If
+
+        If context.CapabilityRoutingResolved Then
+            response.Success = False
+            response.ErrorCode = "capability_routing_already_resolved"
+            response.ErrorMessage = "Capability routing has already been resolved."
+            response.Response = "{""ok"":false,""error"":""capability_routing_already_resolved""}"
+            Return response
+        End If
+
+        Dim kind As String = GetCapabilityRoutingArgument(toolCall.Arguments, "kind").ToLowerInvariant()
+        Dim name As String = GetCapabilityRoutingArgument(toolCall.Arguments, "name")
+        Dim reason As String = GetCapabilityRoutingArgument(toolCall.Arguments, "reason")
+
+        If kind = SharedLibrary.Agents.CapabilityRoutingTool.KindNone Then
+            context.CapabilityRoutingResolved = True
+            context.CapabilityRoutingKind = SharedLibrary.Agents.CapabilityRoutingTool.KindNone
+            context.CapabilityRoutingName = ""
+            context.CapabilityRoutingEntered = True
+            response.Success = True
+            response.Response = "{""ok"":true,""kind"":""none""}"
+            context.Log("Capability route resolved: kind=none; reason=" & reason, "diag")
+            ToolingFileLogger.LogStep("[ROUTE] resolved kind=none; host=" & context.HostKind & "; reason=" & reason)
+            Return response
+        End If
+
+        If kind <> SharedLibrary.Agents.CapabilityRoutingTool.KindSkill AndAlso
+           kind <> SharedLibrary.Agents.CapabilityRoutingTool.KindAgent Then
+            response.Success = False
+            response.ErrorCode = "invalid_capability_route_kind"
+            response.ErrorMessage = "Routing kind must be skill, agent, or none."
+            response.Response = "{""ok"":false,""error"":""invalid_capability_route_kind""}"
+            Return response
+        End If
+
+        If String.IsNullOrWhiteSpace(name) OrElse context.AllowedToolRegistry Is Nothing Then
+            response.Success = False
+            response.ErrorCode = "invalid_capability_route_name"
+            response.ErrorMessage = "A valid advertised capability name is required."
+            response.Response = "{""ok"":false,""error"":""invalid_capability_route_name""}"
+            Return response
+        End If
+
+        Dim matchingManifest As SharedLibrary.Agents.ToolManifest =
+            context.AllowedToolRegistry.ListManifests().FirstOrDefault(
+                Function(m)
+                    Return m IsNot Nothing AndAlso
+                           Not String.IsNullOrWhiteSpace(m.Name) AndAlso
+                           m.Name.Equals(name, StringComparison.OrdinalIgnoreCase) AndAlso
+                           String.Equals(m.Category, kind, StringComparison.OrdinalIgnoreCase)
+                End Function)
+
+        If matchingManifest Is Nothing Then
+            response.Success = False
+            response.ErrorCode = "capability_route_not_advertised"
+            response.ErrorMessage = "The selected capability is not an advertised candidate of the requested kind."
+            response.Response = "{""ok"":false,""error"":""capability_route_not_advertised""}"
+            context.LogWarn("Rejected invalid capability route.", details:="host=" & context.HostKind & "; kind=" & kind & "; name=" & name)
+            Return response
+        End If
+
+        Dim loaded As ModelConfig = EnsureVisibleToolLoaded(matchingManifest.Name, context)
+        If loaded Is Nothing Then
+            response.Success = False
+            response.ErrorCode = "capability_route_load_failed"
+            response.ErrorMessage = "The selected capability could not be prepared for the next turn."
+            response.Response = "{""ok"":false,""error"":""capability_route_load_failed""}"
+            context.LogWarn("Selected capability could not be prepared.", details:="host=" & context.HostKind & "; kind=" & kind & "; name=" & matchingManifest.Name)
+            Return response
+        End If
+
+        context.CapabilityRoutingResolved = True
+        context.CapabilityRoutingKind = kind
+        context.CapabilityRoutingName = matchingManifest.Name
+        context.CapabilityRoutingEntered = False
+        response.Success = True
+        response.Response = "{""ok"":true,""kind"":""" & kind & """,""name"":""" & matchingManifest.Name & """,""next"":""invoke_selected_capability""}"
+        context.Log("Capability route resolved: kind=" & kind & "; name=" & matchingManifest.Name & "; reason=" & reason, "diag")
+        ToolingFileLogger.LogStep("[ROUTE] resolved kind=" & kind & "; name=" & matchingManifest.Name & "; entered=false; host=" & context.HostKind & "; reason=" & reason)
+        Return response
+    End Function
+
+    Private Shared Function GetCapabilityRoutingArgument(arguments As Dictionary(Of String, Object),
+                                                         argumentName As String) As String
+        If arguments Is Nothing OrElse String.IsNullOrWhiteSpace(argumentName) OrElse
+           Not arguments.ContainsKey(argumentName) OrElse arguments(argumentName) Is Nothing Then
+            Return ""
+        End If
+        Return arguments(argumentName).ToString().Trim()
+    End Function
+
+    Private Shared Function ShouldBlockForCapabilityRouting(toolName As String,
+                                                            context As ToolExecutionContext) As Boolean
+        If context Is Nothing OrElse Not context.CapabilityRoutingRequired Then Return False
+        If Not context.CapabilityRoutingResolved Then Return True
+        If context.CapabilityRoutingEntered Then Return False
+        If context.CapabilityRoutingKind = SharedLibrary.Agents.CapabilityRoutingTool.KindNone Then Return False
+        Return String.IsNullOrWhiteSpace(context.CapabilityRoutingName) OrElse
+               Not String.Equals(If(toolName, "").Trim(), context.CapabilityRoutingName, StringComparison.OrdinalIgnoreCase)
+    End Function
+
+    Private Shared Function BuildCapabilityRoutingGuardPrompt(context As ToolExecutionContext) As String
+        If context Is Nothing OrElse Not context.CapabilityRoutingResolved Then
+            Return "CAPABILITY ROUTING REQUIRED: Before any substantive tool call, call resolve_capability_route exactly once. Select a specifically applicable skill first; only if no skill applies select a specifically applicable top-level agent; otherwise select none. Use only advertised names/descriptions and do not gather background first."
+        End If
+
+        If Not context.CapabilityRoutingEntered AndAlso Not String.IsNullOrWhiteSpace(context.CapabilityRoutingName) Then
+            Return "CAPABILITY ROUTE ENFORCEMENT: The route is already resolved to '" & context.CapabilityRoutingName & "'. Invoke that selected " & context.CapabilityRoutingKind & " now. Do not call any other substantive tool until the selected capability has been entered successfully."
+        End If
+
+        Return "Capability routing is complete; continue normally."
+    End Function
+
+    Private Shared Function BuildCapabilityRoutingBlockedResponse(toolCall As ToolCall,
+                                                                  context As ToolExecutionContext) As ToolResponse
+        Dim selected As String = If(context?.CapabilityRoutingName, "")
+        Dim code As String = If(context IsNot Nothing AndAlso context.CapabilityRoutingResolved,
+                                "selected_capability_must_run_first",
+                                "capability_routing_required")
+        Return New ToolResponse() With {
+            .CallId = If(toolCall?.CallId, ""),
+            .ToolName = If(toolCall?.ToolName, ""),
+            .Success = False,
+            .ErrorCode = code,
+            .ErrorMessage = BuildCapabilityRoutingGuardPrompt(context),
+            .Response = "{""ok"":false,""error"":""" & code & """,""selected"":""" & selected & """}",
+            .OriginalCallJson = If(toolCall?.RawJson, ""),
+            .Timestamp = DateTime.Now
+        }
+    End Function
 
     Private Function TryPrepareToolForNextTurnAfterExposureMiss(toolName As String,
                                                             context As ToolExecutionContext) As Boolean

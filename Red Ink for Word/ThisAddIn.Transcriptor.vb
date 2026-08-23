@@ -1756,7 +1756,8 @@ Partial Public Class ThisAddIn
 
             Try
                 Using f As New DragDropForm()
-                    If f.ShowDialog() = DialogResult.OK Then
+                    Dim __safeDialogOwner1759 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                    If If(__safeDialogOwner1759 IsNot Nothing, f.ShowDialog(__safeDialogOwner1759), f.ShowDialog()) = DialogResult.OK Then
                         filePath = f.SelectedFilePath
                     End If
                 End Using
@@ -2058,7 +2059,8 @@ Partial Public Class ThisAddIn
 
                 Try
                     Using f As New DragDropForm(DragDropMode.FileOrDirectory)
-                        If f.ShowDialog() = DialogResult.OK Then
+                        Dim __safeDialogOwner2061 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                        If If(__safeDialogOwner2061 IsNot Nothing, f.ShowDialog(__safeDialogOwner2061), f.ShowDialog()) = DialogResult.OK Then
                             contextDocumentPath = f.SelectedFilePath
                             contextDocumentIsDirectory = f.IsDirectory
                         End If

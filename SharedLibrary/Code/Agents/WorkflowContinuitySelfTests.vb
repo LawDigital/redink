@@ -1,4 +1,18 @@
-﻿#If DEBUG Then
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: WorkflowContinuitySelfTests.vb
+' Purpose:
+'   DEBUG-only self-tests for workflow-continuity state, recovery, and completion
+'   invariants used by the shared tooling loop.
+'
+' Architecture:
+'   Developer-only test harness excluded from SharedLibrary.vbproj. It exercises
+'   WorkflowContinuity behavior directly without becoming part of release binaries.
+' =============================================================================
+
+#If DEBUG Then
 
 Option Strict On
 Option Explicit On

@@ -487,7 +487,14 @@ Namespace SharedLibrary
             ApplyCheckboxWrap()
             ApplyFilePathWrap()
 
-            Dim result As System.Windows.Forms.DialogResult = settingsForm.ShowDialog()
+            AddHandler settingsForm.Shown,
+                Sub()
+                    settingsForm.TopMost = True
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(settingsForm)
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(settingsForm)
+                End Sub
+            Dim __safeDialogOwner490 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            Dim result As System.Windows.Forms.DialogResult = If(__safeDialogOwner490 IsNot Nothing, settingsForm.ShowDialog(__safeDialogOwner490), settingsForm.ShowDialog())
 
             If result = System.Windows.Forms.DialogResult.OK Then
                 Dim selectedIndex = titleListBox.SelectedIndex
@@ -818,7 +825,14 @@ Namespace SharedLibrary
             ApplyCheckboxWrap()
             ApplyFilePathWrap()
 
-            Dim result As System.Windows.Forms.DialogResult = settingsForm.ShowDialog()
+            AddHandler settingsForm.Shown,
+                Sub()
+                    settingsForm.TopMost = True
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(settingsForm)
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(settingsForm)
+                End Sub
+            Dim __safeDialogOwner821 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+            Dim result As System.Windows.Forms.DialogResult = If(__safeDialogOwner821 IsNot Nothing, settingsForm.ShowDialog(__safeDialogOwner821), settingsForm.ShowDialog())
 
             If result = System.Windows.Forms.DialogResult.OK Then
                 Dim selectedIndex = titleListBox.SelectedIndex
@@ -1392,10 +1406,9 @@ Namespace SharedLibrary
     Sub()
         titleTextBox.Focus()
         Try
-            form.BringToFront()
-            form.Activate()
-            SharedLibrary.NativeMethods.SetForegroundWindow(form.Handle)
-        Catch
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(form)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(form)
+        Catch ex As System.Exception
         End Try
     End Sub
 
@@ -1960,10 +1973,9 @@ Namespace SharedLibrary
                         searchTextBox.SelectionStart = 0
                         searchTextBox.SelectionLength = searchTextBox.TextLength
                         Try
-                            pickerForm.BringToFront()
-                            pickerForm.Activate()
-                            SharedLibrary.NativeMethods.SetForegroundWindow(pickerForm.Handle)
-                        Catch
+                            Global.SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(pickerForm)
+                            Global.SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(pickerForm)
+                        Catch ex As System.Exception
                         End Try
                     End Sub
 

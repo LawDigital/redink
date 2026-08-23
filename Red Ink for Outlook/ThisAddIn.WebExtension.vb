@@ -13,21 +13,23 @@
 '   converts markdown responses to HTML for browser rendering.
 '
 ' Key Responsibilities:
-'   - Serve UI (GET `InkyUiRoute`) and JSON API (POST `InkyApiRoute`) under `/inky`.
+'   - Serve UI (GET `InkyUiRoute`) and authenticated JSON API (POST `InkyApiRoute`) under `/inky`.
 '   - Route commands (`inky_*`) and fall back to legacy dispatcher commands.
 '   - Persist per-chat state (chat 1/2) via `InkyState`/`ChatTurn` in application settings.
 '   - Run LLM requests as background jobs (`LlmJob`) with cancellation + TTL cleanup.
-'   - Support optional file uploads (DataURL) and inline extraction for known types.
+'   - Support optional file uploads (DataURL) and inline extraction for known types,
+'     with bounded transport, per-file, aggregate-size, and file-count limits.
 '   - Render markdown to HTML via Markdig (inline CSS/JS; no external assets).
 '   - Marshal Office/UI work back onto the UI thread where required.
 '   - Guard operations during suspend/resume and update watchdog progress counters.
 '   - Sanitize model output (strip role markers) prior to browser display.
 '
 ' Architecture:
-'   - HTTP Layer: one `HttpListener` (prefix `/inky`) serving:
+'   - HTTP Layer: one loopback `HttpListener` serving authenticated local-chat and
+'     explicitly approved browser-extension traffic:
 '       * UI HTML (GET `/inky`)
 '       * JSON API (POST `/inky/api`)
-'       * CORS preflight (OPTIONS)
+'       * restricted CORS preflight (OPTIONS) for approved extension origins
 '   - Routing Constants: `InkyBasePath`, `InkyUiRoute`, `InkyApiRoute`.
 '   - State: `InkyState` + `ChatTurn`, stored per chat id in `My.Settings`.
 '   - Jobs: `ConcurrentDictionary(Of String, LlmJob)` + TTL (`JobTtlMinutes`).
@@ -226,6 +228,7 @@ Partial Public Class ThisAddIn
         Dim isLocalChatRequest As System.Boolean =
             System.String.Equals(requestPath, "/", System.StringComparison.OrdinalIgnoreCase) OrElse
             System.String.Equals(requestPath, "/inky/ping", System.StringComparison.OrdinalIgnoreCase) OrElse
+            System.String.Equals(requestPath, InkyPairRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
             System.String.Equals(requestPath, InkyUiRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
             System.String.Equals(requestPath, InkyUiRoute & "/", System.StringComparison.OrdinalIgnoreCase) OrElse
             System.String.Equals(requestPath, InkyPlayRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
@@ -243,7 +246,7 @@ Partial Public Class ThisAddIn
                     res,
                     requestId,
                     "Local chat and InkyPlay are disabled by WebServerBlock.",
-                    addCors:=True)
+                    addCors:=False)
                 Return
             End If
 
@@ -252,9 +255,11 @@ Partial Public Class ThisAddIn
                     res,
                     requestId,
                     "The Edge extension receiver is disabled by WebServerBlock.",
-                    addCors:=True)
+                    addCors:=False)
                 Return
             End If
+
+            If Not EnsureLocalLoopbackRequest(req, res, requestId) Then Return
 
             If debugEnabled Then
                 Dim rawUrl As System.String = ""
@@ -336,14 +341,43 @@ Partial Public Class ThisAddIn
                     msgBytes,
                     requestId,
                     "resumeCooldown",
-                    addCors:=True)
+                    addCors:=False)
 
                 Return
             End If
 
             If requestMethod.Equals("OPTIONS", System.StringComparison.OrdinalIgnoreCase) Then
-                res.AddHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-                res.AddHeader("Access-Control-Allow-Headers", "Content-Type, Authorization")
+                If isLegacyWebExtensionRequest Then
+                    Dim approvedOrigin As System.String =
+                        Await EnsureApprovedBrowserExtensionOriginAsync(req).ConfigureAwait(False)
+
+                    If System.String.IsNullOrWhiteSpace(approvedOrigin) Then
+                        Dim forbiddenBytes() As System.Byte = System.Text.Encoding.UTF8.GetBytes("Forbidden browser origin.")
+                        SendBufferedHttpResponse(
+                            res,
+                            403,
+                            "text/plain; charset=utf-8",
+                            forbiddenBytes,
+                            requestId,
+                            "legacy-options-origin-rejected",
+                            addCors:=False)
+                        Return
+                    End If
+
+                    AddExplicitCorsOrigin(res, approvedOrigin)
+                    res.AddHeader("Access-Control-Allow-Methods", "POST, OPTIONS")
+                    res.AddHeader("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+                    SendBufferedHttpResponse(
+                        res,
+                        204,
+                        "text/plain; charset=utf-8",
+                        New System.Byte() {},
+                        requestId,
+                        "legacy-options",
+                        addCors:=False)
+                    Return
+                End If
 
                 SendBufferedHttpResponse(
                     res,
@@ -352,8 +386,7 @@ Partial Public Class ThisAddIn
                     New System.Byte() {},
                     requestId,
                     "options",
-                    addCors:=True)
-
+                    addCors:=False)
                 Return
             End If
 
@@ -390,7 +423,7 @@ Partial Public Class ThisAddIn
                     pingBytes,
                     requestId,
                     "ping",
-                    addCors:=True)
+                    addCors:=False)
 
                 Return
             End If
@@ -404,7 +437,16 @@ Partial Public Class ThisAddIn
                     AppendInkyServerLog("REQ " & requestId & " BuildInkyHtmlPage begin.")
                 End If
 
-                Dim html As System.String = BuildInkyHtmlPage()
+                Dim browserCredential As System.String = System.String.Empty
+                Dim html As System.String
+
+                If GetLocalHttpSecurity().TryValidateBrowserCredential(req.Headers("Cookie"), browserCredential) Then
+                    Dim csrfToken As System.String = GetLocalHttpSecurity().CreateCsrfToken(browserCredential)
+                    html = BuildInkyHtmlPage(csrfToken)
+                Else
+                    html = BuildLocalBrowserPairingPage()
+                End If
+
                 Dim bufUi() As System.Byte = System.Text.Encoding.UTF8.GetBytes(html)
 
                 If debugEnabled Then
@@ -415,6 +457,8 @@ Partial Public Class ThisAddIn
                         "; htmlBytes=" &
                         bufUi.LongLength.ToString(System.Globalization.CultureInfo.InvariantCulture))
                 End If
+
+                AddLocalUiSecurityHeaders(res)
 
                 SendBufferedHttpResponse(
                     res,
@@ -436,7 +480,16 @@ Partial Public Class ThisAddIn
                     AppendInkyServerLog("REQ " & requestId & " BuildInkyPlayHtmlPage begin.")
                 End If
 
-                Dim html As System.String = BuildInkyPlayHtmlPage()
+                Dim browserCredential As System.String = System.String.Empty
+                Dim html As System.String
+
+                If GetLocalHttpSecurity().TryValidateBrowserCredential(req.Headers("Cookie"), browserCredential) Then
+                    Dim csrfToken As System.String = GetLocalHttpSecurity().CreateCsrfToken(browserCredential)
+                    html = BuildInkyPlayHtmlPage(csrfToken)
+                Else
+                    html = BuildLocalBrowserPairingPage()
+                End If
+
                 Dim bufPlay() As System.Byte = System.Text.Encoding.UTF8.GetBytes(html)
 
                 If debugEnabled Then
@@ -447,6 +500,8 @@ Partial Public Class ThisAddIn
                         "; htmlBytes=" &
                         bufPlay.LongLength.ToString(System.Globalization.CultureInfo.InvariantCulture))
                 End If
+
+                AddLocalUiSecurityHeaders(res)
 
                 SendBufferedHttpResponse(
                     res,
@@ -461,8 +516,33 @@ Partial Public Class ThisAddIn
             End If
 
             If requestMethod.Equals("POST", System.StringComparison.OrdinalIgnoreCase) AndAlso
+               System.String.Equals(requestPath, InkyPairRoute, System.StringComparison.OrdinalIgnoreCase) Then
+
+                Await HandleLocalBrowserPairRequestAsync(req, res, requestId).ConfigureAwait(False)
+                Return
+            End If
+
+            If requestMethod.Equals("POST", System.StringComparison.OrdinalIgnoreCase) AndAlso
                (System.String.Equals(requestPath, LegacyWebExtensionRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
                 System.String.Equals(requestPath, LegacyWebExtensionRoute & "/", System.StringComparison.OrdinalIgnoreCase)) Then
+
+                Dim approvedOrigin As System.String =
+                    Await EnsureApprovedBrowserExtensionOriginAsync(req).ConfigureAwait(False)
+
+                If System.String.IsNullOrWhiteSpace(approvedOrigin) Then
+                    Dim forbiddenBytes() As System.Byte = System.Text.Encoding.UTF8.GetBytes("Forbidden browser origin.")
+                    SendBufferedHttpResponse(
+                        res,
+                        403,
+                        "text/plain; charset=utf-8",
+                        forbiddenBytes,
+                        requestId,
+                        "legacy-origin-rejected",
+                        addCors:=False)
+                    Return
+                End If
+
+                AddExplicitCorsOrigin(res, approvedOrigin)
 
                 Dim body As System.String = System.String.Empty
                 Dim cmd As System.String = ""
@@ -472,15 +552,15 @@ Partial Public Class ThisAddIn
                         AppendInkyServerLog("REQ " & requestId & " reading legacy POST body.")
                     End If
 
-                    Using rdr As New System.IO.StreamReader(
-                        req.InputStream,
-                        System.Text.Encoding.UTF8,
-                        detectEncodingFromByteOrderMarks:=False,
-                        bufferSize:=8192,
-                        leaveOpen:=False)
-
-                        body = Await rdr.ReadToEndAsync().ConfigureAwait(False)
-                    End Using
+                    Try
+                        body = Await SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.ReadUtf8RequestBodyBoundedAsync(
+                            req,
+                            SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.MaxStandardRequestBytes).ConfigureAwait(False)
+                    Catch exTooLarge As SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.LocalHttpRequestTooLargeException
+                        Dim tooLargeBytes() As System.Byte = System.Text.Encoding.UTF8.GetBytes("Request is too large.")
+                        SendBufferedHttpResponse(res, 413, "text/plain; charset=utf-8", tooLargeBytes, requestId, "legacy-request-too-large", addCors:=False)
+                        Return
+                    End Try
                 End If
 
                 If debugEnabled Then
@@ -530,7 +610,7 @@ Partial Public Class ThisAddIn
                     buf,
                     requestId,
                     "legacy-redink",
-                    addCors:=True)
+                    addCors:=False)
 
                 Return
             End If
@@ -538,6 +618,16 @@ Partial Public Class ThisAddIn
             If requestMethod.Equals("POST", System.StringComparison.OrdinalIgnoreCase) AndAlso
                (System.String.Equals(requestPath, InkyApiRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
                 System.String.Equals(requestPath, InkyApiRoute & "/", System.StringComparison.OrdinalIgnoreCase)) Then
+
+                Dim browserCredential As System.String = System.String.Empty
+                If Not TryAuthorizeLocalChatRequest(
+                    req,
+                    res,
+                    requestId,
+                    requireCsrf:=True,
+                    browserCredential:=browserCredential) Then
+                    Return
+                End If
 
                 Dim body As System.String = System.String.Empty
                 Dim cmd As System.String = ""
@@ -547,15 +637,15 @@ Partial Public Class ThisAddIn
                         AppendInkyServerLog("REQ " & requestId & " reading POST body.")
                     End If
 
-                    Using rdr As New System.IO.StreamReader(
-                        req.InputStream,
-                        System.Text.Encoding.UTF8,
-                        detectEncodingFromByteOrderMarks:=False,
-                        bufferSize:=8192,
-                        leaveOpen:=False)
-
-                        body = Await rdr.ReadToEndAsync().ConfigureAwait(False)
-                    End Using
+                    Try
+                        body = Await SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.ReadUtf8RequestBodyBoundedAsync(
+                            req,
+                            SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.MaxUploadRequestBytes).ConfigureAwait(False)
+                    Catch exTooLarge As SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.LocalHttpRequestTooLargeException
+                        Dim tooLargeBytes() As System.Byte = System.Text.Encoding.UTF8.GetBytes("Request is too large.")
+                        SendBufferedHttpResponse(res, 413, "text/plain; charset=utf-8", tooLargeBytes, requestId, "inky-request-too-large", addCors:=False)
+                        Return
+                    End Try
                 End If
 
                 If debugEnabled Then
@@ -569,6 +659,15 @@ Partial Public Class ThisAddIn
                         "; bodyExcerpt=" & ClipForInkyServerLog(body, 1200))
 
                     AppendInkyServerLog("REQ " & requestId & " ProcessRequestInAddIn begin. cmd=" & cmd)
+                End If
+
+                Dim requestCommand As System.String = TryGetJsonCommandForInkyServerLog(body)
+                Dim bodyByteCount As System.Int64 = System.Text.Encoding.UTF8.GetByteCount(body)
+                If bodyByteCount > SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.MaxStandardRequestBytes AndAlso
+                   Not requestCommand.Equals("inky_upload", System.StringComparison.OrdinalIgnoreCase) Then
+                    Dim tooLargeBytes() As System.Byte = System.Text.Encoding.UTF8.GetBytes("Request is too large for this command.")
+                    SendBufferedHttpResponse(res, 413, "text/plain; charset=utf-8", tooLargeBytes, requestId, "inky-standard-request-too-large", addCors:=False)
+                    Return
                 End If
 
                 Dim responseText As System.String =
@@ -605,7 +704,7 @@ Partial Public Class ThisAddIn
                     buf,
                     requestId,
                     "inky-api",
-                    addCors:=True)
+                    addCors:=False)
 
                 Return
             End If
@@ -623,7 +722,7 @@ Partial Public Class ThisAddIn
                     buf405,
                     requestId,
                     "405",
-                    addCors:=True)
+                    addCors:=False)
 
                 Return
             End If
@@ -638,7 +737,7 @@ Partial Public Class ThisAddIn
                 buf404,
                 requestId,
                 "404",
-                addCors:=True)
+                addCors:=False)
 
             Return
 
@@ -671,7 +770,7 @@ Partial Public Class ThisAddIn
                     bufErr,
                     requestId,
                     "fallback-500",
-                    addCors:=True)
+                    addCors:=False)
 
                 If debugEnabled Then
                     AppendInkyServerLog("REQ " & requestId & " fallback 500 written from HandleHttpRequest catch.")
@@ -735,9 +834,8 @@ Partial Public Class ThisAddIn
         Try
             res.StatusCode = statusCode
 
-            If addCors Then
-                res.AddHeader("Access-Control-Allow-Origin", "*")
-            End If
+            ' Wildcard CORS is intentionally not emitted. Privileged browser-extension
+            ' routes add an explicitly approved origin before this writer is called.
 
             If Not System.String.IsNullOrWhiteSpace(contentType) Then
                 res.ContentType = contentType
@@ -1401,23 +1499,9 @@ Partial Public Class ThisAddIn
         Try
             ' Maximum markdown functionality + soft line breaks as <br/>
             Dim pipeline As Markdig.MarkdownPipeline =
-                New Markdig.MarkdownPipelineBuilder().
-                    UseAdvancedExtensions().
-                    UseSoftlineBreakAsHardlineBreak().
-                    UsePipeTables().
-                    UseGridTables().
-                    UseListExtras().
-                    UseFootnotes().
-                    UseDefinitionLists().
-                    UseAbbreviations().
-                    UseAutoLinks().
-                    UseTaskLists().
-                    UseMathematics().
-                    UseFigures().
-                    UseGenericAttributes().
-                    Build()
+                Global.SharedLibrary.SharedLibrary.SharedMethods.CreateMarkdownHtmlPipeline(useSoftlineBreakAsHardlineBreak:=True)
 
-            Return Markdig.Markdown.ToHtml(md, pipeline)
+            Return Markdig.Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(md), pipeline)
         Catch ex As System.Exception
             ' Fallback: safely encode and preserve line breaks
             Return System.Net.WebUtility.HtmlEncode(md).Replace(vbLf, "<br>")
@@ -1719,7 +1803,7 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Generates full HTML (inline CSS + JS) for the chat UI page.
     ''' </summary>
-    Private Function BuildInkyHtmlPage() As System.String
+    Private Function BuildInkyHtmlPage(ByVal csrfToken As System.String) As System.String
         Dim botName As String = GetBotName()
         Dim brandName As String = If(Not String.IsNullOrWhiteSpace(AN), AN, botName)
         Dim logoUrl As String = GetLogoDataUrl()
@@ -1962,6 +2046,7 @@ Partial Public Class ThisAddIn
         ' JS
         html.AppendLine("<script>")
         html.AppendLine("window.__botName=" & Newtonsoft.Json.JsonConvert.SerializeObject(botName) & ";")
+        html.AppendLine("const __redInkCsrf=" & Newtonsoft.Json.JsonConvert.SerializeObject(If(csrfToken, System.String.Empty)) & ";")
         html.AppendLine("let __supportsFiles=false;")
         html.AppendLine("let __pendingFilePath='';")
         html.AppendLine("let dark=false;")
@@ -1979,7 +2064,7 @@ Partial Public Class ThisAddIn
         ' Helpers
         html.AppendLine("function copyText(t){if(navigator.clipboard){return navigator.clipboard.writeText(t);}return new Promise((res,rej)=>{try{const ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.left='-9999px';document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();res();}catch(e){rej(e);}});}")
         html.AppendLine("function enhanceCodeBlocks(scope){(scope||document).querySelectorAll('pre').forEach(pre=>{if(pre.dataset.enhanced==='1')return;const btn=document.createElement('button');btn.type='button';btn.className='code-copy-btn';btn.innerHTML='<svg viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><rect x=""9"" y=""9"" width=""13"" height=""13"" rx=""2"" ry=""2""/><path d=""M5 15H4a2 2 0 0 1-2-2V4c0-1.1.9-2 2-2h9a2 2 0 0 1 2 2v1""/></svg>';btn.addEventListener('click',()=>{const code=pre.querySelector('code');const txt=code?code.innerText:pre.innerText;copyText(txt).then(()=>{btn.classList.add('copied');setTimeout(()=>btn.classList.remove('copied'),1500);});});pre.appendChild(btn);pre.dataset.enhanced='1';});}")
-        html.AppendLine("const api=async(cmd,data={})=>{try{const r=await fetch('/inky/api',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({Command:cmd},data))});const txt=await r.text();try{return JSON.parse(txt);}catch{return{ok:false,error:txt}}}catch(e){return{ok:false,error:e.message||'Network error'}}};")
+        html.AppendLine("const api=async(cmd,data={})=>{try{const r=await fetch('/inky/api',{method:'POST',headers:{'Content-Type':'application/json','X-RedInk-CSRF':__redInkCsrf},body:JSON.stringify(Object.assign({Command:cmd},data))});const txt=await r.text();try{return JSON.parse(txt);}catch{return{ok:false,error:txt}}}catch(e){return{ok:false,error:e.message||'Network error'}}};")
         html.AppendLine("function isPromptLibrarySlashTrigger(){const pos=msgEl.selectionStart||0;if(pos<=0)return true;const prev=msgEl.value.charAt(pos-1);return /\s/.test(prev);} ")
         html.AppendLine("function insertPromptIntoMessage(text){const start=msgEl.selectionStart||0;const end=msgEl.selectionEnd||start;msgEl.setRangeText(String(text||''),start,end,'end');msgEl.focus();} ")
         html.AppendLine("async function openPromptLibrary(){const r=await api('inky_promptlibpick');if(!r||!r.ok){if(r&&r.error)alert(r.error||'Prompt library failed');return;}if(r.prompt){insertPromptIntoMessage(r.prompt);}};")
@@ -2172,18 +2257,86 @@ Partial Public Class ThisAddIn
     ''' Central dispatcher for browser API commands under InkyApiRoute; handles chat operations,
     ''' job control, model selection, theme toggle, file upload, and falls back to legacy commands.
     ''' </summary>
+    Private ReadOnly _inkyUploadQuotaGate As New System.Object()
+
+    Private Function TryWriteInkyUploadWithinQuota(
+        ByVal targetPath As System.String,
+        ByVal bytes() As System.Byte,
+        ByRef errorMessage As System.String
+    ) As System.Boolean
+        errorMessage = System.String.Empty
+        If bytes Is Nothing Then
+            errorMessage = "Missing file data."
+            Return False
+        End If
+
+        If bytes.LongLength > SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.MaxSingleUploadBytes Then
+            errorMessage = "The selected file is too large. The maximum file size is 150 MB."
+            Return False
+        End If
+
+        Dim uploadDirectory As System.String = System.IO.Path.GetDirectoryName(targetPath)
+        If System.String.IsNullOrWhiteSpace(uploadDirectory) Then
+            errorMessage = "The upload destination is invalid."
+            Return False
+        End If
+
+        SyncLock _inkyUploadQuotaGate
+            Try
+                If Not System.IO.Directory.Exists(uploadDirectory) Then System.IO.Directory.CreateDirectory(uploadDirectory)
+
+                Dim files() As System.String = System.IO.Directory.GetFiles(uploadDirectory, "*", System.IO.SearchOption.TopDirectoryOnly)
+                If files.Length >= SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.MaxUploadFileCount Then
+                    errorMessage = "Too many uploaded files are active. The maximum is 50 files."
+                    Return False
+                End If
+
+                Dim totalBytes As System.Int64 = 0L
+                For Each filePath As System.String In files
+                    Try
+                        totalBytes += New System.IO.FileInfo(filePath).Length
+                    Catch ex As System.Exception
+                        errorMessage = "The upload storage quota could not be verified. Please try again."
+                        Return False
+                    End Try
+                Next
+
+                If totalBytes > SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.MaxUploadTotalBytes - bytes.LongLength Then
+                    errorMessage = "The Red Ink upload cache is full. Remove uploaded files before adding more files."
+                    Return False
+                End If
+
+                System.IO.File.WriteAllBytes(targetPath, bytes)
+                Return True
+            Catch ex As System.Exception
+                errorMessage = "Upload failed: " & ex.Message
+                Return False
+            End Try
+        End SyncLock
+    End Function
+
     Private Async Function ProcessRequestInAddIn(
         body As System.String,
         rawUrl As System.String) As System.Threading.Tasks.Task(Of System.String)
 
         ' If this is a browser POST to our Inky API, j may be JSON; otherwise keep your existing flow
         If rawUrl IsNot Nothing AndAlso rawUrl.StartsWith(InkyApiRoute, System.StringComparison.OrdinalIgnoreCase) Then
+            Dim requestRunIsolationOwned As System.Boolean = False
             Try
                 Dim j As Newtonsoft.Json.Linq.JObject = If(
                     Not System.String.IsNullOrWhiteSpace(body),
                     Newtonsoft.Json.Linq.JObject.Parse(body),
                     New Newtonsoft.Json.Linq.JObject())
                 Dim cmd As System.String = j("Command")?.ToString()
+
+                If System.String.Equals(cmd, "inky_send", System.StringComparison.OrdinalIgnoreCase) Then
+                    ' Protect Local Agent request preparation as well as the background run.
+                    ' The request builds model/workspace/file context from process-global host
+                    ' fields; without this scope a concurrent AutoPilot/Scheduler run could
+                    ' temporarily expose another run's workspace state to this request.
+                    Await SharedLibrary.Agents.AgentGate.BeginOwnedScopeAsync().ConfigureAwait(False)
+                    requestRunIsolationOwned = True
+                End If
 
                 If INI_APIDebug Then
                     AppendInkyServerLog(
@@ -2622,7 +2775,8 @@ Partial Public Class ThisAddIn
                                                  Using dlg As New DragDropForm(DragDropMode.DirectoryOnly)
                                                      dlg.Text = "Select Agent Workspace Folder"
                                                      dlg.SetInstructionText("Drag and drop the workspace folder here, or click Browse. The Local Agent will only be allowed to access this folder and its subfolders.")
-                                                     If dlg.ShowDialog() = DialogResult.OK Then
+                                                     Dim __safeDialogOwner2621 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                                                     If If(__safeDialogOwner2621 IsNot Nothing, dlg.ShowDialog(__safeDialogOwner2621), dlg.ShowDialog()) = DialogResult.OK Then
                                                          selectedPath = dlg.SelectedFilePath
                                                      End If
                                                  End Using
@@ -3046,21 +3200,33 @@ Partial Public Class ThisAddIn
                             Dim commaIx As System.Int32 = dataUrl.IndexOf(","c)
                             If commaIx < 0 Then Return JsonErr("Bad DataURL.")
                             Dim b64 As System.String = dataUrl.Substring(commaIx + 1)
+                            Dim estimatedDecodedBytes As System.Int64 = (CLng(b64.Length) * 3L) \ 4L
+                            If estimatedDecodedBytes > SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.MaxSingleUploadBytes + 2L Then
+                                Return JsonErr("The selected file is too large. The maximum file size is 150 MB.")
+                            End If
+
                             Dim bytes() As System.Byte
                             Try
                                 bytes = System.Convert.FromBase64String(b64)
                             Catch exB64 As System.Exception
                                 Return JsonErr("Invalid base64: " & exB64.Message)
                             End Try
+                            If bytes.LongLength > SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.MaxSingleUploadBytes Then
+                                Return JsonErr("The selected file is too large. The maximum file size is 150 MB.")
+                            End If
+
                             Dim dir As System.String = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "InkyUploads")
-                            If Not System.IO.Directory.Exists(dir) Then System.IO.Directory.CreateDirectory(dir)
+
                             Dim safeName As System.String = System.IO.Path.GetFileName(name)
                             For Each c As System.Char In System.IO.Path.GetInvalidFileNameChars()
                                 safeName = safeName.Replace(c, "_"c)
                             Next
                             Dim unique As System.String = System.Guid.NewGuid().ToString("N")
                             Dim target As System.String = System.IO.Path.Combine(dir, unique & "_" & safeName)
-                            System.IO.File.WriteAllBytes(target, bytes)
+                            Dim quotaError As System.String = System.String.Empty
+                            If Not TryWriteInkyUploadWithinQuota(target, bytes, quotaError) Then
+                                Return JsonErr(quotaError)
+                            End If
                             Return JsonOk(New With {.ok = True, .supported = True, .path = target, .name = safeName, .size = bytes.LongLength})
                         Catch exUp As System.Exception
                             Return JsonErr("Upload failed: " & exUp.Message)
@@ -3296,6 +3462,18 @@ Partial Public Class ThisAddIn
                                 End If
                             End If
                         End If
+
+                        Dim scheduledTaskPreparedForJob As System.Boolean = False
+                        If Not System.String.IsNullOrWhiteSpace(scheduledTaskId) Then
+                            If Not SchedulerPrepareLocalBrowserTaskForExecution(scheduledTaskId) Then
+                                Return JsonErr("Scheduled Local Agent task is not available to this browser session.")
+                            End If
+                            scheduledTaskPreparedForJob = True
+                            ' Preparation may switch the active scheduled-chat state; reload it
+                            ' before building the prompt/job snapshot.
+                            st = LoadInkyState()
+                        End If
+
                         ' ------------------ (C) Append user turn immediately ------------------
                         Dim userTurn As New ChatTurn With {
                             .Role = "user",
@@ -3417,6 +3595,9 @@ Partial Public Class ThisAddIn
                                     }
                         If Not jobMap.TryAdd(jobId, job) Then
                             jobCts.Dispose()
+                            If scheduledTaskPreparedForJob AndAlso Not System.String.IsNullOrWhiteSpace(scheduledTaskId) Then
+                                SchedulerFailLocalBrowserTask(scheduledTaskId, "Failed to register Local Agent background job.")
+                            End If
                             Return JsonErr("Failed to register job.")
                         End If
                         Threading.Interlocked.Increment(activeJobs)
@@ -3450,7 +3631,13 @@ Partial Public Class ThisAddIn
                                 Dim agentToolCallLogSnapshot As List(Of AutoPilotToolCallEntry) = Nothing
                                 Dim agentOutputFiles As List(Of String) = Nothing
                                 Dim scheduledTaskFinalized As Boolean = False
+                                Dim runIsolationOwned As Boolean = False
                                 Try
+                                    ' Serialize the complete Local Agent run because model configuration,
+                                    ' current attachments, PathPolicy and delivery state are shared host state.
+                                    SharedLibrary.Agents.AgentGate.BeginOwnedScopeAsync(jobCts.Token).GetAwaiter().GetResult()
+                                    runIsolationOwned = True
+
                                     ' (1) Alternate model application (safer pattern)
                                     If useSecondApiLocal AndAlso Not String.IsNullOrWhiteSpace(selectedModelKeyLocal) Then
                                         Try
@@ -3583,7 +3770,9 @@ Partial Public Class ThisAddIn
                                             If Not String.IsNullOrWhiteSpace(job.ScheduledTaskId) AndAlso
                                                agentOutputFiles IsNot Nothing AndAlso
                                                agentOutputFiles.Count > 0 Then
-                                                SchedulerPersistLocalBrowserOutputs(job.ScheduledTaskId, agentOutputFiles)
+                                                If Not SchedulerPersistLocalBrowserOutputs(job.ScheduledTaskId, agentOutputFiles) Then
+                                                    Throw New System.IO.IOException("One or more Local Agent scheduled-task outputs could not be persisted to the task workspace.")
+                                                End If
                                             End If
 
                                             If agentAbortDetected Then
@@ -3718,6 +3907,12 @@ Partial Public Class ThisAddIn
                                     Catch
                                         ' Ignore restore errors
                                     End Try
+
+                                    If runIsolationOwned Then
+                                        SharedLibrary.Agents.AgentGate.EndOwnedScope()
+                                        runIsolationOwned = False
+                                    End If
+
                                     Threading.Interlocked.Decrement(activeJobs)
                                 End Try
                             End Sub)
@@ -4152,6 +4347,11 @@ Partial Public Class ThisAddIn
                 End If
 
                 Return JsonErr("Bad request: " & ex.Message)
+            Finally
+                If requestRunIsolationOwned Then
+                    SharedLibrary.Agents.AgentGate.EndOwnedScope()
+                    requestRunIsolationOwned = False
+                End If
             End Try
         End If
 
@@ -4297,14 +4497,14 @@ Partial Public Class ThisAddIn
                 If Not String.IsNullOrWhiteSpace(My.Settings.LastPrompt) Then sb.Append("; ctrl-p for your last prompt")
                 sb.Append(":")
                 Dim promptMsg As String = sb.ToString()
-                Dim OptionalButtons As System.Tuple(Of String, String, String)()
+                Dim OptionalButtons As System.Tuple(Of String, String, String)() = Nothing
                 If wordInstalled Then
                     OptionalButtons = {
                         System.Tuple.Create("OK, do a new doc", $"Use this to automatically insert '{NewDocPrefix}' as a prefix.", NewDocPrefix)
                     }
                 End If
                 OtherPrompt = Await SwitchToUi(Function()
-                                                   Return SLib.ShowCustomInputBox(promptMsg, promptCaption, False, "", My.Settings.LastPrompt, If(wordInstalled, OptionalButtons, Nothing), Context:=_context)
+                                                   Return SLib.ShowCustomInputBox(promptMsg, promptCaption, False, "", My.Settings.LastPrompt, OptionalButtons, Context:=_context)
                                                End Function)
                 Dim doMarkupFlag As Boolean = False
                 Dim doInsertFlag As Boolean = False

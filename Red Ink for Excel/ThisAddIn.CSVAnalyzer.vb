@@ -190,8 +190,8 @@ Partial Public Class ThisAddIn
             Try : My.Settings.Save() : Catch : End Try
 
             ' 5) Resolve columns to extract (by header names)
-            Dim selectedHeaders As List(Of String)
-            Dim selectedIdx As List(Of Integer)
+            Dim selectedHeaders As New List(Of String)()
+            Dim selectedIdx As New List(Of Integer)()
             Dim err As String = ResolveColumns(headerColumns, columnsToProcessRaw, Separator, selectedHeaders, selectedIdx)
             If Not String.IsNullOrEmpty(err) Then
                 ShowCustomMessageBox(err)

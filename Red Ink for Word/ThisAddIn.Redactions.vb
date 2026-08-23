@@ -282,7 +282,8 @@ Partial Public Class ThisAddIn
                     Using dlg As New FolderBrowserDialog()
                         dlg.Description = "Select the folder containing the PDF files to redact"
                         dlg.ShowNewFolderButton = False
-                        Dim dr = dlg.ShowDialog()
+                        Dim __safeDialogOwner285 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                        Dim dr = If(__safeDialogOwner285 IsNot Nothing, dlg.ShowDialog(__safeDialogOwner285), dlg.ShowDialog())
                         If dr <> DialogResult.OK OrElse System.String.IsNullOrWhiteSpace(dlg.SelectedPath) Then
                             ShowCustomMessageBox("No folder has been selected - will abort.")
                             Return
@@ -454,7 +455,8 @@ Partial Public Class ThisAddIn
                     Using dlg As New System.Windows.Forms.FolderBrowserDialog()
                         dlg.Description = "Select the folder containing the PDF files to finalize"
                         dlg.ShowNewFolderButton = False
-                        Dim dr As System.Windows.Forms.DialogResult = dlg.ShowDialog()
+                        Dim __safeDialogOwner457 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                        Dim dr As System.Windows.Forms.DialogResult = If(__safeDialogOwner457 IsNot Nothing, dlg.ShowDialog(__safeDialogOwner457), dlg.ShowDialog())
                         If dr <> System.Windows.Forms.DialogResult.OK OrElse System.String.IsNullOrWhiteSpace(dlg.SelectedPath) Then
                             ShowCustomMessageBox("No folder has been selected - will abort.")
                             Return

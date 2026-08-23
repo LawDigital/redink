@@ -487,6 +487,8 @@ Partial Public Class ThisAddIn
             ShowCustomMessageBox("Error in SizeOfWorksheet: " & ex.Message)
         End Try
 
+        Return 0
+
     End Function
 
     ''' <summary>

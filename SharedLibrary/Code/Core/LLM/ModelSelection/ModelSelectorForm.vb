@@ -39,6 +39,14 @@ Namespace SharedLibrary
     Public Class ModelSelectorForm
         Inherits Form
 
+        Protected Overrides Sub OnShown(e As System.EventArgs)
+            MyBase.OnShown(e)
+            Me.TopMost = True
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ForceDialogToForeground(Me)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.AttachForeignForegroundWatchdog(Me)
+        End Sub
+
+
         ''' <summary>Title/description label displayed above the model list.</summary>
         Private lblTitle As System.Windows.Forms.Label
 

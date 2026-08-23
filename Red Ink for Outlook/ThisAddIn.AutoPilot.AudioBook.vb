@@ -1251,22 +1251,10 @@ Partial Public Class ThisAddIn
                 response.Response = $"Audio file '{Path.GetFileName(outputPath)}' generated successfully " &
                     $"({fileSize / 1024:F0} KB, {mode} mode, engine={AB_SelectedEngine}). The file is attached to the reply."
 
-                ' Register the output file so CollectResultAttachments picks it up.
-                ' Use OutputFiles on the first attachment (if any) so the file appears
-                ' in the "registered outputs" pass.  When the mail has no input
-                ' attachments, the directory-scan fallback will find the file because
-                ' we no longer add a phantom AutoPilotAttachmentInfo whose TempFilePath
-                ' would cause the scan to skip it.
-                If _apCurrentAttachments IsNot Nothing AndAlso _apCurrentAttachments.Count > 0 Then
-                    Dim firstAtt = _apCurrentAttachments(0)
-                    If firstAtt.OutputFiles Is Nothing Then firstAtt.OutputFiles = New List(Of String)()
-                    firstAtt.OutputFiles.Add(outputPath)
-                End If
-                ' NOTE: We intentionally do NOT add a new AutoPilotAttachmentInfo here.
-                ' Adding one with TempFilePath = outputPath caused CollectResultAttachments
-                ' to treat the generated file as an "original" attachment and exclude it
-                ' from both the OutputFiles pass and the directory-scan fallback, so the
-                ' file was never attached to the reply.
+                ' Register explicitly even when the current mail/session has no inbound attachment.
+                ' The generated carrier is marked IsToolOutput, so it is never mistaken for
+                ' an original inbound file by the bounded compatibility collector.
+                RegisterAutoPilotGeneratedOutputFile(outputPath)
             Else
                 Dim errMsg = "Audio generation failed. No audio segments could be produced. " &
                     $"Engine={AB_SelectedEngine}, Endpoint='{If(AB_SelectedEngine = ABEngine.OpenAI, AB_OpenAIEndpoint, AB_GoogleEndpoint)}'. " &

@@ -2,7 +2,7 @@
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
 ' =============================================================================
-' File: WordDocHost.vb
+' File: ThisAddIn.WordDocHost.vb
 ' Purpose: Services for agents to interact with Word documents: list, read, search, 
 '       insert, format, comment.
 '

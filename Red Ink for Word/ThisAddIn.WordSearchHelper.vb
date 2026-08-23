@@ -354,16 +354,16 @@ Public Module WordSearchHelper
 
                     If okE Then
                         ' Extract slice and build canonical form with position backmap
-                        Dim sliceTxt As System.String
-                        Dim back As System.Collections.Generic.IReadOnlyList(Of System.Int32)
+                        Dim sliceTxt As System.String = ""
+                        Dim back As System.Collections.Generic.IReadOnlyList(Of System.Int32) = System.Array.Empty(Of System.Int32)()
                         VisibleSlice(doc, posStart, eRng.End - posStart, skipDeleted, sliceTxt, back)
 
                         If ENABLE_SLICE_DEBUG AndAlso System.Diagnostics.Debugger.IsAttached Then
                             System.Diagnostics.Debug.WriteLine(sliceTxt & System.Environment.NewLine)
                         End If
 
-                        Dim canSlice As System.String
-                        Dim backCanon As System.Collections.Generic.List(Of System.Int32)
+                        Dim canSlice As System.String = ""
+                        Dim backCanon As New System.Collections.Generic.List(Of System.Int32)()
                         CanonicaliseWithBackMap(sliceTxt, True, back, canSlice, backCanon)
 
                         Dim idx As System.Int32 = canSlice.IndexOf(canonNeedle, System.StringComparison.Ordinal)
@@ -422,12 +422,12 @@ Public Module WordSearchHelper
                 cancel.ThrowIfCancellationRequested()
 
                 Dim len As System.Int32 = System.Math.Min(winSize, area.End - p)
-                Dim sliceTxt As System.String
-                Dim back As System.Collections.Generic.IReadOnlyList(Of System.Int32)
+                Dim sliceTxt As System.String = ""
+                Dim back As System.Collections.Generic.IReadOnlyList(Of System.Int32) = System.Array.Empty(Of System.Int32)()
                 VisibleSlice(doc, p, len, skipDeleted, sliceTxt, back)
 
-                Dim canSlice As System.String
-                Dim backCanon As System.Collections.Generic.List(Of System.Int32)
+                Dim canSlice As System.String = ""
+                Dim backCanon As New System.Collections.Generic.List(Of System.Int32)()
                 CanonicaliseWithBackMap(sliceTxt, True, back, canSlice, backCanon)
 
                 Dim idx As System.Int32 = canSlice.IndexOf(canonNeedle, System.StringComparison.Ordinal)

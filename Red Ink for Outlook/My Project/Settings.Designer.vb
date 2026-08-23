@@ -1081,6 +1081,30 @@ Namespace My
                 Me("AP_ThreadRetentionDays") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property LocalHttpAuthMasterKey() As String
+            Get
+                Return CType(Me("LocalHttpAuthMasterKey"),String)
+            End Get
+            Set
+                Me("LocalHttpAuthMasterKey") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property LocalHttpApprovedOrigins() As String
+            Get
+                Return CType(Me("LocalHttpApprovedOrigins"),String)
+            End Get
+            Set
+                Me("LocalHttpApprovedOrigins") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

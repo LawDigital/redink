@@ -1,7 +1,19 @@
 ﻿' Part of "Red Ink for Excel"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: ThisAddIn.vb
+' Purpose:
+'   Main Excel VSTO add-in entry point. Owns startup/shutdown, configuration
+'   initialization, feature setup, and the host-level Excel add-in lifecycle.
 '
-' 16.8.2026
+' Architecture:
+'   Root partial ThisAddIn lifecycle module for the Excel host. It initializes shared
+'   configuration and add-in features, while worksheet processing, commands, helpers,
+'   analysis, panes, and file workflows are implemented in the other ThisAddIn.* files.
+' =============================================================================
+'
+' 23.8.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -57,7 +69,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.160826" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.230826" & SharedMethods.VersionQualifier
 
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
@@ -323,116 +335,38 @@ Partial Public Class ThisAddIn
 End Class
 
 
-' =========================================================================================
-' Red Ink Excel Add-in: Maintenance & Security Review Overview
-' =========================================================================================
-' PURPOSE
-'   Provides AI-assisted text, document, and data processing inside Excel. Central entry
-'   point is ThisAddIn.vb which wires UI elements, configuration, update checks, helper
-'   modules, and cross-process automation bridges.
+' =================================================================================================
+' Red Ink for Excel - Architecture Overview
 '
-' CORE EXECUTION FLOW
-'   1. ThisAddIn_Startup initializes threading context, update handler, custom task panes,
-'      menus/ribbon bindings, configuration (via SharedLibrary), and feature modules.
-'   2. User actions (Ribbon / context menu / drag & drop / VBA helper calls / pane UI)
-'      funnel into command handlers (see ThisAddIn.Commands.vb) which route to processing
-'      helpers (LLM calls, file/text transforms, worksheet insertion, CSV analysis, etc.).
-'   3. Long-running or AI calls use async wrappers (LLM / PostCorrection) and marshal back
-'      to the UI thread via EnsureUIThread().
+' ROLE OF THIS FILE
+'   ThisAddIn.vb is the Excel VSTO composition root. It owns startup/shutdown, shared
+'   configuration/context initialization, UI-thread marshaling, update checks and the
+'   host bridge to shared LLM/model services. Worksheet/business features live in the
+'   other partial ThisAddIn.* files.
 '
-' ARCHITECTURAL COMPONENTS (FILES)
-'   ThisAddIn.vb
-'       - Host add-in partial class; lifecycle (Startup/Shutdown); hardcoded constants;
-'         global state; async LLM bridge; configuration bootstrap; exposes COM automation
-'         entry via BridgeSubs; maintains undo cell states; initializes menus & panes.
-'   VBA Helper
-'       - A VBA-accessible module (external helper file/workbook) that invokes exposed
-'         automation methods (e.g. via Application.COMAddIns(...).Object) for macro-based
-'         integration; version checked against MinHelperVersion.
-'   BridgeSubs.vb
-'       - COM-visible automation surface (late-bound calls from VBA or external processes).
-'         Provides restricted, parameterized access to safe subsets of add-in functionality.
-'         SECURITY: Validate inputs (paths, prompts) to avoid injection or unsafe file IO.
-'   DragDropForm.Designer.vb / DragDropForm.vb
-'       - WinForms UI for drag & drop ingestion of files. Filters extensions (see
-'         allowedExtensions) to constrain processing surface. SECURITY: Enforce whitelist,
-'         reject large/binary/unsupported types; sanitize textual content before AI calls.
-'   Form1.Designer.vb / Form1.vb (Excel)
-'       - Main configuration/interaction window (settings, manual prompt execution, status).
-'         Likely hosts controls for model selection, temperature, timeouts, etc. SECURITY:
-'         Persist only necessary settings; avoid logging secrets/API keys in plain text.
-'   Ribbon1.vb
-'       - Defines custom Ribbon buttons and callbacks, dispatching user actions to command
-'         handlers. Keep callbacks thin; delegate logic to Commands/Helpers modules.
-'   ThisAddIn.Commands.vb
-'       - Central command dispatcher; orchestrates user operations (summarize, shorten,
-'         translate, markup insertion, batch processing). SECURITY: Validate spreadsheet
-'         ranges & user-selected text; guard against over-large prompts (memory / API cost).
-'   ThisAddIn.CSVAnalyzer.vb
-'       - CSV profiling (delimiter detection, column stats, sampling). SECURITY: Stream
-'         files instead of loading entire large datasets; handle malformed input robustly.
-'   ThisAddIn.ExcelHelpers.vb
-'       - Utility functions for range enumeration, cell value extraction, formula handling,
-'         undo stack management, safe write operations. SECURITY: Avoid formula injection;
-'         preserve previous state for rollback (undoStates).
-'   ThisAddIn.FileHelpers.vb
-'       - File IO abstraction (load/save text, PDF/RTF/HTML parsing). SECURITY: Enforce
-'         allowedExtensions; normalize paths; avoid directory traversal; prefer read-only
-'         access; treat external content as untrusted.
-'   ThisAddIn.Helpers.vb
-'       - General shared helpers (string transforms, prompt construction, token limits,
-'         color parsing, extension-based routing). Keep pure & testable. SECURITY: Encode
-'         user-provided text before embedding in markup/HTML contexts.
-'   ThisAddIn.MenuContext.vb
-'       - Builds legacy or modern context menus. SECURITY: Ensure commands are disabled
-'         when selection state invalid; prevent accidental mass operations.
-'   ThisAddIn.Pane.vb
-'       - Manages CustomTaskPane instances (chat panel / insights). Handles lifecycle,
-'         visibility, and cross-thread UI marshalling.
-'   ThisAddIn.Processing.InsertIntoWorksheet.vb
-'       - Writes AI-generated output back into a worksheet (cell-by-cell, batch, pane).
-'         SECURITY: Strip control characters; guard against formula payloads; size checks
-'         (LargeWorksheetSize).
-'   ThisAddIn.Processing.vb
-'       - Core transformation pipeline (invoke LLM, apply shortening, diffing, annotation,
-'         bubble markup, context expansion). SECURITY: Rate-limit; timeout long calls;
-'         segregate model/system prompts vs. user input; handle cancellation.
-'   ThisAddIn.Properties.vb
-'       - Centralized strongly-typed property/state access (current prompt mode, user
-'         language, flags, feature toggles). SECURITY: Avoid storing secrets; thread-safety
-'         for mutable shared state if accessed concurrently.
+' PRIMARY ARCHITECTURAL AREAS
+'   - UI/commands: Ribbon1.vb, Form1.vb, DragDropForm.vb, MenuContext and Pane.
+'   - Processing: ThisAddIn.Processing.vb orchestrates transformations; the
+'     Processing.InsertIntoWorksheet partial performs controlled worksheet writes.
+'   - Excel data helpers: ExcelHelpers handles range/cell/formula concerns; CSVAnalyzer
+'     and DirectoryAnalyzer analyze external data; FactExtractor bridges structured fact
+'     extraction; FileHelpers/Helpers/Properties provide host utilities and state.
+'   - File operations: FileRenamer and related helpers implement explicit file workflows.
+'   - Automation: BridgeSubs exposes the bounded COM automation surface used by approved
+'     external/VBA callers.
 '
-' EXTERNAL DEPENDENCIES
-'   - Multiple third-party libraries (DiffPlex, Newtonsoft.Json, HtmlAgilityPack, PdfPig,
-'     MarkDig, NAudio, Whisper/Vosk, gRPC, Google Cloud Speech, etc.) used unmodified except
-'     MarkdownToRTF (modified). Review their licenses & update cadence; pin versions; ensure
-'     no dynamic code execution surfaces (e.g., HTML parsing, audio transcription).
+' SHARED-LIBRARY BOUNDARY
+'   Configuration/licensing, LLM/HTTP/model selection, common text handling, knowledge/
+'   M365 services, agent/tool infrastructure and shared UI/utilities belong in
+'   SharedLibrary. Excel code should remain focused on workbook/range semantics and host UI.
 '
-' THREADING & ASYNC
-'   - Synchronization via WindowsFormsSynchronizationContext; EnsureUIThread() used after
-'     async LLM calls to safely update UI. REVIEW: Confirm no deadlocks; prefer ConfigureAwait(False)
-'     in library calls where UI not needed.
+' EXECUTION FLOW
+'   Excel/VSTO event or Ribbon/context command -> Commands/Processing -> shared LLM or
+'   host helper -> controlled range/workbook update -> UI result. Long-running work must
+'   avoid blocking Excel and marshal workbook/UI mutations back to the Excel UI thread.
 '
-' SECURITY & REVIEW CHECKLIST
-'   - Input Validation: All file paths, selected text, worksheet ranges, prompts.
-'   - Resource Limits: Prevent oversized prompt or worksheet operations (LargeWorksheetSize).
-'   - External Calls: Centralize API keys/config (do not hardcode); use timeouts/cancellation.
-'   - Deserialization: Newtonsoft.Json usage must restrict to safe types (avoid TypeNameHandling.All).
-'   - Temp / Disk IO: Sanitize filenames; avoid exposing arbitrary filesystem locations.
-'   - Undo Integrity: Ensure undoStates cleared after destructive ops to avoid memory growth.
-'   - Logging: Avoid writing sensitive data (user content, API tokens).
-'
-' MAINTENANCE NOTES
-'   - Keep processing pure/business logic separate from UI (Commands vs Forms).
-'   - Centralize constants (prefix triggers) to avoid divergence across modules.
-'   - Consider extracting common code to SharedLibrary for Word/Outlook parity.
-'   - Add unit tests for Helpers / ExcelHelpers / Processing transformations.
-'
-' QUICK START FOR REVIEWERS
-'   1. Start at ThisAddIn_Startup to see initialization order.
-'   2. Trace a Ribbon command -> Commands -> Processing -> InsertIntoWorksheet.
-'   3. Inspect BridgeSubs for external surface & VBA entry points.
-'   4. Audit FileHelpers & CSVAnalyzer for untrusted input handling.
-'   5. Verify LLM wrapper (ThisAddIn.vb) enforces model/timeout policies.
-'
-' =========================================================================================
+' MAINTENANCE HOTSPOTS
+'   COM object lifetime and UI-thread ownership; formula/value distinction and formula
+'   injection; range-size/resource limits; undo/state restoration; file/path validation;
+'   external/VBA automation inputs; and keeping cross-host policy in SharedLibrary.
+' =================================================================================================

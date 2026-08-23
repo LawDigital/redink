@@ -459,11 +459,14 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Code\Agents\AgentToolRouter.vb" />
+    <Compile Include="Code\Agents\ArtifactDelivery.vb" />
     <Compile Include="Code\Agents\AskUserTool.vb" />
     <Compile Include="Code\Agents\BrowserToolRuntime.vb" />
     <Compile Include="Code\Agents\BrowserTools.vb" />
     <Compile Include="Code\Agents\ContextCompactTool.vb" />
     <Compile Include="Code\Agents\ContextExpandTool.vb" />
+    <Compile Include="Code\Agents\ExplicitOperationRegistry.vb" />
+    <Compile Include="Code\Agents\ExplicitSubAgentTaskRegistry.vb" />
     <Compile Include="Code\Agents\FileTools.vb" />
     <Compile Include="Code\Agents\LargeToolResultProcessor.vb" />
     <Compile Include="Code\Agents\PythonExecuteRepairAdvisor.vb" />
@@ -605,6 +608,8 @@
     <Compile Include="Code\Core\Config\SharedMethods.License.vb" />
     <Compile Include="Code\Core\Config\SharedMethods.LoadConfig.vb" />
     <Compile Include="Code\Core\Config\SharedMethods.Settings.vb" />
+    <Compile Include="Code\Core\Security\LocalHttpBrowserSecurity.vb" />
+    <Compile Include="Code\Core\Security\SharedMethods.SafeExternalLinks.vb" />
     <Compile Include="Code\Core\Definitions\SharedContext.vb" />
     <Compile Include="Code\Core\Converter\MarkdownToRtfConverter.vb" />
     <Compile Include="Code\Core\Definitions\SharedMethods.Constants.vb" />

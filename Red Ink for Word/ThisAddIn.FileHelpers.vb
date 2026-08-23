@@ -62,7 +62,8 @@ Partial Public Class ThisAddIn
 
             If String.IsNullOrWhiteSpace(filePath) Then
                 Using form As New DragDropForm()
-                    If form.ShowDialog() = DialogResult.OK Then
+                    Dim __safeDialogOwner65 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                    If If(__safeDialogOwner65 IsNot Nothing, form.ShowDialog(__safeDialogOwner65), form.ShowDialog()) = DialogResult.OK Then
                         filePath = form.SelectedFilePath
                     Else
                         Return result
@@ -198,7 +199,8 @@ Partial Public Class ThisAddIn
         Try
             If String.IsNullOrWhiteSpace(filePath) Then
                 Using form As New DragDropForm()
-                    If form.ShowDialog() = DialogResult.OK Then
+                    Dim __safeDialogOwner201 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                    If If(__safeDialogOwner201 IsNot Nothing, form.ShowDialog(__safeDialogOwner201), form.ShowDialog()) = DialogResult.OK Then
                         filePath = form.SelectedFilePath
                     Else
                         ' User cancelled or closed form

@@ -165,7 +165,7 @@ Partial Public Class ThisAddIn
                 toolResponse.ResultKind)
 
             If context.SequencingState IsNot Nothing Then
-                context.SequencingState.NoteSuccessfulProgress()
+                context.SequencingState.NoteSuccessfulProgress(toolCall.ToolName)
             End If
         End If
 
@@ -331,6 +331,50 @@ Partial Public Class ThisAddIn
 
         Return executedAny
     End Function
+
+    Private Sub ApplyBootstrapMemoryGroundingDecision(context As ToolExecutionContext,
+                                                       decision As SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingIntentDecision)
+        If context Is Nothing OrElse context.SequencingState Is Nothing OrElse decision Is Nothing OrElse Not decision.IsValid Then
+            Return
+        End If
+
+        If decision.MemoryGroundingMode = SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.Required AndAlso
+           Not decision.ExplicitStoredMemoryRequired Then
+
+            context.LogWarn(
+                "bootstrapMemoryRequiredModeDowngraded",
+                details:=$"host={context.HostKind}; reason=missing_explicit_user_demand_for_stored_memory; classifierReason={If(decision.Reason, "")}",
+                visibleToUser:=False)
+
+            decision.MemoryGroundingMode = SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.OptionalMode
+        End If
+
+        context.SequencingState.MemoryGroundingMode = decision.MemoryGroundingMode
+        context.SequencingState.MemoryGroundingAuthority =
+            If(decision.MemoryGroundingMode = SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None,
+               SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingAuthority.None,
+               SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingAuthority.Classifier)
+        context.SequencingState.ShouldExposeRecentMemoryStubs = decision.ShouldExposeRecentMemoryStubs
+
+        If context.SequencingState.MemoryGroundingMode <> SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None AndAlso
+           context.SequencingState.ShouldExposeRecentMemoryStubs Then
+
+            ResolveMemoryGroundingToolConfig(context, SharedLibrary.Agents.MemoryTools.ToolList)
+            ResolveMemoryGroundingToolConfig(context, SharedLibrary.Agents.MemoryTools.ToolGet)
+
+            If context.SequencingState.MemoryGroundingStage = SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingStage.NotStarted Then
+                context.SequencingState.MemoryGroundingStage = SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingStage.ListRequired
+            End If
+        End If
+
+        context.Log(
+            "Bootstrap memory grounding applied: " &
+            SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState) &
+            "; explicitStoredMemoryRequired=" & If(decision.ExplicitStoredMemoryRequired, "true", "false") &
+            "; reason=" & If(decision.Reason, ""),
+            "diag")
+    End Sub
+
 
     Private Async Function ResolveMemoryGroundingModeAsync(context As ToolExecutionContext,
                                                            userText As String,

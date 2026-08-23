@@ -2,7 +2,7 @@
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
 ' =============================================================================
-' File: ThisAddIn.WordHelpers.ImageGeneration.vb
+' File: ThisAddIn.WordHelpers,ImageGeneration.vb
 ' Purpose: Interactive image generation using a configured "ImageGeneration"
 '          special task model. Prompts the user for a description, optionally
 '          attaches a reference image via (file), calls the LLM, displays
@@ -285,7 +285,7 @@ Partial Public Class ThisAddIn
             If Not String.IsNullOrWhiteSpace(modelText) Then
                 Try
                     Dim pipeline = New MarkdownPipelineBuilder().UseAdvancedExtensions().Build()
-                    bodyHtml = Markdig.Markdown.ToHtml(modelText, pipeline)
+                    bodyHtml = Markdig.Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(modelText), pipeline)
                 Catch
                     ' Fallback: plain-text HTML encoding
                     bodyHtml = "<p>" & System.Net.WebUtility.HtmlEncode(modelText).Replace(vbLf, "<br/>") & "</p>"

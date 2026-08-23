@@ -4,11 +4,17 @@
 '
 ' =============================================================================
 ' File: DrawioEditorForm.vb
-' Summary:
-'   Hosts the diagrams.net (draw.io) embedded editor inside a WinForms window
-'   using WebView2. Loads a diagram from an mxfile XML string and saves edited
-'   XML back to a local .drawio file. Supports export via the diagrams.net embed
-'   postMessage API.
+' Purpose:
+'   Hosts the diagrams.net embedded editor in WebView2 for editing a supplied mxfile XML
+'   document and saving/exporting the resulting diagram through the Word host workflow.
+'
+' Architecture / Function:
+'   - Uses the diagrams.net embed postMessage protocol; XML is exchanged with the page
+'     through structured host messages rather than injected as executable script.
+'   - Owns editor readiness, save/export requests and optional network disablement after
+'     initial load; edited XML is written only to the caller-supplied local save path.
+'   - Diagram-to-Word conversion/insertion is handled by the surrounding Word helper
+'     modules, keeping this class focused on the editor UI and message bridge.
 ' =============================================================================
 
 Option Strict On

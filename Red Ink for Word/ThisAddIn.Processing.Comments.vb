@@ -674,7 +674,7 @@ Partial Public Class ThisAddIn
                 html = src
             Else
                 Dim pipeline = New MarkdownPipelineBuilder().UseAdvancedExtensions().Build()
-                html = Markdig.Markdown.ToHtml(If(src, String.Empty), pipeline)
+                html = Markdig.Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(If(src, String.Empty)), pipeline)
             End If
 
             ' 2) Load/sanitize
@@ -752,7 +752,7 @@ Partial Public Class ThisAddIn
                 html = src
             Else
                 Dim pipeline = New MarkdownPipelineBuilder().UseAdvancedExtensions().Build()
-                html = Markdig.Markdown.ToHtml(If(src, String.Empty), pipeline)
+                html = Markdig.Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(If(src, String.Empty)), pipeline)
             End If
             Dim hdoc As New HtmlAgilityPack.HtmlDocument()
             hdoc.LoadHtml(html)

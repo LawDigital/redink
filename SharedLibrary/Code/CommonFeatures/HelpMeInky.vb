@@ -31,6 +31,7 @@
 '  - Markdig: Markdown -> HTML rendering.
 '  - HtmlAgilityPack: HTML -> plain text extraction for manual loading.
 '  - SharedLibrary.SharedMethods: LLM invocation, PDF/RTF reading, config discovery, model switching.
+'  - External links are opened only through SharedMethods.SafeOpenExternalLink (HTTP/HTTPS/MAILTO).
 ' =============================================================================
 
 Option Strict On
@@ -213,10 +214,7 @@ Namespace SharedLibrary
             table.Controls.Add(pnlButtons, 0, 2)
             Me.Controls.Add(table)
 
-            _mdPipeline = New MarkdownPipelineBuilder().
-            UseAdvancedExtensions().
-            UseSoftlineBreakAsHardlineBreak().
-            Build()
+            _mdPipeline = Global.SharedLibrary.SharedLibrary.SharedMethods.CreateMarkdownHtmlPipeline(useSoftlineBreakAsHardlineBreak:=True)
 
             AddHandler Me.Load, AddressOf OnLoadForm
             AddHandler Me.FormClosing, AddressOf OnFormClosing
@@ -2109,7 +2107,7 @@ Namespace SharedLibrary
                 Dim scheme = e.Url?.Scheme?.ToLowerInvariant()
                 If scheme = "http" OrElse scheme = "https" OrElse scheme = "mailto" Then
                     e.Cancel = True
-                    Process.Start(New ProcessStartInfo(e.Url.ToString()) With {.UseShellExecute = True})
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.SafeOpenExternalLink(e.Url.ToString())
                 End If
             Catch ex As Exception
                 Dbg("Navigating error: " & ex.Message)
@@ -2162,7 +2160,7 @@ Namespace SharedLibrary
         ''' </summary>
         Private Sub AppendAssistantMarkdown(md As String)
             md = If(md, "")
-            Dim body = Markdig.Markdown.ToHtml(md, _mdPipeline)
+            Dim body = Markdig.Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(md), _mdPipeline)
             Dim t = body.Trim()
             Dim isSingle = Regex.IsMatch(t, "^\s*<p>[\s\S]*?</p>\s*$", RegexOptions.IgnoreCase) AndAlso
                        Not Regex.IsMatch(t, "<(ul|ol|pre|table|h[1-6]|blockquote|hr|div)\b", RegexOptions.IgnoreCase)

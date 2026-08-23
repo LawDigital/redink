@@ -184,7 +184,8 @@ Partial Public Class ThisAddIn
                 Dim Voices As Integer = ShowCustomYesNoBox("Do you want to use alternate voices to read the text?", "No, one voice", "Yes, alternate", "Create Audio")
                 If Voices = 0 Then Return
                 Using frm As New TTSSelectionForm("Select the voice you wish To use For creating your audio file And configure where To save it.", $"{AN} Text-To-Speech - Select Voices", Voices = 2, FromFile = "pptx") ' TTSSelectionForm(_context, INI_OAuth2ClientMail, INI_OAuth2Scopes, INI_APIKey, INI_OAuth2Endpoint, INI_OAuth2ATExpiry, "Select the voice you wish To use For creating your audio file And configure where To save it.", $"{AN} Text-To-Speech - Select Voices", Voices = 2)
-                    If frm.ShowDialog() = DialogResult.OK Then
+                    Dim __safeDialogOwner187 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
+                    If If(__safeDialogOwner187 IsNot Nothing, frm.ShowDialog(__safeDialogOwner187), frm.ShowDialog()) = DialogResult.OK Then
                         Dim selectedVoices As List(Of String) = frm.SelectedVoices
                         Dim selectedLanguage As String = frm.SelectedLanguage
                         Dim outputPath As String = frm.SelectedOutputPath

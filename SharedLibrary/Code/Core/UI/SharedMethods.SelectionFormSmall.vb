@@ -67,6 +67,15 @@ Namespace SharedLibrary
             Private ReadOnly _pnlAction As System.Windows.Forms.Panel
             Private _result As Integer = 0
 
+            ''' <summary>
+            ''' When True, the dialog was shown WITHOUT a resolved owner, so it must
+            ''' force itself to the foreground on Shown (Windows' foreground lock can
+            ''' otherwise keep an ownerless, background/STA dialog behind the active
+            ''' Office window). When it has a real owner, ownership handles Z-order and
+            ''' this stays False so no TopMost band is applied. Set by SelectValue.
+            ''' </summary>
+            Friend Property ForceForegroundOnShow As Boolean
+
             Friend Sub New(items As IReadOnlyList(Of SelectionItem),
                    defaultValue As Integer,
                    promptText As String,
@@ -281,6 +290,19 @@ Namespace SharedLibrary
                 End If
             End Sub
 
+            ''' <summary>
+            ''' Surfaces the dialog only when it was shown ownerless (see
+            ''' <see cref="ForceForegroundOnShow"/>); owned dialogs rely on ambient
+            ''' ownership for correct Z-order per SharedMethods.DialogOwner.vb.
+            ''' </summary>
+            Protected Overrides Sub OnShown(e As System.EventArgs)
+                MyBase.OnShown(e)
+                If ForceForegroundOnShow Then
+                    SharedMethods.ForceDialogToForeground(Me)
+                    SharedMethods.AttachForeignForegroundWatchdog(Me)
+                End If
+            End Sub
+
             Friend ReadOnly Property Result As Integer
                 Get
                     Return _result
@@ -323,6 +345,9 @@ Namespace SharedLibrary
                 If effectiveOwner IsNot Nothing Then
                     frm.ShowDialog(effectiveOwner)
                 Else
+                    ' No resolved owner: force the ownerless dialog to the foreground
+                    ' on Shown so it does not stay behind the active Office window.
+                    frm.ForceForegroundOnShow = True
                     frm.ShowDialog()
                 End If
                 Return frm.Result

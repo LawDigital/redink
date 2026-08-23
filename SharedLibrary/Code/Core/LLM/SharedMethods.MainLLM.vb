@@ -26,6 +26,10 @@
 ' Notes:
 '  - This file is the central shared LLM runtime used across add-ins and
 '    special-service/tooling scenarios.
+' Security:
+'  - API debug output is sanitized at the disk-writing sink; bearer/access/refresh
+'    tokens, API keys, client secrets, passwords and private-key material are redacted.
+'
 ' =============================================================================
 Option Strict On
 Option Explicit On
@@ -80,11 +84,9 @@ Namespace SharedLibrary
         ''' <param name="FileObject">Optional file/clipboard object reference used for object upload features.</param>
         ''' <param name="cancellationToken">Cancellation token propagated to network calls and linked to splash cancellation.</param>
         ''' <param name="ToolExecution">If <c>True</c> then LLM expects to be in the tooling execution mode when calling an LLM (necessary for building APICall).</c>.</param>
-        ''' <returns>Extracted text from the JSON response; returns an empty string on cancellation or on handled errors.</returns>
+        ''' <returns>Extracted text from the JSON response. Caller cancellation is propagated; request timeout is surfaced as System.TimeoutException.</returns>
         Public Shared Async Function LLM(context As ISharedContext, ByVal promptSystem As String, ByVal promptUser As String, Optional ByVal Model As String = "", Optional ByVal Temperature As String = "", Optional ByVal Timeout As Long = 0, Optional ByVal UseSecondAPI As Boolean = False, Optional ByVal Hidesplash As Boolean = False, Optional ByVal AddUserPrompt As String = "", Optional FileObject As String = "", Optional cancellationToken As Threading.CancellationToken = Nothing, Optional ToolExecution As Boolean = False, Optional binaryOutputDirectory As String = Nothing) As Task(Of String)
-            If cancellationToken.IsCancellationRequested Then
-                Return ""
-            End If
+            cancellationToken.ThrowIfCancellationRequested()
 
             Await Agents.AgentGate.EnterAsync(cancellationToken).ConfigureAwait(False)
             Try
@@ -125,9 +127,7 @@ Namespace SharedLibrary
                     End If
                 End If
 
-                If cancellationToken.IsCancellationRequested Then
-                    Return ""
-                End If
+                cancellationToken.ThrowIfCancellationRequested()
 
                 Dim splash As SplashScreenCountDown = Nothing
                 Dim cts As System.Threading.CancellationTokenSource = Nothing
@@ -337,7 +337,12 @@ Namespace SharedLibrary
 
                     ' Link a local CTS with the external token so caller cancellation, timeout, and the splash cancel button apply.
                     cts = System.Threading.CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)
-                    AddHandler splash.CancelRequested, Sub() cts.Cancel()
+                    Dim splashCancelRequested As System.Int32 = 0
+                    AddHandler splash.CancelRequested,
+                        Sub()
+                            System.Threading.Interlocked.Exchange(splashCancelRequested, 1)
+                            cts.Cancel()
+                        End Sub
                     Dim ct As System.Threading.CancellationToken = cts.Token
 
                     Dim restartCountdownAndTimeout As Action(Of String) =
@@ -781,9 +786,15 @@ Namespace SharedLibrary
                                     End Try
                                 End Using
                             End Using
-                        Catch ex As OperationCanceledException
-                            If Not Hidesplash Then ShowCustomMessageBox("Request canceled.")
-                            Return ""
+                        Catch ex As System.OperationCanceledException
+                            If cancellationToken.IsCancellationRequested OrElse
+                               System.Threading.Interlocked.CompareExchange(splashCancelRequested, 0, 0) <> 0 Then
+                                Throw New System.OperationCanceledException("LLM request canceled by caller.", ex, cancellationToken)
+                            End If
+
+                            Throw New System.TimeoutException(
+                                $"LLM request timed out after {TimeoutValue} ms.",
+                                ex)
                         Finally
                             cts.Dispose()
                             If Not Hidesplash Then splash.Close()
@@ -1099,9 +1110,15 @@ Namespace SharedLibrary
                             If Not Hidesplash Then splash.Close()
                             If Not Hidesplash Then ShowCustomMessageBox($"The response from the endpoint resulted in an error: {ex.Message}")
                         End Try
-                    Catch ex As OperationCanceledException
-                        If Not Hidesplash Then ShowCustomMessageBox("Request canceled.")
-                        Return ""
+                    Catch ex As System.OperationCanceledException
+                        If cancellationToken.IsCancellationRequested OrElse
+                           System.Threading.Interlocked.CompareExchange(splashCancelRequested, 0, 0) <> 0 Then
+                            Throw New System.OperationCanceledException("LLM request canceled by caller.", ex, cancellationToken)
+                        End If
+
+                        Throw New System.TimeoutException(
+                            $"LLM request timed out after {TimeoutValue} ms.",
+                            ex)
                     Finally
                         cts.Dispose()
                         If Not Hidesplash Then splash.Close()
@@ -1149,6 +1166,12 @@ PostProcess:
                     If AnonActive Then Returnvalue = ReidentifyText(Returnvalue)
 
                     Return Returnvalue
+
+                Catch ex As System.TimeoutException
+                    Throw
+
+                Catch ex As System.OperationCanceledException
+                    Throw
 
                 Catch ex As System.Exception
 
@@ -1468,8 +1491,46 @@ PostProcess:
 
 
         ''' <summary>
+        ''' Redacts credential material before API debug content is persisted to disk.
+        ''' This is enforced at the logging sink so callers cannot accidentally bypass it.
+        ''' </summary>
+        Private Shared Function RedactSensitiveDebugText(ByVal value As System.String) As System.String
+            If System.String.IsNullOrEmpty(value) Then Return value
+
+            Dim result As System.String = value
+
+            result = System.Text.RegularExpressions.Regex.Replace(
+                result,
+                "(?i)(""(?:(?:authorization)|(?:access_token)|(?:refresh_token)|(?:client_secret)|(?:api[_-]?key)|(?:apikey)|(?:password)|(?:private_key))""\s*:\s*"")[^""]*("")",
+                "$1[REDACTED]$2")
+
+            result = System.Text.RegularExpressions.Regex.Replace(
+                result,
+                "(?im)(Authorization\s*:\s*)[^\r\n]+",
+                "$1[REDACTED]")
+
+            result = System.Text.RegularExpressions.Regex.Replace(
+                result,
+                "(?i)\bBearer\s+[A-Za-z0-9._~+\-/=]+",
+                "Bearer [REDACTED]")
+
+            result = System.Text.RegularExpressions.Regex.Replace(
+                result,
+                "(?i)((?:access_token|refresh_token|client_secret|api[_-]?key|apikey|password)=)[^&\s]+",
+                "$1[REDACTED]")
+
+            result = System.Text.RegularExpressions.Regex.Replace(
+                result,
+                "(?is)-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----.*?-----END(?: [A-Z0-9]+)? PRIVATE KEY-----",
+                "[REDACTED PRIVATE KEY]")
+
+            Return result
+        End Function
+
+
+        ''' <summary>
         ''' When API debug mode is active, appends a timestamped error entry (with endpoint, request body,
-        ''' response text, exception details, and any additional context) to <c>RI_Error.txt</c> on the Desktop.
+        ''' response text, exception details, and any additional context) to <c>RI_API_Log.txt</c> on the Desktop.
         ''' Silently ignores any I/O failures.
         ''' </summary>
         ''' <param name="errorMessage">Primary error description.</param>
@@ -1486,27 +1547,29 @@ PostProcess:
                 Dim sb As New StringBuilder()
                 sb.AppendLine("========== RED INK API LOG ==========")
                 sb.AppendLine("Timestamp: " & DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture))
-                sb.AppendLine("Error: " & If(errorMessage, "(no message)"))
+                sb.AppendLine("Error: " & If(RedactSensitiveDebugText(errorMessage), "(no message)"))
                 If Not String.IsNullOrWhiteSpace(endpoint) Then
-                    sb.AppendLine("Endpoint: " & endpoint)
+                    sb.AppendLine("Endpoint: " & RedactSensitiveDebugText(endpoint))
                 End If
                 If Not String.IsNullOrWhiteSpace(requestBody) Then
                     sb.AppendLine("Request Body:")
-                    sb.AppendLine(If(requestBody.Length > 8000, requestBody.Substring(0, 8000) & "... (truncated)", requestBody))
+                    Dim safeRequestBody As System.String = RedactSensitiveDebugText(requestBody)
+                    sb.AppendLine(If(safeRequestBody.Length > 8000, safeRequestBody.Substring(0, 8000) & "... (truncated)", safeRequestBody))
                 End If
                 If Not String.IsNullOrWhiteSpace(responseText) Then
                     sb.AppendLine("Response Text:")
-                    sb.AppendLine(If(responseText.Length > 8000, responseText.Substring(0, 8000) & "... (truncated)", responseText))
+                    Dim safeResponseText As System.String = RedactSensitiveDebugText(responseText)
+                    sb.AppendLine(If(safeResponseText.Length > 8000, safeResponseText.Substring(0, 8000) & "... (truncated)", safeResponseText))
                 End If
                 If ex IsNot Nothing Then
                     sb.AppendLine("Exception Type: " & ex.GetType().FullName)
-                    sb.AppendLine("Exception Message: " & ex.Message)
+                    sb.AppendLine("Exception Message: " & RedactSensitiveDebugText(ex.Message))
                     If ex.StackTrace IsNot Nothing Then
                         sb.AppendLine("Stack Trace:")
                         sb.AppendLine(ex.StackTrace)
                     End If
                     If ex.InnerException IsNot Nothing Then
-                        sb.AppendLine("Inner Exception: " & ex.InnerException.GetType().FullName & ": " & ex.InnerException.Message)
+                        sb.AppendLine("Inner Exception: " & ex.InnerException.GetType().FullName & ": " & RedactSensitiveDebugText(ex.InnerException.Message))
                     End If
                 End If
                 sb.AppendLine("=======================================")
@@ -2446,8 +2509,8 @@ PostProcess:
                     dbg.AppendLine($"  AuthServer      = {If(String.IsNullOrWhiteSpace(AuthServer), "(empty)", AuthServer)}")
                     dbg.AppendLine($"  TLife           = {TLife}")
                     dbg.AppendLine($"  PrivateKey len  = {If(PrivateKey IsNot Nothing, PrivateKey.Length.ToString(), "Nothing")}")
-                    dbg.AppendLine($"  PrivateKey head = {If(PrivateKey IsNot Nothing AndAlso PrivateKey.Length > 40, PrivateKey.Substring(0, 40) & "...", If(PrivateKey, "(Nothing)"))}")
-                    dbg.AppendLine($"  Cached token    = {If(String.IsNullOrEmpty(accessToken), "(empty)", accessToken)}")
+                    dbg.AppendLine($"  Private key     = {If(System.String.IsNullOrEmpty(PrivateKey), "(empty)", "present")}")
+                    dbg.AppendLine($"  Cached token    = {If(System.String.IsNullOrEmpty(accessToken), "(empty)", "present")}")
                     dbg.AppendLine($"  Token expiry    = {currentexpiry:yyyy-MM-dd HH:mm:ss} UTC")
                     dbg.AppendLine($"  UtcNow          = {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC")
                     dbg.AppendLine($"  Token expired?  = {DateTime.UtcNow >= currentexpiry}")
@@ -2536,7 +2599,7 @@ PostProcess:
                     accessToken = Await GoogleOAuthHelper.GetAccessToken()
 
                     If context.INI_APIDebug Then
-                        WriteDebugError($"[OAuth2 Debug] GetAccessToken() returned:{Environment.NewLine}{If(String.IsNullOrEmpty(accessToken), "(empty — FAILED)", accessToken)}")
+                        WriteDebugError($"[OAuth2 Debug] GetAccessToken() returned: {If(System.String.IsNullOrEmpty(accessToken), "(empty — FAILED)", "token present")}")
                     End If
 
                     If SecondAPI Then
