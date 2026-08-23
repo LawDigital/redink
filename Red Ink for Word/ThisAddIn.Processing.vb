@@ -22,7 +22,9 @@
 '  - `ProcessSelectedText` is the main orchestration entry point for validation, undo handling,
 '    story-aware branching, and delegation to downstream processing routines.
 '  - Core processing keeps formatting and structural state stable while coordinating prompt,
-'    response, and insertion workflows across chunked selections.
+'    response, and insertion workflows across chunked selections; Markdown insertion preserves
+'    literal backslash text, keeps serialized Word-element placeholders opaque through every
+'    Markdown/LaTeX/HTML stage, and delegates bounded LaTeX normalization to the shared HTML pipeline.
 '  - Markup orchestration remains in this file, while the surgical diff/apply engine is split
 '    into `ThisAddIn.Processing.SurgicalInsert.vb`.
 '  - Chart/diagram output cleans returned draw.io XML, persists `.drawio` files, and supports
@@ -2879,6 +2881,17 @@ Partial Public Class ThisAddIn
         Next
     End Sub
 
+    Private Shared Function BuildMarkdownOpaqueToken(kind As String, index As Integer) As String
+        Return "RIMDOPAQUE" & kind & index.ToString(System.Globalization.CultureInfo.InvariantCulture) & "TOKENEND"
+    End Function
+
+    Private Shared Sub EnsureMarkdownOpaqueTokenSurvived(html As String, token As String)
+        If String.IsNullOrEmpty(token) Then Return
+        If html Is Nothing OrElse html.IndexOf(token, StringComparison.Ordinal) < 0 Then
+            Throw New System.Exception("A protected Word placeholder was altered during Markdown/HTML conversion. The insertion was stopped to avoid corrupting fields or notes.")
+        End If
+    End Sub
+
     ''' <summary>
     ''' Inserts Markdown-formatted text into the selection, converting it to HTML then Word formatting.
     ''' Handles trailing CR and space preservation around the inserted content.
@@ -2926,17 +2939,44 @@ Partial Public Class ThisAddIn
 
         Dim insertionStart As Integer = selection.Range.Start
 
-        Dim ResultBack As String = Result
-        Try
-            Result = System.Text.RegularExpressions.Regex.Unescape(Result)
-        Catch
-            Debug.WriteLine("Error unescaping Result with: " & Result)
-            Result = ResultBack
-        End Try
+        ' Result is already application text at this boundary. Do not apply a generic
+        ' C/regex-style unescape here: ordinary prose and filesystem paths may legitimately
+        ' contain sequences such as \r, \a, \n or \t, which must remain literal text.
+        ' LaTeX normalization is handled later by the shared explicit allow-list only.
 
-        Debug.WriteLine($"After Unescape: {Result}")
+        ' IMPORTANT PIPELINE INVARIANT: serialized Word elements and other protected literal
+        ' regions are opaque payloads. Mask them BEFORE any line-break, Markdown, LaTeX, or
+        ' HTML preprocessing so their contents cannot be rewritten by an unrelated stage.
+        Dim curlyPlaceholders As New List(Of String)()
+        Dim singleCurlyPlaceholders As New List(Of String)()
+        Dim anglePlaceholders As New List(Of String)()
 
-        Dim markdownSource As String = Result
+        Result = System.Text.RegularExpressions.Regex.Replace(
+            Result,
+            "\{\{.*?\}\}",
+            Function(m)
+                curlyPlaceholders.Add(m.Value)
+                Return BuildMarkdownOpaqueToken("C", curlyPlaceholders.Count - 1)
+            End Function,
+            RegexOptions.Singleline)
+
+        Result = System.Text.RegularExpressions.Regex.Replace(
+            Result,
+            "\{[^{}]+\}",
+            Function(m)
+                singleCurlyPlaceholders.Add(m.Value)
+                Return BuildMarkdownOpaqueToken("S", singleCurlyPlaceholders.Count - 1)
+            End Function,
+            RegexOptions.Singleline)
+
+        Result = System.Text.RegularExpressions.Regex.Replace(
+            Result,
+            "<(?![/]?(?:p|br|div|span|strong|b|i|em|u|a|ul|ol|li|h[1-6]|table|tr|td|th|thead|tbody|img|hr|pre|code|blockquote)[ >/])[^>]+>",
+            Function(m)
+                anglePlaceholders.Add(m.Value)
+                Return BuildMarkdownOpaqueToken("A", anglePlaceholders.Count - 1)
+            End Function,
+            RegexOptions.IgnoreCase Or RegexOptions.Singleline)
 
         Result = Result.Replace(vbLf & " " & vbLf, vbLf & vbLf)
 
@@ -2957,79 +2997,17 @@ Partial Public Class ThisAddIn
                                                     End If
                                                 End Function)
 
-        ' ============= PROTECT SPECIAL PATTERNS BEFORE MARKDOWN CONVERSION =============
-        ' Protect {{...}} placeholders (merge fields, special elements) - MUST come first
-        Dim curlyPlaceholders As New List(Of String)()
-        Result = System.Text.RegularExpressions.Regex.Replace(
-            Result,
-            "\{\{.*?\}\}",
-            Function(m)
-                curlyPlaceholders.Add(m.Value)
-                Return $"[[CURLY_{curlyPlaceholders.Count - 1}]]"
-            End Function,
-            RegexOptions.Singleline)
-
-        ' Protect single curly braces {word} that Markdig interprets as generic attributes
-        Dim singleCurlyPlaceholders As New List(Of String)()
-        Result = System.Text.RegularExpressions.Regex.Replace(
-            Result,
-            "\{[^{}]+\}",
-            Function(m)
-                singleCurlyPlaceholders.Add(m.Value)
-                Return $"[[SCURLY_{singleCurlyPlaceholders.Count - 1}]]"
-            End Function,
-            RegexOptions.Singleline)
-
-        ' Protect <...> angle bracket content that is NOT valid HTML
-        Dim anglePlaceholders As New List(Of String)()
-        Result = System.Text.RegularExpressions.Regex.Replace(
-            Result,
-            "<(?![/]?(?:p|br|div|span|strong|b|i|em|u|a|ul|ol|li|h[1-6]|table|tr|td|th|thead|tbody|img|hr|pre|code|blockquote)[ >/])[^>]+>",
-            Function(m)
-                anglePlaceholders.Add(m.Value)
-                Return $"[[ANGLE_{anglePlaceholders.Count - 1}]]"
-            End Function,
-            RegexOptions.IgnoreCase Or RegexOptions.Singleline)
-        ' ================================================================================
-
-        Dim builder As New MarkdownPipelineBuilder()
-
-        builder.UsePipeTables()
-        builder.UseGridTables()
-        builder.UseSoftlineBreakAsHardlineBreak()
-        builder.UseListExtras()
-        builder.UseFootnotes()
-        builder.UseDefinitionLists()
-        builder.UseAbbreviations()
-        builder.UseAutoLinks()
-        builder.UseTaskLists()
-        builder.UseMathematics()
-        builder.UseFigures()
-        builder.UseAdvancedExtensions()
-        builder.UseGenericAttributes()
-
-        Dim markdownPipeline As MarkdownPipeline = builder.Build()
+        ' Use the shared HTML pipeline so Word insertion follows the same Markdown/LaTeX
+        ' contract as the other Red Ink HTML surfaces. In particular, Mathematics stays
+        ' disabled and only NormalizeMarkdownForHtmlDisplay's explicit allow-list handles
+        ' supported LaTeX notation.
+        Dim markdownPipeline As MarkdownPipeline =
+            Global.SharedLibrary.SharedLibrary.SharedMethods.CreateMarkdownHtmlPipeline(
+                useSoftlineBreakAsHardlineBreak:=True)
 
         Debug.WriteLine("Result=" & Result)
 
         Dim htmlResult As String = Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(Result), markdownPipeline).Trim
-
-        ' ============= RESTORE PROTECTED PATTERNS AFTER MARKDOWN CONVERSION =============
-        ' Restore {{...}} placeholders - DO NOT encode, these need to be processed by RestoreSpecialTextElements
-        For idx As Integer = 0 To curlyPlaceholders.Count - 1
-            htmlResult = htmlResult.Replace($"[[CURLY_{idx}]]", curlyPlaceholders(idx))
-        Next
-
-        ' Restore single curly braces {word} - keep as literal text
-        For idx As Integer = 0 To singleCurlyPlaceholders.Count - 1
-            htmlResult = htmlResult.Replace($"[[SCURLY_{idx}]]", System.Net.WebUtility.HtmlEncode(singleCurlyPlaceholders(idx)))
-        Next
-
-        ' Restore <...> placeholders (HTML-encode them so they display as text)
-        For idx As Integer = 0 To anglePlaceholders.Count - 1
-            htmlResult = htmlResult.Replace($"[[ANGLE_{idx}]]", System.Net.WebUtility.HtmlEncode(anglePlaceholders(idx)))
-        Next
-        ' ================================================================================
 
         ' Remove all real newlines so they are not converted as text
         htmlResult = htmlResult _
@@ -3043,6 +3021,31 @@ Partial Public Class ThisAddIn
         htmlDoc.LoadHtml(htmlResult)
 
         fullhtml = htmlDoc.DocumentNode.OuterHtml
+
+        ' ============= RESTORE OPAQUE REGIONS AT THE LAST HTML BOUNDARY =============
+        ' Keep protected payloads masked through line normalization, LaTeX normalization,
+        ' Markdig, newline cleanup, and HtmlAgilityPack parsing. Restore only after the HTML
+        ' structure is final, and encode the payload for HTML transport so Word receives the
+        ' exact literal placeholder text for RestoreSpecialTextElements.
+        For idx As Integer = 0 To curlyPlaceholders.Count - 1
+            Dim token As String = BuildMarkdownOpaqueToken("C", idx)
+            EnsureMarkdownOpaqueTokenSurvived(fullhtml, token)
+            fullhtml = fullhtml.Replace(token, System.Net.WebUtility.HtmlEncode(curlyPlaceholders(idx)))
+        Next
+
+        For idx As Integer = 0 To singleCurlyPlaceholders.Count - 1
+            Dim token As String = BuildMarkdownOpaqueToken("S", idx)
+            EnsureMarkdownOpaqueTokenSurvived(fullhtml, token)
+            fullhtml = fullhtml.Replace(token, System.Net.WebUtility.HtmlEncode(singleCurlyPlaceholders(idx)))
+        Next
+
+        For idx As Integer = 0 To anglePlaceholders.Count - 1
+            Dim token As String = BuildMarkdownOpaqueToken("A", idx)
+            EnsureMarkdownOpaqueTokenSurvived(fullhtml, token)
+            fullhtml = fullhtml.Replace(token, System.Net.WebUtility.HtmlEncode(anglePlaceholders(idx)))
+        Next
+        ' ================================================================================
+
         Debug.WriteLine("HTML1=" & fullhtml)
 
         SLib.InsertTextWithFormat(fullhtml, range, True, Not TrailingCR)

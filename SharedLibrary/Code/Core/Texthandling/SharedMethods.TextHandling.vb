@@ -240,55 +240,316 @@ Namespace SharedLibrary
 
             Dim result As String = value
 
-            ' A few structured commands need their annotation/content retained.
-            result = System.Text.RegularExpressions.Regex.Replace(result, "\\xrightarrow\{\\text\{([^{}]*)\}\}", " —$1→ ")
-            result = System.Text.RegularExpressions.Regex.Replace(result, "\\xrightarrow\{([^{}]*)\}", " —$1→ ")
-            result = System.Text.RegularExpressions.Regex.Replace(result, "\\xleftarrow\{\\text\{([^{}]*)\}\}", " ←$1— ")
-            result = System.Text.RegularExpressions.Regex.Replace(result, "\\xleftarrow\{([^{}]*)\}", " ←$1— ")
-            result = System.Text.RegularExpressions.Regex.Replace(result, "\\(?:text|mathrm|mathbf|mathit)\{([^{}]*)\}", "$1")
-            result = System.Text.RegularExpressions.Regex.Replace(result, "_\{\\text\{([^{}]*)\}\}", "_$1")
-            result = System.Text.RegularExpressions.Regex.Replace(result, "\^\{?\\circ\}?", "°")
+            ' Keep LaTeX normalization deliberately literal and bounded. Do not use regular
+            ' expressions here: ordinary prose, paths, environment-variable notation, URLs,
+            ' and other backslash-containing text must remain byte-for-byte unchanged unless
+            ' it contains one of the explicitly supported LaTeX forms below.
+            result = ReplaceSimpleBracedLatexCommand(result, "\text", "", "")
+            result = ReplaceSimpleBracedLatexSubscript(result)
+            result = ReplaceSimpleBracedLatexCommand(result, "\mathrm", "", "")
+            result = ReplaceSimpleBracedLatexCommand(result, "\mathbf", "", "")
+            result = ReplaceSimpleBracedLatexCommand(result, "\mathit", "", "")
+            result = ReplaceSimpleBracedLatexCommand(result, "\xrightarrow", " —", "→ ")
+            result = ReplaceSimpleBracedLatexCommand(result, "\xleftarrow", " ←", "— ")
+
+            result = result.Replace("^{\circ}", "°")
+            result = result.Replace("^\circ", "°")
 
             Dim replacements As New System.Collections.Generic.Dictionary(Of String, String)(StringComparer.Ordinal) From {
                 {"\leftrightarrow", "↔"}, {"\rightarrow", "→"}, {"\leftarrow", "←"}, {"\to", "→"}, {"\gets", "←"},
                 {"\Longleftrightarrow", "⟺"}, {"\Longrightarrow", "⟹"}, {"\Longleftarrow", "⟸"},
                 {"\Rightarrow", "⇒"}, {"\Leftarrow", "⇐"}, {"\Leftrightarrow", "⇔"}, {"\implies", "⇒"}, {"\impliedby", "⇐"}, {"\iff", "⇔"}, {"\mapsto", "↦"},
-                {"\Updownarrow", "⇕"}, {"\Uparrow", "⇑"}, {"\Downarrow", "⇓"},
-                {"\uparrow", "↑"}, {"\downarrow", "↓"}, {"\updownarrow", "↕"},
+                {"\Updownarrow", "⇕"}, {"\Uparrow", "⇑"}, {"\Downarrow", "⇓"}, {"\uparrow", "↑"}, {"\downarrow", "↓"}, {"\updownarrow", "↕"},
                 {"\leq", "≤"}, {"\le", "≤"}, {"\geq", "≥"}, {"\ge", "≥"}, {"\neq", "≠"}, {"\ne", "≠"},
                 {"\ll", "≪"}, {"\gg", "≫"}, {"\approx", "≈"}, {"\equiv", "≡"}, {"\propto", "∝"},
                 {"\pm", "±"}, {"\mp", "∓"}, {"\times", "×"}, {"\cdot", "·"}, {"\div", "÷"}, {"\circ", "°"},
                 {"\checkmark", "✓"}, {"\star", "★"}, {"\bullet", "•"}, {"\textdegree", "°"},
                 {"\notin", "∉"}, {"\in", "∈"}, {"\subseteq", "⊆"}, {"\supseteq", "⊇"}, {"\subset", "⊂"}, {"\supset", "⊃"},
-                {"\cap", "∩"}, {"\cup", "∪"}, {"\forall", "∀"}, {"\exists", "∃"},
-                {"\land", "∧"}, {"\lor", "∨"}, {"\neg", "¬"}
+                {"\cap", "∩"}, {"\cup", "∪"}, {"\forall", "∀"}, {"\exists", "∃"}, {"\land", "∧"}, {"\lor", "∨"}, {"\neg", "¬"}
             }
 
             For Each pair As System.Collections.Generic.KeyValuePair(Of String, String) In System.Linq.Enumerable.OrderByDescending(replacements, Function(item) item.Key.Length)
-                Dim pattern As String = System.Text.RegularExpressions.Regex.Escape(pair.Key) & "(?![A-Za-z])"
-                result = System.Text.RegularExpressions.Regex.Replace(result, pattern, pair.Value)
+                result = ReplaceBoundedLatexToken(result, pair.Key, pair.Value)
             Next
 
-            ' Section/paragraph commands are unusually ambiguous in ordinary paths, so
-            ' require a boundary that looks like prose/reference notation.
-            result = System.Text.RegularExpressions.Regex.Replace(result, "\\S(?=(?:\\,)?(?:\s|\d|[().,:;]))", "§")
-            result = System.Text.RegularExpressions.Regex.Replace(result, "\\P(?=(?:\\,)?(?:\s|\d|[().,:;]))", "¶")
+            result = ReplaceBoundedSectionLatexToken(result, "\S", "§")
+            result = ReplaceBoundedSectionLatexToken(result, "\P", "¶")
             result = result.Replace("\,", " ")
-            result = System.Text.RegularExpressions.Regex.Replace(result, "_\{([^{}]+)\}", "_$1")
             result = NormalizeSimpleLatexSubscriptsAndSuperscripts(result)
-
-            ' Remove math delimiters only for spans where one of the allow-listed commands
-            ' has already become a known symbol. Currency and unrelated $...$ text remain untouched.
-            Dim symbolClass As String = "[≤≥≠≈≡∝≪≫→←↔⇒⇐⇔⟹⟸⟺↦↑↓↕⇑⇓⇕✓★•∈∉⊂⊆⊃⊇∩∪∀∃∧∨¬±∓×·÷°]"
-            result = System.Text.RegularExpressions.Regex.Replace(
-                result,
-                "(?<!\\)\$(?!\$)([^$\r\n]*" & symbolClass & "[^$\r\n]*)(?<!\\)\$(?!\$)",
-                "$1")
-            result = System.Text.RegularExpressions.Regex.Replace(result, "\\\(([^()\r\n]*" & symbolClass & "[^()\r\n]*)\\\)", "$1")
-            result = System.Text.RegularExpressions.Regex.Replace(result, "\\\[([^\[\]\r\n]*" & symbolClass & "[^\[\]\r\n]*)\\\]", "$1")
+            result = RemoveKnownLatexMathWrappers(result)
             result = result.Replace("$>$", ">").Replace("$<$", "<")
 
             Return result
+        End Function
+
+        Private Shared Function ReplaceSimpleBracedLatexCommand(
+            value As String,
+            command As String,
+            replacementPrefix As String,
+            replacementSuffix As String
+        ) As String
+            If String.IsNullOrEmpty(value) OrElse String.IsNullOrEmpty(command) Then Return If(value, String.Empty)
+
+            Dim startToken As String = command & "{"
+            Dim output As New System.Text.StringBuilder(value.Length)
+            Dim index As Integer = 0
+
+            While index < value.Length
+                Dim commandStart As Integer = value.IndexOf(startToken, index, StringComparison.Ordinal)
+                If commandStart < 0 Then
+                    output.Append(value.Substring(index))
+                    Exit While
+                End If
+
+                output.Append(value.Substring(index, commandStart - index))
+                Dim contentStart As Integer = commandStart + startToken.Length
+                Dim commandEnd As Integer = value.IndexOf("}"c, contentStart)
+                If commandEnd < 0 Then
+                    output.Append(value.Substring(commandStart))
+                    Exit While
+                End If
+
+                Dim content As String = value.Substring(contentStart, commandEnd - contentStart)
+                If content.IndexOf("{"c) >= 0 OrElse content.IndexOf("}"c) >= 0 Then
+                    output.Append(startToken)
+                    index = contentStart
+                    Continue While
+                End If
+
+                output.Append(replacementPrefix)
+                output.Append(content)
+                output.Append(replacementSuffix)
+                index = commandEnd + 1
+            End While
+
+            Return output.ToString()
+        End Function
+
+        Private Shared Function ReplaceSimpleBracedLatexSubscript(value As String) As String
+            If String.IsNullOrEmpty(value) Then Return If(value, String.Empty)
+
+            Const startToken As String = "_{"
+            Dim output As New System.Text.StringBuilder(value.Length)
+            Dim index As Integer = 0
+
+            While index < value.Length
+                Dim tokenStart As Integer = value.IndexOf(startToken, index, StringComparison.Ordinal)
+                If tokenStart < 0 Then
+                    output.Append(value.Substring(index))
+                    Exit While
+                End If
+
+                output.Append(value.Substring(index, tokenStart - index))
+                Dim contentStart As Integer = tokenStart + startToken.Length
+                Dim tokenEnd As Integer = value.IndexOf("}"c, contentStart)
+                If tokenEnd < 0 Then
+                    output.Append(value.Substring(tokenStart))
+                    Exit While
+                End If
+
+                Dim content As String = value.Substring(contentStart, tokenEnd - contentStart)
+                If content.IndexOf("{"c) >= 0 OrElse content.IndexOf("}"c) >= 0 Then
+                    output.Append(startToken)
+                    index = contentStart
+                    Continue While
+                End If
+
+                output.Append("_")
+                output.Append(content)
+                index = tokenEnd + 1
+            End While
+
+            Return output.ToString()
+        End Function
+
+        Private Shared Function ReplaceBoundedLatexToken(value As String, token As String, replacement As String) As String
+            If String.IsNullOrEmpty(value) OrElse String.IsNullOrEmpty(token) Then Return If(value, String.Empty)
+
+            Dim output As New System.Text.StringBuilder(value.Length)
+            Dim index As Integer = 0
+
+            While index < value.Length
+                Dim tokenStart As Integer = value.IndexOf(token, index, StringComparison.Ordinal)
+                If tokenStart < 0 Then
+                    output.Append(value.Substring(index))
+                    Exit While
+                End If
+
+                output.Append(value.Substring(index, tokenStart - index))
+                Dim tokenEnd As Integer = tokenStart + token.Length
+                Dim nextIsAsciiLetter As Boolean = tokenEnd < value.Length AndAlso IsAsciiLetter(value(tokenEnd))
+
+                If nextIsAsciiLetter OrElse IsLikelyFilesystemPathToken(value, tokenStart, tokenEnd) Then
+                    output.Append(token)
+                Else
+                    output.Append(replacement)
+                End If
+                index = tokenEnd
+            End While
+
+            Return output.ToString()
+        End Function
+
+        Private Shared Function ReplaceBoundedSectionLatexToken(value As String, token As String, replacement As String) As String
+            If String.IsNullOrEmpty(value) OrElse String.IsNullOrEmpty(token) Then Return If(value, String.Empty)
+
+            Dim output As New System.Text.StringBuilder(value.Length)
+            Dim index As Integer = 0
+
+            While index < value.Length
+                Dim tokenStart As Integer = value.IndexOf(token, index, StringComparison.Ordinal)
+                If tokenStart < 0 Then
+                    output.Append(value.Substring(index))
+                    Exit While
+                End If
+
+                output.Append(value.Substring(index, tokenStart - index))
+                Dim tokenEnd As Integer = tokenStart + token.Length
+                Dim boundaryIndex As Integer = tokenEnd
+                If boundaryIndex + 1 < value.Length AndAlso value(boundaryIndex) = "\"c AndAlso value(boundaryIndex + 1) = ","c Then
+                    boundaryIndex += 2
+                End If
+
+                Dim hasExpectedBoundary As Boolean = boundaryIndex < value.Length AndAlso IsLatexSectionBoundary(value(boundaryIndex))
+                If hasExpectedBoundary AndAlso Not IsLikelyFilesystemPathToken(value, tokenStart, tokenEnd) Then
+                    output.Append(replacement)
+                Else
+                    output.Append(token)
+                End If
+                index = tokenEnd
+            End While
+
+            Return output.ToString()
+        End Function
+
+        Private Shared Function IsLatexSectionBoundary(ch As Char) As Boolean
+            Return Char.IsWhiteSpace(ch) OrElse Char.IsDigit(ch) OrElse ch = "("c OrElse ch = ")"c OrElse
+                   ch = "."c OrElse ch = ","c OrElse ch = ":"c OrElse ch = ";"c
+        End Function
+
+        Private Shared Function IsAsciiLetter(ch As Char) As Boolean
+            Return (ch >= "A"c AndAlso ch <= "Z"c) OrElse (ch >= "a"c AndAlso ch <= "z"c)
+        End Function
+
+        Private Shared Function IsLikelyFilesystemPathToken(value As String, tokenStart As Integer, tokenEnd As Integer) As Boolean
+            If String.IsNullOrEmpty(value) OrElse tokenStart < 0 OrElse tokenStart >= value.Length Then Return False
+
+            ' A following path separator makes the token a filesystem path segment, not a LaTeX command.
+            If tokenEnd < value.Length AndAlso (value(tokenEnd) = "\"c OrElse value(tokenEnd) = "/"c) Then Return True
+
+            Dim segmentStart As Integer = tokenStart - 1
+            While segmentStart >= 0 AndAlso Not Char.IsWhiteSpace(value(segmentStart))
+                segmentStart -= 1
+            End While
+            segmentStart += 1
+
+            Dim prefixLength As Integer = tokenStart - segmentStart
+            If prefixLength <= 0 Then Return False
+            Dim prefix As String = value.Substring(segmentStart, prefixLength)
+
+            If prefix.IndexOf(":\", StringComparison.Ordinal) >= 0 OrElse
+               prefix.IndexOf(":/", StringComparison.Ordinal) >= 0 OrElse
+               prefix.IndexOf("%", StringComparison.Ordinal) >= 0 OrElse
+               prefix.StartsWith("\\", StringComparison.Ordinal) Then
+                Return True
+            End If
+
+            Return False
+        End Function
+
+        Private Shared Function RemoveKnownLatexMathWrappers(value As String) As String
+            If String.IsNullOrEmpty(value) Then Return If(value, String.Empty)
+
+            Dim result As String = value
+            result = RemoveKnownLatexMathWrapper(result, "\(", "\)")
+            result = RemoveKnownLatexMathWrapper(result, "\[", "\]")
+            result = RemoveKnownDollarMathWrappers(result)
+            Return result
+        End Function
+
+        Private Shared Function RemoveKnownLatexMathWrapper(value As String, openToken As String, closeToken As String) As String
+            Dim output As New System.Text.StringBuilder(value.Length)
+            Dim index As Integer = 0
+
+            While index < value.Length
+                Dim openIndex As Integer = value.IndexOf(openToken, index, StringComparison.Ordinal)
+                If openIndex < 0 Then
+                    output.Append(value.Substring(index))
+                    Exit While
+                End If
+
+                output.Append(value.Substring(index, openIndex - index))
+                Dim contentStart As Integer = openIndex + openToken.Length
+                Dim closeIndex As Integer = value.IndexOf(closeToken, contentStart, StringComparison.Ordinal)
+                If closeIndex < 0 Then
+                    output.Append(value.Substring(openIndex))
+                    Exit While
+                End If
+
+                Dim content As String = value.Substring(contentStart, closeIndex - contentStart)
+                If ContainsKnownLatexReplacementSymbol(content) AndAlso content.IndexOf(ControlChars.Cr) < 0 AndAlso content.IndexOf(ControlChars.Lf) < 0 Then
+                    output.Append(content)
+                Else
+                    output.Append(openToken)
+                    output.Append(content)
+                    output.Append(closeToken)
+                End If
+                index = closeIndex + closeToken.Length
+            End While
+
+            Return output.ToString()
+        End Function
+
+        Private Shared Function RemoveKnownDollarMathWrappers(value As String) As String
+            Dim output As New System.Text.StringBuilder(value.Length)
+            Dim index As Integer = 0
+
+            While index < value.Length
+                Dim openIndex As Integer = FindNextUnescapedSingleDollar(value, index)
+                If openIndex < 0 Then
+                    output.Append(value.Substring(index))
+                    Exit While
+                End If
+
+                output.Append(value.Substring(index, openIndex - index))
+                Dim closeIndex As Integer = FindNextUnescapedSingleDollar(value, openIndex + 1)
+                If closeIndex < 0 Then
+                    output.Append(value.Substring(openIndex))
+                    Exit While
+                End If
+
+                Dim content As String = value.Substring(openIndex + 1, closeIndex - openIndex - 1)
+                If ContainsKnownLatexReplacementSymbol(content) AndAlso content.IndexOf(ControlChars.Cr) < 0 AndAlso content.IndexOf(ControlChars.Lf) < 0 Then
+                    output.Append(content)
+                Else
+                    output.Append("$")
+                    output.Append(content)
+                    output.Append("$")
+                End If
+                index = closeIndex + 1
+            End While
+
+            Return output.ToString()
+        End Function
+
+        Private Shared Function FindNextUnescapedSingleDollar(value As String, startIndex As Integer) As Integer
+            For index As Integer = Math.Max(0, startIndex) To value.Length - 1
+                If value(index) <> "$"c Then Continue For
+                If index > 0 AndAlso value(index - 1) = "\"c Then Continue For
+                If index > 0 AndAlso value(index - 1) = "$"c Then Continue For
+                If index + 1 < value.Length AndAlso value(index + 1) = "$"c Then Continue For
+                Return index
+            Next
+            Return -1
+        End Function
+
+        Private Shared Function ContainsKnownLatexReplacementSymbol(value As String) As Boolean
+            If String.IsNullOrEmpty(value) Then Return False
+            Const knownSymbols As String = "≤≥≠≈≡∝≪≫→←↔⇒⇐⇔⟹⟸⟺↦↑↓↕⇑⇓⇕✓★•∈∉⊂⊆⊃⊇∩∪∀∃∧∨¬±∓×·÷°§¶"
+            For Each symbol As Char In knownSymbols
+                If value.IndexOf(symbol) >= 0 Then Return True
+            Next
+            Return False
         End Function
 
         Private Shared Function FindNextMarkdownLinkStart(value As String, startIndex As Integer) As Integer
