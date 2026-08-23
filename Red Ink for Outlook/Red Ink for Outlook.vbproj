@@ -555,6 +555,7 @@
     <Compile Include="ThisAddIn.WebExtension.FileHelpers.vb" />
     <Compile Include="ThisAddIn.WebExtension.InkyPlay.vb" />
     <Compile Include="ThisAddIn.WebExtension.ListenerAndPower.vb" />
+    <Compile Include="ThisAddIn.WebExtension.Security.vb" />
     <Compile Include="ThisAddIn.WebExtension.vb" />
     <EmbeddedResource Include="Ribbon1.resx">
       <DependentUpon>Ribbon1.vb</DependentUpon>

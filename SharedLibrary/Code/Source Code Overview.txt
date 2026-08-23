@@ -233,6 +233,9 @@
 '   SharedMethods.AlternateModels.vb - Alternate-model loading, filtering, selection, and switching logic.
 '   SharedMethods.PrimaryModelManager.vb - Primary-model selection and active-model state management.
 '
+' [Core\Security]
+'   LocalHttpBrowserSecurity.vb      - Host-agnostic localhost HTTP trust layer: DPAPI-backed browser credentials, CSRF/origin validation, loopback checks, approved browser-extension origins, and byte-bounded HTTP request reading with shared transport/upload limits.
+'
 ' [Core\Texthandling]
 '   SharedMethods.Diff.vb            - Text diff helpers built atop DiffPlex.
 '   SharedMethods.SemanticSearch.CoreAndGenerator.vb - Core semantic-index generation and shared non-interactive APIs.
