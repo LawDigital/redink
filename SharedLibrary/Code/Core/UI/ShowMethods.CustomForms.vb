@@ -3091,6 +3091,7 @@ Namespace SharedLibrary
             Public Property Text As System.String
             Public Property Description As System.String
             Public Property InsertText As System.String
+            Public Property MaxOccurrences As System.Int32
 
             Public Property RequiresValue As System.Boolean
             Public Property ValuePrompt As System.String
@@ -3103,6 +3104,7 @@ Namespace SharedLibrary
                 Me.Text = System.String.Empty
                 Me.Description = System.String.Empty
                 Me.InsertText = System.String.Empty
+                Me.MaxOccurrences = 0
                 Me.RequiresValue = False
                 Me.ValuePrompt = System.String.Empty
                 Me.ValueTitle = System.String.Empty
@@ -3368,6 +3370,54 @@ Namespace SharedLibrary
             End If
 
             Return System.String.Empty
+
+        End Function
+
+
+        Private Shared Function CountFreestyleTokenOccurrences(ByVal source As System.String, ByVal token As System.String) As System.Int32
+
+            If System.String.IsNullOrEmpty(source) OrElse System.String.IsNullOrEmpty(token) Then
+                Return 0
+            End If
+
+            Dim count As System.Int32 = 0
+            Dim searchIndex As System.Int32 = 0
+
+            Do
+                Dim foundIndex As System.Int32 = source.IndexOf(token, searchIndex, System.StringComparison.OrdinalIgnoreCase)
+                If foundIndex < 0 Then
+                    Exit Do
+                End If
+
+                count += 1
+                searchIndex = foundIndex + token.Length
+            Loop While searchIndex < source.Length
+
+            Return count
+
+        End Function
+
+
+        Private Shared Function ValidateFreestyleInsertOccurrenceLimits(ByVal prompt As System.String, ByVal insertOptions As System.Collections.Generic.IEnumerable(Of FreestylePromptInsertOption), ByRef violatingOption As FreestylePromptInsertOption) As System.Boolean
+
+            violatingOption = Nothing
+
+            If insertOptions Is Nothing Then
+                Return True
+            End If
+
+            For Each definition As FreestylePromptInsertOption In insertOptions
+                If definition Is Nothing OrElse definition.MaxOccurrences <= 0 OrElse System.String.IsNullOrWhiteSpace(definition.InsertText) Then
+                    Continue For
+                End If
+
+                If CountFreestyleTokenOccurrences(If(prompt, System.String.Empty), definition.InsertText) > definition.MaxOccurrences Then
+                    violatingOption = definition
+                    Return False
+                End If
+            Next
+
+            Return True
 
         End Function
 
@@ -4340,6 +4390,17 @@ Namespace SharedLibrary
                                                 Return
                                             End If
 
+                                            If clickedDefinition.MaxOccurrences > 0 AndAlso
+                                               Not System.String.IsNullOrWhiteSpace(clickedDefinition.InsertText) AndAlso
+                                               SharedMethods.CountFreestyleTokenOccurrences(promptTextBox.Text, clickedDefinition.InsertText) >= clickedDefinition.MaxOccurrences Then
+
+                                                SharedMethods.ShowCustomMessageBox(
+                                                    "'" & clickedDefinition.Text & "' can be included at most " & clickedDefinition.MaxOccurrences.ToString(System.Globalization.CultureInfo.InvariantCulture) & " time(s) in one Freestyle request.",
+                                                    "Freestyle")
+                                                promptTextBox.Focus()
+                                                Return
+                                            End If
+
                                             SharedMethods.InsertFreestyleTextAtCaret(promptTextBox, textToInsert)
 
                                         End Sub
@@ -5256,6 +5317,18 @@ Namespace SharedLibrary
                                     Sub(sender As System.Object, e As System.Windows.Forms.FormClosingEventArgs)
 
                                         If freestyleForm.DialogResult <> System.Windows.Forms.DialogResult.OK Then
+                                            Return
+                                        End If
+
+                                        Dim violatingInsertOption As FreestylePromptInsertOption = Nothing
+                                        If Not SharedMethods.ValidateFreestyleInsertOccurrenceLimits(promptTextBox.Text, options.InsertOptions, violatingInsertOption) Then
+                                            e.Cancel = True
+                                            Dim optionLabel As System.String = If(violatingInsertOption Is Nothing OrElse System.String.IsNullOrWhiteSpace(violatingInsertOption.Text), "This context option", violatingInsertOption.Text)
+                                            Dim maximum As System.Int32 = If(violatingInsertOption Is Nothing, 1, violatingInsertOption.MaxOccurrences)
+                                            SharedMethods.ShowCustomMessageBox(
+                                                "'" & optionLabel & "' can be included at most " & maximum.ToString(System.Globalization.CultureInfo.InvariantCulture) & " time(s) in one Freestyle request.",
+                                                "Freestyle")
+                                            promptTextBox.Focus()
                                             Return
                                         End If
 

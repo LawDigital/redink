@@ -1380,7 +1380,8 @@ SkipPromptWin:
                     .Id = "file-object",
                     .Text = "File object",
                     .Description = "Attach a file as an LLM object (" & ObjectTrigger & ").",
-                    .InsertText = ObjectTrigger
+                    .InsertText = ObjectTrigger,
+                    .MaxOccurrences = 1
                 })
 
             promptOptions.InsertOptions.Add(

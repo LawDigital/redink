@@ -12560,16 +12560,37 @@ Partial Public Class ThisAddIn
             Dim includeHeadersFooters = GetArgBool(toolCall.Arguments, "include_headers_footers", False)
             Dim includeFootnotesEndnotes = GetArgBool(toolCall.Arguments, "include_footnotes_endnotes", False)
             Dim includeTrackedChanges = GetArgBool(toolCall.Arguments, "include_tracked_changes", True)
-            Dim filterAuthor = GetArgString(toolCall.Arguments, "tracked_changes_author")
-            Dim filterSinceStr = GetArgString(toolCall.Arguments, "tracked_changes_since")
-
-            Dim filterSince As DateTime? = Nothing
-            If Not String.IsNullOrWhiteSpace(filterSinceStr) Then
-                Dim parsed As DateTime
-                If DateTime.TryParse(filterSinceStr, Globalization.CultureInfo.InvariantCulture,
-                                     Globalization.DateTimeStyles.None, parsed) Then
-                    filterSince = parsed
+            Dim trackedChangesOnly = GetArgBool(toolCall.Arguments, "tracked_changes_only", False)
+            If trackedChangesOnly Then includeTrackedChanges = True
+            Dim filterAuthors As New List(Of String)()
+            Dim legacyFilterAuthor = GetArgString(toolCall.Arguments, "tracked_changes_author")
+            If Not String.IsNullOrWhiteSpace(legacyFilterAuthor) Then filterAuthors.Add(legacyFilterAuthor.Trim())
+            For Each requestedAuthor As String In GetArgStringArray(toolCall.Arguments, "tracked_changes_authors")
+                If Not String.IsNullOrWhiteSpace(requestedAuthor) AndAlso
+                   Not filterAuthors.Any(Function(existingAuthor) String.Equals(existingAuthor, requestedAuthor.Trim(), StringComparison.OrdinalIgnoreCase)) Then
+                    filterAuthors.Add(requestedAuthor.Trim())
                 End If
+            Next
+
+            Dim filterSinceStr = GetArgString(toolCall.Arguments, "tracked_changes_since")
+            Dim filterUntilStr = GetArgString(toolCall.Arguments, "tracked_changes_until")
+            Dim filterSince As DateTime? = Nothing
+            Dim filterUntil As DateTime? = Nothing
+            Dim dateError As String = Nothing
+            If Not TryParseRevisionDateFilter(filterSinceStr, False, filterSince, dateError) Then
+                response.Success = False
+                response.Response = dateError
+                Return response
+            End If
+            If Not TryParseRevisionDateFilter(filterUntilStr, True, filterUntil, dateError) Then
+                response.Success = False
+                response.Response = dateError
+                Return response
+            End If
+            If filterSince.HasValue AndAlso filterUntil.HasValue AndAlso filterSince.Value > filterUntil.Value Then
+                response.Success = False
+                response.Response = "tracked_changes_since must be earlier than or equal to tracked_changes_until."
+                Return response
             End If
 
             context.Log($"Deep-reading Word document: {fileName}")
@@ -12577,7 +12598,7 @@ Partial Public Class ThisAddIn
 
             Dim result = Await System.Threading.Tasks.Task.Run(Function() ExtractWordDocumentDetails(
                 att.TempFilePath, includeComments, includeHeadersFooters,
-                includeFootnotesEndnotes, includeTrackedChanges, filterAuthor, filterSince))
+                includeFootnotesEndnotes, includeTrackedChanges, trackedChangesOnly, filterAuthors, filterSince, filterUntil))
 
             If result.Length > 300000 Then
                 result = result.Substring(0, 300000) & vbCrLf & "[... content truncated at 300,000 characters (use read_attachment for more) ...]"
@@ -12606,8 +12627,10 @@ Partial Public Class ThisAddIn
             includeHeadersFooters As Boolean,
             includeFootnotesEndnotes As Boolean,
             includeTrackedChanges As Boolean,
-            filterAuthor As String,
-            filterSince As DateTime?) As String
+            trackedChangesOnly As Boolean,
+            filterAuthors As List(Of String),
+            filterSince As DateTime?,
+            filterUntil As DateTime?) As String
 
         Dim tempDir = Path.Combine(Path.GetTempPath(), "ap_detail_" & Guid.NewGuid().ToString("N"))
         Try
@@ -12627,6 +12650,14 @@ Partial Public Class ThisAddIn
 
             Dim sb As New StringBuilder()
 
+            ' Revision-only mode is intentionally a projection of the same XML reader, not a
+            ' separate parser. This keeps author/date filtering and OOXML coverage identical while
+            ' avoiding a very large body-text payload when the caller only needs tracked changes.
+            If trackedChangesOnly Then
+                AppendTrackedChangesXmlDetails(tempDir, sb, filterAuthors, filterSince, filterUntil)
+                Return sb.ToString().TrimEnd()
+            End If
+
             ' ── BODY TEXT (with optional inline tracked changes) ──
             If docXml IsNot Nothing Then
                 Dim bodyNode = docXml.SelectSingleNode("//w:body", nsMgr)
@@ -12640,12 +12671,14 @@ Partial Public Class ThisAddIn
                     Dim revFmtCount = 0
                     Dim authorCounts As New Dictionary(Of String, Integer)(StringComparer.OrdinalIgnoreCase)
 
-                    For Each paraNode As XmlNode In bodyNode.SelectNodes("w:p", nsMgr)
+                    ' Descendant selection intentionally includes paragraphs inside tables, content controls,
+                    ' text boxes represented in the main document part, and other nested body structures.
+                    For Each paraNode As XmlNode In bodyNode.SelectNodes(".//w:p", nsMgr)
                         Dim paraText As New StringBuilder()
 
                         For Each child As XmlNode In paraNode.ChildNodes
                             ProcessDocBodyNode(child, nsMgr, paraText, includeTrackedChanges,
-                                             filterAuthor, filterSince,
+                                             filterAuthors, filterSince, filterUntil,
                                              revInsCount, revDelCount, revFmtCount, authorCounts)
                         Next
 
@@ -12663,6 +12696,8 @@ Partial Public Class ThisAddIn
                             sb.AppendLine("By author: " & String.Join(", ", authorCounts.Select(Function(kv) $"{kv.Key}: {kv.Value}")))
                         End If
                         sb.AppendLine()
+
+                        AppendTrackedChangesXmlDetails(tempDir, sb, filterAuthors, filterSince, filterUntil)
                     End If
                 End If
             End If
@@ -12733,16 +12768,28 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Sub ProcessDocBodyNode(
             node As XmlNode, nsMgr As XmlNamespaceManager, sb As StringBuilder,
-            includeTrackedChanges As Boolean, filterAuthor As String, filterSince As DateTime?,
+            includeTrackedChanges As Boolean, filterAuthors As List(Of String), filterSince As DateTime?, filterUntil As DateTime?,
             ByRef insCount As Integer, ByRef delCount As Integer, ByRef fmtCount As Integer,
             authorCounts As Dictionary(Of String, Integer))
 
         If node Is Nothing Then Return
 
         Select Case node.LocalName
-            Case "r" ' Normal run
-                For Each tNode As XmlNode In node.SelectNodes("w:t", nsMgr)
-                    sb.Append(tNode.InnerText)
+            Case "r" ' Normal run; preserve text while still inspecting run-property revisions.
+                For Each child As XmlNode In node.ChildNodes
+                    If child.LocalName = "t" Then
+                        sb.Append(child.InnerText)
+                    ElseIf child.LocalName = "tab" Then
+                        sb.Append(vbTab)
+                    ElseIf child.LocalName = "br" OrElse child.LocalName = "cr" Then
+                        sb.Append(vbLf)
+                    ElseIf child.LocalName = "rPr" Then
+                        For Each propertyChild As XmlNode In child.ChildNodes
+                            ProcessDocBodyNode(propertyChild, nsMgr, sb, includeTrackedChanges,
+                                             filterAuthors, filterSince, filterUntil,
+                                             insCount, delCount, fmtCount, authorCounts)
+                        Next
+                    End If
                 Next
 
             Case "ins" ' Insertion
@@ -12750,7 +12797,7 @@ Partial Public Class ThisAddIn
                 Dim dateStr = If(DirectCast(node, XmlElement).GetAttribute("w:date"), "")
                 Dim shortDate = If(dateStr.Length >= 10, dateStr.Substring(0, 10), dateStr)
 
-                Dim passesFilter = PassesRevisionFilter(author, dateStr, filterAuthor, filterSince)
+                Dim passesFilter = PassesRevisionFilter(author, dateStr, filterAuthors, filterSince, filterUntil)
 
                 If includeTrackedChanges AndAlso passesFilter Then
                     Dim innerText As New StringBuilder()
@@ -12776,7 +12823,7 @@ Partial Public Class ThisAddIn
                 Dim dateStr = If(DirectCast(node, XmlElement).GetAttribute("w:date"), "")
                 Dim shortDate = If(dateStr.Length >= 10, dateStr.Substring(0, 10), dateStr)
 
-                Dim passesFilter = PassesRevisionFilter(author, dateStr, filterAuthor, filterSince)
+                Dim passesFilter = PassesRevisionFilter(author, dateStr, filterAuthors, filterSince, filterUntil)
 
                 If includeTrackedChanges AndAlso passesFilter Then
                     Dim innerText As New StringBuilder()
@@ -12795,7 +12842,7 @@ Partial Public Class ThisAddIn
                 If includeTrackedChanges Then
                     Dim author = If(DirectCast(node, XmlElement).GetAttribute("w:author"), "")
                     Dim dateStr = If(DirectCast(node, XmlElement).GetAttribute("w:date"), "")
-                    If PassesRevisionFilter(author, dateStr, filterAuthor, filterSince) Then
+                    If PassesRevisionFilter(author, dateStr, filterAuthors, filterSince, filterUntil) Then
                         fmtCount += 1
                         IncrementAuthorCount(authorCounts, author)
                     End If
@@ -12805,24 +12852,148 @@ Partial Public Class ThisAddIn
                 ' Recurse into child nodes for structure elements like hyperlinks, smart tags, etc.
                 For Each child As XmlNode In node.ChildNodes
                     ProcessDocBodyNode(child, nsMgr, sb, includeTrackedChanges,
-                                     filterAuthor, filterSince, insCount, delCount, fmtCount, authorCounts)
+                                     filterAuthors, filterSince, filterUntil, insCount, delCount, fmtCount, authorCounts)
                 Next
         End Select
     End Sub
 
     Private Shared Function PassesRevisionFilter(author As String, dateStr As String,
-                                                  filterAuthor As String, filterSince As DateTime?) As Boolean
-        If Not String.IsNullOrWhiteSpace(filterAuthor) Then
-            If Not author.IndexOf(filterAuthor, StringComparison.OrdinalIgnoreCase) >= 0 Then Return False
+                                                  filterAuthors As List(Of String), filterSince As DateTime?, filterUntil As DateTime?) As Boolean
+        If filterAuthors IsNot Nothing AndAlso filterAuthors.Count > 0 Then
+            Dim authorMatched As Boolean = filterAuthors.Any(
+                Function(candidate) Not String.IsNullOrWhiteSpace(candidate) AndAlso
+                                    author.IndexOf(candidate, StringComparison.OrdinalIgnoreCase) >= 0)
+            If Not authorMatched Then Return False
         End If
-        If filterSince.HasValue AndAlso Not String.IsNullOrWhiteSpace(dateStr) Then
+
+        If (filterSince.HasValue OrElse filterUntil.HasValue) AndAlso Not String.IsNullOrWhiteSpace(dateStr) Then
             Dim revDate As DateTime
             If DateTime.TryParse(dateStr, Globalization.CultureInfo.InvariantCulture,
-                                 Globalization.DateTimeStyles.None, revDate) Then
-                If revDate < filterSince.Value Then Return False
+                                 Globalization.DateTimeStyles.AssumeUniversal Or Globalization.DateTimeStyles.AdjustToUniversal, revDate) Then
+                If filterSince.HasValue AndAlso revDate < filterSince.Value.ToUniversalTime() Then Return False
+                If filterUntil.HasValue AndAlso revDate > filterUntil.Value.ToUniversalTime() Then Return False
             End If
+        ElseIf (filterSince.HasValue OrElse filterUntil.HasValue) AndAlso String.IsNullOrWhiteSpace(dateStr) Then
+            ' A dated filter cannot deterministically include an undated revision.
+            Return False
         End If
         Return True
+    End Function
+
+    Private Shared Function TryParseRevisionDateFilter(value As String, isUpperBound As Boolean,
+                                                        ByRef parsedValue As DateTime?, ByRef errorMessage As String) As Boolean
+        parsedValue = Nothing
+        errorMessage = Nothing
+        If String.IsNullOrWhiteSpace(value) Then Return True
+
+        Dim trimmed As String = value.Trim()
+        Dim parsed As DateTime
+        If Not DateTime.TryParse(trimmed, Globalization.CultureInfo.InvariantCulture,
+                                 Globalization.DateTimeStyles.AssumeLocal, parsed) Then
+            errorMessage = $"Invalid tracked-changes date/time '{trimmed}'. Use ISO 8601, for example 2026-08-24 or 2026-08-24T09:30:00+02:00."
+            Return False
+        End If
+
+        If isUpperBound AndAlso trimmed.Length = 10 AndAlso trimmed(4) = "-"c AndAlso trimmed(7) = "-"c Then
+            parsed = parsed.Date.AddDays(1).AddTicks(-1)
+        End If
+        parsedValue = parsed
+        Return True
+    End Function
+
+    Private Sub AppendTrackedChangesXmlDetails(tempDir As System.String, sb As System.Text.StringBuilder,
+                                                filterAuthors As System.Collections.Generic.List(Of System.String),
+                                                filterSince As System.DateTime?, filterUntil As System.DateTime?)
+        Dim wordDirectory As System.String = System.IO.Path.Combine(tempDir, "word")
+        If Not System.IO.Directory.Exists(wordDirectory) Then Return
+
+        Dim partPaths As New System.Collections.Generic.List(Of System.String)()
+        Dim documentPart As System.String = System.IO.Path.Combine(wordDirectory, "document.xml")
+        If System.IO.File.Exists(documentPart) Then partPaths.Add(documentPart)
+        partPaths.AddRange(System.IO.Directory.GetFiles(wordDirectory, "header*.xml"))
+        partPaths.AddRange(System.IO.Directory.GetFiles(wordDirectory, "footer*.xml"))
+        For Each optionalPartName As System.String In New System.String() {"footnotes.xml", "endnotes.xml"}
+            Dim optionalPartPath As System.String = System.IO.Path.Combine(wordDirectory, optionalPartName)
+            If System.IO.File.Exists(optionalPartPath) Then partPaths.Add(optionalPartPath)
+        Next
+
+        Dim details As New System.Text.StringBuilder()
+        Dim matchingCount As System.Int32 = 0
+        Dim revisionIndex As System.Int32 = 0
+        Dim revisionXPath As System.String =
+            "//w:ins | //w:del | //w:moveFrom | //w:moveTo | //w:rPrChange | //w:pPrChange | //w:tblPrChange | //w:tblGridChange | //w:trPrChange | //w:tcPrChange | //w:sectPrChange | //w:numberingChange"
+
+        For Each partPath As System.String In partPaths.Distinct(System.StringComparer.OrdinalIgnoreCase)
+            Try
+                Dim partDocument As New System.Xml.XmlDocument()
+                partDocument.Load(partPath)
+                Dim partNamespaces As New System.Xml.XmlNamespaceManager(partDocument.NameTable)
+                partNamespaces.AddNamespace("w", "http://schemas.openxmlformats.org/wordprocessingml/2006/main")
+                Dim revisionNodes As System.Xml.XmlNodeList = partDocument.SelectNodes(revisionXPath, partNamespaces)
+                If revisionNodes Is Nothing Then Continue For
+
+                For Each revisionNode As System.Xml.XmlNode In revisionNodes
+                    Dim element As System.Xml.XmlElement = TryCast(revisionNode, System.Xml.XmlElement)
+                    If element Is Nothing Then Continue For
+                    Dim author As System.String = element.GetAttribute("w:author")
+                    Dim dateStr As System.String = element.GetAttribute("w:date")
+                    If Not PassesRevisionFilter(author, dateStr, filterAuthors, filterSince, filterUntil) Then Continue For
+
+                    matchingCount += 1
+                    revisionIndex += 1
+                    Dim revisionId As System.String = element.GetAttribute("w:id")
+                    Dim revisionText As System.String = ExtractRevisionNodeText(revisionNode, partNamespaces)
+                    Dim paragraphContext As System.String = ExtractRevisionParagraphContext(revisionNode, partNamespaces)
+                    Dim partName As System.String = System.IO.Path.GetFileName(partPath)
+
+                    details.AppendLine($"[Revision #{revisionIndex}] Part: {partName} | Type: {revisionNode.LocalName} | Author: {If(System.String.IsNullOrWhiteSpace(author), "(unknown)", author)} | Date: {If(System.String.IsNullOrWhiteSpace(dateStr), "(unknown)", dateStr)} | Id: {If(System.String.IsNullOrWhiteSpace(revisionId), "(none)", revisionId)}")
+                    If Not System.String.IsNullOrWhiteSpace(revisionText) Then details.AppendLine("  Changed text: " & revisionText)
+                    If Not System.String.IsNullOrWhiteSpace(paragraphContext) Then details.AppendLine("  Paragraph context: " & paragraphContext)
+                Next
+            Catch ex As System.Exception
+                ' A malformed optional part must not suppress valid revisions from the remaining parts.
+                details.AppendLine($"[Revision part warning] {System.IO.Path.GetFileName(partPath)} could not be inspected: {ex.Message}")
+            End Try
+        Next
+
+        sb.AppendLine("═══ TRACKED CHANGES XML DETAILS ═══")
+        If filterAuthors IsNot Nothing AndAlso filterAuthors.Count > 0 Then
+            sb.AppendLine("Author filter: " & System.String.Join(", ", filterAuthors))
+        End If
+        If filterSince.HasValue Then sb.AppendLine("Since: " & filterSince.Value.ToString("o", System.Globalization.CultureInfo.InvariantCulture))
+        If filterUntil.HasValue Then sb.AppendLine("Until: " & filterUntil.Value.ToString("o", System.Globalization.CultureInfo.InvariantCulture))
+        sb.AppendLine($"Matching XML revision records: {matchingCount}")
+        sb.Append(details)
+        sb.AppendLine()
+    End Sub
+
+    Private Shared Function ExtractRevisionNodeText(revisionNode As XmlNode, nsMgr As XmlNamespaceManager) As String
+        Dim text As New StringBuilder()
+        For Each textNode As XmlNode In revisionNode.SelectNodes(".//w:t | .//w:delText | .//w:instrText | .//w:delInstrText", nsMgr)
+            text.Append(textNode.InnerText)
+        Next
+        Return NormalizeRevisionOutputText(text.ToString())
+    End Function
+
+    Private Shared Function ExtractRevisionParagraphContext(revisionNode As XmlNode, nsMgr As XmlNamespaceManager) As String
+        Dim paragraph As XmlNode = revisionNode
+        While paragraph IsNot Nothing AndAlso paragraph.LocalName <> "p"
+            paragraph = paragraph.ParentNode
+        End While
+        If paragraph Is Nothing Then Return Nothing
+
+        Dim text As New StringBuilder()
+        For Each textNode As XmlNode In paragraph.SelectNodes(".//w:t | .//w:delText", nsMgr)
+            text.Append(textNode.InnerText)
+        Next
+        Return NormalizeRevisionOutputText(text.ToString())
+    End Function
+
+    Private Shared Function NormalizeRevisionOutputText(value As String) As String
+        If String.IsNullOrWhiteSpace(value) Then Return Nothing
+        Dim normalized As String = value.Replace(vbCr, " ").Replace(vbLf, " ").Trim()
+        If normalized.Length > 1000 Then normalized = normalized.Substring(0, 1000) & "..."
+        Return normalized
     End Function
 
     Private Shared Sub IncrementAuthorCount(dict As Dictionary(Of String, Integer), author As String)

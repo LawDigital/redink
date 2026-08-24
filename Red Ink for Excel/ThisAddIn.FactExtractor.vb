@@ -264,6 +264,7 @@ Partial Public Class ThisAddIn
             Dim pMergeDateCol As New SLib.InputParameter("Column to merge/group on (1-based)", If(mergeDateColumn <= 0, "", mergeDateColumn.ToString()))
             Dim pMergeInstruction As New SLib.InputParameter("Additional merge instructions (optional, overrides)", mergeInstruction)
             Dim pLinkFiles As New SLib.InputParameter("Make file names clickable (hyperlinks)", False)
+            Dim pDebugDiagnostics As New SLib.InputParameter("Debug failed/no-result extractions to Desktop log", False)
 
             Dim p11 As SLib.InputParameter = Nothing
             If hasSecondary Then
@@ -277,8 +278,8 @@ Partial Public Class ThisAddIn
 
             Dim params() As SLib.InputParameter =
                 If(hasSecondary,
-                   New SLib.InputParameter() {p0, p1, pSchema, p2, pClampFrom, pClampTo, p3, p4, p6, p9, p10, pMergeEnable, pMergeDateCol, pMergeInstruction, pLinkFiles, p11},
-                   New SLib.InputParameter() {p0, p1, pSchema, p2, pClampFrom, pClampTo, p3, p4, p6, p9, p10, pMergeEnable, pMergeDateCol, pMergeInstruction, pLinkFiles})
+                   New SLib.InputParameter() {p0, p1, pSchema, p2, pClampFrom, pClampTo, p3, p4, p6, p9, p10, pMergeEnable, pMergeDateCol, pMergeInstruction, pLinkFiles, pDebugDiagnostics, p11},
+                   New SLib.InputParameter() {p0, p1, pSchema, p2, pClampFrom, pClampTo, p3, p4, p6, p9, p10, pMergeEnable, pMergeDateCol, pMergeInstruction, pLinkFiles, pDebugDiagnostics})
 
             ' Optional extra button: "Edit Local Library"
             Dim extraText As String = Nothing
@@ -383,9 +384,11 @@ ShowBuilderLoop:
 
             Dim linkFiles As Boolean = False
             Try : linkFiles = System.Convert.ToBoolean(params(14).Value) : Catch : linkFiles = False : End Try
+            Dim debugDiagnostics As System.Boolean = False
+            Try : debugDiagnostics = System.Convert.ToBoolean(params(15).Value) : Catch : debugDiagnostics = False : End Try
 
             If hasSecondary Then
-                Try : do2ndModel = System.Convert.ToBoolean(params(15).Value) : Catch : do2ndModel = False : End Try
+                Try : do2ndModel = System.Convert.ToBoolean(params(16).Value) : Catch : do2ndModel = False : End Try
             End If
 
             Try : My.Settings.Extractor_ManualInstruction = manualInstruction : Catch : End Try
@@ -647,7 +650,8 @@ ShowBuilderLoop:
                                                            cancellationRequested:=cancelFunc,
                                                            llmWithFileFunc:=Async Function(sys, usr, mdl, tmp, tmo, use2nd, hide, fileObj)
                                                                                 Return Await LLM(sys, usr, mdl, tmp, tmo, use2nd, True, "", fileObj)
-                                                                            End Function)
+                                                                            End Function,
+                                                       debugDiagnostics:=debugDiagnostics)
                 Catch ex As Exception
                     ProgressBarModule.CancelOperation = True
                     ShowCustomMessageBox("Retry extraction failed: " & ex.Message)
@@ -661,6 +665,7 @@ ShowBuilderLoop:
                     If retryRes IsNot Nothing AndAlso retryRes.FailedFiles > 0 Then
                         msg &= vbCrLf & "Still failed: " & String.Join(", ", retryRes.FailedFileNames)
                     End If
+                    If retryRes IsNot Nothing AndAlso Not System.String.IsNullOrWhiteSpace(retryRes.DebugLogPath) Then msg &= vbCrLf & "Diagnostic log: " & retryRes.DebugLogPath
                     ShowCustomMessageBox(msg)
                     Return
                 End If
@@ -672,6 +677,7 @@ ShowBuilderLoop:
                 retryMsg.AppendLine("Retry completed.")
                 retryMsg.AppendLine("Newly processed: " & retryRes.ProcessedFiles)
                 retryMsg.AppendLine("Still failed: " & retryRes.FailedFiles)
+                If retryRes.FailedFiles > 0 AndAlso Not System.String.IsNullOrWhiteSpace(retryRes.DebugLogPath) Then retryMsg.AppendLine("Diagnostic log: " & retryRes.DebugLogPath)
                 If retryRes.FailedFiles > 0 Then
                     retryMsg.AppendLine("Failed: " & String.Join(", ", retryRes.FailedFileNames))
                 End If
@@ -746,7 +752,8 @@ ShowBuilderLoop:
                                                        cancellationRequested:=cancelFunc,
                                                        llmWithFileFunc:=Async Function(sys, usr, mdl, tmp, tmo, use2nd, hide, fileObj)
                                                                             Return Await LLM(sys, usr, mdl, tmp, tmo, use2nd, True, "", fileObj)
-                                                                        End Function)
+                                                                        End Function,
+                                                       debugDiagnostics:=debugDiagnostics)
                 Catch ex As Exception
                     ProgressBarModule.CancelOperation = True
                     ShowCustomMessageBox("Single-file extraction failed: " & ex.Message)
@@ -756,11 +763,11 @@ ShowBuilderLoop:
                 End Try
 
                 If res Is Nothing OrElse res.Rows.Count = 0 Then
-                    ShowCustomMessageBox("No data extracted.")
+                    ShowCustomMessageBox("No data extracted." & If(res IsNot Nothing AndAlso Not System.String.IsNullOrWhiteSpace(res.DebugLogPath), vbCrLf & "Diagnostic log: " & res.DebugLogPath, ""))
                     Return
                 End If
                 InsertResultIntoExcel(res, selectedPath, dateOutputFormat, startRow, overwriteAtA1, linkFiles)
-                ShowCustomMessageBox("Data extraction completed.")
+                ShowCustomMessageBox("Data extraction completed." & If(res.FailedFiles > 0 AndAlso Not System.String.IsNullOrWhiteSpace(res.DebugLogPath), vbCrLf & "Diagnostic log: " & res.DebugLogPath, ""))
             Else
                 ' ── Folder (multiple files) ──
                 Dim selectedFolder = selectedPath
@@ -871,7 +878,8 @@ ShowBuilderLoop:
                                                        cancellationRequested:=cancelFunc,
                                                        llmWithFileFunc:=Async Function(sys, usr, mdl, tmp, tmo, use2nd, hide, fileObj)
                                                                             Return Await LLM(sys, usr, mdl, tmp, tmo, use2nd, True, "", fileObj)
-                                                                        End Function)
+                                                                        End Function,
+                                                       debugDiagnostics:=debugDiagnostics)
 
                 Dim wasCancelled As Boolean = ProgressBarModule.CancelOperation
                 ProgressBarModule.CancelOperation = True
@@ -899,6 +907,7 @@ ShowBuilderLoop:
                     summary.AppendLine("Skipped (unsupported): " & skippedFiles.Count.ToString())
                     'summary.AppendLine(String.Join(", ", skippedFiles))
                 End If
+                If res.FailedFiles > 0 AndAlso Not System.String.IsNullOrWhiteSpace(res.DebugLogPath) Then summary.AppendLine("Diagnostic log: " & res.DebugLogPath)
                 ShowCustomMessageBox("Data extraction completed." & vbCrLf & summary.ToString())
             End If
 
