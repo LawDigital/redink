@@ -1336,8 +1336,8 @@ SkipPromptWin:
         promptOptions.InsertOptions.Add(
             New SLib.FreestylePromptInsertOption() With {
                 .Id = "file",
-                .Text = "File",
-                .Description = "Select and include the text of a document or file (" & ExtTrigger & ").",
+                .Text = "Doc",
+                .Description = "Select and include the text of a document (" & ExtTrigger & ").",
                 .InsertText = ExtTrigger
             })
 
@@ -1346,11 +1346,11 @@ SkipPromptWin:
             promptOptions.InsertOptions.Add(
                 New SLib.FreestylePromptInsertOption() With {
                     .Id = "file-path",
-                    .Text = "File path",
-                    .Description = "Enter a specific file path and insert the completed path command into the prompt.",
+                    .Text = "Doc path",
+                    .Description = "Enter a specific document path and insert the completed path command into the prompt.",
                     .RequiresValue = True,
-                    .ValuePrompt = "Enter the full path of the file to include:",
-                    .ValueTitle = $"{AN} Freestyle - File path",
+                    .ValuePrompt = "Enter the full path of the document to include:",
+                    .ValueTitle = $"{AN} Freestyle - Doc path",
                     .ValueTemplate = ExtTriggerFixed,
                     .ValuePlaceholder = "[path]"
                 })

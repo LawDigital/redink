@@ -398,7 +398,8 @@ Namespace SharedLibrary
                                                     Optional CtrlP As String = "",
                                                     Optional OptionalButtons As System.Tuple(Of System.String, System.String, System.String)() = Nothing,
                                                     Optional InsertButtons As System.Tuple(Of System.String, System.String, System.String)() = Nothing,
-                                                    Optional Context As ISharedContext = Nothing
+                                                    Optional Context As ISharedContext = Nothing,
+                                                    Optional InsertButtonMaxOccurrences As System.Collections.Generic.IDictionary(Of System.String, System.Int32) = Nothing
                                                 ) As String
 
             ' Screen working area (accounts for taskbar, etc.).
@@ -493,10 +494,27 @@ Namespace SharedLibrary
             Dim okButton As New Button() With {.Text = "OK", .AutoSize = True, .Font = standardFont}
             Dim cancelButton As New Button() With {.Text = "Cancel", .AutoSize = True, .Font = standardFont}
 
-            AddHandler okButton.Click, Sub()
-                                           inputForm.DialogResult = DialogResult.OK
-                                           inputForm.Close()
-                                       End Sub
+            AddHandler okButton.Click,
+                Sub()
+                    Dim violatingToken As System.String = System.String.Empty
+                    Dim maximumOccurrences As System.Int32 = 0
+                    If Not SharedMethods.ValidateCustomInputInsertOccurrenceLimits(
+                        inputTextBox.Text,
+                        InsertButtonMaxOccurrences,
+                        violatingToken,
+                        maximumOccurrences) Then
+
+                        SharedMethods.ShowCustomMessageBox(
+                            "'" & violatingToken & "' can be included at most " &
+                            maximumOccurrences.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                            " time(s) in one request.")
+                        inputTextBox.Focus()
+                        Return
+                    End If
+
+                    inputForm.DialogResult = DialogResult.OK
+                    inputForm.Close()
+                End Sub
             AddHandler cancelButton.Click, Sub()
                                                inputForm.DialogResult = DialogResult.Cancel
                                                inputForm.Close()
@@ -559,6 +577,21 @@ Namespace SharedLibrary
                     Dim textToInsert As String = insertItem.Item3
                     AddHandler insertBtn.Click,
                         Sub()
+                            Dim maxOccurrences As System.Int32 = SharedMethods.GetCustomInputInsertMaximum(
+                                InsertButtonMaxOccurrences,
+                                textToInsert)
+
+                            If maxOccurrences > 0 AndAlso
+                               SharedMethods.CountFreestyleTokenOccurrences(inputTextBox.Text, textToInsert) >= maxOccurrences Then
+
+                                SharedMethods.ShowCustomMessageBox(
+                                    "This item can be included at most " &
+                                    maxOccurrences.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                    " time(s) in one request.")
+                                inputTextBox.Focus()
+                                Return
+                            End If
+
                             Dim selPos = inputTextBox.SelectionStart
                             inputTextBox.Text = inputTextBox.Text.Insert(selPos, textToInsert)
                             inputTextBox.SelectionStart = selPos + textToInsert.Length
@@ -3370,6 +3403,55 @@ Namespace SharedLibrary
             End If
 
             Return System.String.Empty
+
+        End Function
+
+
+        Private Shared Function GetCustomInputInsertMaximum(
+            ByVal limits As System.Collections.Generic.IDictionary(Of System.String, System.Int32),
+            ByVal token As System.String) As System.Int32
+
+            If limits Is Nothing OrElse System.String.IsNullOrWhiteSpace(token) Then
+                Return 0
+            End If
+
+            For Each pair As System.Collections.Generic.KeyValuePair(Of System.String, System.Int32) In limits
+                If System.String.Equals(pair.Key, token, System.StringComparison.OrdinalIgnoreCase) Then
+                    Return System.Math.Max(0, pair.Value)
+                End If
+            Next
+
+            Return 0
+
+        End Function
+
+
+        Private Shared Function ValidateCustomInputInsertOccurrenceLimits(
+            ByVal prompt As System.String,
+            ByVal limits As System.Collections.Generic.IDictionary(Of System.String, System.Int32),
+            ByRef violatingToken As System.String,
+            ByRef maximumOccurrences As System.Int32) As System.Boolean
+
+            violatingToken = System.String.Empty
+            maximumOccurrences = 0
+
+            If limits Is Nothing Then
+                Return True
+            End If
+
+            For Each pair As System.Collections.Generic.KeyValuePair(Of System.String, System.Int32) In limits
+                If pair.Value <= 0 OrElse System.String.IsNullOrWhiteSpace(pair.Key) Then
+                    Continue For
+                End If
+
+                If SharedMethods.CountFreestyleTokenOccurrences(If(prompt, System.String.Empty), pair.Key) > pair.Value Then
+                    violatingToken = pair.Key
+                    maximumOccurrences = pair.Value
+                    Return False
+                End If
+            Next
+
+            Return True
 
         End Function
 
