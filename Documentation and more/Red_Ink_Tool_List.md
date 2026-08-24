@@ -1,4 +1,4 @@
-# Red Ink Tool List
+﻿# Red Ink Tool List
 
 This file lists the built-in internal tools that can be advertised by Word, Outlook, and Outlook AutoPilot.
 
@@ -128,7 +128,7 @@ These binary-safe tools operate across the PathPolicy-governed roots (the agent 
 | `list_attachments` | Lists the attachments available in the current session context. | No | Yes | Yes |
 | `describe_binary_attachment` | Produces a description of a non-text attachment. | No | Yes | Yes |
 | `compare_word_documents` | Compares two Word documents and reports differences. | No | Yes | Yes |
-| `read_word_document_details` | Returns metadata or structural details about a Word document. | No | Yes | Yes |
+| `read_word_document_details` | Deep-reads .docx WordprocessingML/OpenXML, including explicit tracked-change revisions with author/date/text, optional author/date-range filtering, and a revision-only projection for compact tracked-changes workflows. | No | Yes | Yes |
 | `create_pdf_from_text` | Generates a PDF from supplied text content. | No | Yes | Yes |
 | `extract_excel_data` | Extracts readable or structured data from an Excel file using the normal reader path. | No | Yes | Yes |
 | `excel_list_live_worksheets` | Lists worksheet names and basic live worksheet metadata from an existing Excel file through Excel Interop. | No | Yes | Yes |

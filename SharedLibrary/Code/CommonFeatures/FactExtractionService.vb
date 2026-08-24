@@ -113,6 +113,8 @@ Namespace SharedLibrary
             ''' Source directory associated with the run.
             ''' </summary>
             Public Property SourceDirectory As String
+
+            Public Property DebugLogPath As String
         End Class
 
         ' Reason codes for failed file tracking
@@ -124,6 +126,64 @@ Namespace SharedLibrary
         Public Const FailReason_LlmResponseError As String = "LLM_RESPONSE_ERROR"
         Public Const FailReason_ParseError As String = "PARSE_ERROR"
         Public Const FailReason_Cancelled As String = "CANCELLED"
+
+        Private Const FactExtractorDebugLogFileName As System.String = "RI_DataEctractor_Log.txt"
+
+        Private Function InitializeFactExtractorDebugLog(enabled As System.Boolean) As System.String
+            If Not enabled Then Return Nothing
+            Try
+                Dim desktop As System.String = System.Environment.GetFolderPath(System.Environment.SpecialFolder.DesktopDirectory)
+                If System.String.IsNullOrWhiteSpace(desktop) Then Return Nothing
+                Dim logPath As System.String = System.IO.Path.Combine(desktop, FactExtractorDebugLogFileName)
+                Dim header As New System.Text.StringBuilder()
+                header.AppendLine("Red Ink Data Extractor diagnostic log")
+                header.AppendLine("Started: " & System.DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", System.Globalization.CultureInfo.InvariantCulture))
+                header.AppendLine("Contains raw content for failed/no-result inputs because diagnostic mode was explicitly enabled.")
+                header.AppendLine(New System.String("="c, 100))
+                System.IO.File.WriteAllText(logPath, header.ToString(), New System.Text.UTF8Encoding(False))
+                Return logPath
+            Catch
+                Return Nothing
+            End Try
+        End Function
+
+        Private Sub AppendFactExtractorDebugFailure(logPath As System.String, displayName As System.String, fullPath As System.String, reasonCode As System.String, stage As System.String, extractedContent As System.String, rawLlmResponse As System.String, detail As System.String)
+            If System.String.IsNullOrWhiteSpace(logPath) Then Return
+            Try
+                Dim sb As New System.Text.StringBuilder()
+                sb.AppendLine()
+                sb.AppendLine(New System.String("-"c, 100))
+                sb.AppendLine("Time: " & System.DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", System.Globalization.CultureInfo.InvariantCulture))
+                sb.AppendLine("File: " & If(displayName, ""))
+                sb.AppendLine("Path: " & If(fullPath, ""))
+                sb.AppendLine("Reason: " & If(reasonCode, "UNKNOWN"))
+                sb.AppendLine("Stage: " & If(stage, ""))
+                If Not System.String.IsNullOrWhiteSpace(detail) Then sb.AppendLine("Detail: " & detail)
+                sb.AppendLine()
+                sb.AppendLine("[EXTRACTED CONTENT]")
+                sb.AppendLine(If(extractedContent, "<not available>"))
+                sb.AppendLine()
+                sb.AppendLine("[RAW LLM RESPONSE]")
+                sb.AppendLine(If(rawLlmResponse, "<not available>"))
+                System.IO.File.AppendAllText(logPath, sb.ToString(), New System.Text.UTF8Encoding(False))
+            Catch
+            End Try
+        End Sub
+
+        Private Sub AppendFactExtractorDebugSummary(logPath As System.String, result As FactExtractionAggregateResult, totalFiles As System.Int32)
+            If System.String.IsNullOrWhiteSpace(logPath) OrElse result Is Nothing Then Return
+            Try
+                Dim sb As New System.Text.StringBuilder()
+                sb.AppendLine()
+                sb.AppendLine(New System.String("="c, 100))
+                sb.AppendLine("Completed: " & System.DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", System.Globalization.CultureInfo.InvariantCulture))
+                sb.AppendLine("Total inputs: " & totalFiles.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                sb.AppendLine("Processed: " & result.ProcessedFiles.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                sb.AppendLine("Failed/no result: " & result.FailedFiles.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                System.IO.File.AppendAllText(logPath, sb.ToString(), New System.Text.UTF8Encoding(False))
+            Catch
+            End Try
+        End Sub
 
         ''' <summary>
         ''' Setting key: manual instruction for extraction run.
@@ -570,7 +630,8 @@ Namespace SharedLibrary
                                              Optional mergeRowsViaLlm As Boolean = False,
                                              Optional mergeInstruction As String = Nothing,
                                              Optional cancellationRequested As Func(Of Boolean) = Nothing,
-                                             Optional llmWithFileFunc As Func(Of String, String, String, String, Integer, Boolean, Boolean, String, Threading.Tasks.Task(Of String)) = Nothing) _
+                                             Optional llmWithFileFunc As Func(Of String, String, String, String, Integer, Boolean, Boolean, String, Threading.Tasks.Task(Of String)) = Nothing,
+                                             Optional debugDiagnostics As System.Boolean = False) _
                                              As Threading.Tasks.Task(Of FactExtractionAggregateResult)
 
             ' Initialize with new properties
@@ -583,6 +644,9 @@ Namespace SharedLibrary
                 .FailedFilePaths = New System.Collections.Generic.Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase),
                 .SourceDirectory = sourceDirectory
             }
+
+            Dim debugLogPath As System.String = InitializeFactExtractorDebugLog(debugDiagnostics)
+            agg.DebugLogPath = debugLogPath
 
             If filePaths Is Nothing OrElse filePaths.Count = 0 Then
                 agg.Errors.Add("No input files.")
@@ -623,6 +687,7 @@ Namespace SharedLibrary
                     agg.FailedFileNames.Add(displayName)
                     agg.FailedFileReasons(displayName) = FailReason_FileNotFound
                     agg.FailedFilePaths(displayName) = path
+                    AppendFactExtractorDebugFailure(debugLogPath, displayName, path, FailReason_FileNotFound, "input_validation", Nothing, Nothing, "File not found.")
                     Continue For
                 End If
 
@@ -630,6 +695,8 @@ Namespace SharedLibrary
                 Dim isBinaryMedia As Boolean = SharedLibrary.SharedMethods.IsBinaryMediaExtension(ext)
 
                 Dim jsonResp As String = Nothing
+                Dim debugRawLlmResponse As System.String = Nothing
+                Dim debugExtractedContent As System.String = Nothing
 
                 If isBinaryMedia AndAlso llmWithFileFunc IsNot Nothing Then
                     ' ── Binary/media file: send directly to the LLM as a file object ──
@@ -639,13 +706,14 @@ Namespace SharedLibrary
                     End If
 
                     Try
-                        jsonResp = Await llmWithFileFunc(sysPrompt, "", "", "", 0, useSecondApi, True, path)
-                        jsonResp = WebAgentInterpreter.SanitizeLlmResult(jsonResp)
+                        debugRawLlmResponse = Await llmWithFileFunc(sysPrompt, "", "", "", 0, useSecondApi, True, path)
+                        jsonResp = WebAgentInterpreter.SanitizeLlmResult(debugRawLlmResponse)
                     Catch ex As Exception
                         agg.Errors.Add("LLM call failed for '" & displayName & "': " & ex.Message)
                         agg.FailedFileNames.Add(displayName)
                         agg.FailedFileReasons(displayName) = FailReason_LlmError
                         agg.FailedFilePaths(displayName) = path
+                        AppendFactExtractorDebugFailure(debugLogPath, displayName, path, FailReason_LlmError, "llm_call", Nothing, debugRawLlmResponse, ex.ToString())
                         Continue For
                     End Try
 
@@ -655,6 +723,7 @@ Namespace SharedLibrary
                         agg.FailedFileNames.Add(displayName)
                         agg.FailedFileReasons(displayName) = FailReason_EmptyResponse
                         agg.FailedFilePaths(displayName) = path
+                        AppendFactExtractorDebugFailure(debugLogPath, displayName, path, FailReason_EmptyResponse, "llm_response", Nothing, debugRawLlmResponse, "LLM returned an empty response for a binary/media input.")
                         Continue For
                     End If
 
@@ -663,6 +732,7 @@ Namespace SharedLibrary
                         agg.FailedFileNames.Add(displayName)
                         agg.FailedFileReasons(displayName) = FailReason_LlmResponseError
                         agg.FailedFilePaths(displayName) = path
+                        AppendFactExtractorDebugFailure(debugLogPath, displayName, path, FailReason_LlmResponseError, "llm_response", Nothing, debugRawLlmResponse, "LLM returned an error-like response.")
                         Continue For
                     End If
                 Else
@@ -671,11 +741,13 @@ Namespace SharedLibrary
                     Dim text As String = Nothing
                     Try
                         text = Await GetFileContentFunc(path, True, doOcr, False)
+                        debugExtractedContent = text
                     Catch ex As Exception
                         agg.Errors.Add("File read failed for '" & displayName & "': " & ex.Message)
                         agg.FailedFileNames.Add(displayName)
                         agg.FailedFileReasons(displayName) = FailReason_ReadError
                         agg.FailedFilePaths(displayName) = path
+                        AppendFactExtractorDebugFailure(debugLogPath, displayName, path, FailReason_ReadError, "file_read", text, Nothing, ex.ToString())
                         Continue For
                     End Try
 
@@ -687,6 +759,7 @@ Namespace SharedLibrary
                         agg.FailedFileNames.Add(displayName)
                         agg.FailedFileReasons(displayName) = FailReason_EmptyContent
                         agg.FailedFilePaths(displayName) = path
+                        AppendFactExtractorDebugFailure(debugLogPath, displayName, path, FailReason_EmptyContent, "file_read", text, Nothing, "File reader returned empty/whitespace content.")
                         Continue For
                     End If
 
@@ -696,6 +769,7 @@ Namespace SharedLibrary
                         agg.FailedFileNames.Add(displayName)
                         agg.FailedFileReasons(displayName) = FailReason_ReadError
                         agg.FailedFilePaths(displayName) = path
+                        AppendFactExtractorDebugFailure(debugLogPath, displayName, path, FailReason_ReadError, "file_read", text, Nothing, text.Trim())
                         Continue For
                     End If
 
@@ -706,13 +780,14 @@ Namespace SharedLibrary
                     End If
 
                     Try
-                        jsonResp = Await llmFunc(sysPrompt, userText, "", "", 0, useSecondApi, True)
-                        jsonResp = WebAgentInterpreter.SanitizeLlmResult(jsonResp)
+                        debugRawLlmResponse = Await llmFunc(sysPrompt, userText, "", "", 0, useSecondApi, True)
+                        jsonResp = WebAgentInterpreter.SanitizeLlmResult(debugRawLlmResponse)
                     Catch ex As Exception
                         agg.Errors.Add("LLM call failed for '" & displayName & "': " & ex.Message)
                         agg.FailedFileNames.Add(displayName)
                         agg.FailedFileReasons(displayName) = FailReason_LlmError
                         agg.FailedFilePaths(displayName) = path
+                        AppendFactExtractorDebugFailure(debugLogPath, displayName, path, FailReason_LlmError, "llm_call", text, debugRawLlmResponse, ex.ToString())
                         Continue For
                     End Try
                 End If
@@ -722,6 +797,7 @@ Namespace SharedLibrary
                     agg.FailedFileNames.Add(displayName)
                     agg.FailedFileReasons(displayName) = FailReason_EmptyResponse
                     agg.FailedFilePaths(displayName) = path
+                    AppendFactExtractorDebugFailure(debugLogPath, displayName, path, FailReason_EmptyResponse, "llm_response", debugExtractedContent, debugRawLlmResponse, "LLM returned an empty response.")
                     Continue For
                 End If
 
@@ -734,6 +810,7 @@ Namespace SharedLibrary
                     agg.FailedFileNames.Add(displayName)
                     agg.FailedFileReasons(displayName) = FailReason_ParseError
                     agg.FailedFilePaths(displayName) = path
+                    AppendFactExtractorDebugFailure(debugLogPath, displayName, path, FailReason_ParseError, "response_parse", debugExtractedContent, debugRawLlmResponse, "No rows/schema could be parsed from the LLM response.")
                     Continue For
                 End If
                 MergeIntoAggregate(agg, parsed.schema, parsed.rows, displayName, dateColumnsUser)
@@ -745,6 +822,7 @@ Namespace SharedLibrary
                     progressCallback(agg.ProcessedFiles, Math.Max(1, filePaths.Count), "Cancelled.")
                 End If
                 agg.FailedFiles = agg.FailedFileNames.Count
+                AppendFactExtractorDebugSummary(debugLogPath, agg, filePaths.Count)
                 Return agg
             End If
 
@@ -765,6 +843,7 @@ Namespace SharedLibrary
 
             agg.FailedFiles = agg.FailedFileNames.Count
             If sortColumn > 0 Then SortAggregate(agg, sortColumn, sortDirection)
+            AppendFactExtractorDebugSummary(debugLogPath, agg, filePaths.Count)
 
             If progressCallback IsNot Nothing Then
                 Dim finalStatus As String
