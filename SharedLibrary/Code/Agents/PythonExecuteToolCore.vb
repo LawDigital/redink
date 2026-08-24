@@ -153,7 +153,7 @@ Namespace Agents
 
         Public Shared ReadOnly Property ToolInstructionsPrompt As System.String
             Get
-                Return "Use python_execute for calculations, parsing, structured transformations, deterministic data processing, document editing, and generating output artifacts from self-contained Python code. When js_run is available and sufficient for the task, prefer js_run instead because it is usually faster; use python_execute when Python-specific libraries, richer file handling, or more complex processing are needed. For Word document modifications (.docx), prefer the native Word tools (for example word_write, word_markup, word_comment_add) over python_execute; select python_execute only when those native tools are unsuitable, have already failed, or cannot perform the required operation. When a task involves several steps or several files, combine them all into a single script and call python_execute once; do not issue multiple python_execute calls for one logical task. When you do use python_execute, put the COMPLETE task into one self-contained program that inspects the document as needed, identifies the target, performs the modification, saves the final output, validates the result, and publishes the result/output, all in the same execution. Do not split a simple task into separate python_execute calls for discovery, editing, re-reading, verification, or publication; only make a second call when information from the first execution is genuinely required before the next program can be constructed, or to repair a genuinely failed execution. After the requested output has been produced and validated in a successful run, do not issue further python_execute calls to re-read or re-verify the result; finalize instead. Access every input file through redink_pythonagent.agent_api.input_path(name), passing the same relative name you listed in input_files (for example: from redink_pythonagent import agent_api; doc = docx.Document(agent_api.input_path('Schreiben.docx'))). Never open an input by a bare filename or absolute path; staged inputs are not in the working directory and a bare open will fail with a not-found error. Write every produced document to a path obtained from agent_api.output_path(name); do not write to arbitrary or absolute paths. Anything written to stdout/stderr (for example via print(...)) is NOT returned to you; it is retained only as a human diagnostic. To make any value observable to you, publish a direct JSON result with agent_api.publish_result(...) or text with agent_api.publish_result_text(...); use output_path(...) for large or binary documents. A run that publishes neither a result nor an output file returns no observable outcome even when it exits successfully, so always publish a result or an output file for every task. The worker has no direct network access. Depending on how the host is configured for this task, it may additionally have access to host-mediated capabilities such as language-model assistance and web retrieval/search; when such a capability is not enabled, any attempt to use it fails with a typed host error, so treat these as optional and check availability at runtime rather than assuming them. Only explicitly supplied input files are visible. Do not use python_execute to inspect arbitrary host directories, search the resource tree, or discover files under `.inky`, `diagnostics`, Desktop, or other host-local paths; the sandbox can access only staged `input_files` and files created through `agent_api.output_path(...)`. Execution and all relays are time- and size-bounded. Raw stdout, stderr, tracebacks, and arbitrary exception text remain human diagnostics; structured safe errors are returned to the model. Each call executes a complete, standalone Python program from scratch; nothing persists between calls. Do not stall the process: do not sleep, poll, retry in a loop, or wait for a file, resource, or state to appear; if an expected input or condition is missing, publish that fact and return immediately instead of waiting. Host-mediated capabilities (such as language-model assistance or web retrieval/search) are comparatively slow and optional; only call them when the task requires them, and never rely on them completing quickly. A deterministic Python error (for example SyntaxError, NameError, AttributeError, TypeError, ValueError, ImportError, or ModuleNotFoundError) will fail identically if resubmitted unchanged, so fix the code instead of retrying the same script. After an AttributeError or an API mismatch, do not guess a similarly named attribute or method; first inspect the real object with type(value), type(value).__module__, type(value).__qualname__, and hasattr(value, 'name') (a filtered dir() is acceptable), then call the API that actually exists. Do not reuse an approach that already failed. agent_api.output_path(name) requires a non-empty relative path inside the output directory; an empty string, '.', absolute paths, and paths escaping the output directory are rejected. Never mask a failure with a broad try/except or by writing placeholder/dummy output; a repair must preserve the required behavior and produce the real result. Published results must be JSON-compatible: allowed values are dictionaries with string keys, lists, strings, integers, finite floating-point values, booleans, and null; convert tuples and sets to lists, convert pathlib.Path values with str(path), convert datetime values to ISO 8601 strings, and reduce library objects or custom classes to dictionaries or primitive values before calling agent_api.publish_result(...). agent_api.output_path(name) returns a pathlib.Path; most modern APIs accept path-like objects, but if a third-party library rejects pathlib.Path or WindowsPath (for example reportlab.platypus.SimpleDocTemplate), convert it with str(path) only at that API boundary. python-docx header objects do not provide a universal .text property: read header text from section.header.paragraphs (joining each paragraph.text) and, when required, from section.header.tables. Do not pass a returned internal results path (for example results/<session-id>/file.docx) to input_files: published-result paths are informational only and are not reusable as inputs. Only use attachment references, workspace-relative paths, or explicitly reusable published-file handles as input_files."
+                Return "Use python_execute for calculations, parsing, structured transformations, deterministic data processing, document editing, and generating output artifacts from self-contained Python code. When js_run is available and sufficient for the task, prefer js_run instead because it is usually faster; use python_execute when Python-specific libraries, richer file handling, or more complex processing are needed. For Word document modifications (.docx), prefer the native Word tools (for example word_write, word_markup, word_comment_add) over python_execute; select python_execute only when those native tools are unsuitable, have already failed, or cannot perform the required operation. When a task involves several steps or several files, combine them all into a single script and call python_execute once; do not issue multiple python_execute calls for one logical task. When you do use python_execute, put the COMPLETE task into one self-contained program that inspects the document as needed, identifies the target, performs the modification, saves the final output, validates the result, and publishes the result/output, all in the same execution. Do not split a simple task into separate python_execute calls for discovery, editing, re-reading, verification, or publication; only make a second call when information from the first execution is genuinely required before the next program can be constructed, or to repair a genuinely failed execution. After the requested output has been produced and validated in a successful run, do not issue further python_execute calls to re-read or re-verify the result; finalize instead. Access every input file through redink_pythonagent.agent_api.input_path(name), passing the same relative name you listed in input_files (for example: from redink_pythonagent import agent_api; doc = docx.Document(agent_api.input_path('Schreiben.docx'))). Never open an input by a bare filename or absolute path; staged inputs are not in the working directory and a bare open will fail with a not-found error. Never shorten, rename, or invent aliases for input_files to work around host path lengths; input_files must remain real attachment/workspace references and the host handles any required physical staging aliases transparently. Write every produced document to a path obtained from agent_api.output_path(name); do not write to arbitrary or absolute paths. Anything written to stdout/stderr (for example via print(...)) is NOT returned to you; it is retained only as a human diagnostic. To make any value observable to you, publish a direct JSON result with agent_api.publish_result(...) or text with agent_api.publish_result_text(...); use output_path(...) for large or binary documents. A run that publishes neither a result nor an output file returns no observable outcome even when it exits successfully, so always publish a result or an output file for every task. The worker has no direct network access. Depending on how the host is configured for this task, it may additionally have access to host-mediated capabilities such as language-model assistance and web retrieval/search; when such a capability is not enabled, any attempt to use it fails with a typed host error, so treat these as optional and check availability at runtime rather than assuming them. Only explicitly supplied input files are visible. Do not use python_execute to inspect arbitrary host directories, search the resource tree, or discover files under `.inky`, `diagnostics`, Desktop, or other host-local paths; the sandbox can access only staged `input_files` and files created through `agent_api.output_path(...)`. Execution and all relays are time- and size-bounded. Raw stdout, stderr, tracebacks, and arbitrary exception text remain human diagnostics; structured safe errors are returned to the model. Each call executes a complete, standalone Python program from scratch; nothing persists between calls. Do not stall the process: do not sleep, poll, retry in a loop, or wait for a file, resource, or state to appear; if an expected input or condition is missing, publish that fact and return immediately instead of waiting. Host-mediated capabilities (such as language-model assistance or web retrieval/search) are comparatively slow and optional; only call them when the task requires them, and never rely on them completing quickly. A deterministic Python error (for example SyntaxError, NameError, AttributeError, TypeError, ValueError, ImportError, or ModuleNotFoundError) will fail identically if resubmitted unchanged, so fix the code instead of retrying the same script. After an AttributeError or an API mismatch, do not guess a similarly named attribute or method; first inspect the real object with type(value), type(value).__module__, type(value).__qualname__, and hasattr(value, 'name') (a filtered dir() is acceptable), then call the API that actually exists. Do not reuse an approach that already failed. agent_api.output_path(name) requires a non-empty relative path inside the output directory; an empty string, '.', absolute paths, and paths escaping the output directory are rejected. Never mask a failure with a broad try/except or by writing placeholder/dummy output; a repair must preserve the required behavior and produce the real result. Published results must be JSON-compatible: allowed values are dictionaries with string keys, lists, strings, integers, finite floating-point values, booleans, and null; convert tuples and sets to lists, convert pathlib.Path values with str(path), convert datetime values to ISO 8601 strings, and reduce library objects or custom classes to dictionaries or primitive values before calling agent_api.publish_result(...). agent_api.output_path(name) returns a pathlib.Path; most modern APIs accept path-like objects, but if a third-party library rejects pathlib.Path or WindowsPath (for example reportlab.platypus.SimpleDocTemplate), convert it with str(path) only at that API boundary. python-docx header objects do not provide a universal .text property: read header text from section.header.paragraphs (joining each paragraph.text) and, when required, from section.header.tables. Do not pass a returned internal results path (for example results/<session-id>/file.docx) to input_files: published-result paths are informational only and are not reusable as inputs. Only use attachment references, workspace-relative paths, or explicitly reusable published-file handles as input_files."
             End Get
         End Property
 
@@ -520,6 +520,19 @@ Namespace Agents
             End If
 
             Dim callRoot As System.String = CreateCallRoot(options.RootDirectory)
+
+            ' Decouple logical input names from physical staging paths only when the projected
+            ' Windows path would approach the legacy path limit. The PythonAgent protocol and
+            ' agent_api contract remain unchanged: user code still addresses the original logical
+            ' name, while the host transparently maps it to a compact staged relative path.
+            Dim stagedInputFiles As System.Collections.Generic.List(Of RedInkPythonAgentInputFile) = resolvedInputFiles
+            Dim inputAliases As System.Collections.Generic.Dictionary(Of System.String, System.String) = Nothing
+            PrepareCompactInputStaging(callRoot, resolvedInputFiles, stagedInputFiles, inputAliases)
+            If inputAliases IsNot Nothing AndAlso inputAliases.Count > 0 Then
+                code = WrapCodeForInputAliases(code, inputAliases)
+                SafeLog(logDiag, "Python input staging uses " & inputAliases.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) & " compact physical alias(es); logical input names remain unchanged.")
+            End If
+
             Dim retainDiagnostics As System.Boolean = False
             Try
                 Dim configuration As RedInkPythonAgentConfiguration = ResolveConfigurationRelativeToAssembly(options.AgentConfiguration)
@@ -547,7 +560,7 @@ Namespace Agents
                     SafeLog(logDiag, "Secure Python executable verified.")
                     SafeLog(logDiag, "Verified PythonAgent executable: " & executable)
                     SafeLog(logDiag, "Python request source bytes: " & codeBytes.ToString(System.Globalization.CultureInfo.InvariantCulture))
-                    execution = client.CreateExecution(configuration, callRoot, code, resolvedInputFiles, limits, options.HostServiceHandler, progress)
+                    execution = client.CreateExecution(configuration, callRoot, code, stagedInputFiles, limits, options.HostServiceHandler, progress)
                     Using registration As System.Threading.CancellationTokenRegistration = cancellationToken.Register(
                     Sub()
                         If execution IsNot Nothing Then
@@ -577,6 +590,9 @@ Namespace Agents
                     End If
                     If TypeOf unexpected Is RedInkPythonAgentConfigurationException Then
                         Return CreateLocalFailure("CONFIGURATION_INVALID", "failed", FriendlyMessage("CONFIGURATION_INVALID", "failed"))
+                    End If
+                    If TypeOf unexpected Is System.IO.PathTooLongException Then
+                        Return CreateLocalFailure("INPUT_STAGING_PATH_TOO_LONG", "failed", FriendlyMessage("INPUT_STAGING_PATH_TOO_LONG", "failed"))
                     End If
                     Return CreateLocalFailure("INTERNAL_BROKER_ERROR", "failed", FriendlyMessage("INTERNAL_BROKER_ERROR", "failed"))
                 End If
@@ -895,6 +911,8 @@ Namespace Agents
                     Return "The Python execution request is invalid."
                 Case "INPUT_REFERENCE_INVALID"
                     Return "An input reference is invalid: an internal published-result path cannot be used as an input file."
+                Case "INPUT_STAGING_PATH_TOO_LONG"
+                    Return "The internal Python staging path exceeds the Windows path limit even after host-side compaction. Python was not started. Do not rename or invent input_files aliases; keep exact input references and correct the configured staging root/path environment."
                 Case "PYTHON_RESULT_TOO_LARGE"
                     Return "The direct Python result exceeded the configured byte limit; write large content to an output file instead."
                 Case "PYTHON_RESULT_TOO_DEEP", "PYTHON_RESULT_TOO_COMPLEX", "PYTHON_RESULT_INVALID"
@@ -1100,6 +1118,95 @@ Namespace Agents
             Return System.String.Join("/", parts)
         End Function
 
+        Private Shared Sub PrepareCompactInputStaging(
+            callRoot As System.String,
+            logicalInputs As System.Collections.Generic.List(Of RedInkPythonAgentInputFile),
+            ByRef stagedInputs As System.Collections.Generic.List(Of RedInkPythonAgentInputFile),
+            ByRef aliases As System.Collections.Generic.Dictionary(Of System.String, System.String))
+
+            If logicalInputs Is Nothing OrElse logicalInputs.Count = 0 Then Return
+
+            ' RedInkPythonAgentClient creates requests\<36-char-session-guid>\input below callRoot.
+            ' Keep a conservative reserve below MAX_PATH so directory creation and file open do not
+            ' depend on exact boundary behavior of the running .NET/Windows configuration.
+            Const projectedSafePathLength As System.Int32 = 220
+            Const sessionDirectoryLength As System.Int32 = 36
+            Dim projectedPrefix As System.String = System.IO.Path.Combine(
+                callRoot, "requests", New System.String("0"c, sessionDirectoryLength), "input")
+
+            Dim occupied As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            For Each item As RedInkPythonAgentInputFile In logicalInputs
+                occupied.Add(item.RelativePath.Replace("\"c, "/"c))
+            Next
+
+            Dim replacements As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.OrdinalIgnoreCase)
+            Dim physicalInputs As New System.Collections.Generic.List(Of RedInkPythonAgentInputFile)(logicalInputs.Count)
+            Dim aliasIndex As System.Int32 = 0
+
+            For Each item As RedInkPythonAgentInputFile In logicalInputs
+                Dim logicalRelative As System.String = item.RelativePath.Replace("\"c, "/"c)
+                Dim projected As System.String = System.IO.Path.Combine(projectedPrefix, logicalRelative.Replace("/"c, System.IO.Path.DirectorySeparatorChar))
+                If projected.Length < projectedSafePathLength Then
+                    physicalInputs.Add(item)
+                    Continue For
+                End If
+
+                Dim extension As System.String = System.IO.Path.GetExtension(logicalRelative)
+                Dim compactRelative As System.String = Nothing
+                Do
+                    aliasIndex += 1
+                    compactRelative = "__ri_stage/i" & aliasIndex.ToString("D4", System.Globalization.CultureInfo.InvariantCulture) & extension
+                Loop While occupied.Contains(compactRelative)
+                occupied.Add(compactRelative)
+
+                physicalInputs.Add(New RedInkPythonAgentInputFile(item.SourcePath, compactRelative))
+                replacements(logicalRelative) = compactRelative
+            Next
+
+            If replacements.Count > 0 Then
+                stagedInputs = physicalInputs
+                aliases = replacements
+            End If
+        End Sub
+
+        Private Shared Function WrapCodeForInputAliases(
+            code As System.String,
+            aliases As System.Collections.Generic.IDictionary(Of System.String, System.String)) As System.String
+
+            If aliases Is Nothing OrElse aliases.Count = 0 Then Return code
+
+            Dim normalizedAliases As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.Ordinal)
+            For Each pair As System.Collections.Generic.KeyValuePair(Of System.String, System.String) In aliases
+                normalizedAliases(pair.Key.Replace("\"c, "/"c).ToLowerInvariant()) = pair.Value.Replace("\"c, "/"c)
+            Next
+
+            Dim aliasJson As System.String = Newtonsoft.Json.JsonConvert.SerializeObject(normalizedAliases)
+            Dim encodedSource As System.String = System.Convert.ToBase64String(New System.Text.UTF8Encoding(False, True).GetBytes(code))
+            Dim builder As New System.Text.StringBuilder()
+            builder.AppendLine("import base64 as __redink_base64")
+            builder.AppendLine("import os as __redink_os")
+            builder.AppendLine("from redink_pythonagent import agent_api as __redink_agent_api")
+            builder.Append("__redink_input_aliases = ")
+            builder.AppendLine(aliasJson)
+            builder.AppendLine("__redink_original_input_path = __redink_agent_api.input_path")
+            builder.AppendLine("def __redink_mapped_input_path(name):")
+            builder.AppendLine("    try:")
+            builder.AppendLine("        __redink_key = __redink_os.fspath(name).replace('\\', '/').lower()")
+            builder.AppendLine("    except (TypeError, AttributeError):")
+            builder.AppendLine("        return __redink_original_input_path(name)")
+            builder.AppendLine("    __redink_alias = __redink_input_aliases.get(__redink_key)")
+            builder.AppendLine("    if __redink_alias is None:")
+            builder.AppendLine("        return __redink_original_input_path(name)")
+            builder.AppendLine("    return __redink_original_input_path(__redink_alias)")
+            builder.AppendLine("__redink_agent_api.input_path = __redink_mapped_input_path")
+            builder.Append("__redink_source = __redink_base64.b64decode('")
+            builder.Append(encodedSource)
+            builder.AppendLine("').decode('utf-8')")
+            builder.AppendLine("__redink_globals = {'__name__': '__main__', '__file__': 'code.py', '__package__': None, '__cached__': None}")
+            builder.AppendLine("exec(compile(__redink_source, 'code.py', 'exec'), __redink_globals, __redink_globals)")
+            Return builder.ToString()
+        End Function
+
         Private Shared Function WrapCodeForStandardInput(code As System.String) As System.String
             Dim encoded As System.String = System.Convert.ToBase64String(New System.Text.UTF8Encoding(False, True).GetBytes(code))
             Dim builder As New System.Text.StringBuilder()
@@ -1119,13 +1226,34 @@ Namespace Agents
         Private Shared Function CreateCallRoot(baseRoot As System.String) As System.String
             Dim fullBase As System.String = System.IO.Path.GetFullPath(System.Environment.ExpandEnvironmentVariables(baseRoot))
             System.IO.Directory.CreateDirectory(fullBase)
-            Dim callParent As System.String = System.IO.Path.Combine(fullBase, "python_execute")
+
+            ' Keep the configured PythonAgent root as the path authority. The worker already creates
+            ' a unique session GUID below requests/control, so the host-side call folder only needs a
+            ' compact collision-resistant name. This deliberately saves path budget for user-supplied
+            ' input filenames without changing the agent protocol, request layout, diagnostics root,
+            ' cleanup semantics, or the logical names exposed through agent_api.input_path(...).
+            Dim legacyCallParent As System.String = System.IO.Path.Combine(fullBase, "python_execute")
+            If System.IO.Directory.Exists(legacyCallParent) Then
+                PruneStaleCallRoots(legacyCallParent)
+            End If
+
+            Dim callParent As System.String = System.IO.Path.Combine(fullBase, "p")
             System.IO.Directory.CreateDirectory(callParent)
+
             ' Best-effort sweep of stale per-call roots left behind when a prior broker process
             ' crashed or was force-killed with locked files (the normal Finally cleanup could not
             ' delete them). These transient folders are never needed after their run completes.
             PruneStaleCallRoots(callParent)
-            Return System.IO.Path.Combine(callParent, System.Guid.NewGuid().ToString("D"))
+
+            For attempt As System.Int32 = 1 To 20
+                Dim compactId As System.String = System.Guid.NewGuid().ToString("N").Substring(0, 10)
+                Dim candidate As System.String = System.IO.Path.Combine(callParent, compactId)
+                If Not System.IO.Directory.Exists(candidate) AndAlso Not System.IO.File.Exists(candidate) Then
+                    Return candidate
+                End If
+            Next
+
+            Throw New System.IO.IOException("Could not allocate a unique Python execution staging directory.")
         End Function
 
         Private Shared Sub PruneStaleCallRoots(callParent As System.String)

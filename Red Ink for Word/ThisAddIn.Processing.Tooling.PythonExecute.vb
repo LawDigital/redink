@@ -254,6 +254,16 @@ Partial Public Class ThisAddIn
                    Agents.PythonExecuteRepairAdvisor.HasCapableNonFallbackAlternative(context.SelectedTools, toolCall.ToolName),
                    pythonReroutePayload, pythonRerouteReason) Then
 
+                Dim originalPythonFailureCode As System.String = If(response.ErrorCode, System.String.Empty)
+                Dim originalPythonFailureMessage As System.String = If(response.ErrorMessage, System.String.Empty)
+                Dim originalPythonFailurePayload As System.String = If(response.Response, System.String.Empty)
+                context.Log(
+                    "python_execute original failure before fallback reroute: code=" &
+                    If(originalPythonFailureCode.Length = 0, "(none)", originalPythonFailureCode) &
+                    "; message=" & If(originalPythonFailureMessage.Length = 0, "(none)", originalPythonFailureMessage),
+                    "diag")
+                ToolingFileLogger.LogRawResponseStub("Internal tool (python_execute original failure before reroute)", originalPythonFailurePayload)
+
                 response.ErrorCode = "REROUTE_TO_ALTERNATIVE"
                 response.ErrorMessage = "A specialized tool can perform this operation; not entering the Python repair loop."
                 response.Response = pythonReroutePayload

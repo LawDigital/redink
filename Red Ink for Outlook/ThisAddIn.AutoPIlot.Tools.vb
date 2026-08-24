@@ -419,29 +419,33 @@ Partial Public Class ThisAddIn
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ReadWordDocDetails,
             .ModelDescription = "Read Word Document Details (built-in)",
                   .ToolInstructionsPrompt =
-                AP_Tool_ReadWordDocDetails & ": Deep-reads a Word document (.docx) including body text with inline tracked changes, " &
-                "comment bubbles (with author, date, and anchored text), headers, footers, footnotes, and endnotes. " &
-                "This is a heavier tool — only use it when the user explicitly asks about comments, tracked changes, " &
-                "revisions, review history, headers/footers, or footnotes/endnotes. For general content questions, use " & AP_Tool_ReadAttachment & " instead. " &
-                "NOTE: The body text returned by this tool is optimized for review markup and does NOT include automatic list/heading numbering, " &
-                "multilevel list restarts, resolved fields, or bookmark/cross-reference (REF) resolution. When the user needs the fully rendered " &
-                "content — numbered lists, heading numbers, field results, or cross-references — use " & AP_Tool_ReadAttachment & " instead. " &
-                "Tracked changes are shown inline using «INS|author|date»...«/INS» and «DEL|author|date»...«/DEL» markers. " &
-                "Use tracked_changes_author and tracked_changes_since to filter changes by a specific author or date.",
+                AP_Tool_ReadWordDocDetails & ": Deep-reads a Word document (.docx) directly from its WordprocessingML/OpenXML parts, including body text, " &
+                "tracked revisions (insertions, deletions, moves, and revision/property-change records), comment bubbles (with author, date, and anchored text), " &
+                "headers, footers, footnotes, and endnotes. IMPORTANT TRACK-CHANGES ROUTING: when the user asks to read, list, inspect, extract, identify, transfer, " &
+                "filter, verify, or reason about tracked changes/revisions in a .docx, use this tool rather than assuming ordinary extracted/rendered text contains them. " &
+                "The user does NOT need to explicitly ask for an XML read: this tool is the built-in deterministic way to inspect tracked changes stored in Word XML. " &
+                "Set include_tracked_changes=true (default) and, when requested, filter with tracked_changes_author (legacy single-author filter), tracked_changes_authors " &
+                "(one or more authors), tracked_changes_since, and/or tracked_changes_until. If only revision records are needed, set tracked_changes_only=true to avoid returning the full document body. " &
+                "Do not use Python merely to rediscover Word tracked changes after this tool has returned them; use Python only when the remaining task genuinely requires Python processing. " &
+                "For general content questions unrelated to review markup, use " & AP_Tool_ReadAttachment & " instead. " &
+                "NOTE: The body text returned by this tool is optimized for review markup and does NOT include automatic list/heading numbering, multilevel list restarts, " &
+                "resolved fields, or bookmark/cross-reference (REF) resolution. When the user needs fully rendered content, use " & AP_Tool_ReadAttachment & " instead. " &
+                "Tracked insertions/deletions are shown inline using «INS|author|date»...«/INS» and «DEL|author|date»...«/DEL» markers, and a separate XML revision list provides explicit revision records.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_ReadWordDocDetails & """," &
-                """description"":""Deep-reads a Word document (.docx) with comments, tracked changes, headers/footers, and footnotes/endnotes. " &
-                "Only use when the user asks about comments, revisions, changes, review history, headers, footers, footnotes, or endnotes. " &
-                "For general content, use " & AP_Tool_ReadAttachment & " instead. " &
-                "The body text here omits automatic list/heading numbering, multilevel list restarts, resolved fields, and cross-references (REF); " &
-                "use " & AP_Tool_ReadAttachment & " when those are needed.""," & """parameters"":{""type"":""object"",""properties"":{" &
+                """description"":""Deep-reads a .docx directly from WordprocessingML/OpenXML, including explicit tracked-revision records with author/date/text plus comments and optional document parts. " &
+                "Use this whenever the task depends on Word tracked changes/revisions; ordinary text extraction may not expose revision XML. Supports all revisions or filters by one/multiple authors and date range. " &
+                "For general rendered content unrelated to review markup, use " & AP_Tool_ReadAttachment & " instead. The body text here omits automatic list/heading numbering, multilevel list restarts, resolved fields, and cross-references (REF).""," & """parameters"":{""type"":""object"",""properties"":{" &
                 """attachment_name"":{""type"":""string"",""description"":""Filename of the .docx attachment to read""}," &
                 """include_comments"":{""type"":""boolean"",""description"":""Include comment bubbles with author, date, and anchored text (default: true)""}," &
                 """include_headers_footers"":{""type"":""boolean"",""description"":""Include headers and footers (default: false)""}," &
                 """include_footnotes_endnotes"":{""type"":""boolean"",""description"":""Include footnotes and endnotes (default: false)""}," &
-                """include_tracked_changes"":{""type"":""boolean"",""description"":""Include tracked changes as inline markers in the body text (default: true)""}," &
-                """tracked_changes_author"":{""type"":""string"",""description"":""Optional: only show tracked changes by this author""}," &
-                """tracked_changes_since"":{""type"":""string"",""description"":""Optional: only show tracked changes on or after this date (ISO 8601, e.g. '2026-01-15')""}" &
+                """include_tracked_changes"":{""type"":""boolean"",""description"":""Include tracked changes from the Word XML as inline markers plus an explicit XML revision list (default: true). Set true whenever the task depends on revisions.""}," &
+                """tracked_changes_only"":{""type"":""boolean"",""description"":""Return only explicit tracked-change/revision records from Word XML, with type, author, date, changed text, paragraph context, and OOXML part (default: false). Use for revision-focused tasks to avoid returning the full document body.""}," &
+                """tracked_changes_author"":{""type"":""string"",""description"":""Optional legacy single-author filter; case-insensitive partial author-name match""}," &
+                """tracked_changes_authors"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Optional list of one or more authors. A revision is included when its author matches any supplied value (case-insensitive partial match).""}," &
+                """tracked_changes_since"":{""type"":""string"",""description"":""Optional inclusive lower date/time bound for revisions (ISO 8601, e.g. '2026-08-24' or '2026-08-24T09:30:00+02:00')""}," &
+                """tracked_changes_until"":{""type"":""string"",""description"":""Optional inclusive upper date/time bound for revisions (ISO 8601). A date-only value includes that entire calendar day.""}" &
                 "},""required"":[""attachment_name""]}}"
         })
 
