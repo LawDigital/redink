@@ -84,6 +84,8 @@ Partial Public Class ThisAddIn
         Private _lastPartialText As String = ""
 
         Private _suspendSettingsPersistence As Boolean = False
+        Private _selectedAudioSourceMode As String = "MicrophoneOnly"
+        Private _selectedAudioOutputDeviceId As String = ""
         Private _alternateOpenAiConfig As ModelConfig = Nothing
         Private _alternateGoogleConfig As ModelConfig = Nothing
 
@@ -309,7 +311,7 @@ Partial Public Class ThisAddIn
             AddHandler cboLang.SelectedIndexChanged, Sub() PersistSettings()
 
             AddHandler cboEngine.SelectedIndexChanged, Sub() PersistSettings()
-            AddHandler cboDevice.SelectedIndexChanged, Sub() PersistSettings()
+            AddHandler cboDevice.SelectedIndexChanged, AddressOf OnAudioInputDeviceChanged
 
         End Sub
 
@@ -690,6 +692,7 @@ Partial Public Class ThisAddIn
         End Sub
 
         Private Sub OnEngineChanged(sender As Object, e As EventArgs)
+            Dim previousSuspendSettingsPersistence As Boolean = _suspendSettingsPersistence
             _suspendSettingsPersistence = True
 
             Try
@@ -796,7 +799,7 @@ Partial Public Class ThisAddIn
                     cboLang.SelectedItem = savedLanguage
                 End If
             Finally
-                _suspendSettingsPersistence = False
+                _suspendSettingsPersistence = previousSuspendSettingsPersistence
             End Try
 
             UpdateComboToolTip(cboEngine)
@@ -1017,6 +1020,21 @@ Partial Public Class ThisAddIn
             End If
         End Sub
 
+        Private Sub OnAudioInputDeviceChanged(sender As Object, e As EventArgs)
+            If _suspendSettingsPersistence OrElse Me.IsDisposed Then
+                Return
+            End If
+
+            Try
+                UpdateSelectedMicrophonePreference()
+                My.Settings.LastAudioInputDeviceIndex = cboDevice.SelectedIndex
+                My.Settings.LastEngineOptionsJson = JsonConvert.SerializeObject(_opts)
+                My.Settings.Save()
+            Catch
+                ' Microphone persistence is best-effort and must never break the Transcriptor UI.
+            End Try
+        End Sub
+
         Private Sub UpdateSelectedMicrophonePreference()
             If _opts Is Nothing Then
                 _opts = New TranscriptionOptions()
@@ -1050,7 +1068,7 @@ Partial Public Class ThisAddIn
         End Function
 
         Private Function GetConfiguredSourceMode() As AudioSourceMode
-            Dim raw As String = If(String.IsNullOrWhiteSpace(My.Settings.LastAudioSourceMode), "MicrophoneOnly", My.Settings.LastAudioSourceMode)
+            Dim raw As String = If(String.IsNullOrWhiteSpace(_selectedAudioSourceMode), "MicrophoneOnly", _selectedAudioSourceMode)
 
             Try
                 Return CType([Enum].Parse(GetType(AudioSourceMode), raw), AudioSourceMode)
@@ -1060,11 +1078,14 @@ Partial Public Class ThisAddIn
         End Function
 
         Private Function GetConfiguredOutputDeviceId() As String
-            Return If(My.Settings.LastAudioOutputDeviceId, "")
+            Return If(_selectedAudioOutputDeviceId, "")
         End Function
 
         Private Sub RestoreSettings()
             Try
+                _selectedAudioSourceMode = If(String.IsNullOrWhiteSpace(My.Settings.LastAudioSourceMode), "MicrophoneOnly", My.Settings.LastAudioSourceMode)
+                _selectedAudioOutputDeviceId = If(My.Settings.LastAudioOutputDeviceId, "")
+
                 RestoreLastEngineSelection()
 
                 RefreshEngineUi()
@@ -1104,6 +1125,8 @@ Partial Public Class ThisAddIn
                 SaveCurrentEngineSelection()
                 UpdateSelectedMicrophonePreference()
                 My.Settings.LastAudioInputDeviceIndex = cboDevice.SelectedIndex
+                My.Settings.LastAudioSourceMode = If(String.IsNullOrWhiteSpace(_selectedAudioSourceMode), "MicrophoneOnly", _selectedAudioSourceMode)
+                My.Settings.LastAudioOutputDeviceId = If(_selectedAudioOutputDeviceId, "")
                 My.Settings.LastEngineOptionsJson = JsonConvert.SerializeObject(_opts)
                 SaveCurrentLanguageForCurrentEngine()
                 My.Settings.Save()
@@ -1125,7 +1148,7 @@ Partial Public Class ThisAddIn
                 d.DisplayName,
                 _opts,
                 langs,
-                If(String.IsNullOrWhiteSpace(My.Settings.LastAudioSourceMode), "MicrophoneOnly", My.Settings.LastAudioSourceMode),
+                If(String.IsNullOrWhiteSpace(_selectedAudioSourceMode), "MicrophoneOnly", _selectedAudioSourceMode),
                 GetConfiguredOutputDeviceId(),
                 GetAudioOutputDeviceChoices())
 
@@ -1136,8 +1159,8 @@ Partial Public Class ThisAddIn
                         cboLang.SelectedItem = _opts.LanguageCode
                     End If
 
-                    My.Settings.LastAudioSourceMode = dlg.SelectedSourceMode
-                    My.Settings.LastAudioOutputDeviceId = dlg.SelectedOutputDeviceId
+                    _selectedAudioSourceMode = dlg.SelectedSourceMode
+                    _selectedAudioOutputDeviceId = dlg.SelectedOutputDeviceId
                     PersistSettings()
                     SetLiveState(GetIdleLiveState())
                 End If
@@ -2150,6 +2173,8 @@ Partial Public Class ThisAddIn
             End If
         End Sub
         Private Async Sub OnClosing(sender As Object, e As FormClosingEventArgs)
+            PersistSettings()
+
             If _isStopping Then
                 e.Cancel = True
                 Return
