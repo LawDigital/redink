@@ -1,4 +1,4 @@
-﻿# Red Ink Tool List
+# Red Ink Tool List
 
 This file lists the built-in internal tools that can be advertised by Word, Outlook, and Outlook AutoPilot.
 
